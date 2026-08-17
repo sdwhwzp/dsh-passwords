@@ -52,6 +52,7 @@ export const zh = {
   subHint: '子用户可用同样的登录页进入 dsh，但没有用户管理权限。',
   // 聊天 / 留言
   'chat.open': '打开聊天',
+  'chat.dragHint': '中键按住可拖动位置',
   'chat.title': '消息与留言',
   'chat.close': '关闭',
   'chat.send': '发送',
@@ -157,6 +158,7 @@ export const en: Record<keyof typeof zh, string> = {
   subHint: 'Subusers sign in through the same page but have no user-management permission.',
   // Chat / messages
   'chat.open': 'Open chat',
+  'chat.dragHint': 'Hold middle mouse button to drag',
   'chat.title': 'Messages',
   'chat.close': 'Close',
   'chat.send': 'Send',
