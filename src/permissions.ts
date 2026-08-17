@@ -400,6 +400,32 @@ export function stripArchivedSessionIds(value: unknown, depth = 0): boolean {
 }
 
 /**
+ * 递归把 JSON 里所有 string[] 的 sessionIds 字段按 keep(id) 过滤（F-25 扩展）：
+ * workspace.list 的 items[].sessionIds 会泄露该工作区全部会话 ID（含主用户/其他
+ * 子用户共享时）——即使 allowedFolders=[] 全部允许，子用户也只能看自己拥有的会话。
+ * 原地修改，不返回新对象。
+ */
+export function filterOwnedSessionIds(
+  value: unknown,
+  keep: (id: string) => boolean,
+  depth = 0,
+): void {
+  if (depth > 8 || value === null || typeof value !== 'object') return;
+  if (Array.isArray(value)) {
+    for (const item of value) filterOwnedSessionIds(item, keep, depth + 1);
+    return;
+  }
+  const obj = value as Record<string, unknown>;
+  if (Array.isArray(obj.sessionIds) && obj.sessionIds.every((x) => typeof x === 'string')) {
+    obj.sessionIds = obj.sessionIds.filter((id) => keep(id as string));
+  }
+  for (const key of Object.keys(obj)) {
+    const v = obj[key];
+    if (v !== null && typeof v === 'object') filterOwnedSessionIds(v, keep, depth + 1);
+  }
+}
+
+/**
  * 递归过滤会话条目（带 sessionId 字符串字段的对象，session.list 响应）：
  * keep(id) 返回 false 时从所在数组移除。用于子用户只看得到自己拥有的会话。
  * 只要 sessionId 是字符串就执行归属判定（不再要求 cwd 必填——

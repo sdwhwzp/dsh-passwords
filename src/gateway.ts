@@ -41,6 +41,7 @@ import {
   SESSION_SCOPED_RE,
   extractSessionId,
   stripArchivedSessionIds,
+  filterOwnedSessionIds,
   filterSessionItems,
   sandboxPresetRank,
   permissionPresetFromCommand,
@@ -1423,8 +1424,13 @@ export function createGatewayServer(
               const outBody = restricted
                 ? filterByPathField(parsed, reqAs.dshpwPerms!.allowed_folders, 'path')
                 : parsed;
-              // F-25：archivedSessionIds 把他人会话 ID 直接漏给子用户（枚举源），一律清空
-              if (reqAs.dshpwPerms !== undefined) stripArchivedSessionIds(outBody);
+              // F-25：子用户（含 allowedFolders=[] 全部允许）只能看到自己拥有的会话——
+              // 清空 archivedSessionIds 枚举源，并把 items[].sessionIds 也按归属过滤
+              //（工作区可能被主用户/其他子用户共享，path 命中白名单不等于会话可读）
+              if (reqAs.dshpwPerms !== undefined) {
+                stripArchivedSessionIds(outBody);
+                filterOwnedSessionIds(outBody, (id) => db.getSessionOwner(id) === reqAs.dshpwUser);
+              }
               const out = Buffer.from(JSON.stringify(outBody), 'utf8');
               const respHeaders = headersForRewrittenBody(upstreamRes.headers);
               respHeaders['content-length'] = String(out.length);
