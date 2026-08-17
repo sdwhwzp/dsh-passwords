@@ -88,26 +88,35 @@ export function filterByPathField(value: unknown, allowedFolders: string[], fiel
   return value;
 }
 
-/** 递归收集 {id, path} 对（workspace.list 响应用，建 workspaceId → 路径 映射）
- *  depth 上限 8：与 filterByPathField 同口径 */
+/** 递归收集 {workspaceId, path} 对（workspace.list 响应用，建 workspaceId → 路径 映射）。
+ *  ⚠ dsh 工作区对象的 id 字段是 workspaceId（实测 items 里是 {workspaceId, path, ...}，
+ *  没有顶层 id）——同时兼容 obj.id 与 obj.workspaceId，否则 session.create 带 workspaceId
+ *  时缓存搜不到路径、fail-closed 403（功能缺失）。depth 上限 8。 */
 export function collectIdPathPairs(value: unknown, out: Map<string, string> = new Map(), depth = 0): Map<string, string> {
   if (depth > 8 || value === null) return out;
   if (Array.isArray(value)) {
     for (const item of value) collectIdPathPairs(item, out, depth + 1);
   } else if (typeof value === 'object') {
     const obj = value as Record<string, unknown>;
-    if (typeof obj.id === 'string' && typeof obj.path === 'string') out.set(obj.id, obj.path);
+    if (typeof obj.path === 'string') {
+      const id = typeof obj.workspaceId === 'string' ? obj.workspaceId : typeof obj.id === 'string' ? obj.id : null;
+      if (id !== null) out.set(id, obj.path);
+    }
     for (const v of Object.values(obj)) collectIdPathPairs(v, out, depth + 1);
   }
   return out;
 }
 
-/** 递归查找请求体里的 workspaceId（session.create 可能带 workspaceId 而非 cwd） */
+/**
+ * 递归查找请求体里的 workspaceId（session.create 可能带 workspaceId 而非 cwd）。
+ *  ⚠ 递归时跳过 args 子对象（同 extractPathFromBody：args 是 dsh 不消费的伪字段）。
+ */
 export function extractWorkspaceId(value: unknown, depth = 0): string | null {
   if (depth > 6 || value === null || typeof value !== 'object') return null;
   const obj = value as Record<string, unknown>;
   if (typeof obj.workspaceId === 'string' && obj.workspaceId.length > 0) return obj.workspaceId;
   for (const key of Object.keys(obj)) {
+    if (key === 'args') continue;
     const nested = extractWorkspaceId(obj[key], depth + 1);
     if (nested !== null) return nested;
   }
@@ -356,8 +365,10 @@ export function isWorkspaceWrite(pathname: string): boolean {
 
 // ── 工作区/会话文件夹限制：需要读 JSON 请求体 ──────────────────────────
 
-/** 涉及创建/切换工作区的 dsh typert RPC（斜杠风格：/api/session/create 等；兼容点号风格） */
-export const WORKSPACE_ENDPOINT_RE = /^\/api\/session[.\/](create|fork)([.\/]|$)/;
+/** 涉及创建工作区的 dsh typert RPC（斜杠风格：/api/session/create 等；兼容点号风格）
+ *  只含 create——fork 继承源会话的 cwd，目标目录由源会话决定（其归属已由
+ *  SESSION_SCOPED_RE/needsOwnershipCheck 校验），无需也不应再做文件夹白名单。 */
+export const WORKSPACE_ENDPOINT_RE = /^\/api\/session[.\/](create)([.\/]|$)/;
 
 /**
  * 会话作用域 RPC（F-25）：这些端点带一个 sessionId，能读/写/改某个会话——
@@ -478,7 +489,12 @@ const PATH_FIELDS = [
   'targetPath',
 ];
 
-/** 递归查找请求体里第一个字符串路径字段（兼容 typert 的 {args:{request:{...}}} 嵌套） */
+/**
+ * 递归查找请求体里第一个字符串路径字段（兼容 typert 信封 {type,rpcId,method,payload}）。
+ * ⚠ 递归时跳过 args 子对象——实测 {payload:{args:{cwd:'/root/11'}}} 会被 dsh 忽略 args、
+ *  用默认工作区（/opt），而网关若把 args.cwd 当白名单依据会误放行（fail-open 越权）。
+ *  真实 wire 路径是 payload.cwd（payload 层），args 是 dsh 不消费的伪字段。
+ */
 export function extractPathFromBody(value: unknown, depth = 0): string | null {
   if (depth > 6 || value === null || typeof value !== 'object') return null;
   const obj = value as Record<string, unknown>;
@@ -487,6 +503,7 @@ export function extractPathFromBody(value: unknown, depth = 0): string | null {
     if (typeof v === 'string' && v.length > 0) return v;
   }
   for (const key of Object.keys(obj)) {
+    if (key === 'args') continue; // 跳过 dsh 不消费的 args 伪包裹
     const nested = extractPathFromBody(obj[key], depth + 1);
     if (nested !== null) return nested;
   }
