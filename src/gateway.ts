@@ -1182,7 +1182,13 @@ export function createGatewayServer(
           return;
         }
         // aionui-panel 文件树：GET/HEAD 的 root 在 query 里，直接校验白名单（拦截目录浏览/下载）
-        if (isWorkspaceRestricted(perms.allowed_folders) && (req.method === 'GET' || req.method === 'HEAD')) {
+        // ⚠ 只对 aionui-panel 路径做此检查——aionuiRootFrom 对非 aionui-panel 路径返回 null，
+        //  若用 null 判 fail-closed 会把普通 GET/HEAD（state/messages/页面资源等）全部 403
+        if (
+          isWorkspaceRestricted(perms.allowed_folders) &&
+          (req.method === 'GET' || req.method === 'HEAD') &&
+          isAionuiPanel(parsed.pathname)
+        ) {
           const aionuiRoot = aionuiRootFrom(req.method, parsed.pathname, parsed.searchParams, null);
           // 提取不到 root 时也 fail-closed（之前直接放行→白名单外的目录可被下载）
           if (aionuiRoot === null || !folderAllowed(aionuiRoot, perms.allowed_folders)) {
