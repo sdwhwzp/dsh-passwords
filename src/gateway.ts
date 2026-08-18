@@ -13,6 +13,7 @@ import { createHmac, createHash, randomBytes, timingSafeEqual } from 'node:crypt
 import { type Duplex } from 'node:stream';
 import zlib from 'node:zlib';
 import { URL } from 'node:url';
+import dns from 'node:dns';
 import express, { type Request, type Response } from 'express';
 import type { PlatformConfig } from './config.js';
 import { hardenSecretsAfterSetup } from './config.js';
@@ -497,6 +498,29 @@ function renderSetupPage(params: { lang: Lang; error?: string; csrf: string }): 
   });
 </script>`,
   });
+}
+
+/**
+ * dsh-ssh host SSRF 判定（异步版，F-28）：
+ *   - IP 字面量（含八进制/十六进制/简写段变体）→ isPrivateHost 立刻判
+ *   - hostname（如 127.0.0.1.nip.io、sslip.io 通配）→ DNS 全量解析后
+ *     逐地址判定，任一解析结果命中私网/回环 → 拦截
+ *   - 3 秒超时防 DNS 卡死（请求被 hang 住）；解析失败视为不拦截
+ *     （公网域名解析失败时 dsh-ssh 自身也会连接失败，无 SSRF 面）
+ */
+function isSshHostPrivate(host: string): Promise<boolean> {
+  const h = host.trim().toLowerCase();
+  if (isPrivateHost(h)) return Promise.resolve(true);
+  if (h === '') return Promise.resolve(false);
+  const lookup: Promise<dns.LookupAddress[]> = dns.promises
+    .lookup(h, { all: true, verbatim: false })
+    .catch(() => []);
+  const timeout = new Promise<dns.LookupAddress[]>((resolve) =>
+    setTimeout(() => resolve([]), 3000).unref(),
+  );
+  return Promise.race([lookup, timeout]).then((addrs) =>
+    addrs.some((addr) => isPrivateHost(addr.address)),
+  );
 }
 
 export function createGatewayServer(
@@ -1822,12 +1846,14 @@ export function createGatewayServer(
       reqAs.dshpwPerms !== undefined &&
       (req.method === 'POST' || req.method === 'PUT') &&
       SESSION_SCOPED_RE.test(parsedUrl.pathname);
-    // ── 第三方插件纵深防御：dsh-ssh 创建/测试主机时，host 为私网/回环地址
+    // ── 第三方插件纵深防御：dsh-ssh 创建/修改/测试主机时，host 为私网/回环地址
     // 一律拒绝（SSRF 封堵——插件源码不在我们控制内，网关拦一层；
     // 所有登录用户含主用户都拦，管理员同样可能被诱导连接内网）
+    // F-27：PATCH（修改主机）/PUT 同样要拦——之前只拦 POST，PATCH 可直接把
+    // 已有主机的 host 改成 127.0.0.1 等私网地址（实测可修改成功）
     const needsSshHostCheck =
       reqAs.dshpwUser !== undefined &&
-      req.method === 'POST' &&
+      (req.method === 'POST' || req.method === 'PATCH' || req.method === 'PUT') &&
       /^\/api\/dsh-ssh[.\/](hosts|test)([.\/]|$)/.test(parsedUrl.pathname);
 
     if (needsFolderCheck || needsSandboxCheck || needsCommandCheck || needsApprovalCheck || needsOwnershipCheck || needsSshHostCheck) {
@@ -1862,7 +1888,7 @@ export function createGatewayServer(
         }
         chunks.push(chunk);
       });
-      req.on('end', () => {
+      req.on('end', async () => {
         if (settled) return;
         settled = true;
         const lang = langOf(req);
@@ -1881,12 +1907,13 @@ export function createGatewayServer(
           return;
         }
 
-        // dsh-ssh SSRF 封堵：创建主机时 body.host 为私网地址 → 403。
+        // dsh-ssh SSRF 封堵：创建/修改主机时 body.host 命中私网/回环 → 403。
         // 只校验 host 字段存在的情况（test 请求用 alias 引用已创建主机，无 host 字段——
         // 私网主机在创建时已被拦截，test 无从引用私网目标）。
+        // F-28：host 为 hostname（如 nip.io 通配）时做 DNS 解析逐地址判定。
         if (needsSshHostCheck && bodyObj !== null && typeof bodyObj === 'object') {
           const host = (bodyObj as Record<string, unknown>).host;
-          if (typeof host === 'string' && isPrivateHost(host)) {
+          if (typeof host === 'string' && (await isSshHostPrivate(host))) {
             upstreamReq.destroy();
             res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
             return;

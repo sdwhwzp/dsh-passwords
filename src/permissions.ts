@@ -35,8 +35,13 @@ const DENY_ALL_WORKSPACES = '__deny__';
 
 /**
  * 判断 host 是否私网/回环/链路本地地址（dsh-ssh 等第三方插件 SSRF 纵深防御）。
- * 拦截 IP 字面量（含八进制/十六进制/简写段变体）与 localhost；
- * 域名不拦截（正常 SSH 用途连公网域名；DNS 重绑定在网关层无法完全防御）。
+ *
+ * F-28：IP 字面量必须用真·inet_aton 语义解析——之前用 Number() 归一化，
+ * 被三形态绕过（实测服务端真的解析并连接）：
+ *   - 0177.0.0.1（八进制，Number('0177')=177 按十进制处理，漏拦）→ 127.0.0.1
+ *   - 2130706433（单段 32 位整数，>255 被判非法放行）→ 127.0.0.1
+ *   - 127.0.0.1.nip.io（域名通配，DNS 解析回私网）→ 网关层 DNS 解析后逐地址判
+ * 域名（hostname）本层放行，由网关做 DNS 解析后逐地址判定。
  */
 export function isPrivateHost(host: string): boolean {
   const h = host.trim().toLowerCase();
@@ -46,25 +51,75 @@ export function isPrivateHost(host: string): boolean {
   if (h.includes(':')) {
     // IPv6 私网/回环/链路本地（ULA = fc00::/7 覆盖 fc00-fdff）
     if (h === '::1' || h === '::' || /^f[cd][\da-f]{2}:/i.test(h) || /^fe[89ab][\da-f]:/i.test(h)) return true;
-    // IPv4:port 形式（dsh-ssh 的 host 字段可能带端口）
-    const m = /^(\d{1,3}(?:\.\d{1,3}){1,3}):\d+$/.exec(h);
-    if (m) return isPrivateIpv4(m[1]);
+    // IPv4:port 形式（dsh-ssh 的 host 字段可能带端口，变体段一并判）
+    const m = /^([^:]+):\d+$/.exec(h);
+    if (m) {
+      const lit = parseIpv4Literal(m[1]);
+      if (lit) return isPrivateIpv4Bytes(lit);
+    }
     return false;
   }
-  return isPrivateIpv4(h);
+  const lit = parseIpv4Literal(h);
+  if (lit) return isPrivateIpv4Bytes(lit);
+  // 非 IP 字面量（hostname）→ 本层不判，由网关 DNS 解析后逐地址再判
+  return false;
 }
 
-/** IPv4 私网判定：Number() 归一化八进制/十六进制段（010.0.0.1 → 10.0.0.1、
- *  0x7f.0.0.1 → 127.0.0.1）；简写段（127.1 → 127.0.0.1）补零后再判。 */
-function isPrivateIpv4(ip: string): boolean {
-  const segments = ip.split('.');
-  if (segments.length < 1 || segments.length > 4) return false;
-  // 允许十进制 / 0x 十六进制 / 0 开头八进制（Number() 统一归一化）
-  if (!segments.every((s) => /^(0[xX][0-9a-fA-F]+|\d+)$/.test(s))) return false;
-  const nums = segments.map((s) => Number(s));
-  if (nums.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return false;
-  while (nums.length < 4) nums.push(0); // 简写段补零（127.1 → 127.0.0.1）
-  const [a, b] = nums;
+/** 真·inet_aton 四字节解析：返回 [a,b,c,d]（每字节 0-255）或 null（非法）。
+ *  兼容十进制 / 0x 十六进制 / 0 前导八进制；支持 1/2/3/4 段简写：
+ *    - 1 段 = 完整 32 位整数（2130706433 → 127.0.0.1；> 0xffffffff 拒绝）
+ *    - 2 段 = a.b，b 为 24 位（127.65534 → 127.0.255.254）
+ *    - 3 段 = a.b.c，c 为 16 位（127.0.1 → 127.0.0.1）
+ *    - 4 段 = 逐字节，每段 ≤ 0xff
+ *  与服务端（glibc inet_aton / Node socket）实际解析口径一致。 */
+function parseIpv4Literal(ip: string): [number, number, number, number] | null {
+  const segs = ip.split('.');
+  const n = segs.length;
+  if (n < 1 || n > 4) return null;
+  const parts: number[] = [];
+  for (const s of segs) {
+    let v: number;
+    if (/^0[xX][0-9a-fA-F]+$/.test(s)) {
+      v = parseInt(s.slice(2), 16);
+    } else if (/^0[0-7]+$/.test(s)) {
+      // 八进制：前导 0 且全为 0-7。注意 Number('0177')=177（十进制）是漏洞根源
+      v = parseInt(s.slice(1), 8);
+    } else if (/^\d+$/.test(s)) {
+      v = parseInt(s, 10);
+    } else {
+      return null;
+    }
+    parts.push(v);
+  }
+  // 前 n-1 段必须是单字节
+  for (let i = 0; i < n - 1; i++) {
+    if (parts[i] < 0 || parts[i] > 0xff) return null;
+  }
+  // 末段宽度 = 5-n 字节（n=1→4B、n=2→3B、n=3→2B、n=4→1B）
+  const last = parts[n - 1];
+  if (last < 0) return null;
+  if (n === 1 && last > 0xffffffff) return null;
+  if (n === 2 && last > 0xffffff) return null;
+  if (n === 3 && last > 0xffff) return null;
+  if (n === 4 && last > 0xff) return null;
+  // 展开成 4 字节（>>> 走 ToUint32，1 段 32 位大值不会溢出成负）
+  const bytes: number[] = [];
+  for (let i = 0; i < n; i++) {
+    if (i < n - 1) {
+      bytes.push(parts[i]);
+    } else {
+      const lastBytes = 5 - n;
+      for (let j = lastBytes - 1; j >= 0; j--) {
+        bytes.push((last >>> (j * 8)) & 0xff);
+      }
+    }
+  }
+  return [bytes[0], bytes[1], bytes[2], bytes[3]];
+}
+
+/** IPv4 私网/回环/链路本地字节判定（与旧 isPrivateIpv4 同口径） */
+function isPrivateIpv4Bytes(bytes: [number, number, number, number]): boolean {
+  const [a, b] = bytes;
   return (
     a === 0 || // 0.0.0.0/8
     a === 10 || // 10.0.0.0/8
