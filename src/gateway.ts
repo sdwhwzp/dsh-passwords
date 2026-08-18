@@ -1910,27 +1910,29 @@ export function createGatewayServer(
           return;
         }
 
-        // ── session.history 响应：受限子用户的沙盒降级（防共享会话提权） ──
-        // 主用户把会话设为 danger-full-access 后共享给子用户，子用户打开会话时
-        // 会话 log 里的 permission/preset 就是 full access——不拦截就直接继承提权。
-        // 这里把超过子用户授权级别的 preset/mode 统一降级。
-        if (
-          reqAs.dshpwPerms !== undefined &&
-          reqAs.dshpwPerms.sandbox_mode !== null &&
-          req.method === 'POST' &&
-          /^\/api\/session[.\/]history$/.test(parsedUrl.pathname)
-        ) {
+        // ── session.history 响应：F-A2 隐藏 Unicode 清洗（所有用户）+ 受限子用户沙盒降级 ──
+        // F-A2：AI agent 读取文件后内容进入会话历史，重读历史时隐藏指令（零宽/bidi）会
+        // 重新进入模型——历史响应经网关代理，在这里对所有用户清洗（主用户同样可能被
+        // 诱导读恶意文件）；上游 dsh 不处理，网关补偿。
+        // 沙盒降级：主用户把会话设为 danger-full-access 后共享给子用户，子用户打开会话时
+        // 会话 log 里的 permission/preset 就是 full access——不拦截就直接继承提权，
+        // 这里把超过子用户授权级别的 preset/mode 统一降级（仅受限子用户）。
+        if (req.method === 'POST' && /^\/api\/session[.\/]history$/.test(parsedUrl.pathname)) {
           bufferUpstream(upstreamRes, res, (raw) => {
             try {
               let body = raw;
               const enc = String(upstreamRes.headers['content-encoding'] ?? '');
               if (enc.includes('gzip')) body = zlib.gunzipSync(body);
               const parsed = JSON.parse(body.toString('utf8'));
-              void clampSessionHistorySandbox(
-                parsed,
-                reqAs.dshpwPerms!.sandbox_mode as 'read-only' | 'workspace-write' | 'danger-full-access',
-              );
-              const out = Buffer.from(JSON.stringify(parsed), 'utf8');
+              if (reqAs.dshpwPerms !== undefined && reqAs.dshpwPerms.sandbox_mode !== null) {
+                void clampSessionHistorySandbox(
+                  parsed,
+                  reqAs.dshpwPerms!.sandbox_mode as 'read-only' | 'workspace-write' | 'danger-full-access',
+                );
+              }
+              // F-A2：递归清洗历史中所有字符串字段（消息内容/工具结果）的隐藏 Unicode
+              const cleaned = sanitizeHiddenUnicodeJson(parsed);
+              const out = Buffer.from(JSON.stringify(cleaned), 'utf8');
               const respHeaders = headersForRewrittenBody(upstreamRes.headers);
               respHeaders['content-length'] = String(out.length);
               if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
