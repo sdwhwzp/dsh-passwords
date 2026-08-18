@@ -49,8 +49,14 @@ export function isPrivateHost(host: string): boolean {
   // 去掉 [::1] 形式的外层括号
   if (h.startsWith('[') && h.endsWith(']')) return isPrivateHost(h.slice(1, -1));
   if (h.includes(':')) {
-    // IPv6 私网/回环/链路本地（ULA = fc00::/7 覆盖 fc00-fdff）
-    if (h === '::1' || h === '::' || /^f[cd][\da-f]{2}:/i.test(h) || /^fe[89ab][\da-f]:/i.test(h)) return true;
+    // F-29：IPv6 真·16 字节解析后按前缀判。之前只正则匹配 ::1 / :: / fc*: / fe8*:，
+    // IPv4-mapped（::ffff:127.0.0.1、::ffff:7f00:1）、IPv4-compatible（::127.0.0.1）
+    // 等全部漏判放行（实测 Node socket 把映射地址按 127.0.0.1 连，SSRF 面与 IPv4 侧等同）。
+    // 中括号带端口形式 [::ffff:127.0.0.1]:22 → 剥端口再判。
+    const brack = /^\[([^\]]+)\]:\d+$/.exec(h);
+    if (brack) return isPrivateHost(brack[1]);
+    const v6 = parseIpv6Literal(h);
+    if (v6 !== null) return isPrivateIpv6(v6);
     // IPv4:port 形式（dsh-ssh 的 host 字段可能带端口，变体段一并判）
     const m = /^([^:]+):\d+$/.exec(h);
     if (m) {
@@ -62,6 +68,95 @@ export function isPrivateHost(host: string): boolean {
   const lit = parseIpv4Literal(h);
   if (lit) return isPrivateIpv4Bytes(lit);
   // 非 IP 字面量（hostname）→ 本层不判，由网关 DNS 解析后逐地址再判
+  return false;
+}
+
+/** IPv6 真·解析：展开 :: 压缩与尾部内嵌 IPv4 段到 16 字节；非法/非常规返回 null。
+ *  严格性与 IPv4 侧一致（非字面量返回 null，由调用方按 hostname 处理）。
+ *    - 支持 ::
+ *    - 支持尾部内嵌 IPv4（::ffff:127.0.0.1），也支持变体段（复用 parseIpv4Literal）
+ *    - 十六进制组 1-4 位
+ *  输出：16 字节数组（每 16 位组展开成高/低字节），供 isPrivateIpv6 按字节前缀判定。
+ *  与 Node socket / 各解析库口径一致，避免 IPv4-mapped 与压缩形式绕过。 */
+function parseIpv6Literal(ip: string): number[] | null {
+  const s = ip.trim().toLowerCase().replace(/^\[|\]$/g, '');
+  if (s === '' || !/^[0-9a-f:.]+$/.test(s)) return null;
+
+  const parseSeq = (chunks: string[]): number[] | null => {
+    const out: number[] = [];
+    for (const raw of chunks) {
+      if (raw === '') return null;
+      if (raw.includes('.')) {
+        // 内嵌 IPv4：展开成 2 个 16 位组
+        const lit = parseIpv4Literal(raw);
+        if (!lit) return null;
+        out.push((lit[0] << 8) | lit[1], (lit[2] << 8) | lit[3]);
+      } else if (/^[0-9a-f]{1,4}$/.test(raw)) {
+        out.push(parseInt(raw, 16));
+      } else {
+        return null;
+      }
+    }
+    return out;
+  };
+
+  let groups: number[] | null;
+  const halves = s.split('::');
+  if (halves.length > 2) return null;
+  if (halves.length === 1) {
+    const g = parseSeq(s.split(':'));
+    groups = g !== null && g.length === 8 ? g : null;
+  } else {
+    // 有 :: 压缩：两端各拼，中间补零
+    const head = halves[0] === '' ? [] : parseSeq(halves[0].split(':'));
+    const tail = halves[1] === '' ? [] : parseSeq(halves[1].split(':'));
+    if (head === null || tail === null) return null;
+    const total = head.length + tail.length;
+    if (total > 7) return null; // :: 至少要补 1 组（全 :: 恰好 8 组 0）
+    const pad = 8 - total;
+    groups = [...head, ...new Array(pad).fill(0), ...tail];
+  }
+  if (groups === null) return null;
+  // 16 位组 → 16 字节（高字节在前）
+  const bytes: number[] = [];
+  for (const g of groups) {
+    bytes.push((g >>> 8) & 0xff, g & 0xff);
+  }
+  return bytes;
+}
+
+/** IPv6 私网/回环/链路本地/映射判定（按 16 字节前缀），与 IPv4 侧同严格度。 */
+function isPrivateIpv6(bytes: number[]): boolean {
+  // ::（未指定）
+  if (bytes.every((x) => x === 0)) return true;
+  // ::1（回环）
+  if (bytes.slice(0, 15).every((x) => x === 0) && bytes[15] === 1) return true;
+  // IPv4-mapped ::ffff:0:0/96：前 80 位 0 + 16 位 ffff + 32 位 v4
+  if (bytes.slice(0, 10).every((x) => x === 0) && bytes[10] === 0xff && bytes[11] === 0xff) {
+    return isPrivateIpv4Bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
+  }
+  // IPv4-compatible ::/96（已废弃）：前 96 位 0 + 32 位 v4（::127.0.0.1 一族）
+  if (bytes.slice(0, 12).every((x) => x === 0)) {
+    return isPrivateIpv4Bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
+  }
+  // NAT64 well-known 64:ff9b::/96：内嵌 v4 同判
+  if (
+    bytes[0] === 0 &&
+    bytes[1] === 0x64 &&
+    bytes[2] === 0xff &&
+    bytes[3] === 0x9b &&
+    bytes.slice(4, 12).every((x) => x === 0)
+  ) {
+    return isPrivateIpv4Bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
+  }
+  // ULA fc00::/7
+  if ((bytes[0] & 0xfe) === 0xfc) return true;
+  // 链路本地 fe80::/10
+  if (bytes[0] === 0xfe && (bytes[1] & 0xc0) === 0x80) return true;
+  // 站点本地 fec0::/10（已废弃）
+  if (bytes[0] === 0xfe && (bytes[1] & 0xc0) === 0xc0) return true;
+  // 组播/保留 ff00::/8（对齐 IPv4 侧 a>=224）
+  if (bytes[0] === 0xff) return true;
   return false;
 }
 

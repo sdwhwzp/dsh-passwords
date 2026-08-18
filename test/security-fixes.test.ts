@@ -30,6 +30,14 @@ test('SSRF：私网/回环/链路本地地址全部拦截', () => {
     'fe80::1',
     '[::1]',
     '[fd00::1]',
+    // F-29：IPv4-mapped / IPv4-compatible IPv6（Node socket 按 127.0.0.1 连）
+    '::ffff:127.0.0.1', // IPv4-mapped → 127.0.0.1
+    '::ffff:7f00:1', // IPv4-mapped 十六进制压缩 → 127.0.0.1
+    '::127.0.0.1', // IPv4-compatible → 127.0.0.1
+    '::ffff:10.0.0.1', // IPv4-mapped → 10.0.0.1 私网
+    '[::ffff:127.0.0.1]', // 中括号
+    '[::ffff:127.0.0.1]:22', // 中括号带端口
+    '64:ff9b::7f00:1', // NAT64 well-known → 127.0.0.1
     // 变体：八进制/十六进制/简写段（F-28 真·inet_aton 解析）
     '0177.0.0.1', // 八进制 0177 → 127.0.0.1（之前 Number('0177')=177 漏拦）
     '0x7f.0.0.1', // → 127.0.0.1
@@ -55,6 +63,14 @@ test('SSRF：八进制/非法变体按 inet_aton 正确判定', () => {
   // 单段非私网大整数 → 公网 2130706432 = 127.0.0.0? 否，是 8.0.0.0
   // 2130706433 = 0x7F000001 = 127.0.0.1；134744072 = 0x08080808 = 8.8.8.8
   assert.equal(isPrivateHost('134744072'), false, '134744072 → 8.8.8.8 公网放行');
+});
+
+test('SSRF：IPv4-mapped IPv6 按内嵌 IPv4 判定（F-29）', () => {
+  // 公网内嵌 → 放行（只有私网内嵌才拦）
+  assert.equal(isPrivateHost('::ffff:8.8.8.8'), false, '::ffff:8.8.8.8 公网应放行');
+  // 带端口/zone 形式：解析器不支持的按非字面量放行（网关 DNS 层兜底）
+  assert.equal(isPrivateHost('fe80::1%25eth0'), false, 'zone id 非字面量路径');
+  assert.equal(isPrivateHost('::ffff:127.0.0.1:22'), false, '非标准带端口映射按非字面量');
 });
 
 test('SSRF：公网地址放行', () => {
