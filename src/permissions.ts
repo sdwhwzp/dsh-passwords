@@ -107,6 +107,38 @@ export function collectIdPathPairs(value: unknown, out: Map<string, string> = ne
   return out;
 }
 
+/** 从 session.list 响应收集 sessionId → cwd 映射（供会话作用域 RPC 的目录白名单校验）。 */
+export function collectSessionCwd(value: unknown, out: Map<string, string> = new Map(), depth = 0): Map<string, string> {
+  if (depth > 8 || value === null) return out;
+  if (Array.isArray(value)) {
+    for (const item of value) collectSessionCwd(item, out, depth + 1);
+  } else if (typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    if (typeof obj.sessionId === 'string' && typeof obj.cwd === 'string' && obj.cwd.length > 0) {
+      out.set(obj.sessionId, obj.cwd);
+    }
+    for (const v of Object.values(obj)) collectSessionCwd(v, out, depth + 1);
+  }
+  return out;
+}
+
+/** 从 workspace.list 响应收集会话归属工作区：工作区 path → 其 sessionIds 的每个会话的 cwd（无则覆盖）。 */
+export function collectSessionCwdFromWorkspaces(value: unknown, out: Map<string, string> = new Map(), depth = 0): Map<string, string> {
+  if (depth > 8 || value === null) return out;
+  if (Array.isArray(value)) {
+    for (const item of value) collectSessionCwdFromWorkspaces(item, out, depth + 1);
+  } else if (typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    if (typeof obj.path === 'string' && Array.isArray(obj.sessionIds)) {
+      for (const sid of obj.sessionIds) {
+        if (typeof sid === 'string' && !out.has(sid)) out.set(sid, obj.path);
+      }
+    }
+    for (const v of Object.values(obj)) collectSessionCwdFromWorkspaces(v, out, depth + 1);
+  }
+  return out;
+}
+
 /**
  * 递归查找请求体里的 workspaceId（session.create 可能带 workspaceId 而非 cwd）。
  *  ⚠ 递归时跳过 args 子对象（同 extractPathFromBody：args 是 dsh 不消费的伪字段）。
@@ -438,28 +470,40 @@ export function filterOwnedSessionIds(
 
 /**
  * 递归过滤会话条目（带 sessionId 字符串字段的对象，session.list 响应）：
- * keep(id) 返回 false 时从所在数组移除。用于子用户只看得到自己拥有的会话。
+ * - keep(id) 返回 false 时从所在数组移除。用于子用户只看得到自己拥有的会话。
+ * - cwdAllowed 非 null 时（授权目录受限的子用户），额外要求条目 cwd 在白名单内：
+ *   权限撤销前在老目录创建的旧会话，其工作区已被 workspace.list 白名单隐藏，
+ *   若不按 cwd 丢弃，前端会把这条孤会话归入「未分组」并在侧栏显示幽灵「新会话」。
+ *   cwd 缺失/非字符串 = 无法确认在白名单内 → fail-closed 丢弃。
  * 只要 sessionId 是字符串就执行归属判定（不再要求 cwd 必填——
  *  无工作区的会话也要归属校验，否则侧栏泄露他人会话标题）。
  * 注意：typert 线上格式的会话条目是 { sessionId, cwd, ... }（不是 id）。
  */
-export function filterSessionItems(value: unknown, keep: (id: string) => boolean, depth = 0): unknown {
+export function filterSessionItems(
+  value: unknown,
+  keep: (id: string) => boolean,
+  cwdAllowed: ((cwd: string) => boolean) | null = null,
+  depth = 0,
+): unknown {
   if (depth > 8 || value === null) return value;
   if (Array.isArray(value)) {
     const out: unknown[] = [];
     for (const item of value) {
       const obj = item as Record<string, unknown> | null;
+      const sidRaw = obj === null || typeof obj === 'object' ? obj?.sessionId : undefined;
+      const hasSessionId = typeof sidRaw === 'string' && sidRaw.length > 0;
       // 只要 sessionId 是字符串就走归属判定（fail-closed：归属不在本人 → 整条丢弃）
-      if (
-        obj !== null &&
-        typeof obj === 'object' &&
-        typeof obj.sessionId === 'string' &&
-        obj.sessionId.length > 0 &&
-        !keep(obj.sessionId)
-      ) {
+      if (hasSessionId && !keep(sidRaw as string)) {
         continue;
       }
-      out.push(filterSessionItems(item, keep, depth + 1));
+      // 受限子用户：cwd 不在授权目录的会话丢弃（含 cwd 缺失/非法）
+      if (hasSessionId && cwdAllowed !== null) {
+        const cwd = obj!.cwd;
+        if (typeof cwd !== 'string' || cwd.length === 0 || !cwdAllowed(cwd)) {
+          continue;
+        }
+      }
+      out.push(filterSessionItems(item, keep, cwdAllowed, depth + 1));
     }
     return out;
   }
@@ -467,7 +511,7 @@ export function filterSessionItems(value: unknown, keep: (id: string) => boolean
     const obj = value as Record<string, unknown>;
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(obj)) {
-      out[k] = filterSessionItems(v, keep, depth + 1);
+      out[k] = filterSessionItems(v, keep, cwdAllowed, depth + 1);
     }
     return out;
   }

@@ -36,6 +36,8 @@ import {
   extractPathFromBody,
   filterByPathField,
   collectIdPathPairs,
+  collectSessionCwd,
+  collectSessionCwdFromWorkspaces,
   extractWorkspaceId,
   findStringField,
   SESSION_SCOPED_RE,
@@ -58,6 +60,9 @@ import { t, resolveGatewayLang, type Lang } from './i18n.js';
 type Req = Request & {
   dshpwUser?: number;
   dshpwPerms?: UserPermissionsRow;
+  /** 会话目录白名单校验用：本次请求判定出的目标工作区路径（session.create/fork 时）；
+   *  由 needsFolderCheck 写入，供 session.create 响应回调记录 sessionId→cwd 缓存 */
+  dshpwSessionCwd?: string;
 };
 
 const COOKIE_NAME = 'dsh_gateway_token';
@@ -522,6 +527,11 @@ export function createGatewayServer(
 
   // workspaceId → 规范路径 映射：从 workspace.list 响应里收集，供 session.create 用 workspaceId 时解析路径
   const workspacePathById = new Map<string, string>();
+
+  // sessionId → cwd 映射：从 session.list/workspace.list/session.create 响应里收集，
+  // 供受限子用户的会话作用域 RPC（history/prompt 等）做 cwd 白名单校验——
+  // 权限撤销后仍能按 sessionId 直读旧目录会话必须封堵
+  const sessionCwdById = new Map<string, string>();
 
   /**
    * 从 Cookie 校验会话；返回用户或 null（用户已不存在时旧 token 立即失效）。
@@ -1419,6 +1429,8 @@ export function createGatewayServer(
               const parsed = JSON.parse(body.toString('utf8'));
               // 先缓存全量 id→path（供 session.create 用 workspaceId 时解析路径）
               collectIdPathPairs(parsed, workspacePathById);
+              // 缓存会话归属工作区：工作区 path → 其 sessionIds（供会话作用域 RPC 的 cwd 校验）
+              collectSessionCwdFromWorkspaces(parsed, sessionCwdById);
               const restricted =
                 reqAs.dshpwPerms !== undefined && isWorkspaceRestricted(reqAs.dshpwPerms.allowed_folders);
               const outBody = restricted
@@ -1459,6 +1471,9 @@ export function createGatewayServer(
               const sessionId = extractSessionId(parsed);
               if (sessionId !== null && reqAs.dshpwUser !== undefined) {
                 db.setSessionOwner(sessionId, reqAs.dshpwUser);
+                // 记录 sessionId → 创建时的目标 cwd（needsFolderCheck 已算出，存于 req）
+                const cwd = reqAs.dshpwSessionCwd;
+                if (typeof cwd === 'string' && cwd.length > 0) sessionCwdById.set(sessionId, cwd);
                 if (reqAs.dshpwPerms !== undefined && reqAs.dshpwPerms.sandbox_mode !== null) {
                   applySandboxToSession(sessionId, reqAs.dshpwPerms.sandbox_mode);
                 }
@@ -1492,8 +1507,21 @@ export function createGatewayServer(
               const enc = String(upstreamRes.headers['content-encoding'] ?? '');
               if (enc.includes('gzip')) body = zlib.gunzipSync(body);
               const parsed = JSON.parse(body.toString('utf8'));
+              // 先收集 sessionId→cwd 缓存（过滤前的原始响应，含受限前创建的旧目录会话），
+              // 供会话作用域 RPC（history/prompt 等）做 cwd 白名单校验
+              collectSessionCwd(parsed, sessionCwdById);
               const caller = reqAs.dshpwUser!;
-              const filtered = filterSessionItems(parsed, (id) => db.getSessionOwner(id) === caller);
+              // 受限子用户按 cwd 白名单过滤：权限撤销前在老目录创建的旧会话，其工作区
+              // 已被 workspace.list 隐藏，不丢弃会导致前端出现「未分组+新会话」孤儿项
+              const _perms = reqAs.dshpwPerms!;
+              const cwdAllowed = isWorkspaceRestricted(_perms.allowed_folders)
+                ? (cwd: string) => folderAllowed(cwd, _perms.allowed_folders)
+                : null;
+              const filtered = filterSessionItems(
+                parsed,
+                (id) => db.getSessionOwner(id) === caller,
+                cwdAllowed,
+              );
               const out = Buffer.from(JSON.stringify(filtered), 'utf8');
               const respHeaders = headersForRewrittenBody(upstreamRes.headers);
               respHeaders['content-length'] = String(out.length);
@@ -1700,6 +1728,8 @@ export function createGatewayServer(
             res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
             return;
           }
+          // 记录本次判定出的目标目录，供 session.create/fork 响应回调登记 sessionId→cwd 缓存
+          if (targetPath !== null) reqAs.dshpwSessionCwd = targetPath;
         }
 
         if (needsSandboxCheck && bodyObj !== null) {
@@ -1745,6 +1775,18 @@ export function createGatewayServer(
             upstreamReq.destroy();
             res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
             return;
+          }
+          // 受限子用户：会话 cwd 必须仍在授权目录内。
+          // 否则权限撤销后仍能按 sessionId 直读/写旧目录会话（网关只做了列表隐藏）。
+          // cwd 未知（无缓存记录）→ fail-closed 拒绝，憋扩对新会话的误伤：
+          // session.create 响应与 session.list/workspace.list 响应都会填充缓存。
+          if (isWorkspaceRestricted(reqAs.dshpwPerms!.allowed_folders)) {
+            const cwd = sessionCwdById.get(sessionId);
+            if (cwd === undefined || !folderAllowed(cwd, reqAs.dshpwPerms!.allowed_folders)) {
+              upstreamReq.destroy();
+              res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+              return;
+            }
           }
         }
 
