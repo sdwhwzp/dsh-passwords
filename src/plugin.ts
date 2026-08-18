@@ -41,14 +41,20 @@ class BodyTooLargeError extends Error {}
 function readCookie(cookieHeader: string | undefined, cookieName: string): string | null {
   if (!cookieHeader) return null;
   for (const part of cookieHeader.split(';')) {
-    const [key, ...rest] = part.trim().split('=');
-    if (key === cookieName && rest.length > 0) {
-      const raw = rest.join('=');
-      try {
-        return decodeURIComponent(raw);
-      } catch {
-        return raw;
-      }
+    // Cookie Chaos 加固（P3）：与 gateway.ts 同口径——只剥离 RFC 6265 的 OWS
+    // （ASCII SP/HTAB），cookie 名精确匹配，不按 JS Unicode 空白语义 trim，
+    // 杜绝 Unicode 空白前缀的“伪同名”cookie 被归一化读入。
+    const trimmed = part.replace(/^[ \t]+/, '');
+    const eq = trimmed.indexOf('=');
+    if (eq <= 0) continue;
+    const key = trimmed.slice(0, eq);
+    if (key !== cookieName) continue;
+    const value = trimmed.slice(eq + 1);
+    if (value === '') continue;
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return value;
     }
   }
   return null;

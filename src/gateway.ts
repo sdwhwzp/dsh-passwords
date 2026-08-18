@@ -108,15 +108,24 @@ const INJECT_SCRIPT = `<script>
 function readCookie(cookieHeader: string | undefined, name: string): string | null {
   if (!cookieHeader) return null;
   for (const part of cookieHeader.split(';')) {
-    const [key, ...rest] = part.trim().split('=');
-    if (key === name && rest.length > 0) {
-      const raw = rest.join('=');
-      try {
-        return decodeURIComponent(raw);
-      } catch {
-        // 畸形百分号编码（如 %zz）：返回原值，JWT 校验自然失败，不抛 URIError 500
-        return raw;
-      }
+    // Cookie Chaos 加固（P3）：之前 part.trim() 按 JS Unicode 空白语义裁剪 cookie 名，
+    // 导致带 Unicode 空白前缀（U+00A0/U+3000/U+2000/U+0085 等）的“伪同名”cookie 在
+    // 单字节 latin1 编码下会被 trim 归一化成目标名读入（行为不一致、依赖编码变异）。
+    // 现在只剥离 RFC 6265 允许的 OWS（ASCII SP/HTAB，来自 "; " 分隔符或 cookie-pair
+    // 前 OWS），cookie 名其余字符必须与目标精确相等——任何非 ASCII 前缀（含 Unicode
+    // 空白与单字节 latin1 变体）都不再可能被归一化匹配，一律 fail-closed。
+    const trimmed = part.replace(/^[ \t]+/, '');
+    const eq = trimmed.indexOf('=');
+    if (eq <= 0) continue;
+    const key = trimmed.slice(0, eq);
+    if (key !== name) continue;
+    const value = trimmed.slice(eq + 1);
+    if (value === '') continue;
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      // 畸形百分号编码（如 %zz）：返回原值，JWT 校验自然失败，不抛 URIError 500
+      return value;
     }
   }
   return null;

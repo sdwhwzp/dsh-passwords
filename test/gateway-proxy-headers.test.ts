@@ -36,6 +36,8 @@ let upstream: http.Server;
 let gateway: http.Server;
 let gatewayPort = 0;
 let cookie = '';
+/** 会话 JWT 明文（Cookie Chaos 回归测试用：构造 Unicode 前缀的伪同名 cookie） */
+let tokenValue = '';
 /** 上游最后一次收到的请求头（F-15 回归测试用：验证网关 cookie 不被透传） */
 let lastUpstreamHeaders: http.IncomingHttpHeaders = {};
 
@@ -145,6 +147,7 @@ before(async () => {
   const token = jwt.sign({ sub: String(user.id), username: user.username, cv: 0 }, config.jwtSecret, {
     expiresIn: '12h',
   });
+  tokenValue = token;
   cookie = `dsh_gateway_token=${token}`;
 });
 
@@ -226,4 +229,22 @@ test('F-15 例外：自身插件路由 /api/dsh-passwords/* 必须保留 Cookie�
     cookie,
     '插件路由的上游请求必须携带网关 Cookie，否则设置页用户管理全部 401',
   );
+});
+
+test('Cookie Chaos 加固（P3）：Unicode 空白前缀的会话 cookie 不再被归一化匹配 → 未认证', async () => {
+  const locationOf = (rh: string[]): string => {
+    const i = rh.findIndex((v, idx) => idx % 2 === 0 && v.toLowerCase() === 'location');
+    return i >= 0 ? rh[i + 1] ?? '' : '';
+  };
+  // 只有 U+00A0 前缀的伪同名 cookie（旧 trim() 会按 Unicode 空白语义归一化成
+  // dsh_gateway_token 读入并放行认证）；严格解析应视为不同 cookie → 302 登录页
+  const r = await gatewayReq('GET', '/html', {
+    cookie: `\u00a0dsh_gateway_token=${tokenValue}`, // U+00A0 在 latin1 下为单字节 0xA0
+  });
+  assert.equal(r.status, 302, 'Unicode 前缀 cookie 不应通过认证，应重定向到登录页');
+  assert.match(locationOf(r.rawHeaders), /\/gateway\/login/);
+
+  // 对照：正常 cookie 认证通过（U+00A0 精确匹配不被干扰）
+  const ok = await gatewayReq('GET', '/html', { cookie: `dsh_gateway_token=${tokenValue}` });
+  assert.equal(ok.status, 200, '正常会话 cookie 应认证通过');
 });
