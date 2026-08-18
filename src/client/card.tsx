@@ -1,5 +1,6 @@
-// dsh-passwords 设置卡片：可折叠（与官方 PluginCard 同形态：header 按钮 +
-// aria-expanded + 展开才渲染 body）。内容：
+// dsh-passwords 设置卡片：内容平铺展示（独立 settings.section 分区，不再折叠）。
+// 内容：
+//   - 当前身份（账号 + 角色徽章）
 //   - 远程设置补丁：状态（所有用户可见）+ "重载补丁"按钮（仅主用户；F-02）
 //   - 用户管理：改密/改名/子用户分配（主用户 admin 可管理所有，子用户只能改自己）
 // 数据面：/api/dsh-passwords/*（网关注入的 JWT cookie 鉴权）。
@@ -318,7 +319,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
     h(
       'div',
       { className: 'dshpw-row' },
-      h('span', { className: 'dshpw-label', style: { marginBottom: 0 } }, t('desc'), ' '),
+      h('span', null, t('identity')),
       h('strong', null, me || '—'),
       isAdmin
         ? h('span', { className: 'dshpw-badge admin' }, t('owner'))

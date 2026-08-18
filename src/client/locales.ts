@@ -6,14 +6,11 @@
 // 优先按 code 本地化，未知 code 回退到服务端返回的 error 文案。
 
 export const zh = {
-  title: 'dsh-passwords · 密码门',
-  desc: '登录网关的账号管理。当前身份：',
   sectionTitle: '密码门',
   sectionDesc: 'dsh-passwords 登录网关的设置与账号管理。',
+  identity: '当前身份：',
   owner: '主用户',
   subuser: '子用户',
-  expand: '展开',
-  collapse: '收起',
   // 远程设置 / 补丁
   patch: '远程设置',
   patchUnknown: '状态未知',
@@ -118,14 +115,11 @@ export const zh = {
 };
 
 export const en: Record<keyof typeof zh, string> = {
-  title: 'dsh-passwords · Password Gate',
-  desc: 'Accounts for the login gateway. Signed in as:',
   sectionTitle: 'Password Gate',
   sectionDesc: 'dsh-passwords login gateway settings and account management.',
+  identity: 'Signed in as:',
   owner: 'Owner',
   subuser: 'Subuser',
-  expand: 'Expand',
-  collapse: 'Collapse',
   patch: 'Remote settings',
   patchUnknown: 'Status unknown',
   patchOk: 'Enabled · Remote access ready',

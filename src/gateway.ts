@@ -989,12 +989,15 @@ export function createGatewayServer(
     const dshHome = process.env.DSH_HOME !== undefined && process.env.DSH_HOME !== ''
       ? path.resolve(process.env.DSH_HOME)
       : path.join(home, '.dsh');
+    // dsh 安装根：显式配置或自动探测（npm root -g/@deepseek-ai/dsh）；
+    // 用 findDshRoot 而不是直接读 config.patch.dshRoot，因为它可能是空（自动探测）
+    const resolvedDshRoot = findDshRoot(config.patch.dshRoot);
     const sensitiveBases: string[] = [
       dbReal,
       path.dirname(dbReal),
       // 部署目录（dbPath 的 data/ 再上一级）：盖住 .env / dist / scripts
       path.dirname(path.dirname(dbReal)),
-      config.patch.dshRoot !== '' ? path.resolve(config.patch.dshRoot) : '',
+      resolvedDshRoot !== null ? resolvedDshRoot : '',
       dshHome,
       path.join(home, '.ssh'),
       ...(process.platform === 'win32' ? [] : ['/etc', '/proc', '/sys', '/dev', '/boot']),

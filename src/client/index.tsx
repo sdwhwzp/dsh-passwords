@@ -16,7 +16,7 @@ import { zh, en } from './locales';
 const CSS = `
 .dshpw-card{display:flex;flex-direction:column;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-layer-3);transition:border-color .16s,background .16s;font-size:13px;line-height:1.5;overflow:hidden}
 .dshpw-card:hover{border-color:var(--dsw-alias-label-dimmed)}
-.dshpw-body{display:flex;flex-direction:column;gap:14px}
+.dshpw-body{display:flex;flex-direction:column;gap:14px;padding:14px 16px}
 .dshpw-section{display:flex;flex-direction:column;gap:8px}
 .dshpw-label{display:block;font-size:12px;font-weight:600;color:var(--dsw-alias-label-secondary)}
 .dshpw-input{width:100%;box-sizing:border-box;min-width:0;padding:7px 10px;font-size:13px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:8px;transition:border-color .15s,box-shadow .15s}
