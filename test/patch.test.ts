@@ -52,6 +52,12 @@ const WORKSPACE_STICKY = [
   '\t\t\t\twide,',
   '\t\t\t\tsearchExpanded',
   '\t\t\t]);',
+  '\t\t\t(0, react_jsx_runtime.jsx)("input", {',
+  '\t\t\t\t\tref: searchInput,',
+  '\t\t\t\t\tclassName: WorkspaceBrowser_module_css_default.searchInput,',
+  '\t\t\t\t\ttype: "text",',
+  '\t\t\t\t\tplaceholder: t("search.placeholder"),',
+  '\t\t\t\t}),',
   '',
 ].join('\n');
 
@@ -122,6 +128,9 @@ test('补丁：工作区搜索粘滞态 → 无结果时点击别处自动收起
     assert.ok(!ws.includes('if (normalizedQuery !== "") return;'), '旧粘滞行为（query 非空直接 return）已移除');
     assert.ok(ws.includes('remoteSearch.status !== "loading"'), '已注入无结果自动收起逻辑');
     assert.ok(ws.includes('remoteSearch,'), 'click-outside effect 依赖数组已补 remoteSearch（防闭包过期）');
+    // 搜索框 autocomplete 加固：阻断密码管理器把搜索框当用户名框自动填充（真凶：admin 被填入 → 无匹配会话）
+    assert.ok(ws.includes('autoComplete: "off"'), '搜索框已注入 autocomplete="off"');
+    assert.ok(ws.includes('dshpw-session-search'), '搜索框已注入中性 name，摘掉用户名框资格');
 
     const after = patchStatus(root);
     assert.equal(after.workspaceSearch, true, '状态检测为已打');

@@ -48,6 +48,16 @@ const SEARCH_DEPS_RE =
   /(\}, \[)[\t ]*\n[\t ]*normalizedQuery,[\t ]*\n[\t ]*wide,[\t ]*\n[\t ]*searchExpanded([\t ]*\n[\t ]*\]\);)/;
 const SEARCH_DEPS_TO = '$1\n\t\t\t\tremoteSearch,\n\t\t\t\tnormalizedQuery,\n\t\t\t\twide,\n\t\t\t\tsearchExpanded$2';
 
+// dsh 上游行为：搜索输入框无 autocomplete/name 属性——浏览器密码管理器在页面出现
+// 密码框时会用启发式找用户名框（DOM 里密码框之前最近的文本框），侧栏搜索框会被
+// 选中并填入已存用户名（实测被填 "admin" → 触发搜索 → 无匹配会话，见 PROCESS.md
+// 步骤 32）。子补丁：给搜索框加 autocomplete="off" + 中性 name，摘掉用户名框资格。
+const SEARCH_AUTOFILL_MARK = 'dshpw-session-search';
+const SEARCH_AUTOFILL_RE =
+  /(className: WorkspaceBrowser_module_css_default\.searchInput,[\t ]*\n[\t ]*type: "text",)/;
+const SEARCH_AUTOFILL_TO =
+  '$1\n\t\t\t\t\t\t\tautoComplete: "off",\n\t\t\t\t\t\t\tname: "dshpw-session-search",';
+
 /**
  * 命名空间白名单补丁是否适用当前 dsh。
  * dsh 0.1.0-rc.7+ 移除了主机侧硬编码 WEB_SETTINGS_NAMESPACES 白名单
@@ -112,7 +122,9 @@ export function patchStatus(
     // 打过 = 不再含旧行为串 + 含子补丁标记（文件缺失按未打处理）
     workspaceSearch =
       !ws.includes('if (normalizedQuery !== "") return;') &&
-      ws.includes('remoteSearch.status !== "loading"');
+      ws.includes('remoteSearch.status !== "loading"') &&
+      // 搜索框 autocomplete 加固（v2.5.1）：未含标记且仍可匹配 = 未打
+      (ws.includes(SEARCH_AUTOFILL_MARK) || !SEARCH_AUTOFILL_RE.test(ws));
   } catch { /* 同上 */ }
   return { settingsHostMode, whitelist, workspaceSearch };
 }
@@ -158,16 +170,25 @@ export function applyRemotePatch(dshRoot: string): 'applied' | 'unchanged' | 'mi
     }
   }
 
-  // 3) 工作区侧栏搜索自动收起（可选子补丁：目标文件不存在则跳过，不影响 1/2）
+  // 3) 工作区侧栏搜索两个子补丁（可选：目标文件不存在则跳过，不影响 1/2）
+  //    ① 无结果搜索点击别处自动收起并清空（消除「无匹配会话」死状态滞留）
+  //    ② 搜索框 autocomplete="off" + 中性 name（阻断密码管理器把搜索框当用户名框自动填充）
   const wsFile = path.join(dshRoot, WORKSPACE_TARGET);
   if (existsSync(wsFile)) {
     const ws = readFileSync(wsFile, 'utf8');
-    if (SEARCH_STICKY_RE.test(ws) && SEARCH_DEPS_RE.test(ws)) {
+    let wsNext = ws;
+    let wsChanged = false;
+    if (SEARCH_STICKY_RE.test(wsNext) && SEARCH_DEPS_RE.test(wsNext)) {
+      wsNext = wsNext.replace(SEARCH_STICKY_RE, SEARCH_STICKY_TO).replace(SEARCH_DEPS_RE, SEARCH_DEPS_TO);
+      wsChanged = true;
+    }
+    if (!wsNext.includes(SEARCH_AUTOFILL_MARK) && SEARCH_AUTOFILL_RE.test(wsNext)) {
+      wsNext = wsNext.replace(SEARCH_AUTOFILL_RE, SEARCH_AUTOFILL_TO);
+      wsChanged = true;
+    }
+    if (wsChanged) {
       if (!existsSync(wsFile + BAK_SUFFIX)) writeFileSync(wsFile + BAK_SUFFIX, ws);
-      writeFileSync(
-        wsFile,
-        ws.replace(SEARCH_STICKY_RE, SEARCH_STICKY_TO).replace(SEARCH_DEPS_RE, SEARCH_DEPS_TO),
-      );
+      writeFileSync(wsFile, wsNext);
       changed = true;
     }
   }

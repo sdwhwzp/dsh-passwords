@@ -395,7 +395,10 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
         h('input', {
           className: 'dshpw-input',
           type: 'password',
-          autoComplete: 'current-password',
+          // dsh-passwords 修复：旧密码框用 new-password 而非 current-password——后者会邀请浏览器
+          // 密码管理器自动填充已存凭据对，用户名启发式会误把侧栏会话搜索框当用户名框填入
+          // （实测：搜索框被填入 "admin" → 触发搜索 → 无匹配会话，见 PROCESS.md 步骤 32）
+          autoComplete: 'new-password',
           placeholder: t('currentPwPh'),
           value: pwCurrent,
           onChange: (e: { target: { value: string } }) => setPwCurrent(e.target.value),
@@ -432,6 +435,8 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
       targetSelect(nameTarget, setNameTarget),
       h('input', {
         className: 'dshpw-input',
+        autoComplete: 'off',
+        name: 'dshpw-newname',
         placeholder: t('newNamePh'),
         value: nameNew,
         onChange: (e: { target: { value: string } }) => setNameNew(e.target.value),
@@ -469,6 +474,8 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
         ),
         h('input', {
           className: 'dshpw-input',
+          autoComplete: 'off',
+          name: 'dshpw-subname',
           placeholder: t('subNamePh'),
           value: addName,
           onChange: (e: { target: { value: string } }) => setAddName(e.target.value),
@@ -564,6 +571,8 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
                   type: 'text',
                   inputMode: 'numeric',
                   pattern: '[0-9]*',
+                  autoComplete: 'off',
+                  name: 'dshpw-tokenlimit',
                   placeholder: t('permsToken'),
                   value: d.token,
                   onChange: (e: { target: { value: string } }) => setDraft(u.id, { token: e.target.value }),
@@ -573,6 +582,8 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
                   type: 'text',
                   inputMode: 'numeric',
                   pattern: '[0-9]*',
+                  autoComplete: 'off',
+                  name: 'dshpw-minlimit',
                   placeholder: t('permsMinutes'),
                   value: d.minutes,
                   onChange: (e: { target: { value: string } }) => setDraft(u.id, { minutes: e.target.value }),
