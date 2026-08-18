@@ -108,34 +108,11 @@ function errText(error: unknown, tr: (key: string, params?: Record<string, strin
   return tr('opFailed');
 }
 
-function Chevron(props: { open: boolean }) {
-  return h(
-    'svg',
-    {
-      className: 'dshpw-chevron' + (props.open ? ' open' : ''),
-      width: 14,
-      height: 14,
-      viewBox: '0 0 24 24',
-      fill: 'none',
-      'aria-hidden': 'true',
-    },
-    h('path', {
-      d: 'M6 9l6 6 6-6',
-      stroke: 'currentColor',
-      strokeWidth: 2,
-      strokeLinecap: 'round',
-      strokeLinejoin: 'round',
-    }),
-  );
-}
-
 export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
   const t = props.t;
   // errText 需要接收动态 key（err.<code>），而 dshpw 词典 t 的 key 是受限联合类型：
   // 这里包一层宽松签名适配器（运行时行为不变）
   const trErr = (key: string, params?: Record<string, string | number>) => t(key as never, params);
-  // 折叠状态（与官方 PluginCard 一致：默认收起，展开状态为卡片本地状态）
-  const [open, setOpen] = useState(false);
 
   const [data, setData] = useState<StateData | null>(null);
   const [patchState, setPatchState] = useState<PatchState | null>(null);
@@ -200,18 +177,14 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
       .catch(() => setPatchState(null));
   };
 
+  // 密码门已是独立设置分区页（settings.section），无需折叠：
+  // 进入分区即渲染全部内容，并每 30 秒自动刷新（主用户在别处修改子用户
+  // 权限/工作区后，页面自动同步最新状态）
   useEffect(() => {
-    refresh();
-  }, []);
-
-  // 展开状态下定期刷新（收起时不轮询，避免设置页长期挂着产生无用请求）；
-  // 主用户在别处修改子用户权限/工作区后，展开即拉最新 + 每 30 秒自动同步
-  useEffect(() => {
-    if (!open) return;
     refresh();
     const timer = window.setInterval(refresh, 30_000);
     return () => window.clearInterval(timer);
-  }, [open]);
+  }, []);
 
   const isAdmin = data?.me?.role === 'admin';
   const me = data?.me?.username ?? '';
@@ -338,35 +311,19 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
   const patchText =
     patchState === null ? t('patchUnknown') : patchOk ? t('patchOk') : t('patchBad');
 
-  const header = h(
-    'button',
-    {
-      type: 'button',
-      className: 'dshpw-header',
-      'aria-expanded': open,
-      'aria-label': `${open ? t('collapse') : t('expand')}: dsh-passwords`,
-      onClick: () => setOpen(!open),
-    },
-    h(
-      'span',
-      { className: 'dshpw-head' },
-      h('span', { className: 'dshpw-title' }, t('title')),
-      h(
-        'span',
-        { className: 'dshpw-desc' },
-        t('desc'),
-        h('strong', null, me || '—'),
-        isAdmin
-          ? h('span', { className: 'dshpw-badge admin' }, t('owner'))
-          : h('span', { className: 'dshpw-badge' }, t('subuser')),
-      ),
-    ),
-    h(Chevron, { open }),
-  );
-
   const body = h(
     'div',
     { className: 'dshpw-body' },
+    // ── 当前身份（原折叠头里的账号信息，独立分区后直接展示） ──
+    h(
+      'div',
+      { className: 'dshpw-row' },
+      h('span', { className: 'dshpw-label', style: { marginBottom: 0 } }, t('desc'), ' '),
+      h('strong', null, me || '—'),
+      isAdmin
+        ? h('span', { className: 'dshpw-badge admin' }, t('owner'))
+        : h('span', { className: 'dshpw-badge' }, t('subuser')),
+    ),
     // ── 远程设置：状态 + 重载 ──
     h(
       'div',
@@ -623,5 +580,5 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
     notice && h('div', { className: 'dshpw-ok' }, notice),
   );
 
-  return h('div', { className: 'dshpw-card' + (open ? ' open' : '') }, header, open ? body : null);
+  return h('div', { className: 'dshpw-card' }, body);
 }

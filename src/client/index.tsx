@@ -16,15 +16,7 @@ import { zh, en } from './locales';
 const CSS = `
 .dshpw-card{display:flex;flex-direction:column;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-layer-3);transition:border-color .16s,background .16s;font-size:13px;line-height:1.5;overflow:hidden}
 .dshpw-card:hover{border-color:var(--dsw-alias-label-dimmed)}
-.dshpw-card.open{background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-label-dimmed)}
-.dshpw-header{display:flex;align-items:center;gap:12px;width:100%;padding:14px 16px;background:none;border:0;border-radius:12px;font:inherit;color:inherit;text-align:left;cursor:pointer}
-.dshpw-header:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}
-.dshpw-head{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px}
-.dshpw-title{font-size:15px;font-weight:600;line-height:1.4;color:var(--dsw-alias-label-primary)}
-.dshpw-desc{font-size:13px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}
-.dshpw-chevron{flex:none;color:var(--dsw-alias-label-tertiary);transition:transform .16s}
-.dshpw-chevron.open{transform:rotate(180deg)}
-.dshpw-body{border-top:1px solid var(--dsw-alias-border-l2);margin:0 16px;padding:12px 0 14px;display:flex;flex-direction:column;gap:14px}
+.dshpw-body{display:flex;flex-direction:column;gap:14px}
 .dshpw-section{display:flex;flex-direction:column;gap:8px}
 .dshpw-label{display:block;font-size:12px;font-weight:600;color:var(--dsw-alias-label-secondary)}
 .dshpw-input{width:100%;box-sizing:border-box;min-width:0;padding:7px 10px;font-size:13px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:8px;transition:border-color .15s,box-shadow .15s}
@@ -116,6 +108,44 @@ export function apply(ctx: ClientContext): void {
       TokenReporter,
     ),
   );
+
+  // ── 远程文件下载（Issue #4）──────────────────────────────────
+  // 经 dsh-passwords 网关远程访问时，点击对话里的“生成文件”标签会调用
+  // workspaces.openPath → host.openPath → 服务器容器里 xdg-open（无桌面环境
+  // → spawn xdg-open ENOENT）。这里包装 openPath：检测到经网关访问时改为
+  // 跳转 /gateway/api/download 下载到浏览器；本地桌面访问保持原 RPC 行为。
+  // 网关检测：探测一次响应头 X-Dsh-Gateway（网关在代理/自身响应里注入）。
+  let gatewayDetected: boolean | null = null;
+  const isBehindGateway = async (): Promise<boolean> => {
+    if (gatewayDetected !== null) return gatewayDetected;
+    try {
+      const resp = await fetch('/gateway/login', {
+        method: 'HEAD',
+        credentials: 'same-origin',
+      });
+      gatewayDetected = resp.headers.get('x-dsh-gateway') === '1';
+    } catch {
+      gatewayDetected = false;
+    }
+    return gatewayDetected;
+  };
+
+  ctx.inject(['workspaces'], (scope) => {
+    const workspaces = scope.workspaces as {
+      openPath?: (path: string) => Promise<unknown>;
+    };
+    const original = workspaces.openPath?.bind(workspaces);
+    if (typeof original !== 'function') return;
+    workspaces.openPath = async (filePath: string) => {
+      if (await isBehindGateway()) {
+        // 经网关：下载到浏览器（路径由网关侧再做目录/敏感校验）
+        const url = '/gateway/api/download?path=' + encodeURIComponent(filePath);
+        window.location.assign(url);
+        return { opened: true };
+      }
+      return original(filePath);
+    };
+  });
 
   // 双语词典（zh/en）：卡片文字跟随 dsh 设置里的语言
   // （设置 → 通用 → 语言 / Settings → General → Language），切换即时生效

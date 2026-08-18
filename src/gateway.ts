@@ -5,7 +5,7 @@
 import http, { type IncomingMessage, type IncomingHttpHeaders } from 'node:http';
 import https from 'node:https';
 import { createSecureContext } from 'node:tls';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync, createReadStream, realpathSync } from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -532,6 +532,8 @@ export function createGatewayServer(
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+    // 网关标识：客户端插件探测此头判断是否经 dsh-passwords 远程访问
+    res.setHeader('X-Dsh-Gateway', '1');
     // 页面完全自包含（内联 CSS/JS、无外部资源）：可以上严格 CSP
     res.setHeader(
       'Content-Security-Policy',
@@ -937,6 +939,105 @@ export function createGatewayServer(
     res.json({ ok: true, me: { id: me.userId, username: me.username, role: me.role }, users });
   });
 
+  // ── 远程文件下载（Issue #4）──────────────────────────────────
+  // 经网关远程访问时，点击对话里的“生成文件”标签不再在服务器容器里执行
+  // xdg-open（无桌面环境 → spawn xdg-open ENOENT），而是下载到当前浏览器。
+  // 安全约束：
+  //  1. 仅已登录用户（apiAuth）
+  //  2. 子用户只能下载 allowedFolders 白名单内的文件（folderAllowed）
+  //  3. realpath 后再校验，防 ../ 与符号链接逃逸
+  //  4. 仅普通文件（拒绝目录/设备/socket）
+  //  5. 屏蔽敏感路径：DSH 根目录、数据库、data 目录、.env
+  //  6. 支持 GET（流式）+ HEAD
+  app.get('/gateway/api/download', (req, res) => {
+    const me = apiAuth(req, res);
+    if (!me) return;
+    const rawPath = typeof req.query.path === 'string' ? req.query.path : '';
+    if (rawPath === '') {
+      res.status(400).json({ ok: false, code: 'INVALID', error: 'path 无效' });
+      return;
+    }
+
+    // 1) 规范化 + 绝对路径（防 ../ 与编码变体）
+    const abs = path.resolve(rawPath);
+    // 2) realpath 后再校验（防符号链接逃逸；文件不存在也在此失败）
+    let real: string;
+    try {
+      real = realpathSync(abs);
+    } catch {
+      res.status(404).json({ ok: false, code: 'NOT_FOUND', error: '文件不存在' });
+      return;
+    }
+
+    // 3) 目录白名单（子用户受限时）
+    const perms = effectivePermissions(me.userId);
+    if (!folderAllowed(real, perms.allowed_folders)) {
+      res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '目录越权' });
+      return;
+    }
+
+    // 5) 敏感路径屏蔽：DSH_HOME（会话/设置/凭据）、数据库、部署目录（盖 .env/data/dist）、
+    //    本机 SSH 凭据、OS 系统目录（/etc /proc /sys /dev —— 永不会是工作区文件）
+    const dbReal = (() => {
+      try {
+        return realpathSync(config.dbPath);
+      } catch {
+        return path.resolve(config.dbPath);
+      }
+    })();
+    const home = os.homedir();
+    const dshHome = process.env.DSH_HOME !== undefined && process.env.DSH_HOME !== ''
+      ? path.resolve(process.env.DSH_HOME)
+      : path.join(home, '.dsh');
+    const sensitiveBases: string[] = [
+      dbReal,
+      path.dirname(dbReal),
+      // 部署目录（dbPath 的 data/ 再上一级）：盖住 .env / dist / scripts
+      path.dirname(path.dirname(dbReal)),
+      config.patch.dshRoot !== '' ? path.resolve(config.patch.dshRoot) : '',
+      dshHome,
+      path.join(home, '.ssh'),
+      ...(process.platform === 'win32' ? [] : ['/etc', '/proc', '/sys', '/dev', '/boot']),
+    ].filter((p) => p !== '');
+    const isSensitive = (p: string): boolean =>
+      sensitiveBases.some((base) => p === base || p.startsWith(base + path.sep));
+    if (isSensitive(real)) {
+      res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '敏感文件不可下载' });
+      return;
+    }
+
+    // 4) 仅普通文件
+    let st;
+    try {
+      st = statSync(real);
+    } catch {
+      res.status(404).json({ ok: false, code: 'NOT_FOUND', error: '文件不存在' });
+      return;
+    }
+    if (!st.isFile()) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: '不是普通文件' });
+      return;
+    }
+
+    // 6) 响应：GET 流式下载；HEAD 仅返回头（供客户端探测路径/权限）
+    const name = path.basename(real);
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(name)}`);
+    res.setHeader('Content-Length', String(st.size));
+    if (req.method === 'HEAD') {
+      res.end();
+      return;
+    }
+    const stream = createReadStream(real);
+    stream.on('error', () => {
+      if (!res.headersSent) res.status(500).json({ ok: false, code: 'INTERNAL', error: '读取失败' });
+      else res.destroy();
+    });
+    stream.pipe(res);
+  });
+
   // ── 更新某子用户权限（仅主用户） ─────────────────────────────
   app.post('/gateway/api/permissions', jsonBody, (req, res) => {
     const me = apiAuth(req, res, true);
@@ -1313,12 +1414,16 @@ export function createGatewayServer(
     delete h['content-length'];
     delete h['content-encoding'];
     delete h['transfer-encoding'];
+    // 网关标识：客户端插件探测此头判断是否经 dsh-passwords 远程访问
+    h['x-dsh-gateway'] = '1';
     return h;
   }
   // 流式透传：上游若异常同时带 CL+TE，按 RFC 9110 §8.6 保留 TE、丢弃 CL
   function headersForStreaming(upstreamHeaders: IncomingHttpHeaders): Record<string, string | string[] | undefined> {
     const h: Record<string, string | string[] | undefined> = { ...upstreamHeaders };
     if (h['content-length'] !== undefined && h['transfer-encoding'] !== undefined) delete h['content-length'];
+    // 网关标识：客户端插件探测此头判断是否经 dsh-passwords 远程访问
+    h['x-dsh-gateway'] = '1';
     return h;
   }
 
