@@ -7,9 +7,14 @@
 # Windows 用户请运行 install.bat。
 set -euo pipefail
 
-if [ -f scripts/install.mjs ]; then
-  node scripts/install.mjs
-  exit $?
+# 从任意 cwd 执行已 clone 的 install.sh 都应找到脚本自身所在目录。
+# curl | bash 时 BASH_SOURCE 不是落盘文件，不能误把调用 cwd 当成项目目录，必须走 clone 分支。
+SCRIPT_SOURCE="${BASH_SOURCE[0]:-$0}"
+if [ -f "$SCRIPT_SOURCE" ]; then
+  SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$SCRIPT_SOURCE")" && pwd)"
+  if [ -f "$SCRIPT_DIR/scripts/install.mjs" ]; then
+    exec node "$SCRIPT_DIR/scripts/install.mjs"
+  fi
 fi
 
 command -v node >/dev/null 2>&1 || { echo "[dsh-passwords] 未找到 Node.js（需要 22.5+），请先安装"; exit 1; }
@@ -26,4 +31,4 @@ if [ -d "$DEST" ]; then
 fi
 git clone --depth 1 https://github.com/slywalker2006/dsh-passwords.git "$DEST"
 cd "$DEST"
-node scripts/install.mjs
+exec node scripts/install.mjs

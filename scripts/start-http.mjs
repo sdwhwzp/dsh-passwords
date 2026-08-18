@@ -16,13 +16,26 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const cli = path.join(root, 'dist', 'cli.js');
 
-const rawPort = process.argv[2] ?? '';
-const port = Number(rawPort) || 8080;
-
 // 跟随环境语言（与 CLI 一致：LANG/LC_ALL/LC_MESSAGES 以 en 开头即英文）
 const isEn = ['LANG', 'LC_ALL', 'LC_MESSAGES'].some((key) =>
   String(process.env[key] ?? '').toLowerCase().startsWith('en'),
 );
+
+const rawPort = process.argv[2] ?? '';
+let port = 8080;
+if (rawPort !== '') {
+  // 严格端口：拒绝 1e3/0x10/浮点/负数/越界，不静默回退到 8080（否则用户会以为
+  // 服务跑在指定端口，实际暴露在另一个端口，排障与安全组配置都会误导）。
+  if (!/^\d+$/.test(rawPort) || !Number.isSafeInteger(Number(rawPort)) || Number(rawPort) < 1 || Number(rawPort) > 65535) {
+    console.error(
+      isEn
+        ? `Invalid port: ${rawPort}. Use an integer from 1 to 65535.`
+        : `端口无效：${rawPort}。请输入 1 到 65535 的整数。`,
+    );
+    process.exit(1);
+  }
+  port = Number(rawPort);
+}
 const warnLines = isEn
   ? [
       '=============================================================',

@@ -1,13 +1,15 @@
 @echo off
-setlocal
+setlocal EnableExtensions
 chcp 65001 >nul
+rem Always resolve paths from this .bat file, not the caller's working directory.
+set "SCRIPT_DIR=%~dp0"
 rem dsh-passwords one-click installer for Windows.
 rem Actual install logic lives in scripts\install.mjs.
 rem Usage: double-click this file, or run it from a cmd window.
 rem   - From a cloned repo:  install.bat
 rem   - Standalone:          download install.bat and run it anywhere
 
-if exist "scripts\install.mjs" goto run
+if exist "%SCRIPT_DIR%scripts\install.mjs" goto run
 
 where node >nul 2>nul || (
   echo [dsh-passwords] Node.js not found. Install Node.js 22.5+ first: https://nodejs.org/
@@ -28,7 +30,8 @@ if exist "%DEST%" (
 git clone --depth 1 https://github.com/slywalker2006/dsh-passwords.git "%DEST%"
 if errorlevel 1 exit /b 1
 cd /d "%DEST%"
+set "SCRIPT_DIR=%CD%\"
 
 :run
-node scripts\install.mjs
+node "%SCRIPT_DIR%scripts\install.mjs"
 exit /b %errorlevel%
