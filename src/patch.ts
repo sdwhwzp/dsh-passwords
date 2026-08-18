@@ -31,6 +31,17 @@ const WHITELIST_TARGET = path.join(
 const SETTINGS_FROM = 'connection.isLoopback ? "host" : "memory"';
 const SETTINGS_TO = '"host"';
 
+/**
+ * 命名空间白名单补丁是否适用当前 dsh。
+ * dsh 0.1.0-rc.7+ 移除了主机侧硬编码 WEB_SETTINGS_NAMESPACES 白名单
+ * （改用 settings.describe() 动态枚举命名空间），此时无对象可打 →
+ * 视为原生支持，无需（也无法）再插 "dsh-passwords"。
+ * 旧版 dsh（<=rc.6）仍需要追加白名单，走插入分支。
+ */
+function whitelistPatchApplicable(content: string): boolean {
+  return /WEB_SETTINGS_NAMESPACES\s*=/.test(content);
+}
+
 /** 找到 dsh 安装根目录（@deepseek-ai/dsh），找不到返回 null */
 export function findDshRoot(explicit: string): string | null {
   if (explicit) return existsSync(explicit) ? explicit : null;
@@ -72,7 +83,8 @@ export function patchStatus(dshRoot: string): { settingsHostMode: boolean; white
   } catch { /* 文件缺失按未打处理 */ }
   try {
     const w = readFileSync(wlFile, 'utf8');
-    whitelist = w.includes('"dsh-passwords"');
+    // rc.7+ 已移除 WEB_SETTINGS_NAMESPACES 白名单 → 原生支持，视为已满足
+    whitelist = !whitelistPatchApplicable(w) || w.includes('"dsh-passwords"');
   } catch { /* 同上 */ }
   return { settingsHostMode, whitelist };
 }
@@ -92,11 +104,15 @@ export function applyRemotePatch(dshRoot: string): 'applied' | 'unchanged' | 'mi
     changed = true;
   }
 
-  // 2) 白名单补齐（最小插入：仅追加 "dsh-passwords"，不重写整块数组）
-  // 之前整块替换会抹掉其他插件/已声明的命名空间（如 dsh 升级新增、其他插件
-  // 补进去的条目），仅靠 '"dsh-passwords"' 字符串检测是否已打过而无法重打。
+  // 2) 白名单补齐（仅 rc.6 及以下适用）：追加 "dsh-passwords"，不重写整块数组。
+  //    之前整块替换会抹掉其他插件/已声明的命名空间（如 dsh 升级新增、其他插件
+  //    补进去的条目），仅靠 '"dsh-passwords"' 字符串检测是否已打过而无法重打。
+  //    rc.7+ 移除了该白名单机制 → 无对象可打，直接跳过（不是 missing：
+  //    dsh 原生支持动态枚举命名空间，插件设置页正常可用）。
   const w = readFileSync(wlFile, 'utf8');
-  if (!w.includes('"dsh-passwords"')) {
+  if (!whitelistPatchApplicable(w)) {
+    // 机制已移除，跳过白名单子补丁
+  } else if (!w.includes('"dsh-passwords"')) {
     const re = /const WEB_SETTINGS_NAMESPACES = \[([\s\S]*?)\];/;
     if (!re.test(w)) return 'missing';
     const currentBlock = w.match(re)![1];
