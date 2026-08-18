@@ -246,6 +246,28 @@ node scripts/start-http.mjs 8080         # 明文 HTTP 模式（危险，y/N 确
 - **设置页卡片**：跟随 dsh 的语言设置，切换语言即时生效。
 - **命令行（CLI）**：跟随 `LANG` / `LC_ALL` 环境变量（`en` 开头即英文）。
 
+## 更新日志
+
+### 2026-08-18 — 兼容 DeepSeek Harness 最新版 keyed slot 变更
+
+**问题**：dsh 最新版（0.1.0-rc.6+）将 `settings.plugin.item` 等 UI 槽位升级为 keyed slot（键控槽位），注册时必须提供 `options.key` 属性。旧版 dsh-passwords 的客户端注册代码缺少 `key` 字段，导致插件加载时报错：
+
+```
+Failed to load plugins dsh-passwords
+failed to apply loader entry 007bd0cb (dsh-passwords):
+keyed slot "settings.plugin.item" requires options.key
+```
+
+**修复**：在 `src/client/index.tsx` 的三处 `ctx.slots.register()` 调用中均添加了 `key` 属性：
+
+| 槽位 | 注册 key |
+|---|---|
+| `settings.plugin.item` | `dsh-passwords` |
+| `shell.overlay` | `dsh-passwords-chat` |
+| `conversation.composer.dock` | `dsh-passwords-token` |
+
+**操作**：更新代码后重新编译（`npm run build`）并重启 dsh 即可。
+
 ## License
 
 [BSD 3-Clause](./LICENSE) © 2026 slywalker2006——自由使用、修改、分发，保留版权声明即可。
