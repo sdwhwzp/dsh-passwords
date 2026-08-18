@@ -1887,9 +1887,9 @@ export function createGatewayServer(
               const caller = reqAs.dshpwUser!;
               // 受限子用户按 cwd 白名单过滤：权限撤销前在老目录创建的旧会话，其工作区
               // 已被 workspace.list 隐藏，不丢弃会导致前端出现「未分组+新会话」孤儿项
-              const _perms = reqAs.dshpwPerms!;
-              const cwdAllowed = isWorkspaceRestricted(_perms.allowed_folders)
-                ? (cwd: string) => folderAllowed(cwd, _perms.allowed_folders)
+              const perms = reqAs.dshpwPerms!;
+              const cwdAllowed = isWorkspaceRestricted(perms.allowed_folders)
+                ? (cwd: string) => folderAllowed(cwd, perms.allowed_folders)
                 : null;
               const filtered = filterSessionItems(
                 parsed,
@@ -2183,7 +2183,7 @@ export function createGatewayServer(
           }
           // 受限子用户：会话 cwd 必须仍在授权目录内。
           // 否则权限撤销后仍能按 sessionId 直读/写旧目录会话（网关只做了列表隐藏）。
-          // cwd 未知（无缓存记录）→ fail-closed 拒绝，憋扩对新会话的误伤：
+          // cwd 未知（无缓存记录）→ fail-closed 拒绝，避免扩大对新会话的误伤：
           // session.create 响应与 session.list/workspace.list 响应都会填充缓存。
           if (isWorkspaceRestricted(reqAs.dshpwPerms!.allowed_folders)) {
             const cwd = sessionCwdById.get(sessionId);

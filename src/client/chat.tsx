@@ -520,6 +520,8 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
                   className="dshpw-chat-input"
                   value={draft}
                   placeholder={t('chat.placeholder')}
+                  autoComplete="off"
+                  name="dshpw-chat-draft"
                   onChange={(e) => setDraft(e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && !e.shiftKey) {
