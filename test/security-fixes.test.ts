@@ -112,3 +112,15 @@ test('消息净化：script 块整体移除（含隐藏指令文本）', () => {
   assert.ok(!out.includes('agent 指令'), 'script 内文本不残留');
   assert.ok(out.includes('正常内容'), '其余文本保留');
 });
+
+test('消息净化：保留数学比较符（不被误当标签剥离）', () => {
+  assert.equal(sanitizeText('2 < 3'), '2 < 3');
+  assert.equal(sanitizeText('if x < 10 and y > 5'), 'if x < 10 and y > 5');
+  assert.equal(sanitizeText('a<b'), 'a<b');
+});
+
+test('消息净化：剥离 HTML 注释（含隐藏文本）', () => {
+  const out = sanitizeText('可见内容<!--隐藏指令-->尾部');
+  assert.ok(!out.includes('隐藏指令'), '注释内容被移除');
+  assert.ok(out.includes('可见内容') && out.includes('尾部'), '注释外文本保留');
+});

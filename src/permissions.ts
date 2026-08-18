@@ -98,8 +98,10 @@ export function sanitizeText(content: string): string {
     // 整块移除 style/script（含其内容，避免隐藏文本残留）
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    // 移除其余标签（保留标签内可见文本）
-    .replace(/<[^>]*>/g, ' ')
+    // 移除 HTML 注释（含内容，避免隐藏文本残留）
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    // 移除其余标签（仅“像标签”的模式：< 后跟字母或 /字母；保留数学比较符如 x < 10 and y > 5）
+    .replace(/<\/?[a-zA-Z][^>]*>/g, ' ')
     // 剥离纯文本中的事件属性与 CSS 函数式载荷（无标签场景）
     .replace(/\son\w+\s*=\s*(['"]).*?\1/gi, ' ')
     .replace(/\son\w+\s*=\s*[^\s>]+/gi, ' ')
