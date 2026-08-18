@@ -211,6 +211,7 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
     let inFlight = false;
     let failStreak = 0; // 连续失败次数 → 指数退避（4s → 30s 封顶）
     let emptyStreak = 0; // 连续空响应次数 → 触发一次全量拉取（DB 重置后恢复基线）
+    let forceBaseline = false; // 恢复触发的全量拉取只重建基线，不计未读（否则会把全部历史算成未读 → 角标 99+）
     let timer: number | null = null;
 
     const load = () => {
@@ -232,12 +233,16 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
             const nextMe = (d.me ?? null) as Me | null;
             setMe(nextMe);
             const maxId = incoming.length > 0 ? incoming[incoming.length - 1].id : 0;
-            if (nextMe && initializedRef.current && maxId > lastSeenId.current) {
+            // forceBaseline：恢复全量拉取（lastSeenId=0 触发）只把最新 id 存为基线，
+            // 不计未读——否则 initializedRef 已为 true + id 全大于 0 → 全部历史都算未读，
+            //  每次进入/重启后 3 轮空轮询就会把角标顶到 99+（必现 bug）。
+            if (!forceBaseline && nextMe && initializedRef.current && maxId > lastSeenId.current) {
               const fresh = incoming.filter(
                 (m) => m.sender_id !== nextMe.id && m.id > lastSeenId.current,
               ).length;
               if (fresh > 0 && !openRef.current) setUnread((u) => u + fresh);
             }
+            forceBaseline = false;
             lastSeenId.current = Math.max(lastSeenId.current, maxId);
             initializedRef.current = true;
             setMessages((prev) => mergeById(prev, incoming));
@@ -249,6 +254,7 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
               if (emptyStreak >= 3) {
                 emptyStreak = 0;
                 lastSeenId.current = 0; // 下轮 since=0 全量拿基线
+                forceBaseline = true; // 该次全量仅重建基线，不计未读
               }
             } else {
               emptyStreak = 0;
