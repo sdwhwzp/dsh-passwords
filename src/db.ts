@@ -173,6 +173,20 @@ function parseJsonArray(raw: string | null): string[] {
   }
 }
 
+/**
+ * 密文判定（users.username / audit_logs 各列共用）：不能只看 v1: 前缀——
+ * 明文值恰好以 v1: 开头时会被误判为密文。只有同时满足
+ * “v1: 前缀 + 合法 base64 + 长度 ≥ 28（iv12+tag16）”才视为密文。
+ */
+function looksLikeCipher(s: string): boolean {
+  if (!s.startsWith('v1:')) return false;
+  try {
+    return Buffer.from(s.slice(3), 'base64').length >= 28;
+  } catch {
+    return false;
+  }
+}
+
 export class Database {
   private db: DatabaseSync;
   private crypto: FieldCrypto;
@@ -261,17 +275,8 @@ export class Database {
     const upd = this.stmt('UPDATE users SET username = ?, username_hash = ? WHERE id = ?');
     let changed = false;
     for (const row of rows) {
-      // 密文判定不能只看 v1: 前缀——明文用户名恰好以 v1: 开头时会被误判为密文
-      // （解密失败 → 跳过 → 该行永远明文且 username_hash 缺失）。只有同时满足
-      // “v1: 前缀 + 合法 base64 + 长度 ≥ 28（iv12+tag16）”才视为密文。
-      const looksLikeCipher = (s: string): boolean => {
-        if (!s.startsWith('v1:')) return false;
-        try {
-          return Buffer.from(s.slice(3), 'base64').length >= 28;
-        } catch {
-          return false;
-        }
-      };
+      // 密文判定与 users 表同口径（looksLikeCipher）；
+      // 明文恰好以 v1: 开头但不满足密文形态的（如伪造 UA）也会被加密。
       const isCipher = looksLikeCipher(row.username);
       let plain: string | null = null;
       if (isCipher) {
@@ -315,7 +320,10 @@ export class Database {
     );
     let changed = false;
     for (const row of rows) {
-      const encIfNeeded = (v: string | null) => (v !== null && !v.startsWith('v1:') ? this.crypto.encrypt(v) : v);
+      // 与 users 表同口径的密文判定：v1: 前缀 + 合法 base64 + 长度足够才视为已加密，
+      // 否则按明文加密写回（明文恰好以 v1: 开头也不会残留）
+      const encIfNeeded = (v: string | null) =>
+        v !== null && !looksLikeCipher(v) ? this.crypto.encrypt(v) : v;
       const username = encIfNeeded(row.username);
       const ip = encIfNeeded(row.ip);
       const userAgent = encIfNeeded(row.user_agent);

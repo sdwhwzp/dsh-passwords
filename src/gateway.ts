@@ -875,6 +875,10 @@ export function createGatewayServer(
 
   const jsonBody = express.json({ limit: '256kb' });
 
+  // token 用量上报节流（客户端 15 秒 flush 一次；这里再加 5 秒最小间隔，防高频自刷）。
+  // 声明在权限路由之前：permissions 路由改配额时会清理该缓存。
+  const usageReportThrottle = new Map<number, number>();
+
   // ── 概览（仅主用户）：所有用户 + 权限 + 当日用量 ─────────────
   app.get('/gateway/api/overview', (req, res) => {
     const me = apiAuth(req, res, true);
@@ -982,8 +986,6 @@ export function createGatewayServer(
   // ── token 用量上报（客户端 liveTokenUsage 投影增量，所有登录用户） ──
   // 替代旧的 HTTP 响应正则计量：客户端复用 dsh 的 tokenUsage 投影（与
   // dsh-web-ui 同源），只上报「增量」，服务端按小时窗口累计并用于配额判定。
-  // 客户端 15 秒 flush 一次；这里再加 5 秒最小间隔节流，防止被高频自刷。
-  const usageReportThrottle = new Map<number, number>();
   app.post('/gateway/api/usage/report', jsonBody, (req, res) => {
     const me = apiAuth(req, res);
     if (!me) return;
@@ -1364,7 +1366,6 @@ export function createGatewayServer(
     const parsedUrl = new URL(req.originalUrl, `http://${req.headers.host ?? 'localhost'}`);
     // 请求上挂的用户/权限（子用户才有）
     const reqAs = req as Req;
-    // 请求上挂的用户/权限（子用户才有）
     const upstreamReq = http.request(
       {
         hostname: upstreamHost,

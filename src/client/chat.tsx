@@ -128,6 +128,10 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
       const d = dragRef.current;
       if (!d) return;
       dragRef.current = null;
+      // 触发一次 re-render：dragging 由 dragRef.current !== null 在渲染时派生，
+      // 不 setState 的话 mouseup 后组件停留在最后一次 mousemove 的 dragging=true，
+      // FAB 的 hover 过渡动画不会恢复（直到下一次任意 state 变化，如 4 秒轮询）
+      setFabPosState((p) => ({ ...p }));
       // 实际拖动过才持久化（纯点击不落盘）；未拖动视为中键点击，无副作用
       if (d.moved && d.lastPos) {
         try {
