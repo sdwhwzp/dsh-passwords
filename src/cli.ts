@@ -149,7 +149,10 @@ function runPatch(argv: string[]): void {
       console.log(`  ${tr('cli.restarting', { service: config.patch.restartService })}`);
       // CLI 进程跑完就退出，不能用延迟定时器（unref 定时器会被丢弃）；直接同步重启
       try {
-        spawnSync('systemctl', ['restart', config.patch.restartService], { stdio: 'inherit' });
+        const restarted = spawnSync('systemctl', ['restart', config.patch.restartService], { stdio: 'inherit' });
+        if (restarted.status !== 0) {
+          console.error(`  ${tr('cli.restartFailed')}${restarted.error ? `: ${String(restarted.error)}` : ''}`);
+        }
       } catch (error) {
         console.error(`  ${tr('cli.restartFailed')}: ${String(error)}`);
       }
@@ -163,7 +166,10 @@ function runPatch(argv: string[]): void {
     if (result === 'rolled-back' && config.patch.restartService) {
       console.log(`  ${tr('cli.restarting', { service: config.patch.restartService })}`);
       try {
-        spawnSync('systemctl', ['restart', config.patch.restartService], { stdio: 'inherit' });
+        const restarted = spawnSync('systemctl', ['restart', config.patch.restartService], { stdio: 'inherit' });
+        if (restarted.status !== 0) {
+          console.error(`  ${tr('cli.restartFailed')}${restarted.error ? `: ${String(restarted.error)}` : ''}`);
+        }
       } catch (error) {
         console.error(`  ${tr('cli.restartFailed')}: ${String(error)}`);
       }

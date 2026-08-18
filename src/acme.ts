@@ -7,8 +7,8 @@
 //   account.key.pem   账户密钥（P-256，复用于续期）
 //   cert.key.pem      证书私钥（P-256，TLS 用）
 //   fullchain.pem     证书链（叶子 + 中间证书）
-import { createHash, createPrivateKey, createPublicKey, createSign, generateKeyPairSync, X509Certificate, type KeyObject } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { createHash, createPrivateKey, createPublicKey, createSign, generateKeyPairSync, randomBytes, X509Certificate, type KeyObject } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import path from 'node:path';
 import { isPublicIp } from './config.js';
 
@@ -74,17 +74,29 @@ function derInt(n: number): Buffer {
 const OID_CN = Buffer.from([0x55, 0x04, 0x03]);
 /** ecdsa-with-SHA256 OID: 1.2.840.10045.4.3.2 */
 const OID_ECDSA_SHA256 = Buffer.from([0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02]);
+/** extensionRequest OID: 1.2.840.113549.1.9.14（CSR 属性里携带扩展） */
+const OID_EXT_REQ = Buffer.from([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x0e]);
+/** subjectAltName OID: 2.5.29.17 */
+const OID_SAN = Buffer.from([0x55, 0x1d, 0x11]);
 
 /**
  * 用 node:crypto 生成 PKCS#10 CSR（DER 编码）：
  * CertificationRequestInfo = SEQ { INTEGER 0, Name(CN=domain),
- *   SPKI（直接取 publicKey.export spki DER）, [0] 空属性 }
+ *   SPKI（直接取 publicKey.export spki DER）,
+ *   [0] extensionRequest{ SAN(dNSName=domain) } }
  * 签名用 P-256 + SHA256，签名值以 DER 形式放入 BIT STRING。
+ * 同时写入 CN 与 SAN：RFC 6125 下浏览器只认 SAN，仅 CN 的证书在严格
+ * 客户端（及部分 CA 策略）会被视为缺 SAN；两者一致是最兼容形态。
  */
-function buildCsr(privateKey: KeyObject, domain: string): Buffer {
+export function buildCsr(privateKey: KeyObject, domain: string): Buffer {
   const spki = createPublicKey(privateKey).export({ type: 'spki', format: 'der' }) as Buffer;
   const name = derSeq(derSet(derSeq(derOid(OID_CN), derUtf8(domain))));
-  const info = derSeq(derInt(0), name, spki, Buffer.from([0xa0, 0x00]));
+  // SAN：GeneralNames = SEQ { [2] dNSName }；Extension = SEQ { OID, GeneralNames }
+  const generalNames = derSeq(derWrap(0x82, Buffer.from(domain, 'utf8')));
+  const sanExt = derSeq(derOid(OID_SAN), generalNames);
+  const extensionRequest = derSeq(derOid(OID_EXT_REQ), derSet(derSeq(sanExt)));
+  const attributes = derWrap(0xa0, extensionRequest);
+  const info = derSeq(derInt(0), name, spki, attributes);
   const sign = createSign('SHA256');
   sign.update(info);
   const signature = sign.sign(privateKey); // DER ECDSA-Sig-Value
@@ -333,13 +345,13 @@ export function certExpiryMs(fullchainPath: string): number | null {
 
 /** 读取证书 leaf 的 CN（主域名）——检查旧证书与当前 opts.domain 是否一致，
  *  避免改 MCP_GATEWAY_DOMAIN 后旧证书一直复用导致浏览器报"域名不匹配"。 */
-function readCertDomain(fullchainPath: string): string | null {
+function readCertMeta(metaPath: string): { domain: string; staging: boolean } | null {
   try {
-    const pem = readFileSync(fullchainPath, 'utf8');
-    const leaf = new X509Certificate(pem);
-    // 取 subject CN（主域名）；SAN 列表与 CN 通常一致（acme.ts CSR 只写 CN）
-    const cn = leaf.subject.split('\n').find((l) => l.startsWith('CN='));
-    return cn ? cn.slice(3).trim() : null;
+    const parsed = JSON.parse(readFileSync(metaPath, 'utf8')) as { domain?: unknown; staging?: unknown };
+    if (typeof parsed.domain === 'string' && typeof parsed.staging === 'boolean') {
+      return { domain: parsed.domain, staging: parsed.staging };
+    }
+    return null;
   } catch {
     return null;
   }
@@ -379,19 +391,19 @@ export async function ensureCertificate(opts: {
   const certPath = path.join(opts.acmeDir, 'fullchain.pem');
   const keyPath = path.join(opts.acmeDir, 'cert.key.pem');
   const accountKeyPath = path.join(opts.acmeDir, 'account.key.pem');
+  const metaPath = path.join(opts.acmeDir, 'meta.json');
 
-  // 已有未到期证书：直接复用（重启/短期多次启动不会重复签发）
-  // 校验证书与当前 opts.domain 匹配：避免用户在 .env 里改 MCP_GATEWAY_DOMAIN 后，
-  // 旧证书一直被复用导致浏览器报"域名不匹配"，直到 30 天续期窗口才重签。
+  // 已有未到期证书：直接复用（重启/短期多次启动不会重复签发）。
+  // 复用判定用签发时记录的 meta.json（{domain, staging}）：域名或签发环境
+  // 与当前配置不一致时重新签发，而不是复用——也不删旧证书：新签发失败时
+  // 旧证书仍在原位可继续服务（删旧证书会让失败窗口裸奔无证书可加载）。
   const existing = certExpiryMs(certPath);
   if (existing !== null && existing - Date.now() > RENEW_BEFORE_MS) {
-    const certDomain = readCertDomain(certPath);
-    if (certDomain === opts.domain) {
+    const meta = readCertMeta(metaPath);
+    if (meta !== null && meta.domain === opts.domain && meta.staging === (opts.staging === true)) {
       return { certPath, keyPath, expiresAt: existing };
     }
-    // 域名不匹配：删除旧证书，下方流程会重新签发新域名的证书
-    try { unlinkSync(certPath); } catch { /* 忽略 */ }
-    try { unlinkSync(keyPath); } catch { /* 忽略 */ }
+    // meta 缺失（旧版本签发）或域名/staging 不匹配：走下方重新签发流程
   }
 
   const accountKey = ensureKeyFile(accountKeyPath);
@@ -462,7 +474,12 @@ export async function ensureCertificate(opts: {
   if (!chainPem.includes('BEGIN CERTIFICATE')) {
     throw new AcmeError('certificate', '证书下载内容不是 PEM');
   }
-  writeFileSync(certPath, chainPem, { mode: 0o600 });
+  // 原子写入：临时文件 + rename。SNICallback 每次 TLS 握手都重新读这两个文件，
+  // 直接 writeFileSync 可能在续期瞬间读到半截证书/私钥导致握手失败。
+  const tmpCert = `${certPath}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`;
+  writeFileSync(tmpCert, chainPem, { mode: 0o600 });
+  renameSync(tmpCert, certPath);
+  writeFileSync(metaPath, JSON.stringify({ domain: opts.domain, staging: opts.staging === true }), { mode: 0o600 });
 
   const expiresAt = certExpiryMs(certPath);
   if (expiresAt === null) throw new AcmeError('certificate', '签发后的证书无法解析有效期');

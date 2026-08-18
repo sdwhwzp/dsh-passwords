@@ -163,55 +163,57 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
   const refresh = () => {
     if (refreshingRef.current) return;
     refreshingRef.current = true;
+    // in-flight 守卫覆盖整个 state→overview→workspaces 链（而非只覆盖 patch/status）：
+    // 否则慢网络下 overview 未返回时守卫已被 patch/status 提前释放，30s 定时又会叠一轮。
     api<StateData>('/api/dsh-passwords/state')
       .then((d) => {
         setData(d);
         setError('');
-        if (d.me?.role === 'admin') {
-          api<PermOverview>('/gateway/api/overview')
-            .then((o) => {
-              setOverview(o);
-              // 草稿同步：新用户初始化；未在编辑（dirty）中的草稿用服务端最新值覆盖
-              // （注释承诺的“主用户在别处修改后页面自动同步最新状态”真正生效）；
-              // 已删除的用户清草稿；正在编辑的用户保留本地未保存修改。
-              setPermDrafts((prev) => {
-                const drafts: Record<number, PermDraft> = { ...prev };
-                const live = new Set<number>();
-                for (const u of o.users) {
-                  if (u.role !== 'user') continue;
-                  live.add(u.id);
-                  const fresh: PermDraft = {
-                    folders: [...(u.permissions.allowedFolders ?? [])],
-                    token: u.permissions.hourlyTokenLimit === null ? '' : String(u.permissions.hourlyTokenLimit),
-                    minutes: u.permissions.dailyMinutesLimit === null ? '' : String(u.permissions.dailyMinutesLimit),
-                    upload: u.permissions.allowUpload,
-                    git: u.permissions.allowGitDownload,
-                    banned: u.permissions.banned,
-                    sandbox: u.permissions.sandboxMode ?? '',
-                  };
-                  if (!(u.id in drafts) || !dirtyUsersRef.current.has(u.id)) {
-                    drafts[u.id] = fresh;
-                  }
+        if (d.me?.role !== 'admin') return undefined;
+        return api<PermOverview>('/gateway/api/overview')
+          .then((o) => {
+            setOverview(o);
+            // 草稿同步：新用户初始化；未在编辑（dirty）中的草稿用服务端最新值覆盖
+            // （注释承诺的“主用户在别处修改后页面自动同步最新状态”真正生效）；
+            // 已删除的用户清草稿；正在编辑的用户保留本地未保存修改。
+            setPermDrafts((prev) => {
+              const drafts: Record<number, PermDraft> = { ...prev };
+              const live = new Set<number>();
+              for (const u of o.users) {
+                if (u.role !== 'user') continue;
+                live.add(u.id);
+                const fresh: PermDraft = {
+                  folders: [...(u.permissions.allowedFolders ?? [])],
+                  token: u.permissions.hourlyTokenLimit === null ? '' : String(u.permissions.hourlyTokenLimit),
+                  minutes: u.permissions.dailyMinutesLimit === null ? '' : String(u.permissions.dailyMinutesLimit),
+                  upload: u.permissions.allowUpload,
+                  git: u.permissions.allowGitDownload,
+                  banned: u.permissions.banned,
+                  sandbox: u.permissions.sandboxMode ?? '',
+                };
+                if (!(u.id in drafts) || !dirtyUsersRef.current.has(u.id)) {
+                  drafts[u.id] = fresh;
                 }
-                for (const id of Object.keys(drafts)) {
-                  if (!live.has(Number(id))) delete drafts[Number(id)];
-                }
-                return drafts;
-              });
-              api<{ workspaces: Array<{ path: string; title: string }> }>('/api/dsh-passwords/workspaces')
-                .then((r) => setWorkspaces(r.workspaces ?? []))
-                .catch(() => setWorkspaces([]));
-            })
-            .catch(() => setOverview(null));
-        }
+              }
+              for (const id of Object.keys(drafts)) {
+                if (!live.has(Number(id))) delete drafts[Number(id)];
+              }
+              return drafts;
+            });
+            return api<{ workspaces: Array<{ path: string; title: string }> }>('/api/dsh-passwords/workspaces')
+              .then((r) => setWorkspaces(r.workspaces ?? []))
+              .catch(() => setWorkspaces([]));
+          })
+          .catch(() => setOverview(null));
       })
-      .catch((e) => setError(errText(e, trErr)));
-    api<{ status: PatchState | null }>('/api/dsh-passwords/patch/status')
-      .then((r) => setPatchState(r.status))
-      .catch(() => setPatchState(null))
+      .catch((e) => setError(errText(e, trErr)))
       .finally(() => {
         refreshingRef.current = false;
       });
+    // patch 状态独立于主链（轻量 + 失败只影响状态展示）
+    api<{ status: PatchState | null }>('/api/dsh-passwords/patch/status')
+      .then((r) => setPatchState(r.status))
+      .catch(() => setPatchState(null));
   };
 
   // 密码门已是独立设置分区页（settings.section），无需折叠：

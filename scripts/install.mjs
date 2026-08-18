@@ -41,6 +41,21 @@ function run(command, args = [], { quiet = false, env } = {}) {
   return result.status ?? 1;
 }
 
+/** Windows 无 POSIX 权限：用 icacls 收紧密钥文件 ACL（仅当前用户 + SYSTEM 可读写），
+ *  防止同机其他用户/服务账号读取 .env 与 setup-key.txt（L-3）。
+ *  域策略等环境可能拒绝执行，失败静默——不影响安装主流程。 */
+function tightenWindowsAcl(file) {
+  if (!isWin || !existsSync(file)) return;
+  try {
+    const args = [file, '/inheritance:r'];
+    if (process.env.USERNAME) args.push('/grant:r', `${process.env.USERNAME}:F`);
+    args.push('/grant:r', 'SYSTEM:F');
+    spawnSync('icacls', args, { stdio: 'ignore' });
+  } catch {
+    // 收紧失败不影响安装主流程
+  }
+}
+
 function mustRun(command, args, failureMessage, options = {}) {
   if (run(command, args, options) === 0) return;
   err(failureMessage);
@@ -99,6 +114,12 @@ if (isFirstInstall && !isWin && typeof process.getuid === 'function' && process.
   err('如必须非特权账号部署，请先阅读 README 的反向代理或明文 HTTP 模式说明，再自行配置 .env。');
   process.exit(1);
 }
+if (isFirstInstall && !isWin && typeof process.getuid === 'function' && process.getuid() === 0) {
+  // root 安装后，dsh 的 web profile（~/.dsh/profiles/web）将由 root 拥有；
+  // 之后用普通用户跑 dsh 会因目录归属/权限读不到插件（M-2）。
+  say('⚠ 检测到以 root 安装：dsh 的 web profile（~/.dsh）将由 root 拥有。');
+  say('  若之后改用其他用户运行 dsh，请先执行 chown -R <用户> ~/.dsh，否则插件可能加载失败。');
+}
 
 // ── 4. 依赖 + 编译（npm 包已预构建时自动跳过） ──
 // 不能只看 node_modules 目录：中断安装会留下半残目录，之后直到首次运行才暴露 MODULE_NOT_FOUND。
@@ -133,6 +154,7 @@ if (!isFirstInstall && existsSync(envPath)) {
     }
   }
   if (!isWin) chmodSync(envPath, 0o600);
+  tightenWindowsAcl(envPath);
   say('.env 已存在，沿用现有配置');
 } else {
   setupKey = randomBytes(24).toString('hex');
@@ -145,6 +167,7 @@ if (!isFirstInstall && existsSync(envPath)) {
     { encoding: 'utf8', mode: 0o600 },
   );
   if (!isWin) chmodSync(envPath, 0o600);
+  tightenWindowsAcl(envPath);
   say('.env 已生成（含随机 SETUP_KEY 与独立 DB 加密密钥）');
 }
 
@@ -173,6 +196,7 @@ if (isFirstInstall) {
     { encoding: 'utf8', mode: 0o600 },
   );
   if (!isWin) chmodSync(keyFile, 0o600);
+  tightenWindowsAcl(keyFile);
   say(`首次配置密钥已写入 ${keyFile}（初始化完成后请删除）`);
 } else {
   say('检测到已有 .env，不重复创建或打印首次配置密钥');

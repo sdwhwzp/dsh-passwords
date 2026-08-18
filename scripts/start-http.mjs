@@ -2,7 +2,9 @@
 // dsh-passwords 明文 HTTP 模式启动脚本（危险，仅限本地/内网）
 //
 // 用法:
-//   node scripts/start-http.mjs [端口]      # 默认 8080
+//   node scripts/start-http.mjs [端口] [监听地址]
+//   端口默认 8080；监听地址默认 127.0.0.1（仅本机可访问）。
+//   显式传 0.0.0.0 才暴露到局域网/公网（明文 HTTP，风险自负）。
 //
 // 背景：密码门默认要求自动 HTTPS（Let's Encrypt），公网 IP/域名拿不到时
 // 会拒绝启动（错误码 30/31），绝不静默降级为明文。确实只能在内网/本地
@@ -36,6 +38,17 @@ if (rawPort !== '') {
   }
   port = Number(rawPort);
 }
+
+// 监听地址：默认只绑本机回环（明文模式下暴露到公网 = 密码/Cookie 可被嗅探）；
+// 用户显式指定第二参数才覆盖（如 0.0.0.0 / 局域网 IP），并追加醒目警告。
+const rawHost = (process.argv[3] ?? '').trim();
+const loopbackHosts = new Set(['127.0.0.1', '::1', 'localhost', '[::1]']);
+const host = rawHost === '' ? '127.0.0.1' : rawHost;
+if (!/^[A-Za-z0-9.:\-\[\]]+$/.test(host)) {
+  console.error(isEn ? `Invalid bind address: ${host}` : `监听地址无效：${host}`);
+  process.exit(1);
+}
+const nonLoopback = rawHost !== '' && !loopbackHosts.has(rawHost.toLowerCase());
 const warnLines = isEn
   ? [
       '=============================================================',
@@ -55,10 +68,17 @@ const warnLines = isEn
       '=============================================================',
     ];
 for (const line of warnLines) console.error(line);
+if (nonLoopback) {
+  console.error(
+    isEn
+      ? `  EXTRA WARNING: binding to ${host} exposes the plaintext service to the network.`
+      : `  ⚠ 额外警告：监听 ${host} 会把明文服务暴露到网络上，登录密码可被嗅探。`,
+  );
+}
 
 const prompt = isEn
-  ? `Start the gateway in HTTP mode on port ${port}? Type y to continue [y/N] `
-  : `确认以 HTTP 模式启动密码门（端口 ${port}）？输入 y 继续 [y/N] `;
+  ? `Start the gateway in HTTP mode on ${host}:${port}? Type y to continue [y/N] `
+  : `确认以 HTTP 模式启动密码门（监听 ${host}:${port}）？输入 y 继续 [y/N] `;
 
 const rl = createInterface({ input: process.stdin, output: process.stderr });
 rl.question(prompt, (answer) => {
@@ -77,7 +97,7 @@ rl.question(prompt, (answer) => {
   }
   const child = spawn(
     process.execPath,
-    [cli, 'serve-gateway', '--port', String(port)],
+    [cli, 'serve-gateway', '--port', String(port), '--host', host],
     {
       cwd: root,
       env: {

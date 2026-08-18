@@ -127,6 +127,35 @@ function notifyGateway(cfg: PlatformConfig): void {
   req.end(body);
 }
 
+/** 通知网关进程：某用户会话缓存立即失效（改密/改名/删除后，消除 30 秒撤销窗口）。
+ *  fire-and-forget：网关不在线时静默——缓存 TTL 到期后自然重新查库。 */
+function notifyGatewaySessionInvalidate(cfg: PlatformConfig, userId: number): void {
+  const mod = cfg.gateway.tls !== null ? https : http;
+  const url = `${cfg.gateway.tls !== null ? 'https' : 'http'}://127.0.0.1:${String(cfg.gateway.port)}/gateway/internal/session-invalidate`;
+  const body = JSON.stringify({ userId });
+  const req = mod.request(
+    url,
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-internal-secret': cfg.internalSecret,
+        'content-length': String(Buffer.byteLength(body)),
+      },
+      // 网关可能用自签证书，内部回环调用豁免校验
+      rejectUnauthorized: false,
+      timeout: 4000,
+    },
+    (res) => {
+      res.resume();
+    },
+  );
+  req.on('error', () => {
+    // 网关没起来时静默：会话缓存 30 秒 TTL 到期后自动重新校验凭据版本
+  });
+  req.end(body);
+}
+
 /** 网关启动错误码（与 cli.ts 保持一致）：30 证书签发失败 / 31 无公网域名 / 32 端口被占 */
 const EXIT_CERT_FAILED = 30;
 const EXIT_NO_DOMAIN = 31;
@@ -288,6 +317,31 @@ export function apply(ctx: Context): void {
       writeJson(res, 403, { ok: false, code: 'FORBIDDEN_CSRF', error: 'forbidden' });
       return null;
     }
+    // 写操作同源校验：Sec-Fetch-Site 可被缺省，text/plain 可免预检——浏览器
+    // 携带 Origin 时严格与 Host 一致（含 null Origin 拒绝），封堵同站兄弟子域
+    // 带凭据调用改密/删用户等路由。无 Origin 的非浏览器客户端维持原行为。
+    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method ?? '')) {
+      const origin = typeof req.headers.origin === 'string' ? req.headers.origin : '';
+      if (origin !== '') {
+        try {
+          const parsed = new URL(origin);
+          if (parsed.origin === 'null' || parsed.host !== String(req.headers.host ?? '')) {
+            writeJson(res, 403, { ok: false, code: 'FORBIDDEN_CSRF', error: 'forbidden' });
+            return null;
+          }
+        } catch {
+          writeJson(res, 403, { ok: false, code: 'FORBIDDEN_CSRF', error: 'forbidden' });
+          return null;
+        }
+      }
+      // 状态变更路由只接受 JSON：text/plain 等简单类型可绕过 CORS 预检，
+      // 是跨站带凭据发送的常见载体——显式拒绝。
+      const ct = String(req.headers['content-type'] ?? '');
+      if (ct !== '' && !ct.toLowerCase().startsWith('application/json')) {
+        writeJson(res, 415, { ok: false, code: 'INVALID', error: 'Content-Type must be application/json' });
+        return null;
+      }
+    }
     if (db === null || auth === null) {
       writeJson(res, 503, {
         ok: false,
@@ -361,7 +415,10 @@ export function apply(ctx: Context): void {
           const password = typeof body.password === 'string' ? body.password : '';
           // F-06：自助改密（target 为自己）需携带当前密码，服务端 bcrypt 校验
           const currentPassword = typeof body.currentPassword === 'string' ? body.currentPassword : undefined;
+          const targetUser = db!.getUserByUsername(target);
           await auth!.changePassword(caller, target, password, metaOf(req), currentPassword);
+          // 改密后旧会话全部失效：通知网关清掉该用户缓存，撤销窗口归零
+          if (targetUser) notifyGatewaySessionInvalidate(cfg, targetUser.id);
           writeJson(res, 200, { ok: true });
         } catch (error) {
           failJson(res, error);
@@ -379,7 +436,10 @@ export function apply(ctx: Context): void {
           const target = typeof body.target === 'string' && body.target !== '' ? body.target : caller.username;
           const username = typeof body.username === 'string' ? body.username : '';
           assertNoSqlInjection(username, 'username');
+          const targetUser = db!.getUserByUsername(target);
           await auth!.renameUser(caller, target, username, metaOf(req));
+          // 改名同样 bump credential_version：清网关缓存，旧会话立即失效
+          if (targetUser) notifyGatewaySessionInvalidate(cfg, targetUser.id);
           writeJson(res, 200, { ok: true });
         } catch (error) {
           failJson(res, error);
@@ -414,7 +474,9 @@ export function apply(ctx: Context): void {
           const body = await readJsonBody(req);
           const target = typeof body.target === 'string' ? body.target : '';
           assertNoSqlInjection(target, 'target');
+          const targetUser = db!.getUserByUsername(target);
           await auth!.removeUser(caller, target, metaOf(req));
+          if (targetUser) notifyGatewaySessionInvalidate(cfg, targetUser.id);
           writeJson(res, 200, { ok: true });
         } catch (error) {
           failJson(res, error);

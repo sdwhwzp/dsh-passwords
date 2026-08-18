@@ -119,6 +119,7 @@ export class AuthService {
     input: { setupKey: string; username: string; password: string },
     meta: RequestMeta = {},
   ): Promise<void> {
+    // 先做快速检查，最终由 setupInitialAdmin 的 BEGIN IMMEDIATE 再做原子判定。
     if (await this.isInitialized()) {
       throw new AuthError('ALREADY_INITIALIZED', {}, 409);
     }
@@ -137,9 +138,10 @@ export class AuthService {
     const password = assertPassword(input.password);
 
     const hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
-    // 首次配置创建的是主用户（admin 角色），后续子用户由主用户在设置页分配
-    await this.db.createUser(username, hash, 'admin');
-    await this.db.setSetting('installed_at', new Date().toISOString());
+    // 最终 check + insert 必须处于同一 SQLite 写事务，避免两个并发 setup 都创建 admin。
+    if (this.db.setupInitialAdmin(username, hash) === null) {
+      throw new AuthError('ALREADY_INITIALIZED', {}, 409);
+    }
     await this.db.audit('setup_success', {
       username,
       ip: meta.ip,
@@ -376,6 +378,10 @@ export class AuthService {
     if (!targetUser) throw new AuthError('NO_SUCH_USER', {}, 404);
     if (targetUser.username === caller.username) {
       throw new AuthError('CANNOT_REMOVE_SELF', {}, 400);
+    }
+    // 主用户是平台恢复与权限管理的根信任；禁止管理员之间互删以保证始终保留管理面。
+    if (targetUser.role === 'admin') {
+      throw new AuthError('CANNOT_REMOVE_ADMIN', {}, 400);
     }
     await this.db.deleteUser(targetUser.id);
     this.db.clearLoginAttemptsOf(targetUser.username);

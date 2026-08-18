@@ -1001,6 +1001,33 @@ export function createGatewayServer(
     }, 500);
   });
 
+  // ── 内部接口：dsh 插件通知网关立即失效某用户的会话缓存 ─────
+  // 改密/改名/删除用户后，JWT 的 cv 校验要等 30 秒缓存 TTL 才重新查库；
+  // 此接口让插件在操作成功后通知网关同步清理该用户的缓存条目，撤销窗口归零。
+  app.post('/gateway/internal/session-invalidate', express.json({ limit: '4kb' }), (req, res) => {
+    const remoteIp = req.socket.remoteAddress ?? '';
+    if (remoteIp !== '127.0.0.1' && remoteIp !== '::1' && remoteIp !== '::ffff:127.0.0.1') {
+      res.status(403).json({ ok: false, error: 'forbidden' });
+      return;
+    }
+    const secret = typeof req.headers['x-internal-secret'] === 'string' ? req.headers['x-internal-secret'] : '';
+    const expected = config.internalSecret;
+    const a = Buffer.from(secret);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !timingSafeEqual(a, b)) {
+      res.status(403).json({ ok: false, error: 'forbidden' });
+      return;
+    }
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const userId = typeof body.userId === 'number' && Number.isSafeInteger(body.userId) ? body.userId : null;
+    if (userId !== null) {
+      for (const [token, entry] of sessionCache) {
+        if (entry.user.userId === userId) sessionCache.delete(token);
+      }
+    }
+    res.status(200).json({ ok: true });
+  });
+
   // ── 内部辅助：API 路由的输入清洗 ───────────────────────────
   // 严格非负整数：拒绝 1e3/0x10/小数/负数/超大值（之前 Number() 静默接受科学
   // 计数与十六进制，1e21 等超大值在 SQLite 64 位整数绑定里精度失真）。
@@ -1202,6 +1229,15 @@ export function createGatewayServer(
       return;
     }
     const allowedFolders = stringArray(body.allowedFolders);
+    // 空字符串、当前目录和根目录会被 folderAllowed 归一为“全盘允许”，与 UI 的
+    // “允许的工作区”语义相反；显式拒绝，管理员应使用空数组表示不限制。
+    if (allowedFolders.some((folder) => {
+      const trimmed = folder.trim().replace(/\\/g, '/');
+      return trimmed === '' || trimmed === '.' || trimmed === '/';
+    })) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: '允许的工作区不能包含空路径、当前目录或根目录' });
+      return;
+    }
     // 0 归一为 null（=不限）：避免"每日 0 分钟"被误当作"首次使用即封禁"
     const rawToken = nullableInt(body.hourlyTokenLimit);
     const rawMinutes = nullableInt(body.dailyMinutesLimit);
@@ -1483,9 +1519,32 @@ export function createGatewayServer(
         res.redirect(302, `/gateway/login?next=${encodeURIComponent(req.originalUrl)}`);
         return;
       }
-      // 权限判定的 pathname：仍用 WHATWG 归一化（. / .. 已折叠），供下方
-      // isUploadRequest / isGitRequest / 白名单等匹配；gate 前缀判定不受影响
+      // 所有路径型授权必须使用与上游转发完全相同的规范化路径。若使用 WHATWG
+      // 原始 pathname，`/api%2Fsession%2Fhistory` 会在此处躲过检查、却在转发时
+      // 解码为真实敏感路由（C-1）。query 仍由 URL 只读解析。
       const parsed = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const requestPath = gatePath;
+      // 自身插件的写操作必须同源：Sec-Fetch-Site 可被缺省/伪造，且 text/plain
+      // 可避免 CORS 预检；浏览器提供 Origin 时严格与当前 Host 匹配。无 Origin 的
+      // 非浏览器/同源旧客户端保持兼容，仍由 HttpOnly+SameSite Cookie 保护。
+      if (
+        ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) &&
+        requestPath.startsWith('/api/dsh-passwords/') &&
+        !requestPath.startsWith('/api/dsh-passwords/internal/') &&
+        typeof req.headers.origin === 'string'
+      ) {
+        try {
+          const origin = new URL(req.headers.origin);
+          const expected = `${req.protocol}://${req.headers.host ?? ''}`;
+          if (origin.origin !== expected) {
+            res.status(403).type('text/plain').send('403 Forbidden');
+            return;
+          }
+        } catch {
+          res.status(403).type('text/plain').send('403 Forbidden');
+          return;
+        }
+      }
       // F-25：会话归属记录需要所有登录用户（含主用户）的用户 id；权限行仍只挂子用户
       (req as Req).dshpwUser = user.userId;
       if (row.role !== 'admin') {
@@ -1497,23 +1556,23 @@ export function createGatewayServer(
         }
         // F-09/F-12：第三方插件“运维面”端点（dsh-ssh 主机清单/隧道、skin-center、modlens、
         // dsh-uploads 列表/删除等）不在网关权限模型内，对子用户一律 403（仅主用户可访问）
-        if (isAdminOnlyPluginEndpoint(req.method, parsed.pathname)) {
+        if (isAdminOnlyPluginEndpoint(req.method, requestPath)) {
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.adminOnly')));
           return;
         }
-        if (!perms.allow_upload && isUploadRequest(req.method, parsed.pathname)) {
+        if (!perms.allow_upload && isUploadRequest(req.method, requestPath)) {
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.noUpload')));
           return;
         }
-        if (!perms.allow_git_download && (isGitRequest(parsed.pathname) || isAionuiFileRead(req.method, parsed.pathname))) {
+        if (!perms.allow_git_download && (isGitRequest(requestPath) || isAionuiFileRead(req.method, requestPath))) {
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.noGit')));
           return;
         }
-        if (!perms.allow_upload && isAionuiFileWrite(req.method, parsed.pathname)) {
+        if (!perms.allow_upload && isAionuiFileWrite(req.method, requestPath)) {
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.noUpload')));
           return;
         }
-        if (isWorkspaceRestricted(perms.allowed_folders) && isWorkspaceWrite(parsed.pathname)) {
+        if (isWorkspaceRestricted(perms.allowed_folders) && isWorkspaceWrite(requestPath)) {
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.workspaceDenied')));
           return;
         }
@@ -1523,20 +1582,20 @@ export function createGatewayServer(
         if (
           isWorkspaceRestricted(perms.allowed_folders) &&
           (req.method === 'GET' || req.method === 'HEAD') &&
-          isAionuiPanel(parsed.pathname)
+          isAionuiPanel(requestPath)
         ) {
-          const aionuiRoot = aionuiRootFrom(req.method, parsed.pathname, parsed.searchParams, null);
+          const aionuiRoot = aionuiRootFrom(req.method, requestPath, parsed.searchParams, null);
           // 提取不到 root 时也 fail-closed（之前直接放行→白名单外的目录可被下载）
           if (aionuiRoot === null || !folderAllowed(aionuiRoot, perms.allowed_folders)) {
             res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
             return;
           }
         }
-        if (!isStaticAsset(parsed.pathname) && !isPollingRequest(parsed.pathname)) {
+        if (!isStaticAsset(requestPath) && !isPollingRequest(requestPath)) {
           // 配额计时从子用户“说第一句话”（发消息锚点）才开始：
           // 未使用过的子用户（无当日记录且非锚点请求）不创建记录、不受配额限制
           const day = todayLocal();
-          if (db.getUsage(user.userId, day) !== null || isUsageAnchorRequest(parsed.pathname)) {
+          if (db.getUsage(user.userId, day) !== null || isUsageAnchorRequest(requestPath)) {
             const usage = touchUsageThrottled(user.userId);
             if (usage) {
               if (perms.daily_minutes_limit !== null && usage.active_seconds >= perms.daily_minutes_limit * 60) {
@@ -1594,6 +1653,10 @@ export function createGatewayServer(
 
   /** 缓冲上游响应体的上限：超过则放弃改写（注入/过滤），转流式透传，保证内存有界 */
   const MAX_BUFFER_BYTES = 16 * 1024 * 1024;
+  /** gunzip 解压后的上限：缓冲体本身有界，但 16MB 高压缩比炸弹可解压出数百 MB——过滤前拒绝 */
+  const MAX_DECOMPRESSED_BYTES = 64 * 1024 * 1024;
+  /** 安全过滤分支专属：解压超限时 fail-closed（502），不得透传未过滤内容 */
+  class OversizeResponseError extends Error {}
 
   /**
    * 缓冲上游响应：正常路径在 'end' 时调用 onEnd(body) 做改写/过滤；
@@ -1605,6 +1668,7 @@ export function createGatewayServer(
     upstreamRes: http.IncomingMessage,
     res: Response,
     onEnd: (body: Buffer) => void,
+    onOversize: 'stream' | 'fail' = 'fail',
   ): void {
     const chunks: Buffer[] = [];
     let size = 0;
@@ -1617,10 +1681,17 @@ export function createGatewayServer(
         upstreamRes.off('data', onData);
         upstreamRes.off('end', onEndHandler);
         upstreamRes.off('error', onError);
+        if (onOversize === 'fail') {
+          upstreamRes.destroy();
+          if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response too large');
+          return;
+        }
+        // HTML 注入可安全退化为流式透传。必须写入先前缓冲的内容和当前越界 chunk；
+        // 旧实现丢弃当前 chunk，导致响应中间断裂。
         const respHeaders = headersForStreaming(upstreamRes.headers);
         if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
         if (!res.writableEnded) {
-          res.write(Buffer.concat(chunks));
+          res.write(Buffer.concat([...chunks, chunk]));
           upstreamRes.pipe(res);
         }
         return;
@@ -1701,16 +1772,17 @@ export function createGatewayServer(
     // 均无 cookie 逻辑。
     // 例外：/api/dsh-passwords/* 是本网关自身插件路由，其 guard 靠 Cookie 中
     // 的 JWT 鉴权（同一信任域、自己签发的服务），必须保留；其余上游面全剥。
-    const ownPluginRoute = new URL(
-      req.originalUrl,
-      `http://${req.headers.host ?? 'localhost'}`,
-    ).pathname.startsWith('/api/dsh-passwords/');
+    const ownPluginRoute = normalizeDecodedPath(
+      new URL(req.originalUrl, `http://${req.headers.host ?? 'localhost'}`).pathname,
+    ).startsWith('/api/dsh-passwords/');
     if (!ownPluginRoute) delete headers['cookie'];
     // 只允许 gzip/identity：HTML 注入与 workspace/session 过滤只处理 gzip，
     // 上游若返回 br 会损坏页面/导致过滤静默失效（brotli 不走代理缓冲）
     headers['accept-encoding'] = 'gzip';
 
     const parsedUrl = new URL(req.originalUrl, `http://${req.headers.host ?? 'localhost'}`);
+    // 代理后续所有路由分支与认证门卫共享同一口径，禁止编码分隔符制造判定差异。
+    const proxyPath = normalizeDecodedPath(parsedUrl.pathname);
     // 请求上挂的用户/权限（子用户才有）
     const reqAs = req as Req;
     const upstreamReq = http.request(
@@ -1720,7 +1792,7 @@ export function createGatewayServer(
         // 规范化路径转发（与 dsh 的 new URL 解析行为一致，杜绝 ../ 混入上游）
         // F-03：与门卫同口径——pathname 解码后再归一化，编码变体（%2f/%2e）
         // 转发为等价规范路径，避免上游按自身规则解码导致路径语义漂移
-        path: normalizeDecodedPath(parsedUrl.pathname) + parsedUrl.search,
+        path: proxyPath + parsedUrl.search,
         method: req.method,
         headers,
         agent: upstreamAgent,
@@ -1735,6 +1807,7 @@ export function createGatewayServer(
             try {
               let body = raw;
               if (encoding.includes('gzip')) body = zlib.gunzipSync(body);
+              if (body.length > 64 * 1024 * 1024) throw new Error('decompressed HTML exceeds limit');
               const html = body.toString('utf8');
               const injected = html.replace(/<head[^>]*>/i, (match) => match + INJECT_SCRIPT);
               let out = Buffer.from(injected, 'utf8');
@@ -1757,25 +1830,26 @@ export function createGatewayServer(
               if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
               if (!res.writableEnded) res.end(out);
             } catch {
-              // 注入失败（gzip 损坏/编码异常）：与其他拦截分支同口径——原样透传，
-              // 不 destroy（destroy 会让客户端看到连接重置，且与其他分支行为不一致）
+              // 注入仅改善兼容性，解析失败可安全保留原始 HTML；其余安全过滤分支
+              // 则使用 bufferUpstream 默认 fail-closed，不能把未检查内容透传。
               const respHeaders = headersForStreaming(upstreamRes.headers);
               if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
               if (!res.writableEnded) res.end(raw);
             }
-          });
+          }, 'stream');
           return;
         }
 
         // ── F-A2：aionui-panel/read（POST JSON 读文件内容）——缓冲 + 递归清洗隐藏
         // Unicode（零宽/bidi 等）。文件内容进 AI 模型前必经网关代理，在这里补偿清洗，
         // 不必等供应商（dsh）修复；对全部登录用户生效（主用户同样可能被诱导读恶意文件）。
-        if (req.method === 'POST' && parsedUrl.pathname === '/aionui-panel/read') {
+        if (req.method === 'POST' && proxyPath === '/aionui-panel/read') {
           bufferUpstream(upstreamRes, res, (raw) => {
             try {
               let body = raw;
               const enc = String(upstreamRes.headers['content-encoding'] ?? '');
               if (enc.includes('gzip')) body = zlib.gunzipSync(body);
+              if (body.length > MAX_DECOMPRESSED_BYTES) throw new OversizeResponseError();
               const parsed = JSON.parse(body.toString('utf8'));
               const cleaned = sanitizeHiddenUnicodeJson(parsed);
               const out = Buffer.from(JSON.stringify(cleaned), 'utf8');
@@ -1783,7 +1857,11 @@ export function createGatewayServer(
               respHeaders['content-length'] = String(out.length);
               if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
               if (!res.writableEnded) res.end(out);
-            } catch {
+            } catch (error) {
+              if (error instanceof OversizeResponseError) {
+                if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response too large');
+                return;
+              }
               // 非 JSON / gzip 损坏：原样透传（无法解析就不改，避免损坏）
               const respHeaders = headersForStreaming(upstreamRes.headers);
               if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
@@ -1794,12 +1872,13 @@ export function createGatewayServer(
         }
 
         // ── workspace.list 响应：收集 id→path 缓存 + 受限子用户过滤白名单外的工作区 ──
-        if (req.method === 'POST' && /^\/api\/workspace[.\/]list$/.test(parsedUrl.pathname)) {
+        if (req.method === 'POST' && /^\/api\/workspace[.\/]list$/.test(proxyPath)) {
           bufferUpstream(upstreamRes, res, (raw) => {
             try {
               let body = raw;
               const enc = String(upstreamRes.headers['content-encoding'] ?? '');
               if (enc.includes('gzip')) body = zlib.gunzipSync(body);
+              if (body.length > MAX_DECOMPRESSED_BYTES) throw new OversizeResponseError();
               const parsed = JSON.parse(body.toString('utf8'));
               // 先缓存全量 id→path（供 session.create 用 workspaceId 时解析路径）
               collectIdPathPairs(parsed, workspacePathById);
@@ -1822,7 +1901,11 @@ export function createGatewayServer(
               respHeaders['content-length'] = String(out.length);
               if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
               if (!res.writableEnded) res.end(out);
-            } catch {
+            } catch (error) {
+              if (error instanceof OversizeResponseError) {
+                if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response too large');
+                return;
+              }
               // 解析失败（非 JSON 上游响应）：原样透传，不篡改
               const respHeaders = headersForStreaming(upstreamRes.headers);
               if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
@@ -1836,11 +1919,12 @@ export function createGatewayServer(
         // 响应体不变（原样转发），只做两个副作用：
         //   1) sessionId → 创建者 user_id 写入 session_owner（含主用户，保证其新会话不被子用户读）
         //   2) 受限子用户（sandbox_mode 非空）→ 通知 dsh 插件追加 sandbox/mode 事件
-        if (req.method === 'POST' && /^\/api\/session[.\/](create|fork)$/.test(parsedUrl.pathname)) {
+        if (req.method === 'POST' && /^\/api\/session[.\/](create|fork)$/.test(proxyPath)) {
           bufferUpstream(upstreamRes, res, (raw) => {
             try {
               const enc = String(upstreamRes.headers['content-encoding'] ?? '');
               const decoded = enc.includes('gzip') ? zlib.gunzipSync(raw) : raw;
+              if (decoded.length > MAX_DECOMPRESSED_BYTES) throw new OversizeResponseError();
               const parsed = JSON.parse(decoded.toString('utf8'));
               const sessionId = extractSessionId(parsed);
               if (sessionId !== null && reqAs.dshpwUser !== undefined) {
@@ -1855,10 +1939,14 @@ export function createGatewayServer(
               const respHeaders = headersForStreaming(upstreamRes.headers);
               if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
               if (!res.writableEnded) res.end(raw);
-            } catch {
+            } catch (error) {
+              if (error instanceof OversizeResponseError) {
+                if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response too large');
+                return;
+              }
               // 非 JSON 响应：原样透传，但副作用（归属/沙盒）缺失——记录 warn 便于排查
               // （正常上游响应都是 JSON，走到这里说明上游行为异常或响应被截断）
-              console.warn(`[dsh-passwords] session.create/fork 上游响应非 JSON，会话归属/沙盒副作用缺失: ${parsedUrl.pathname}`);
+              console.warn(`[dsh-passwords] session.create/fork 上游响应非 JSON，会话归属/沙盒副作用缺失: ${proxyPath}`);
               const respHeaders = headersForStreaming(upstreamRes.headers);
               if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
               if (!res.writableEnded) res.end(raw);
@@ -1873,13 +1961,14 @@ export function createGatewayServer(
         if (
           reqAs.dshpwPerms !== undefined &&
           req.method === 'POST' &&
-          /^\/api\/session[.\/]list$/.test(parsedUrl.pathname)
+          /^\/api\/session[.\/]list$/.test(proxyPath)
         ) {
           bufferUpstream(upstreamRes, res, (raw) => {
             try {
               let body = raw;
               const enc = String(upstreamRes.headers['content-encoding'] ?? '');
               if (enc.includes('gzip')) body = zlib.gunzipSync(body);
+              if (body.length > MAX_DECOMPRESSED_BYTES) throw new OversizeResponseError();
               const parsed = JSON.parse(body.toString('utf8'));
               // 先收集 sessionId→cwd 缓存（过滤前的原始响应，含受限前创建的旧目录会话），
               // 供会话作用域 RPC（history/prompt 等）做 cwd 白名单校验
@@ -1901,7 +1990,11 @@ export function createGatewayServer(
               respHeaders['content-length'] = String(out.length);
               if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
               if (!res.writableEnded) res.end(out);
-            } catch {
+            } catch (error) {
+              if (error instanceof OversizeResponseError) {
+                if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response too large');
+                return;
+              }
               const respHeaders = headersForStreaming(upstreamRes.headers);
               if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
               if (!res.writableEnded) res.end(raw);
@@ -1917,12 +2010,13 @@ export function createGatewayServer(
         // 沙盒降级：主用户把会话设为 danger-full-access 后共享给子用户，子用户打开会话时
         // 会话 log 里的 permission/preset 就是 full access——不拦截就直接继承提权，
         // 这里把超过子用户授权级别的 preset/mode 统一降级（仅受限子用户）。
-        if (req.method === 'POST' && /^\/api\/session[.\/]history$/.test(parsedUrl.pathname)) {
+        if (req.method === 'POST' && /^\/api\/session[.\/]history$/.test(proxyPath)) {
           bufferUpstream(upstreamRes, res, (raw) => {
             try {
               let body = raw;
               const enc = String(upstreamRes.headers['content-encoding'] ?? '');
               if (enc.includes('gzip')) body = zlib.gunzipSync(body);
+              if (body.length > MAX_DECOMPRESSED_BYTES) throw new OversizeResponseError();
               const parsed = JSON.parse(body.toString('utf8'));
               if (reqAs.dshpwPerms !== undefined && reqAs.dshpwPerms.sandbox_mode !== null) {
                 void clampSessionHistorySandbox(
@@ -1937,7 +2031,11 @@ export function createGatewayServer(
               respHeaders['content-length'] = String(out.length);
               if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
               if (!res.writableEnded) res.end(out);
-            } catch {
+            } catch (error) {
+              if (error instanceof OversizeResponseError) {
+                if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response too large');
+                return;
+              }
               const respHeaders = headersForStreaming(upstreamRes.headers);
               if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
               if (!res.writableEnded) res.end(raw);
@@ -1952,8 +2050,8 @@ export function createGatewayServer(
         // 进页面都要重新下载全部 ~30 个插件文件，导致卡在 "Loading plugins…"。
         // rev 参数/文件名都是内容哈希（换内容即换新 URL），可安全长缓存：
         const isHashedStatic =
-          parsedUrl.pathname.startsWith('/assets/') ||
-          (parsedUrl.pathname.startsWith('/plugins/') && parsedUrl.searchParams.has('rev'));
+          proxyPath.startsWith('/assets/') ||
+          (proxyPath.startsWith('/plugins/') && parsedUrl.searchParams.has('rev'));
         if (isHashedStatic) {
           respHeaders['cache-control'] = 'public, max-age=31536000, immutable';
         }
@@ -1965,7 +2063,7 @@ export function createGatewayServer(
         res.writeHead(upstreamRes.statusCode ?? 502, respHeaders);
         // F-A2：aionui-panel/raw（GET 流式读文件）文本类型 → 字节级流式清洗隐藏 Unicode
         // （图片/二进制不洗，防损坏）。read（POST JSON）已在上面缓冲分支清洗。
-        if (req.method === 'GET' && parsedUrl.pathname === '/aionui-panel/raw' && isTextContentType(contentType)) {
+        if (req.method === 'GET' && proxyPath === '/aionui-panel/raw' && isTextContentType(contentType)) {
           upstreamRes.pipe(hiddenUnicodeStripStream()).pipe(res);
           upstreamRes.on('error', () => res.destroy());
           return;
@@ -1998,13 +2096,13 @@ export function createGatewayServer(
     const needsFolderCheck =
       reqAs.dshpwPerms !== undefined &&
       isWorkspaceRestricted(reqAs.dshpwPerms.allowed_folders) &&
-      (req.method === 'POST' || req.method === 'PUT' || (req.method === 'DELETE' && isAionuiPanel(parsedUrl.pathname))) &&
-      (WORKSPACE_ENDPOINT_RE.test(parsedUrl.pathname) || isAionuiPanel(parsedUrl.pathname));
+      (req.method === 'POST' || req.method === 'PUT' || (req.method === 'DELETE' && isAionuiPanel(proxyPath))) &&
+      (WORKSPACE_ENDPOINT_RE.test(proxyPath) || isAionuiPanel(proxyPath));
     const needsSandboxCheck =
       reqAs.dshpwPerms !== undefined &&
       reqAs.dshpwPerms.sandbox_mode !== null &&
       (req.method === 'POST' || req.method === 'PUT') &&
-      /^\/api\/settings[.\/]/.test(parsedUrl.pathname);
+      /^\/api\/settings[.\/]/.test(proxyPath);
     // 沙盒切换的实际主路径是 /permission slash 命令：经 commands/execute RPC
     // （body { agentId, line }，line 形如 "/permission workspace-write"），
     // 而不是 settings.mutate。这里对受限子用户同样做越权预设检查。
@@ -2012,7 +2110,7 @@ export function createGatewayServer(
       reqAs.dshpwPerms !== undefined &&
       reqAs.dshpwPerms.sandbox_mode !== null &&
       (req.method === 'POST' || req.method === 'PUT') &&
-      /^\/api\/commands[.\/]execute$/.test(parsedUrl.pathname);
+      /^\/api\/commands[.\/]execute$/.test(proxyPath);
     // AI 提权审批：沙盒升级经 /api/respond（body { sessionId, approvalId, outcome }）。
     // 受限子用户（sandbox_mode 非空）即使点了“允许”，也强制改成 rejected，把 AI 的
     // 越权提权直接取消。ask_user_question 用的是 answer 字段，不会被这里误伤。
@@ -2020,13 +2118,13 @@ export function createGatewayServer(
       reqAs.dshpwPerms !== undefined &&
       reqAs.dshpwPerms.sandbox_mode !== null &&
       (req.method === 'POST' || req.method === 'PUT') &&
-      /^\/api\/respond$/.test(parsedUrl.pathname);
+      /^\/api\/respond$/.test(proxyPath);
     // F-25：会话作用域 RPC（history/prompt/respond/archive/delete/rename/fork 等）
     // 必须命中 session_owner 且属本人，否则封堵跨租户读写任意会话。
     const needsOwnershipCheck =
       reqAs.dshpwPerms !== undefined &&
       (req.method === 'POST' || req.method === 'PUT') &&
-      SESSION_SCOPED_RE.test(parsedUrl.pathname);
+      SESSION_SCOPED_RE.test(proxyPath);
     // ── 第三方插件纵深防御：dsh-ssh 创建/修改/测试主机时，host 为私网/回环地址
     // 一律拒绝（SSRF 封堵——插件源码不在我们控制内，网关拦一层；
     // 所有登录用户含主用户都拦，管理员同样可能被诱导连接内网）
@@ -2035,7 +2133,7 @@ export function createGatewayServer(
     const needsSshHostCheck =
       reqAs.dshpwUser !== undefined &&
       (req.method === 'POST' || req.method === 'PATCH' || req.method === 'PUT') &&
-      /^\/api\/dsh-ssh[.\/](hosts|test)([.\/]|$)/.test(parsedUrl.pathname);
+      /^\/api\/dsh-ssh[.\/](hosts|test)([.\/]|$)/.test(proxyPath);
 
     if (needsFolderCheck || needsSandboxCheck || needsCommandCheck || needsApprovalCheck || needsOwnershipCheck || needsSshHostCheck) {
       const chunks: Buffer[] = [];
@@ -2049,7 +2147,7 @@ export function createGatewayServer(
       // 避免误伤正常长输入（仍远小于 aionui 的 4MB，内存面可控）。
       const ownershipOnly =
         needsOwnershipCheck && !needsFolderCheck && !needsSandboxCheck && !needsCommandCheck && !needsApprovalCheck;
-      const bodyLimit = isAionuiPanel(parsedUrl.pathname)
+      const bodyLimit = isAionuiPanel(proxyPath)
         ? 4 * 1024 * 1024
         : ownershipOnly
           ? 1024 * 1024
@@ -2103,9 +2201,9 @@ export function createGatewayServer(
 
         if (needsFolderCheck) {
           let targetPath: string | null = null;
-          if (isAionuiPanel(parsedUrl.pathname)) {
+          if (isAionuiPanel(proxyPath)) {
             // aionui-panel 文件树：root 是工作区路径，path 是 root 下的相对文件路径
-            targetPath = aionuiRootFrom(req.method, parsedUrl.pathname, parsedUrl.searchParams, bodyObj);
+            targetPath = aionuiRootFrom(req.method, proxyPath, parsedUrl.searchParams, bodyObj);
             // F-17b：提取不到 root（DELETE 无 query/body、异常编码等）→ fail-closed，
             // 不能静默跳过白名单校验后透传
             if (targetPath === null) {
@@ -2269,6 +2367,22 @@ export function createGatewayServer(
       if (keep.length > 0) msgRate.set(k, keep);
       else msgRate.delete(k);
     }
+    // 极端 token/IP 洪泛下，TTL 尚未到期的键也可能无界增长；保留最新一半，
+    // 牺牲极端情况下的短期缓存命中而不牺牲进程可用性。
+    const cap = <T>(map: Map<T, unknown>, limit = 10_000) => {
+      if (map.size <= limit) return;
+      let drop = Math.ceil(map.size / 2);
+      for (const key of map.keys()) {
+        map.delete(key);
+        if (--drop === 0) break;
+      }
+    };
+    cap(sessionCache);
+    cap(revokedTokens);
+    cap(usageThrottle);
+    cap(usageReportThrottle);
+    cap(setupAttempts);
+    cap(msgRate);
   }, 10 * 60_000);
   sweep.unref();
   server.on('close', () => clearInterval(sweep));
@@ -2317,9 +2431,20 @@ export function createGatewayServer(
       socket.destroy();
       return;
     }
+    // WebSocket 仅是 dsh 的服务器→客户端事件下行通道；客户端消息是协议违规。
+    // 不允许把任意 HTTP 路径升级为 WS，否则会绕过 HTTP 侧完整的权限模型。
+    const allowedWsPath =
+      gatePath === '/api/events.mux' ||
+      gatePath === '/api/events.host' ||
+      gatePath === '/plugins/events' ||
+      gatePath === '/aionui-panel/events' ||
+      gatePath.startsWith('/aionui-panel/events/');
+    if (!allowedWsPath) {
+      socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+      socket.destroy();
+      return;
+    }
     // P1-3：WS 升级路径级权限——admin-only 端点对非 admin 拒绝
-    // （WS 只有认证，之前无任何路径级限制；session 所有权/文件白名单/配额等
-    //  仍由上游 dsh 自行控制，此处仅堵 admin-only 端点的水平越权）
     if (userRole !== 'admin' && isAdminOnlyPluginEndpoint(req.method ?? 'GET', gatePath)) {
       socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
       socket.destroy();

@@ -5,7 +5,7 @@
 import { config as loadEnv } from 'dotenv';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -221,8 +221,10 @@ export function hardenSecretsAfterSetup(config: PlatformConfig): void {
         // 之前 m[2] !== '' 的裸等会把引号空 / 注释空当"有值"，不固化，
         // 轮换 SETUP_KEY 后历史加密数据永久不可解密。
         const stripped = m[2].replace(/^['"]|['"]$/g, '').replace(/\s+#.*$/, '').trim();
-        if (stripped === '') {
-          out.push(`${key}=${freeze[key]}`); // 空值补成当前生效值
+        // 不论旧值是否为空，都冻结为本进程当前实际生效的值：否则显式但陈旧的
+        // 值会在 SETUP_KEY 轮换后留下不可预测的 JWT/内部接口/数据库加密状态。
+        if (stripped !== freeze[key]) {
+          out.push(`${key}=${freeze[key]}`);
           continue;
         }
       }
@@ -234,7 +236,15 @@ export function hardenSecretsAfterSetup(config: PlatformConfig): void {
   }
 
   try {
-    writeFileSync(envFile, out.join('\n') + (out.length > 0 ? '\n' : ''), { encoding: 'utf8', mode: 0o600 });
+    // 同目录临时文件 + 原子 rename：进程崩溃时保留旧完整 .env，绝不留下半写入密钥文件。
+    const tempFile = `${envFile}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+    try {
+      writeFileSync(tempFile, out.join('\n') + (out.length > 0 ? '\n' : ''), { encoding: 'utf8', mode: 0o600 });
+      renameSync(tempFile, envFile);
+    } catch (error) {
+      try { if (existsSync(tempFile)) unlinkSync(tempFile); } catch { /* best effort */ }
+      throw error;
+    }
   } catch {
     // 写入失败不阻断初始化（用户仍可登录）；下次安装/重启时 .env 仍在
     return;

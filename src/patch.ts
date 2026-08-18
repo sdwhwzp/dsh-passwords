@@ -226,7 +226,12 @@ export function restartDshWeb(service: string, delayMs = 2500): void {
   }
   setTimeout(() => {
     try {
-      spawnSync('systemctl', ['restart', service], { stdio: 'ignore' });
+      const result = spawnSync('systemctl', ['restart', service], { stdio: 'ignore' });
+      // spawnSync 对 ENOENT 不抛异常而是写 result.error；两者都要显式检查，
+      // 否则 systemctl 失败（如服务不存在）会被静默吞掉，补丁表面“已应用”实际未生效。
+      if (result.status !== 0 || result.error) {
+        console.error(`[dsh-passwords] 重启 ${service} 失败（补丁将在下次 dsh 重启后生效）:`, result.error ?? `exit ${String(result.status)}`);
+      }
     } catch (error) {
       console.error(`[dsh-passwords] 重启 ${service} 失败（补丁将在下次 dsh 重启后生效）:`, error);
     }

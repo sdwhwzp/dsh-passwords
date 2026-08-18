@@ -7,7 +7,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots';
 
-interface ChatMessage {
+export interface ChatMessage {
   id: number;
   sender_id: number;
   sender_name: string;
@@ -70,6 +70,12 @@ function haptic(ms = 12): void {
   } catch {
     /* 无振动能力：静默 */
   }
+}
+
+/** 游标倒退判定：返回消息中存在 id ≤ 上次游标 = 服务端数据库被重建（自增从头开始）。
+ *  纯函数导出供单测；轮询循环里用它决定是否重建基线。 */
+export function isCursorReset(since: number, incoming: ChatMessage[]): boolean {
+  return since > 0 && incoming.some((m) => m.id <= since);
 }
 
 /** 合并新消息：去重、按 id 升序、保留最近 200 条。
@@ -251,8 +257,6 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
     let disposed = false;
     let inFlight = false;
     let failStreak = 0; // 连续失败次数 → 指数退避（4s → 30s 封顶）
-    let emptyStreak = 0; // 连续空响应次数 → 触发一次全量拉取（DB 重置后恢复基线）
-    let forceBaseline = false; // 恢复触发的全量拉取只重建基线，不计未读（否则会把全部历史算成未读 → 角标 99+）
     let timer: number | null = null;
 
     const load = () => {
@@ -274,38 +278,24 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
             const nextMe = (d.me ?? null) as Me | null;
             setMe(nextMe);
             const maxId = incoming.length > 0 ? incoming[incoming.length - 1].id : 0;
-            // forceBaseline：恢复全量拉取（lastSeenId=0 触发）只把最新 id 存为基线，
-            // 不计未读——否则 initializedRef 已为 true + id 全大于 0 → 全部历史都算未读，
-            //  每次进入/重启后 3 轮空轮询就会把角标顶到 99+（必现 bug）。
-            if (!forceBaseline && nextMe && initializedRef.current && maxId > lastSeenId.current) {
+            const sinceBefore = lastSeenId.current;
+            // 游标倒退（返回的 id ≤ 上次游标）= 服务端数据库被重建、自增从头开始。
+            // 视为新基线：替换列表、只更新游标，不把整批历史算成未读（角标 99+ 的根因）；
+            // 不再用“连续 3 轮空响应”的启发式（无法与正常无消息态区分，会周期性空跑全量）。
+            const cursorReset = isCursorReset(sinceBefore, incoming);
+            if (!cursorReset && nextMe && initializedRef.current && maxId > sinceBefore) {
               const fresh = incoming.filter(
-                (m) => m.sender_id !== nextMe.id && m.id > lastSeenId.current,
+                (m) => m.sender_id !== nextMe.id && m.id > sinceBefore,
               ).length;
               if (fresh > 0 && !openRef.current) setUnread((u) => u + fresh);
             }
-            forceBaseline = false;
-            lastSeenId.current = Math.max(lastSeenId.current, maxId);
+            lastSeenId.current = Math.max(sinceBefore, maxId);
             initializedRef.current = true;
-            setMessages((prev) => mergeById(prev, incoming));
+            setMessages((prev) => (cursorReset ? incoming : mergeById(prev, incoming)));
             setError('');
-            // 连续 3 轮空响应 → 全量拉取一次：覆盖“网关重建数据库后新消息 id
-            // 从头开始，since 永远大于 maxId → 永久收不到新消息”的静默卡死。
-            // 仅当已有基线（lastSeenId>0）才探测：无消息基线下 lastSeenId=0，
-            // 每轮本就是全量拉取（URL 无 since 参数），空响应是正常态——
-            // 若不区分会永久性每 3 轮触发一次无意义的全量（每 16 秒，无益开销）。
-            if (incoming.length === 0) {
-              if (lastSeenId.current > 0) {
-                emptyStreak++;
-                if (emptyStreak >= 3) {
-                  emptyStreak = 0;
-                  lastSeenId.current = 0; // 下轮 since=0 全量拿基线
-                  forceBaseline = true; // 该次全量仅重建基线，不计未读
-                }
-              }
-            } else {
-              emptyStreak = 0;
-            }
           } else if (!res.ok) {
+            // HTTP 错误同样计入退避：连续 5xx/401 时拉长轮询间隔，避免失败请求风暴
+            failStreak++;
             setError(d.error ?? t('chat.loadFailed'));
           }
         })

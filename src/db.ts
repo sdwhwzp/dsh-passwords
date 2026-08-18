@@ -495,6 +495,24 @@ export class Database {
     };
   }
 
+  /** 原子地创建首个主用户；并发 setup 时仅一个调用能成功。 */
+  setupInitialAdmin(username: string, passwordHash: string): UserRow | null {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      if (this.countUsers() > 0) {
+        this.db.exec('COMMIT');
+        return null;
+      }
+      const user = this.createUser(username, passwordHash, 'admin');
+      this.setSetting('installed_at', new Date().toISOString());
+      this.db.exec('COMMIT');
+      return user;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
   /** 改名（用户名密文 + 等值索引一起更新；同时 bump credential_version 使旧会话全部失效） */
   updateUsername(id: number, username: string): void {
     this.stmt('UPDATE users SET username = ?, username_hash = ?, credential_version = credential_version + 1 WHERE id = ?').run(
