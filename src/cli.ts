@@ -137,6 +137,9 @@ function runPatch(argv: string[]): void {
     console.log(
       `  ${tr('cli.whitelist')}: ${status.whitelist ? tr('cli.patched') : tr('cli.notPatched')}`,
     );
+    console.log(
+      `  ${tr('cli.workspaceSearch')}: ${status.workspaceSearch ? tr('cli.patched') : tr('cli.notPatched')}`,
+    );
     return;
   }
   if (action === undefined || action === 'on' || action === 'reload') {

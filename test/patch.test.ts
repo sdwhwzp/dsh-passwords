@@ -6,8 +6,12 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { applyRemotePatch, patchStatus } from '../src/patch.js';
 
-/** 构建一个模拟 dsh 根目录（含两个补丁目标文件），返回 root 与清理函数 */
-function makeDshRoot(apiproxyContent: string, settingsContent: string): { root: string; cleanup: () => void } {
+/** 构建一个模拟 dsh 根目录（含两个必选补丁目标文件 + 可选 workspace 文件），返回 root 与清理函数 */
+function makeDshRoot(
+  apiproxyContent: string,
+  settingsContent: string,
+  workspaceContent?: string,
+): { root: string; cleanup: () => void } {
   const root = mkdtempSync(path.join(tmpdir(), 'dshpw-patch-'));
   const settingsDir = path.join(root, 'node_modules', '@deepseek-ai', 'dsh-client-ui-settings', 'lib');
   const apiproxyDir = path.join(root, 'node_modules', '@deepseek-ai', 'dsh-host-apiproxy', 'lib');
@@ -15,6 +19,11 @@ function makeDshRoot(apiproxyContent: string, settingsContent: string): { root: 
   mkdirSync(apiproxyDir, { recursive: true });
   writeFileSync(path.join(settingsDir, 'client.js'), settingsContent);
   writeFileSync(path.join(apiproxyDir, 'index.js'), apiproxyContent);
+  if (workspaceContent !== undefined) {
+    const wsDir = path.join(root, 'node_modules', '@deepseek-ai', 'dsh-client-ui-workspace', 'lib');
+    mkdirSync(wsDir, { recursive: true });
+    writeFileSync(path.join(wsDir, 'client.js'), workspaceContent);
+  }
   return { root, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
@@ -23,6 +32,28 @@ const RC7_APIPROXY = 'export function describe(){return settings.describe({redac
 const RC7_SETTINGS_UNPATCHED =
   'const mode = connection.isLoopback ? "host" : "memory";\nexport default mode;\n';
 const RC7_SETTINGS_PATCHED = 'const mode = "host";\nexport default mode;\n';
+
+/** 与真实 dsh-client-ui-workspace client.js 相同的 click-outside 粘滞搜索块（制表符缩进） */
+const WORKSPACE_STICKY = [
+  '\t\t\t(0, react.useEffect)(() => {',
+  '\t\t\t\tif (!wide || !searchExpanded) return;',
+  '\t\t\t\tconst onClick = (event) => {',
+  '\t\t\t\t\tif (!(event.target instanceof Node) || searchRoot.current?.contains(event.target) === true) return;',
+  '\t\t\t\t\tsearchInput.current?.blur();',
+  '\t\t\t\t\tif (normalizedQuery !== "") return;',
+  '\t\t\t\t\tsetSearchExpanded(false);',
+  '\t\t\t\t};',
+  '\t\t\t\tdocument.addEventListener("click", onClick);',
+  '\t\t\t\treturn () => {',
+  '\t\t\t\t\tdocument.removeEventListener("click", onClick);',
+  '\t\t\t\t};',
+  '\t\t\t}, [',
+  '\t\t\t\tnormalizedQuery,',
+  '\t\t\t\twide,',
+  '\t\t\t\tsearchExpanded',
+  '\t\t\t]);',
+  '',
+].join('\n');
 
 test('补丁：rc.6 结构（含 WEB_SETTINGS_NAMESPACES 白名单）→ 插入 dsh-passwords 并打 host 模式', () => {
   const { root, cleanup } = makeDshRoot(RC6_APIPROXY, RC7_SETTINGS_UNPATCHED);
@@ -70,6 +101,50 @@ test('补丁：rc.7 settings 未打 host 模式时会被打进（settings 子补
     assert.equal(result, 'applied', 'rc.7 下 settings 未打时应应用并返回 applied');
     const s = readFileSync(path.join(root, 'node_modules', '@deepseek-ai', 'dsh-client-ui-settings', 'lib', 'client.js'), 'utf8');
     assert.ok(s.includes('"host"') && !s.includes('connection.isLoopback'), 'client.js 已强制 host 模式');
+  } finally {
+    cleanup();
+  }
+});
+
+test('补丁：工作区搜索粘滞态 → 无结果时点击别处自动收起清空（消除“无匹配会话”滞留）', () => {
+  const { root, cleanup } = makeDshRoot(RC7_APIPROXY, RC7_SETTINGS_PATCHED, WORKSPACE_STICKY);
+  try {
+    const before = patchStatus(root);
+    assert.equal(before.workspaceSearch, false, '初始未打 workspace 子补丁');
+
+    const result = applyRemotePatch(root);
+    assert.equal(result, 'applied', 'settings/白名单已满足，workspace 子补丁应实际应用');
+
+    const ws = readFileSync(
+      path.join(root, 'node_modules', '@deepseek-ai', 'dsh-client-ui-workspace', 'lib', 'client.js'),
+      'utf8',
+    );
+    assert.ok(!ws.includes('if (normalizedQuery !== "") return;'), '旧粘滞行为（query 非空直接 return）已移除');
+    assert.ok(ws.includes('remoteSearch.status !== "loading"'), '已注入无结果自动收起逻辑');
+    assert.ok(ws.includes('remoteSearch,'), 'click-outside effect 依赖数组已补 remoteSearch（防闭包过期）');
+
+    const after = patchStatus(root);
+    assert.equal(after.workspaceSearch, true, '状态检测为已打');
+
+    // 幂等：再跑一次必须 unchanged
+    const again = applyRemotePatch(root);
+    assert.equal(again, 'unchanged', '幂等：二次应用不再改动');
+  } finally {
+    cleanup();
+  }
+});
+
+test('补丁：workspace 目标文件缺失时不失败（可选子补丁，1/2 不受影响）', () => {
+  // 不传 workspaceContent → 文件不存在；settings 未打 → applied 仅由 settings 驱动
+  const { root, cleanup } = makeDshRoot(RC7_APIPROXY, RC7_SETTINGS_UNPATCHED);
+  try {
+    const result = applyRemotePatch(root);
+    assert.notEqual(result, 'missing', 'workspace 文件缺失不应报 missing');
+    assert.equal(result, 'applied', 'settings 子补丁仍正常应用');
+
+    const st = patchStatus(root);
+    assert.equal(st.workspaceSearch, false, '缺失按未打处理');
+    assert.equal(st.settingsHostMode, true, 'settings host 模式已打');
   } finally {
     cleanup();
   }

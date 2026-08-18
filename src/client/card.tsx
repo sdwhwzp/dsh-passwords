@@ -27,6 +27,7 @@ export interface StateData {
 export interface PatchState {
   settingsHostMode: boolean;
   whitelist: boolean;
+  workspaceSearch: boolean;
 }
 
 export interface PermOverview {
@@ -345,7 +346,11 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
         )
       : null;
 
-  const patchOk = patchState !== null && patchState.settingsHostMode && patchState.whitelist;
+  const patchOk =
+    patchState !== null &&
+    patchState.settingsHostMode &&
+    patchState.whitelist &&
+    patchState.workspaceSearch;
   const patchText =
     patchState === null ? t('patchUnknown') : patchOk ? t('patchOk') : t('patchBad');
 

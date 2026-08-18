@@ -27,9 +27,26 @@ const SETTINGS_TARGET = path.join(
 const WHITELIST_TARGET = path.join(
   'node_modules', '@deepseek-ai', 'dsh-host-apiproxy', 'lib', 'index.js',
 );
+/** 工作区侧栏搜索文件（无结果搜索自动收起子补丁） */
+const WORKSPACE_TARGET = path.join(
+  'node_modules', '@deepseek-ai', 'dsh-client-ui-workspace', 'lib', 'client.js',
+);
 
 const SETTINGS_FROM = 'connection.isLoopback ? "host" : "memory"';
 const SETTINGS_TO = '"host"';
+
+// dsh 上游行为：搜索 query 非空时点击侧栏外只 blur 不收起——无结果时
+// 「无匹配会话」死状态会永久滞留侧栏（打开设置/卡片等任何点击都无法消除，
+// 只能手动按 Esc/X）。子补丁：无结果（ready/error 且 0 条）时点击别处自动清空并收起。
+const SEARCH_STICKY_RE =
+  /(searchInput\.current\?\.blur\(\);)[\t ]*\n[\t ]*(if \(normalizedQuery !== ""\) return;)[\t ]*\n[\t ]*(setSearchExpanded\(false\);)/;
+const SEARCH_STICKY_TO =
+  '$1\n\t\t\t\t\tif (normalizedQuery === "") {\n\t\t\t\t\t\tsetSearchExpanded(false);\n\t\t\t\t\t} else if (remoteSearch.status !== "loading" && remoteSearch.items.length === 0) {\n\t\t\t\t\t\t// dsh-passwords 补丁：无结果的搜索点击别处自动收起并清空，避免“无匹配会话”滞留在侧栏\n\t\t\t\t\t\tsetQuery("");\n\t\t\t\t\t\tsetSearchExpanded(false);\n\t\t\t\t\t}';
+// 上面新增了 remoteSearch 读取：click-outside effect 的依赖数组必须补上，否则闭包里的
+// remoteSearch 是注册时的旧值（结果到达后不重新注册）→ 永远看到 loading，补丁失效。
+const SEARCH_DEPS_RE =
+  /(\}, \[)[\t ]*\n[\t ]*normalizedQuery,[\t ]*\n[\t ]*wide,[\t ]*\n[\t ]*searchExpanded([\t ]*\n[\t ]*\]\);)/;
+const SEARCH_DEPS_TO = '$1\n\t\t\t\tremoteSearch,\n\t\t\t\tnormalizedQuery,\n\t\t\t\twide,\n\t\t\t\tsearchExpanded$2';
 
 /**
  * 命名空间白名单补丁是否适用当前 dsh。
@@ -72,11 +89,15 @@ export function findDshRoot(explicit: string): string | null {
 }
 
 /** 补丁当前状态（用于 status 展示） */
-export function patchStatus(dshRoot: string): { settingsHostMode: boolean; whitelist: boolean } {
+export function patchStatus(
+  dshRoot: string,
+): { settingsHostMode: boolean; whitelist: boolean; workspaceSearch: boolean } {
   const settingsFile = path.join(dshRoot, SETTINGS_TARGET);
   const wlFile = path.join(dshRoot, WHITELIST_TARGET);
+  const wsFile = path.join(dshRoot, WORKSPACE_TARGET);
   let settingsHostMode = false;
   let whitelist = false;
+  let workspaceSearch = false;
   try {
     const s = readFileSync(settingsFile, 'utf8');
     settingsHostMode = !s.includes(SETTINGS_FROM) && s.includes(SETTINGS_TO);
@@ -86,7 +107,14 @@ export function patchStatus(dshRoot: string): { settingsHostMode: boolean; white
     // rc.7+ 已移除 WEB_SETTINGS_NAMESPACES 白名单 → 原生支持，视为已满足
     whitelist = !whitelistPatchApplicable(w) || w.includes('"dsh-passwords"');
   } catch { /* 同上 */ }
-  return { settingsHostMode, whitelist };
+  try {
+    const ws = readFileSync(wsFile, 'utf8');
+    // 打过 = 不再含旧行为串 + 含子补丁标记（文件缺失按未打处理）
+    workspaceSearch =
+      !ws.includes('if (normalizedQuery !== "") return;') &&
+      ws.includes('remoteSearch.status !== "loading"');
+  } catch { /* 同上 */ }
+  return { settingsHostMode, whitelist, workspaceSearch };
 }
 
 /** 应用补丁（幂等）：返回 'applied'（本次有改动）或 'unchanged' 或 'missing'（目标文件不在） */
@@ -130,11 +158,25 @@ export function applyRemotePatch(dshRoot: string): 'applied' | 'unchanged' | 'mi
     }
   }
 
+  // 3) 工作区侧栏搜索自动收起（可选子补丁：目标文件不存在则跳过，不影响 1/2）
+  const wsFile = path.join(dshRoot, WORKSPACE_TARGET);
+  if (existsSync(wsFile)) {
+    const ws = readFileSync(wsFile, 'utf8');
+    if (SEARCH_STICKY_RE.test(ws) && SEARCH_DEPS_RE.test(ws)) {
+      if (!existsSync(wsFile + BAK_SUFFIX)) writeFileSync(wsFile + BAK_SUFFIX, ws);
+      writeFileSync(
+        wsFile,
+        ws.replace(SEARCH_STICKY_RE, SEARCH_STICKY_TO).replace(SEARCH_DEPS_RE, SEARCH_DEPS_TO),
+      );
+      changed = true;
+    }
+  }
+
   return changed ? 'applied' : 'unchanged';
 }
 
 /**
- * 回滚补丁：从 .bak-dshpw 备份恢复两个目标文件。
+ * 回滚补丁：从 .bak-dshpw 备份恢复目标文件。
  * 备份不存在（从未打过补丁）时返回 'no-backup'。
  */
 export function rollbackPatch(dshRoot: string): 'rolled-back' | 'no-backup' | 'missing' {
@@ -142,7 +184,7 @@ export function rollbackPatch(dshRoot: string): 'rolled-back' | 'no-backup' | 'm
   const wlFile = path.join(dshRoot, WHITELIST_TARGET);
   if (!existsSync(settingsFile) || !existsSync(wlFile)) return 'missing';
   let changed = false;
-  for (const target of [settingsFile, wlFile]) {
+  for (const target of [settingsFile, wlFile, path.join(dshRoot, WORKSPACE_TARGET)]) {
     const bak = target + BAK_SUFFIX;
     if (existsSync(bak)) {
       writeFileSync(target, readFileSync(bak));
