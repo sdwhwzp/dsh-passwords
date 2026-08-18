@@ -16,7 +16,7 @@ import { AuthService } from './auth.js';
 import { createGatewayServer, createRedirectServer } from './gateway.js';
 import { createFieldCrypto } from './encrypt.js';
 import { ensureCertificate, certExpiryMs, detectPublicIp } from './acme.js';
-import { execSync, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -146,7 +146,7 @@ function runPatch(argv: string[]): void {
       console.log(`  ${tr('cli.restarting', { service: config.patch.restartService })}`);
       // CLI 进程跑完就退出，不能用延迟定时器（unref 定时器会被丢弃）；直接同步重启
       try {
-        execSync(`systemctl restart ${config.patch.restartService}`, { stdio: 'inherit' });
+        spawnSync('systemctl', ['restart', config.patch.restartService], { stdio: 'inherit' });
       } catch (error) {
         console.error(`  ${tr('cli.restartFailed')}: ${String(error)}`);
       }
@@ -160,7 +160,7 @@ function runPatch(argv: string[]): void {
     if (result === 'rolled-back' && config.patch.restartService) {
       console.log(`  ${tr('cli.restarting', { service: config.patch.restartService })}`);
       try {
-        execSync(`systemctl restart ${config.patch.restartService}`, { stdio: 'inherit' });
+        spawnSync('systemctl', ['restart', config.patch.restartService], { stdio: 'inherit' });
       } catch (error) {
         console.error(`  ${tr('cli.restartFailed')}: ${String(error)}`);
       }

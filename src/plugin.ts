@@ -264,7 +264,8 @@ export function apply(ctx: Context): void {
     const token = readCookie(req.headers.cookie, COOKIE_NAME);
     if (!token) return null;
     try {
-      const payload = jwt.verify(token, cfg.jwtSecret) as jwt.JwtPayload;
+      // 算法白名单：只接受 HS256（与 auth.verifyToken 同口径）
+      const payload = jwt.verify(token, cfg.jwtSecret, { algorithms: ['HS256'] }) as jwt.JwtPayload;
       const row = db.getUserById(Number(payload.sub));
       if (!row) return null;
       const cv = typeof payload.cv === 'number' ? payload.cv : 0;

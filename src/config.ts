@@ -62,14 +62,20 @@ export function loadConfig(): PlatformConfig {
   // F-07：启动时收紧 .env 权限（POSIX 0600），防止同机其他用户/备份泄露密钥
   tightenEnvPerm(envFilePath());
   const setupKey = readEnv('SETUP_KEY', '');
-  // JWT 密钥：留空则用 setupKey 做稳定派生，重启不失效
+  // 无 SETUP_KEY 时拒绝加载（fail-closed）：
+  // 之前回退到 sha256('dev') 可被公开计算，攻击者能伪造任意 JWT 认证绕过。
+  // cli/plugin 入口本就强制 SETUP_KEY 非空，这里兜底防其他调用路径漏拦。
+  if (setupKey === '') {
+    throw new Error('SETUP_KEY 未配置：请先运行安装脚本或手动配置 .env（见 .env.example）');
+  }
+  // JWT 密钥：从 SETUP_KEY 稳定派生（重启不失效）；生产建议显式配置 MCP_JWT_SECRET
   const jwtSecret =
     readEnv('MCP_JWT_SECRET', '') ||
-    createHash('sha256').update(readEnv('SETUP_KEY', 'dev')).digest('hex');
+    createHash('sha256').update('dsh-jwt:' + setupKey).digest('hex');
   // 内部接口密钥：与 JWT 域分离派生，插件→网关的通知通道用
   const internalSecret =
     readEnv('MCP_INTERNAL_SECRET', '') ||
-    createHash('sha256').update('dshpw-internal:' + readEnv('SETUP_KEY', 'dev')).digest('hex');
+    createHash('sha256').update('dshpw-internal:' + setupKey).digest('hex');
 
   const dbPath = readEnv(
     'MCP_DB_PATH',

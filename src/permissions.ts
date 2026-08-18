@@ -33,6 +33,84 @@ function normalizePath(p: string): string {
  */
 const DENY_ALL_WORKSPACES = '__deny__';
 
+/**
+ * 判断 host 是否私网/回环/链路本地地址（dsh-ssh 等第三方插件 SSRF 纵深防御）。
+ * 拦截 IP 字面量（含八进制/十六进制/简写段变体）与 localhost；
+ * 域名不拦截（正常 SSH 用途连公网域名；DNS 重绑定在网关层无法完全防御）。
+ */
+export function isPrivateHost(host: string): boolean {
+  const h = host.trim().toLowerCase();
+  if (h === '' || h === 'localhost' || h === 'localhost.localdomain') return true;
+  // 去掉 [::1] 形式的外层括号
+  if (h.startsWith('[') && h.endsWith(']')) return isPrivateHost(h.slice(1, -1));
+  if (h.includes(':')) {
+    // IPv6 私网/回环/链路本地（ULA = fc00::/7 覆盖 fc00-fdff）
+    if (h === '::1' || h === '::' || /^f[cd][\da-f]{2}:/i.test(h) || /^fe[89ab][\da-f]:/i.test(h)) return true;
+    // IPv4:port 形式（dsh-ssh 的 host 字段可能带端口）
+    const m = /^(\d{1,3}(?:\.\d{1,3}){1,3}):\d+$/.exec(h);
+    if (m) return isPrivateIpv4(m[1]);
+    return false;
+  }
+  return isPrivateIpv4(h);
+}
+
+/** IPv4 私网判定：Number() 归一化八进制/十六进制段（010.0.0.1 → 10.0.0.1、
+ *  0x7f.0.0.1 → 127.0.0.1）；简写段（127.1 → 127.0.0.1）补零后再判。 */
+function isPrivateIpv4(ip: string): boolean {
+  const segments = ip.split('.');
+  if (segments.length < 1 || segments.length > 4) return false;
+  // 允许十进制 / 0x 十六进制 / 0 开头八进制（Number() 统一归一化）
+  if (!segments.every((s) => /^(0[xX][0-9a-fA-F]+|\d+)$/.test(s))) return false;
+  const nums = segments.map((s) => Number(s));
+  if (nums.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return false;
+  while (nums.length < 4) nums.push(0); // 简写段补零（127.1 → 127.0.0.1）
+  const [a, b] = nums;
+  return (
+    a === 0 || // 0.0.0.0/8
+    a === 10 || // 10.0.0.0/8
+    a === 127 || // 127.0.0.0/8
+    (a === 169 && b === 254) || // 169.254.0.0/16（链路本地 + 云元数据 169.254.169.254）
+    (a === 172 && b >= 16 && b <= 31) || // 172.16.0.0/12
+    (a === 192 && b === 168) || // 192.168.0.0/16
+    (a === 100 && b >= 64 && b <= 127) || // 100.64.0.0/10（CGNAT）
+    (a === 198 && (b === 18 || b === 19)) || // 198.18.0.0/15（benchmark）
+    a >= 224 // 组播/保留
+  );
+}
+
+/** 上传文件名高危扩展名（Web 服务器可解释/可执行类）：
+ *  第三方 dsh-uploads 不限制类型，网关层纵深防御——
+ *  若上传目录未来被 Web 面暴露，.php/.jsp/.svg 等可被直接执行/承载脚本。
+ *  .py/.sh 等 agent 合法使用的脚本类型不拦（当前下载头已强制 octet-stream+nosniff）。 */
+export function isDangerousUploadName(name: string): boolean {
+  if (typeof name !== 'string' || name === '') return false;
+  if (name.includes('..')) return true; // 路径穿越形态
+  return /\.(php\d*|phtml|phar|jspx?|asp|aspx|asa|cer|cfm|shtml|cgi|hta|svg)(\.|$)/i.test(name);
+}
+
+/** 消息内容净化：剥离 HTML/CSS 结构。聊天是纯文本场景——
+ *  服务端剥掉标签/样式块/事件属性/CSS 函数载荷后，
+ *  1) 渲染链即使未来改成富文本也不会爆发存储型 XSS；
+ *  2) AI agent 读取消息时看不到 CSS 隐藏文本/伪元素等
+ *     间接提示注入载体（“人看无害、agent 读是指令”的内容分歧面）。 */
+export function sanitizeText(content: string): string {
+  return content
+    // 整块移除 style/script（含其内容，避免隐藏文本残留）
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    // 移除其余标签（保留标签内可见文本）
+    .replace(/<[^>]*>/g, ' ')
+    // 剥离纯文本中的事件属性与 CSS 函数式载荷（无标签场景）
+    .replace(/\son\w+\s*=\s*(['"]).*?\1/gi, ' ')
+    .replace(/\son\w+\s*=\s*[^\s>]+/gi, ' ')
+    .replace(/url\(\s*['"]?[^)'"]+['"]?\s*\)/gi, ' ')
+    .replace(/image-set\([^)]*\)/gi, ' ')
+    // 压缩连续空白（保留换行）
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 /** 子用户是否受工作区约束（白名单非空，含"禁止所有"哨兵或真实路径） */
 export function isWorkspaceRestricted(allowedFolders: string[]): boolean {
   return allowedFolders.length > 0;

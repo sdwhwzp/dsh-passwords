@@ -14,7 +14,7 @@
 // 因此不提供开关：网关每次启动自动应用（幂等），dsh 升级覆盖文件后重启
 // 网关自动重打，或在设置页点"重载补丁"。
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { execSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 
 const BAK_SUFFIX = '.bak-dshpw';
@@ -46,7 +46,7 @@ function whitelistPatchApplicable(content: string): boolean {
 export function findDshRoot(explicit: string): string | null {
   if (explicit) return existsSync(explicit) ? explicit : null;
   try {
-    const globalRoot = execSync('npm root -g', { encoding: 'utf8' }).trim();
+    const globalRoot = spawnSync('npm', ['root', '-g'], { encoding: 'utf8' }).stdout.trim();
     const candidate = path.join(globalRoot, '@deepseek-ai', 'dsh');
     if (existsSync(candidate)) return candidate;
   } catch {
@@ -153,8 +153,8 @@ export function rollbackPatch(dshRoot: string): 'rolled-back' | 'no-backup' | 'm
 }
 
 /** 延迟重启 dsh 网页服务（补丁生效需要 dsh 重新加载模块）；仅适用于常驻进程
- *  服务名白名单校验：systemctl restart <service> 拼到 shell 命令里，
- *  服务名若含 `; rm -rf /` 之类会被执行——加字符白名单堵住。 */
+ *  用 spawnSync 参数数组（不拼 shell），杜绝命令注入；服务名仍做字符白名单
+ *  双保险（systemctl 只接受合法 unit 名）。 */
 export function restartDshWeb(service: string, delayMs = 2500): void {
   if (!service) return;
   if (!/^[A-Za-z0-9_.@-]+$/.test(service)) {
@@ -163,7 +163,7 @@ export function restartDshWeb(service: string, delayMs = 2500): void {
   }
   setTimeout(() => {
     try {
-      execSync(`systemctl restart ${service}`, { stdio: 'ignore' });
+      spawnSync('systemctl', ['restart', service], { stdio: 'ignore' });
     } catch (error) {
       console.error(`[dsh-passwords] 重启 ${service} 失败（补丁将在下次 dsh 重启后生效）:`, error);
     }

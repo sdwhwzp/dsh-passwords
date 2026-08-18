@@ -24,9 +24,9 @@ const LOCK_STEPS = [1, 5, 15, 60] as const;
  * 单用户锁定触发不了，但同一 IP 的总失败数会快速达到阈值。
  * 阈值/窗口取宽松值：切断自动化喷洒，同时避免大 NAT（公司/校园共享出口）误伤。
  */
-const IP_MAX_FAILED = 30;
+const IP_MAX_FAILED = 50;
 const IP_WINDOW_MS = 15 * 60 * 1000;
-const IP_THROTTLE_MINUTES = 30;
+const IP_THROTTLE_MINUTES = 15;
 /** 时序均衡用空跑哈希：用户不存在时也执行一次 bcrypt，抹平“快=不存在”的枚举差异 */
 const DUMMY_HASH = bcrypt.hashSync('dsh-passwords-timing-equalizer', BCRYPT_ROUNDS);
 
@@ -171,7 +171,10 @@ export class AuthService {
       throw new AuthError('IP_THROTTLED', { minutes: remainMin }, 429);
     }
 
-    // 1) 锁定检查（防暴力破解）
+    // 1) 锁定检查（防暴力破解）——锁定响应与凭据错误统一（401 + 同文案），
+    //    消除“429=账号存在且被锁 / 401=账号不存在”的用户名枚举；
+    //    锁定信息只进审计日志（运维可查）。
+    //    IP 级节流保留 429（跨账号维度、不泄露账号存在性）。
     const attempt = await this.db.getLoginAttempt(username, ip);
     if (attempt?.locked_until && attempt.locked_until.getTime() > Date.now()) {
       const remainMin = Math.ceil((attempt.locked_until.getTime() - Date.now()) / 60000);
@@ -181,7 +184,9 @@ export class AuthService {
         userAgent: meta.userAgent,
         detail: `锁定期间拒绝登录，剩余 ${remainMin} 分钟`,
       });
-      throw new AuthError('ACCOUNT_LOCKED', { minutes: remainMin }, 429);
+      // 时序均衡：锁定路径不跑真实 bcrypt，但空跑一次抹平与凭据校验的耗时差
+      await bcrypt.compare('dsh-passwords-locked', DUMMY_HASH);
+      throw new AuthError('INVALID_CREDENTIALS', {}, 401);
     }
 
     // 2) 凭据校验（统一错误信息，避免用户名枚举；时序上用户不存在也空跑 bcrypt）
@@ -263,7 +268,8 @@ export class AuthService {
   /** 校验 JWT（Web 中间件用）；cv 为签入时的凭据版本，改密后旧 token 失效 */
   verifyToken(token: string): { userId: number; username: string; cv: number } {
     try {
-      const payload = jwt.verify(token, this.config.jwtSecret) as jwt.JwtPayload;
+      // 算法白名单：只接受 HS256（对称密钥），拒绝 alg:none / RS→HS 混淆等变体
+      const payload = jwt.verify(token, this.config.jwtSecret, { algorithms: ['HS256'] }) as jwt.JwtPayload;
       const cv = typeof payload.cv === 'number' ? payload.cv : 0;
       return { userId: Number(payload.sub), username: String(payload.username), cv };
     } catch {

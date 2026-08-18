@@ -9,7 +9,7 @@ import { readFileSync } from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHmac, createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { type Duplex } from 'node:stream';
 import zlib from 'node:zlib';
 import { URL } from 'node:url';
@@ -51,6 +51,9 @@ import {
   forceRejectApproval,
   clampSessionHistorySandbox,
   SANDBOX_RANK,
+  isPrivateHost,
+  isDangerousUploadName,
+  sanitizeText,
   todayLocal,
 } from './permissions.js';
 import { findDshRoot, applyRemotePatch, restartDshWeb } from './patch.js';
@@ -144,13 +147,29 @@ function safeNext(next: string | undefined): string {
 // POST 时恒定时间比对。无服务端会话也能防跨站表单伪造。
 const CSRF_COOKIE = 'dsh_csrf';
 
-function newCsrfToken(): string {
-  return randomBytes(16).toString('hex');
+function newCsrfToken(secret: string): string {
+  // 签名双重提交：token 随机 + HMAC 签名。攻击者即使能自选 cookie 值
+  // （子域 cookie tossing 等），不知道密钥也伪造不出合法签名。
+  const token = randomBytes(16).toString('hex');
+  const sig = createHmac('sha256', secret).update(token).digest('hex').slice(0, 32);
+  return `${token}.${sig}`;
 }
 
-function csrfMatches(cookieValue: string | null, fieldValue: string): boolean {
-  if (!cookieValue || cookieValue.length !== fieldValue.length) return false;
-  return timingSafeEqual(Buffer.from(cookieValue), Buffer.from(fieldValue));
+function csrfMatches(secret: string, cookieValue: string | null, fieldValue: string): boolean {
+  if (!cookieValue || !fieldValue) return false;
+  const cookie = cookieValue.split('.');
+  const field = fieldValue.split('.');
+  if (cookie.length !== 2 || field.length !== 2) return false;
+  const [cookieToken, cookieSig] = cookie as [string, string];
+  const [fieldToken, fieldSig] = field as [string, string];
+  // 双重提交：cookie 与表单的 token 必须一致，且签名必须等于服务端 HMAC
+  if (cookieToken.length === 0 || cookieToken !== fieldToken) return false;
+  const expected = createHmac('sha256', secret).update(cookieToken).digest('hex').slice(0, 32);
+  if (expected.length !== cookieSig.length || expected.length !== fieldSig.length) return false;
+  return (
+    timingSafeEqual(Buffer.from(cookieSig), Buffer.from(fieldSig)) &&
+    timingSafeEqual(Buffer.from(cookieSig), Buffer.from(expected))
+  );
 }
 
 function setCsrfCookie(res: Response, token: string, secure: boolean): void {
@@ -492,6 +511,10 @@ export function createGatewayServer(
   // （全局 express.json/urlencoded 会消费掉请求流，导致上游收到空 body）
   app.use('/gateway', express.urlencoded({ extended: false }));
 
+  // CSRF 签名密钥：从 JWT 密钥域分离派生（服务端私有，登录/配置表单的
+  // 双重提交令牌用 HMAC 签名——攻击者无法自选 cookie 伪造合法签名）
+  const csrfSecret = createHash('sha256').update('dshpw-csrf:' + config.jwtSecret).digest('hex');
+
   // HTTPS 模式：全站 HSTS（浏览器强制后续走 HTTPS）+ 会话 Cookie 加 Secure
   //（Cookie 标志在登录处理器内按 config.gateway.tls 决定）
   if (config.gateway.tls !== null) {
@@ -662,7 +685,7 @@ export function createGatewayServer(
       db.health().catch(() => false),
     ]);
     // 每次渲染下发新 CSRF token（Cookie + 表单隐藏域）
-    const csrf = newCsrfToken();
+    const csrf = newCsrfToken(csrfSecret);
     setCsrfCookie(res, csrf, config.gateway.tls !== null);
     // 显式 ?lang= 选择持久化到 cookie（语言切换链接点出来的）。
     // 注意 Set-Cookie 头已由 CSRF 占用，这里用数组追加而不是 setHeader 覆盖。
@@ -711,8 +734,8 @@ export function createGatewayServer(
 
     // CSRF 校验（double-submit：Cookie 与表单域一致才放行）
     const csrfField = typeof req.body?.csrf === 'string' ? req.body.csrf : '';
-    if (!csrfMatches(readCookie(req.headers.cookie, CSRF_COOKIE), csrfField)) {
-      const csrf = newCsrfToken();
+    if (!csrfMatches(csrfSecret, readCookie(req.headers.cookie, CSRF_COOKIE), csrfField)) {
+      const csrf = newCsrfToken(csrfSecret);
       setCsrfCookie(res, csrf, config.gateway.tls !== null);
       res
         .status(403)
@@ -741,7 +764,7 @@ export function createGatewayServer(
           : error instanceof Error
             ? error.message
             : t(lang, 'gw.initFailed');
-      const csrf = newCsrfToken();
+      const csrf = newCsrfToken(csrfSecret);
       setCsrfCookie(res, csrf, config.gateway.tls !== null);
       res.status(status).type('html').send(renderSetupPage({ lang, error: message, csrf }));
     }
@@ -756,9 +779,9 @@ export function createGatewayServer(
 
     // CSRF 校验（double-submit：Cookie 与表单域一致才放行）
     const csrfField = typeof req.body?.csrf === 'string' ? req.body.csrf : '';
-    if (!csrfMatches(readCookie(req.headers.cookie, CSRF_COOKIE), csrfField)) {
+    if (!csrfMatches(csrfSecret, readCookie(req.headers.cookie, CSRF_COOKIE), csrfField)) {
       const dbHealthy = await db.health().catch(() => false);
-      const csrf = newCsrfToken();
+      const csrf = newCsrfToken(csrfSecret);
       setCsrfCookie(res, csrf, config.gateway.tls !== null);
       res
         .status(403)
@@ -791,7 +814,7 @@ export function createGatewayServer(
             ? error.message
             : t(lang, 'gw.loginFailed');
       const dbHealthy = await db.health().catch(() => false);
-      const csrf = newCsrfToken();
+      const csrf = newCsrfToken(csrfSecret);
       setCsrfCookie(res, csrf, config.gateway.tls !== null);
       res.status(status).type('html').send(renderLoginPage({ lang, next, error: message, dbHealthy, csrf }));
     }
@@ -1041,7 +1064,8 @@ export function createGatewayServer(
     recent.push(now);
     msgRate.set(me.userId, recent);
     const body = (req.body ?? {}) as Record<string, unknown>;
-    const content = typeof body.content === 'string' ? body.content.trim() : '';
+    // 服务端净化（#3）：剥离 HTML/CSS 结构后入库——防存储型注入 + AI agent 间接提示注入
+    const content = sanitizeText(typeof body.content === 'string' ? body.content : '');
     if (content === '') {
       res.status(400).json({ ok: false, code: 'INVALID', error: '内容不能为空' });
       return;
@@ -1136,12 +1160,45 @@ export function createGatewayServer(
 
   app.use((req, res, next) => {
     try {
+      // Host 格式校验：拒绝含路径/控制字符/超长的畸形 Host（防 CRLF/Header 注入
+      // 变体）；不做域名白名单——用户可能用任意域名访问（如未配置 domain 的自定义
+      // DNS），只拦畸形头。
+      const hostRaw = req.headers.host;
+      if (hostRaw !== undefined) {
+        const h = String(hostRaw);
+        if (h.length > 253 || !/^[A-Za-z0-9.\-\[\]:]+$/.test(h)) {
+          res.status(400).type('text/plain').send('400 Bad Request');
+          return;
+        }
+      }
       // F-03：从【原始 req.url】迭代解码 + 压平斜杠 + 归一化后做前缀判定
       // （不能先用 new URL(parsed.pathname)——第一次归一化会把 //../ 的空段吞掉）
       const gatePath = gatePathOf(req.url ?? '/');
-      // /gateway 精确路径与 /gateway/* 都视为网关自有前缀（未注册子路径由
-      // 后续中间件处理，避免透传到上游 dsh）
-      if (gatePath === '/gateway' || gatePath.startsWith('/gateway/')) return next();
+      // /gateway 精确路径与 /gateway/* 都视为网关自有前缀——但只放行已知路由，
+      // 未知子路径（如 /gateway/api/dsh-ssh/hosts 误拼接）直接 404，
+      // 不透传到上游 dsh（否则未登录也返回 SPA 壳，泄露 window.__DSH_BOOT__ 插件清单）
+      if (gatePath === '/gateway' || gatePath.startsWith('/gateway/')) {
+        // 精确白名单：只放行网关自有路由。
+        // /gateway/api/* 不能整段放行——/gateway/api/dsh-ssh/hosts 之类误拼接路径
+        // 会透传到上游 dsh 返回 SPA 壳（泄露 window.__DSH_BOOT__ 插件清单）。
+        const knownGatewayRoute =
+          gatePath === '/gateway' ||
+          gatePath === '/gateway/' ||
+          /^\/gateway\/(login|setup|logout)(\/|$)/.test(gatePath) ||
+          gatePath === '/gateway/api' ||
+          gatePath === '/gateway/api/' ||
+          gatePath === '/gateway/api/overview' ||
+          gatePath === '/gateway/api/permissions' ||
+          gatePath === '/gateway/api/usage/report' ||
+          gatePath === '/gateway/api/messages' ||
+          gatePath.startsWith('/gateway/api/messages/') ||
+          gatePath.startsWith('/gateway/internal/');
+        if (!knownGatewayRoute) {
+          res.status(404).type('text/plain').send('404 Not Found');
+          return;
+        }
+        return next();
+      }
       // P1-1：dsh 插件 internal 端点仅限网关→dsh 本机 HTTP 调用，
       // 外部请求一律 404（loopback 校验被代理拓扑绕过，不能依赖插件侧防护）
       if (gatePath.startsWith('/api/dsh-passwords/internal/')) {
@@ -1229,6 +1286,18 @@ export function createGatewayServer(
         }
         // 附上权限，供后续文件夹限制中间件 / 代理 token 计量使用
         (req as Req).dshpwPerms = perms;
+      }
+      // ── 第三方插件纵深防御（所有登录用户，含主用户） ──
+      // dsh-uploads 上传：高危 Web 可解释扩展名（.php/.jsp/.svg 等）拒绝——
+      // 插件本身不限制类型，网关先拦一层（上传目录若被 Web 面暴露即 RCE 面）
+      if (
+        req.method === 'POST' &&
+        gatePath === '/api/dsh-uploads' &&
+        isDangerousUploadName(String(req.headers['x-file-name'] ?? ''))
+      ) {
+        const lang = langOf(req);
+        res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+        return;
       }
       return next();
     } catch {
@@ -1645,8 +1714,15 @@ export function createGatewayServer(
       reqAs.dshpwPerms !== undefined &&
       (req.method === 'POST' || req.method === 'PUT') &&
       SESSION_SCOPED_RE.test(parsedUrl.pathname);
+    // ── 第三方插件纵深防御：dsh-ssh 创建/测试主机时，host 为私网/回环地址
+    // 一律拒绝（SSRF 封堵——插件源码不在我们控制内，网关拦一层；
+    // 所有登录用户含主用户都拦，管理员同样可能被诱导连接内网）
+    const needsSshHostCheck =
+      reqAs.dshpwUser !== undefined &&
+      req.method === 'POST' &&
+      /^\/api\/dsh-ssh[.\/](hosts|test)([.\/]|$)/.test(parsedUrl.pathname);
 
-    if (needsFolderCheck || needsSandboxCheck || needsCommandCheck || needsApprovalCheck || needsOwnershipCheck) {
+    if (needsFolderCheck || needsSandboxCheck || needsCommandCheck || needsApprovalCheck || needsOwnershipCheck || needsSshHostCheck) {
       const chunks: Buffer[] = [];
       let size = 0;
       let settled = false;
@@ -1695,6 +1771,18 @@ export function createGatewayServer(
           upstreamReq.destroy();
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
           return;
+        }
+
+        // dsh-ssh SSRF 封堵：创建主机时 body.host 为私网地址 → 403。
+        // 只校验 host 字段存在的情况（test 请求用 alias 引用已创建主机，无 host 字段——
+        // 私网主机在创建时已被拦截，test 无从引用私网目标）。
+        if (needsSshHostCheck && bodyObj !== null && typeof bodyObj === 'object') {
+          const host = (bodyObj as Record<string, unknown>).host;
+          if (typeof host === 'string' && isPrivateHost(host)) {
+            upstreamReq.destroy();
+            res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+            return;
+          }
         }
 
         if (needsFolderCheck) {

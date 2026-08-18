@@ -89,13 +89,16 @@ if (existsSync(envPath)) {
   say('.env 已存在，沿用现有配置');
 } else {
   setupKey = randomBytes(24).toString('hex');
+  // DB 加密主密钥独立随机生成（不复用 SETUP_KEY）：SETUP_KEY 泄露/轮换
+  // 不再连带削弱静态加密；hardenSecretsAfterSetup 会把它固化进 .env
+  const dbEncKey = randomBytes(32).toString('hex');
   writeFileSync(
     envPath,
-    `SETUP_KEY=${setupKey}\nMCP_GATEWAY_PORT=443\nMCP_GATEWAY_REDIRECT_PORT=80\n`,
+    `SETUP_KEY=${setupKey}\nMCP_DB_ENC_KEY=${dbEncKey}\nMCP_GATEWAY_PORT=443\nMCP_GATEWAY_REDIRECT_PORT=80\n`,
     'utf8',
   );
   if (!isWin) chmodSync(envPath, 0o600);
-  say('.env 已生成（含随机 SETUP_KEY）');
+  say('.env 已生成（含随机 SETUP_KEY 与独立 DB 加密密钥）');
 }
 
 // ── 6. 把密钥写进 setup-key.txt（初始化完成后请删除） ──
