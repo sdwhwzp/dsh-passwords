@@ -62,6 +62,16 @@ function fmtTime(iso: string): string {
   return `${hh}:${mm}`;
 }
 
+/** 力反馈：移动端真实振动（能力检测，桌面/不支持环境静默忽略）。
+ *  dsh 客户端是标准浏览器壳（Chromium），navigator.vibrate 在支持的环境下可用。 */
+function haptic(ms = 12): void {
+  try {
+    if (typeof navigator !== 'undefined' && 'vibrate' in navigator) navigator.vibrate(ms);
+  } catch {
+    /* 无振动能力：静默 */
+  }
+}
+
 /** 合并新消息：去重、按 id 升序、保留最近 200 条。
  *  无新 id 时返回原引用——每 4 秒轮询返回空时若重建数组，
  *  会触发 [messages] 滚动 effect 把用户硬拽回底部（必现缺陷）。 */
@@ -313,6 +323,7 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
   };
 
   const close = () => {
+    haptic();
     setClosing(true);
     if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current);
     closeTimerRef.current = window.setTimeout(() => {
@@ -324,6 +335,7 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
   };
 
   const openPanel = () => {
+    haptic();
     // 关闭动画进行中重开：取消 pending 的 close 定时器，否则面板开了又被强制关
     if (closeTimerRef.current !== null) {
       window.clearTimeout(closeTimerRef.current);
@@ -337,6 +349,7 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
   const send = () => {
     const content = draft.trim();
     if (!content || busy) return;
+    haptic();
     // 乐观更新：立即把临时消息放进列表（微信式即时发送手感），
     // 服务器确认后用真实消息替换；失败回滚（移除临时 + 恢复草稿 + 报错）。
     // 临时 id 用 Date.now()（远大于自增 id，不会被 mergeById 的 200 条截断丢出列表）。
@@ -387,6 +400,7 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
   };
 
   const toggleTag = (tag: string) => {
+    haptic();
     setTags((prev) => (prev.includes(tag) ? prev.filter((x) => x !== tag) : [...prev, tag]));
   };
 
@@ -442,38 +456,46 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
               {messages.map((m) => {
                 const mine = me ? m.sender_id === me.id : false;
                 const name = mine ? t('chat.you') : m.sender_name;
-                const initial = (name || '?').trim().slice(0, 1).toUpperCase();
+                // 头像首字母：自己用登录用户名，对方用 sender_name
+                const avatarName = mine ? me?.username || name : m.sender_name;
+                const initial = (avatarName || '?').trim().slice(0, 1).toUpperCase();
                 return (
                   <div
                     key={m.id}
                     className={'dshpw-chat-msg' + (mine ? ' mine' : '') + (m.pending ? ' pending' : '')}
                   >
                     {/* 微信式头像：对方按名字哈希取色，自己用品牌色（CSS 默认，不写内联） */}
-                    <div className="dshpw-chat-avatar" style={mine ? undefined : { background: avatarColor(m.sender_name) }}>
+                    <div
+                      className="dshpw-chat-avatar"
+                      style={mine ? undefined : { background: avatarColor(m.sender_name) }}
+                    >
                       {initial}
                     </div>
-                    <div className="dshpw-chat-bubble">
+                    {/* 昵称+时间在气泡外（微信式）：自己消息只显示时间、不显示昵称 */}
+                    <div className="dshpw-chat-main">
                       <div className="dshpw-chat-meta">
-                        <span className="dshpw-chat-author">{name}</span>
+                        {!mine && <span className="dshpw-chat-author">{name}</span>}
                         <span className="dshpw-chat-time">{fmtTime(m.created_at)}</span>
                       </div>
-                      <div className="dshpw-chat-content">{m.content}</div>
-                      {m.tags.length > 0 && (
-                        <div className="dshpw-chat-tags">
-                          {m.tags.map((tag) => (
-                            <span className="dshpw-chat-tag" key={tag}>
-                              {tagDisplay(tag, tr)}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                      {m.pending && (
-                        <span className="dshpw-chat-pending" aria-label={t('chat.sending')}>
-                          <i />
-                          <i />
-                          <i />
-                        </span>
-                      )}
+                      <div className="dshpw-chat-bubble">
+                        <div className="dshpw-chat-content">{m.content}</div>
+                        {m.tags.length > 0 && (
+                          <div className="dshpw-chat-tags">
+                            {m.tags.map((tag) => (
+                              <span className="dshpw-chat-tag" key={tag}>
+                                {tagDisplay(tag, tr)}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        {m.pending && (
+                          <span className="dshpw-chat-pending" aria-label={t('chat.sending')}>
+                            <i />
+                            <i />
+                            <i />
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </div>
                 );
@@ -533,7 +555,7 @@ const CHAT_CSS = `
 .dshpw-chat-fab{position:fixed;z-index:2147483000;width:36px;height:36px;border-radius:50%;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.18);transition:transform .18s,box-shadow .18s,background .18s;pointer-events:auto;animation:dshpwFabIn .4s cubic-bezier(.34,1.56,.64,1)}
 .dshpw-chat-fab.dragging{transition:none;cursor:grabbing;opacity:.85}
 .dshpw-chat-fab:hover{transform:scale(1.05);background:var(--dsw-alias-interactive-bg-hover);box-shadow:0 4px 12px rgba(0,0,0,.25)}
-.dshpw-chat-fab:active{transform:scale(.96)}
+.dshpw-chat-fab:active{transform:scale(.88)}
 .dshpw-chat-fab:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
 .dshpw-chat-fab.shaking{animation:dshpwShake .5s ease}
 .dshpw-chat-fab-inner{position:relative;display:flex}
@@ -546,6 +568,7 @@ const CHAT_CSS = `
 .dshpw-chat-title{font-size:15px;font-weight:600;color:var(--dsw-alias-label-primary)}
 .dshpw-chat-close{width:28px;height:28px;border:0;border-radius:8px;background:none;color:var(--dsw-alias-label-tertiary);font-size:20px;line-height:1;cursor:pointer;transition:background .15s,color .15s,transform .15s}
 .dshpw-chat-close:hover{background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-primary);transform:rotate(90deg)}
+.dshpw-chat-close:active{transform:scale(.85) rotate(45deg)}
 /* 微信式消息列表：浅灰底、头像+气泡两列 */
 .dshpw-chat-list{flex:1;overflow-y:auto;padding:14px 14px 16px;display:flex;flex-direction:column;gap:12px;background:var(--dsw-alias-bg-layer-1);scrollbar-width:thin;scrollbar-color:var(--dsw-alias-border-l2) transparent}
 .dshpw-chat-list::-webkit-scrollbar{width:8px}
@@ -555,18 +578,20 @@ const CHAT_CSS = `
 .dshpw-chat-empty::before{content:'';width:40px;height:40px;border-radius:50%;background:var(--dsw-alias-bg-layer-3);border:1px solid var(--dsw-alias-border-l2);background-image:radial-gradient(circle at 30% 38%,var(--dsw-alias-label-tertiary) 1.5px,transparent 1.6px),radial-gradient(circle at 50% 38%,var(--dsw-alias-label-tertiary) 1.5px,transparent 1.6px),radial-gradient(circle at 70% 38%,var(--dsw-alias-label-tertiary) 1.5px,transparent 1.6px);opacity:.6}
 .dshpw-chat-msg{display:flex;gap:8px;align-items:flex-start;max-width:100%;animation:dshpwMsgIn .32s cubic-bezier(.34,1.56,.64,1)}
 .dshpw-chat-msg.mine{flex-direction:row-reverse;animation:dshpwMsgMineIn .32s cubic-bezier(.34,1.56,.64,1)}
-.dshpw-chat-avatar{flex-shrink:0;width:32px;height:32px;border-radius:50%;background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-primary-inverted,#fff);display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:600;user-select:none;box-shadow:0 1px 3px rgba(0,0,0,.15)}
-.dshpw-chat-bubble{position:relative;max-width:min(78%,calc(100% - 44px));padding:8px 12px;border-radius:12px;border-top-left-radius:4px;background:var(--dsw-alias-bg-layer-3);border:1px solid var(--dsw-alias-border-l2);box-shadow:0 1px 2px rgba(0,0,0,.06)}
+.dshpw-chat-avatar{flex-shrink:0;width:32px;height:32px;border-radius:50%;background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-primary-inverted,#fff);display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:600;user-select:none;box-shadow:0 1px 3px rgba(0,0,0,.15);transition:transform .18s cubic-bezier(.34,1.56,.64,1)}
+.dshpw-chat-msg:hover .dshpw-chat-avatar{transform:scale(1.08)}
+/* 昵称+时间在气泡外（微信式）：内容列 = meta + 气泡 */
+.dshpw-chat-main{display:flex;flex-direction:column;gap:4px;align-items:flex-start;max-width:min(78%,calc(100% - 44px));min-width:0}
+.dshpw-chat-msg.mine .dshpw-chat-main{align-items:flex-end}
+.dshpw-chat-bubble{position:relative;max-width:100%;padding:8px 12px;border-radius:12px;border-top-left-radius:4px;background:var(--dsw-alias-bg-layer-3);border:1px solid var(--dsw-alias-border-l2);box-shadow:0 1px 2px rgba(0,0,0,.06)}
 .dshpw-chat-msg.mine .dshpw-chat-bubble{border-radius:12px;border-top-right-radius:4px;background:var(--dsw-alias-brand-primary);border-color:transparent;box-shadow:0 1px 3px rgba(0,0,0,.12)}
 .dshpw-chat-msg.pending .dshpw-chat-bubble{opacity:.92}
 /* 微信式小尾巴：旋转 45° 的小方块，颜色随气泡 */
 .dshpw-chat-bubble::before{content:'';position:absolute;top:9px;left:-5px;width:9px;height:9px;transform:rotate(45deg);background:inherit;border-left:1px solid var(--dsw-alias-border-l2);border-bottom:1px solid var(--dsw-alias-border-l2);border-top:0;border-right:0}
 .dshpw-chat-msg.mine .dshpw-chat-bubble::before{left:auto;right:-5px;border-left:0;border-bottom:0;border-top:0;border-right:0}
-.dshpw-chat-meta{display:flex;align-items:baseline;gap:6px;margin-bottom:3px}
+.dshpw-chat-meta{display:flex;align-items:baseline;gap:6px;padding:0 2px}
 .dshpw-chat-author{font-size:12px;font-weight:600;color:var(--dsw-alias-label-secondary)}
 .dshpw-chat-time{font-size:11px;color:var(--dsw-alias-label-tertiary)}
-.dshpw-chat-msg.mine .dshpw-chat-author{color:color-mix(in srgb,var(--dsw-alias-label-primary-inverted,#fff) 80%,transparent)}
-.dshpw-chat-msg.mine .dshpw-chat-time{color:color-mix(in srgb,var(--dsw-alias-label-primary-inverted,#fff) 65%,transparent)}
 .dshpw-chat-content{font-size:13px;line-height:1.5;color:var(--dsw-alias-label-primary);white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere}
 .dshpw-chat-msg.mine .dshpw-chat-content{color:var(--dsw-alias-label-primary-inverted,#fff)}
 .dshpw-chat-tags{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
@@ -579,19 +604,21 @@ const CHAT_CSS = `
 .dshpw-chat-pending i:nth-child(2){animation-delay:.15s}
 .dshpw-chat-pending i:nth-child(3){animation-delay:.3s}
 .dshpw-chat-composer{border-top:1px solid var(--dsw-alias-border-l2);padding:10px 12px;display:flex;flex-direction:column;gap:8px;background:var(--dsw-alias-bg-layer-2)}
-.dshpw-chat-tagbtn{appearance:none;border:1px solid var(--dsw-alias-border-l2);border-radius:999px;padding:3px 10px;font-size:11px;background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-secondary);cursor:pointer;transition:border-color .15s,color .15s,background .15s,transform .12s}
+.dshpw-chat-tagbtn{appearance:none;border:1px solid var(--dsw-alias-border-l2);border-radius:999px;padding:3px 10px;font-size:11px;background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-secondary);cursor:pointer;transition:border-color .15s,color .15s,background .15s,transform .2s cubic-bezier(.34,1.56,.64,1)}
 .dshpw-chat-tagbtn:hover{transform:translateY(-1px)}
-.dshpw-chat-tagbtn.active{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary);background:color-mix(in srgb,var(--dsw-alias-brand-primary) 12%,transparent)}
+.dshpw-chat-tagbtn:active{transform:scale(.85)}
+.dshpw-chat-tagbtn.active{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary);background:color-mix(in srgb,var(--dsw-alias-brand-primary) 12%,transparent);animation:dshpwTagPop .3s cubic-bezier(.34,1.56,.64,1)}
 .dshpw-chat-inputrow{display:flex;gap:8px;align-items:center}
 .dshpw-chat-input{flex:1;box-sizing:border-box;min-width:0;padding:9px 14px;font-size:13px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-3);border:1px solid var(--dsw-alias-border-l2);border-radius:18px;outline:none;transition:border-color .15s,box-shadow .15s}
 .dshpw-chat-input:focus{border-color:var(--dsw-alias-brand-primary);box-shadow:0 0 0 3px color-mix(in srgb,var(--dsw-alias-brand-primary) 18%,transparent)}
 /* 圆形纸飞机发送按钮 */
-.dshpw-chat-send{appearance:none;border:0;width:34px;height:34px;flex-shrink:0;border-radius:50%;display:flex;align-items:center;justify-content:center;background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-primary-inverted,#fff);cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.15);transition:transform .15s,filter .15s,opacity .15s,box-shadow .15s}
-.dshpw-chat-send svg{display:block}
+.dshpw-chat-send{appearance:none;border:0;width:34px;height:34px;flex-shrink:0;border-radius:50%;display:flex;align-items:center;justify-content:center;background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-primary-inverted,#fff);cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.15);transition:transform .2s cubic-bezier(.34,1.56,.64,1),filter .15s,opacity .15s,box-shadow .15s}
+.dshpw-chat-send svg{display:block;transition:transform .2s cubic-bezier(.34,1.56,.64,1)}
 .dshpw-chat-send:hover:not(:disabled){transform:scale(1.08) rotate(-8deg);filter:brightness(1.06);box-shadow:0 4px 10px rgba(0,0,0,.2)}
-.dshpw-chat-send:active:not(:disabled){transform:scale(.92)}
+.dshpw-chat-send:active:not(:disabled){transform:scale(.8)}
+.dshpw-chat-send:active:not(:disabled) svg{transform:translateX(1px) scale(.9)}
 .dshpw-chat-send:disabled{opacity:.35;cursor:default;box-shadow:none}
-.dshpw-chat-error{font-size:12px;color:var(--dsw-alias-state-error-primary,#ef4444)}
+.dshpw-chat-error{font-size:12px;color:var(--dsw-alias-state-error-primary,#ef4444);animation:dshpwErrIn .22s ease}
 @keyframes dshpwFabIn{from{opacity:0;transform:scale(0) rotate(-90deg)}to{opacity:1;transform:none}}
 @keyframes dshpwChatFadeIn{from{opacity:0}to{opacity:1}}
 @keyframes dshpwChatPanelIn{from{opacity:0;transform:translateY(14px) scale(.96)}to{opacity:1;transform:none}}
@@ -599,8 +626,10 @@ const CHAT_CSS = `
 @keyframes dshpwMsgMineIn{from{opacity:0;transform:translateX(14px) scale(.97)}to{opacity:1;transform:none}}
 @keyframes dshpwPendingBounce{0%,80%,100%{transform:translateY(0);opacity:.4}40%{transform:translateY(-3px);opacity:1}}
 @keyframes dshpwBadgePop{from{transform:scale(.3);opacity:0}60%{transform:scale(1.25)}to{transform:scale(1);opacity:1}}
+@keyframes dshpwTagPop{0%{transform:scale(1)}50%{transform:scale(1.18)}100%{transform:scale(1)}}
+@keyframes dshpwErrIn{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:none}}
 @keyframes dshpwShake{0%,100%{transform:translateX(0)}20%{transform:translateX(-4px)}40%{transform:translateX(4px)}60%{transform:translateX(-3px)}80%{transform:translateX(3px)}}
-@media (prefers-reduced-motion:reduce){.dshpw-chat-fab,.dshpw-chat-panel,.dshpw-chat-backdrop,.dshpw-chat-msg,.dshpw-chat-badge,.dshpw-chat-pending i,.dshpw-chat-send,.dshpw-chat-tagbtn{animation:none!important;transition:none!important}}
+@media (prefers-reduced-motion:reduce){.dshpw-chat-fab,.dshpw-chat-panel,.dshpw-chat-backdrop,.dshpw-chat-msg,.dshpw-chat-badge,.dshpw-chat-pending i,.dshpw-chat-send,.dshpw-chat-tagbtn,.dshpw-chat-avatar,.dshpw-chat-close,.dshpw-chat-error{animation:none!important;transition:none!important}}
 `;
 
 if (typeof document !== 'undefined') {
