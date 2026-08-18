@@ -244,10 +244,22 @@ export function isDangerousUploadName(name: string): boolean {
   return /\.(php\d*|phtml|phar|jspx?|asp|aspx|asa|cer|cfm|shtml|cgi|hta|svg)(\.|$)/i.test(name);
 }
 
-/** 消息内容净化：剥离 HTML/CSS 结构。聊天是纯文本场景——
- *  服务端剥掉标签/样式块/事件属性/CSS 函数载荷后，
+/** 隐藏/隐形 Unicode 字符（F-A2）：人对“不可见”、对 AI agent 是可见指令/内容分歧面。
+ *  覆盖：零宽（ZWSP/ZWNJ/ZWJ/LRM/RLM）、bidi 控制（LRE/RLE/PDF/LRO/RLO + 新 bidi 隔离）、
+ *  词连接符 WJ/隐形运算符、BOM/ZWNBSP、软连字符 SHY、蒙古元音分隔符 MVS、
+ *  组合字连接符 CGJ、阿拉伯字母标记 ALM、谚文填充符（Hangul filler）。
+ *  全部剥离（替换为空）——它们没有任何可见语义，删除不影响正常文本。 */
+const HIDDEN_UNICODE_RE = /[\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff\u00ad\u180e\u034f\u061c\u115f\u1160]/g;
+
+/** 剥离隐藏/隐形 Unicode 字符（F-A2）。文件内容与消息在进 AI 模型前必经网关代理，
+ *  在网关代理点清洗——供应商（dsh）不处理，网关补偿即可，不必等上游修复。 */
+export function sanitizeHiddenUnicode(content: string): string {
+  return content.replace(HIDDEN_UNICODE_RE, '');
+}
+ /** 消息内容净化：剥离 HTML/CSS 结构 + 隐藏 Unicode 字符。聊天是纯文本场景——
+ *  服务端剥掉标签/样式块/事件属性/CSS 函数载荷/零宽字符后，
  *  1) 渲染链即使未来改成富文本也不会爆发存储型 XSS；
- *  2) AI agent 读取消息时看不到 CSS 隐藏文本/伪元素等
+ *  2) AI agent 读取消息时看不到 CSS 隐藏文本/伪元素/零宽注入等
  *     间接提示注入载体（“人看无害、agent 读是指令”的内容分歧面）。 */
 export function sanitizeText(content: string): string {
   return content
@@ -263,6 +275,8 @@ export function sanitizeText(content: string): string {
     .replace(/\son\w+\s*=\s*[^\s>]+/gi, ' ')
     .replace(/url\(\s*['"]?[^)'"]+['"]?\s*\)/gi, ' ')
     .replace(/image-set\([^)]*\)/gi, ' ')
+    // F-A2：剥离隐藏/隐形 Unicode（零宽/bidi/词连接符等）——AI 提示注入载体
+    .replace(HIDDEN_UNICODE_RE, '')
     // 压缩连续空白（保留换行）
     .replace(/[ \t]{2,}/g, ' ')
     .replace(/\n{3,}/g, '\n\n')

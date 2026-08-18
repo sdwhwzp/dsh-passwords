@@ -10,7 +10,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { createHmac, createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { type Duplex } from 'node:stream';
+import { type Duplex, Transform } from 'node:stream';
 import zlib from 'node:zlib';
 import { URL } from 'node:url';
 import dns from 'node:dns';
@@ -55,6 +55,7 @@ import {
   isPrivateHost,
   isDangerousUploadName,
   sanitizeText,
+  sanitizeHiddenUnicode,
   todayLocal,
 } from './permissions.js';
 import { findDshRoot, applyRemotePatch, restartDshWeb } from './patch.js';
@@ -507,6 +508,102 @@ function renderSetupPage(params: { lang: Lang; error?: string; csrf: string }): 
   });
 </script>`,
   });
+}
+
+/**
+ * F-A2 隐藏 Unicode 清洗的字节级流（aionui-panel/raw 文本内容用）：
+ * 按 UTF-8 字节模式剥离零宽/bidi 等隐形字符序列，跨 chunk 安全。
+ * 用 latin1 做 1:1 字节映射，正则匹配字节序列，不破坏任何非目标字节。
+ *
+ * tail 策略：保留尾部「可能不完整的多字节 UTF-8 序列」——固定保留 3 字节会把
+ * 完整零宽序列（如 E2 80 8B）拆散到 body/tail 两侧，永远无法被正则匹配（实测）。
+ * 这里从尾部倒查：找到最后一个非续字节（0x80-0xBF 之外），若其声明长度 > 已见
+ * 字节数则整体保留，否则全部进 body。
+ */
+// 目标字符的 UTF-8 字节序列（latin1 字符串形式，逐字节 1:1）
+//   E2 80 8B-8F：ZWSP/ZWNJ/ZWJ/LRM/RLM
+//   E2 80 AA-AE：LRE/RLE/PDF/LRO/RLO（bidi）
+//   E2 81 A0-A9：WJ + 隐形运算符 + 新 bidi 隔离（LRI/RLI/FSI/PDI）
+//   EF BB BF：BOM/ZWNBSP
+//   C2 AD：软连字符 SHY
+//   E1 80 8E：蒙古元音分隔符 MVS
+//   CD 8F：组合字连接符 CGJ
+//   D8 9C：阿拉伯字母标记 ALM
+//   E1 85 9F/A0：谚文填充符
+const HIDDEN_BYTES_RE =
+  /(?:\xe2\x80[\x8b-\x8f\xaa-\xae]|\xe2\x81[\xa0-\xa9]|\xef\xbb\xbf|\xc2\xad|\xe1\x80\x8e|\xcd\x8f|\xd8\x9c|\xe1\x85[\x9f\xa0])/g;
+
+function stripHiddenUnicodeBytes(buf: Buffer): Buffer {
+  return Buffer.from(buf.toString('latin1').replace(HIDDEN_BYTES_RE, ''), 'latin1');
+}
+
+function incompleteTailLen(buf: Buffer): number {
+  const len = buf.length;
+  if (len === 0) return 0;
+  const last = buf[len - 1];
+  if (last < 0x80) return 0; // ASCII：无跨 chunk 风险
+  let n = 0; // 尾部续字节数
+  for (let i = len - 1; i >= 0 && i >= len - 4; i--) {
+    const b = buf[i];
+    if ((b & 0xc0) === 0x80) {
+      n++;
+      continue;
+    }
+    let total = 0;
+    if ((b & 0xe0) === 0xc0) total = 2;
+    else if ((b & 0xf0) === 0xe0) total = 3;
+    else if ((b & 0xf8) === 0xf0) total = 4;
+    else return 0; // 异常字节：不保留
+    const have = n + 1;
+    return have < total ? have : 0;
+  }
+  return n; // 全为续字节（异常）：保留，等下一个首字节再判定
+}
+
+function hiddenUnicodeStripStream(): Transform {
+  let tail: Buffer = Buffer.alloc(0);
+  return new Transform({
+    transform(chunk: Buffer, _enc, cb) {
+      const buf = tail.length > 0 ? Buffer.concat([tail, chunk]) : chunk;
+      const keep = incompleteTailLen(buf);
+      const body = buf.subarray(0, buf.length - keep);
+      tail = buf.subarray(buf.length - keep);
+      cb(null, stripHiddenUnicodeBytes(body));
+    },
+    flush(cb) {
+      cb(null, stripHiddenUnicodeBytes(tail));
+    },
+  });
+}
+
+/** 是否为文本类 content-type（二进制/图片/压缩包不做字节清洗，防损坏） */
+function isTextContentType(contentType: string): boolean {
+  const t = contentType.split(';')[0].trim().toLowerCase();
+  if (t === '') return false;
+  if (t.startsWith('text/')) return true;
+  return (
+    /^application\/(json|xml|javascript|x-www-form-urlencoded|yaml|x-yaml|rtf|graphql|toml|x-toml)(\s*|\+.*)$/.test(t) ||
+    /\+json$/.test(t) ||
+    /\+xml$/.test(t)
+  );
+}
+
+/** F-A2：递归清洗 JSON 里所有字符串字段的隐藏 Unicode（read 端点返回文件内容） */
+function sanitizeHiddenUnicodeJson(value: unknown, depth = 0): unknown {
+  if (depth > 8 || value === null) return value;
+  if (typeof value === 'string') return sanitizeHiddenUnicode(value);
+  if (Array.isArray(value)) {
+    const out: unknown[] = [];
+    for (const item of value) out.push(sanitizeHiddenUnicodeJson(item, depth + 1));
+    return out;
+  }
+  if (typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(obj)) out[k] = sanitizeHiddenUnicodeJson(v, depth + 1);
+    return out;
+  }
+  return value;
 }
 
 /**
@@ -1670,6 +1767,32 @@ export function createGatewayServer(
           return;
         }
 
+        // ── F-A2：aionui-panel/read（POST JSON 读文件内容）——缓冲 + 递归清洗隐藏
+        // Unicode（零宽/bidi 等）。文件内容进 AI 模型前必经网关代理，在这里补偿清洗，
+        // 不必等供应商（dsh）修复；对全部登录用户生效（主用户同样可能被诱导读恶意文件）。
+        if (req.method === 'POST' && parsedUrl.pathname === '/aionui-panel/read') {
+          bufferUpstream(upstreamRes, res, (raw) => {
+            try {
+              let body = raw;
+              const enc = String(upstreamRes.headers['content-encoding'] ?? '');
+              if (enc.includes('gzip')) body = zlib.gunzipSync(body);
+              const parsed = JSON.parse(body.toString('utf8'));
+              const cleaned = sanitizeHiddenUnicodeJson(parsed);
+              const out = Buffer.from(JSON.stringify(cleaned), 'utf8');
+              const respHeaders = headersForRewrittenBody(upstreamRes.headers);
+              respHeaders['content-length'] = String(out.length);
+              if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+              if (!res.writableEnded) res.end(out);
+            } catch {
+              // 非 JSON / gzip 损坏：原样透传（无法解析就不改，避免损坏）
+              const respHeaders = headersForStreaming(upstreamRes.headers);
+              if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+              if (!res.writableEnded) res.end(raw);
+            }
+          });
+          return;
+        }
+
         // ── workspace.list 响应：收集 id→path 缓存 + 受限子用户过滤白名单外的工作区 ──
         if (req.method === 'POST' && /^\/api\/workspace[.\/]list$/.test(parsedUrl.pathname)) {
           bufferUpstream(upstreamRes, res, (raw) => {
@@ -1838,6 +1961,13 @@ export function createGatewayServer(
           return;
         }
         res.writeHead(upstreamRes.statusCode ?? 502, respHeaders);
+        // F-A2：aionui-panel/raw（GET 流式读文件）文本类型 → 字节级流式清洗隐藏 Unicode
+        // （图片/二进制不洗，防损坏）。read（POST JSON）已在上面缓冲分支清洗。
+        if (req.method === 'GET' && parsedUrl.pathname === '/aionui-panel/raw' && isTextContentType(contentType)) {
+          upstreamRes.pipe(hiddenUnicodeStripStream()).pipe(res);
+          upstreamRes.on('error', () => res.destroy());
+          return;
+        }
         upstreamRes.pipe(res);
         // 上游响应流中途断开：客户端侧直接中断（头已发，不能再写错误页）
         upstreamRes.on('error', () => {
