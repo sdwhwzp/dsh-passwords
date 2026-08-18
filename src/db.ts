@@ -210,6 +210,12 @@ export class Database {
     return s;
   }
 
+  /** 显式释放 SQLite 文件句柄（测试/一次性工具使用；常驻服务由进程退出回收）。 */
+  close(): void {
+    this.stmts.clear();
+    this.db.close();
+  }
+
   /** 建表（幂等）+ 旧明文数据一次性迁移为密文 */
   init(): void {
     // 删除内容清零，防止已删除的明文残留在空闲页可被文件扫描恢复

@@ -22,6 +22,8 @@ export interface UserInfo {
 export interface StateData {
   me: { username: string; role: 'admin' | 'user' };
   users: UserInfo[];
+  /** 当前账号的聊天入口显示偏好；旧服务端未返回时默认开启。 */
+  chatEnabled?: boolean;
 }
 
 export interface PatchState {
@@ -223,6 +225,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
 
   const isAdmin = data?.me?.role === 'admin';
   const me = data?.me?.username ?? '';
+  const chatEnabled = data?.chatEnabled ?? true;
 
   const run = async (fn: () => Promise<void>, okMessage: string) => {
     setBusy(true);
@@ -248,6 +251,14 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
         window.location.reload();
       }, 6000);
     }, t('reloading'));
+  };
+
+  /** 聊天入口偏好按当前账号存储；ChatLauncher 下次刷新页面读取后停止渲染/轮询。 */
+  const toggleChatEntry = () => {
+    void run(
+      () => api('/api/dsh-passwords/chat-enabled', { enabled: !chatEnabled }),
+      t('chatToggleSaved'),
+    );
   };
 
   const changePassword = () => {
@@ -366,6 +377,24 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
       isAdmin
         ? h('span', { className: 'dshpw-badge admin' }, t('owner'))
         : h('span', { className: 'dshpw-badge' }, t('subuser')),
+    ),
+    // ── 聊天入口：按当前账号跨设备同步的显示偏好 ──
+    h(
+      'div',
+      { className: 'dshpw-section' },
+      h('span', { className: 'dshpw-label' }, t('chatToggle')),
+      h(
+        'label',
+        { className: 'dshpw-check' },
+        h('input', {
+          type: 'checkbox',
+          checked: chatEnabled,
+          disabled: busy || data === null,
+          onChange: toggleChatEntry,
+        }),
+        t('chatToggleDesc'),
+      ),
+      h('div', { className: 'dshpw-hint' }, t('chatToggleHint')),
     ),
     // ── 远程设置：状态 + 重载 ──
     h(

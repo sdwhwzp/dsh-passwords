@@ -108,6 +108,8 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
   const [error, setError] = useState('');
   const [unread, setUnread] = useState(0);
   const [shaking, setShaking] = useState(false);
+  // 账号级偏好异步读取：加载期间不闪现 FAB；请求失败时默认显示，避免 API 暂时异常把聊天永久隐藏。
+  const [chatEntry, setChatEntry] = useState<'loading' | 'on' | 'off'>('loading');
   const listRef = useRef<HTMLDivElement | null>(null);
   const lastSeenId = useRef(0);
   const openRef = useRef(false);
@@ -129,6 +131,23 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
     lastPos: { left: number; top: number } | null;
   } | null>(null);
 
+  // 读取按用户存储的聊天入口偏好（服务端默认开启，跨设备同步）。
+  useEffect(() => {
+    let disposed = false;
+    fetch('/api/dsh-passwords/state')
+      .then(async (res) => {
+        const data = (await res.json().catch(() => ({}))) as { chatEnabled?: unknown };
+        if (disposed) return;
+        setChatEntry(res.ok && data.chatEnabled === false ? 'off' : 'on');
+      })
+      .catch(() => {
+        if (!disposed) setChatEntry('on');
+      });
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
   // 挂载时恢复持久化位置
   useEffect(() => {
     try {
@@ -148,6 +167,7 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
 
   // 中键按下开始拖动（window 级监听一次挂载，拖动状态走 ref）
   useEffect(() => {
+    if (chatEntry !== 'on') return;
     const onMove = (e: MouseEvent) => {
       const d = dragRef.current;
       if (!d) return;
@@ -187,7 +207,7 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
     };
-  }, []);
+  }, [chatEntry]);
 
   const onFabMouseDown = (e: React.MouseEvent<HTMLButtonElement>) => {
     if (e.button !== 1) return; // 仅中键
@@ -227,6 +247,7 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
   // 超时链调度（非 setInterval）：支持失败退避与 in-flight 守卫，
   // 响应超过 4s 时不再重叠堆积请求。
   useEffect(() => {
+    if (chatEntry !== 'on') return;
     let disposed = false;
     let inFlight = false;
     let failStreak = 0; // 连续失败次数 → 指数退避（4s → 30s 封顶）
@@ -307,7 +328,7 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
       disposed = true;
       if (timer !== null) window.clearTimeout(timer);
     };
-  }, []);
+  }, [chatEntry]);
 
   // 新消息 / 打开面板时滚动到底部（仅在用户贴着底部时自动跟随）
   useEffect(() => {
@@ -403,6 +424,9 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
     haptic();
     setTags((prev) => (prev.includes(tag) ? prev.filter((x) => x !== tag) : [...prev, tag]));
   };
+
+  // 偏好关闭时不渲染 FAB/面板；轮询 effect 同步停用（不留后台请求或未读计数）。
+  if (chatEntry !== 'on') return null;
 
   return (
     <>

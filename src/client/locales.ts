@@ -11,6 +11,11 @@ export const zh = {
   identity: '当前身份：',
   owner: '主用户',
   subuser: '子用户',
+  // 聊天入口显示偏好（按当前账号跨设备同步）
+  chatToggle: '聊天入口',
+  chatToggleDesc: '显示左下角聊天气泡',
+  chatToggleHint: '关闭后刷新页面生效；聊天记录不会删除，之后可随时重新开启。',
+  chatToggleSaved: '聊天入口偏好已保存，刷新页面后生效',
   // 远程设置 / 补丁
   patch: '远程设置',
   patchUnknown: '状态未知',
@@ -122,6 +127,10 @@ export const en: Record<keyof typeof zh, string> = {
   identity: 'Signed in as:',
   owner: 'Owner',
   subuser: 'Subuser',
+  chatToggle: 'Chat entry',
+  chatToggleDesc: 'Show the chat bubble in the bottom-left corner',
+  chatToggleHint: 'Takes effect after refreshing. Messages are kept and you can re-enable it anytime.',
+  chatToggleSaved: 'Chat entry preference saved. Takes effect after refresh.',
   patch: 'Remote settings',
   patchUnknown: 'Status unknown',
   patchOk: 'Enabled · Remote access ready',

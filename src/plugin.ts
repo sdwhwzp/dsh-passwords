@@ -344,6 +344,8 @@ export function apply(ctx: Context): void {
           ok: true,
           me: { username: caller.username, role: caller.role },
           users,
+          // 聊天入口为按用户同步的显示偏好：未设置默认开启；用户跨设备登录同一账号时一致。
+          chatEnabled: db!.getSetting(`chat_enabled:${String(caller.userId)}`) !== '0',
         });
       },
     },
@@ -414,6 +416,26 @@ export function apply(ctx: Context): void {
           assertNoSqlInjection(target, 'target');
           await auth!.removeUser(caller, target, metaOf(req));
           writeJson(res, 200, { ok: true });
+        } catch (error) {
+          failJson(res, error);
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/api/dsh-passwords/chat-enabled',
+      handler: async (req, res) => {
+        const caller = guard(req, res);
+        if (!caller) return;
+        try {
+          const body = await readJsonBody(req);
+          if (typeof body.enabled !== 'boolean') {
+            writeJson(res, 400, { ok: false, code: 'INVALID', error: 'enabled 必须为布尔值' });
+            return;
+          }
+          // 显示偏好按用户持久化，而非全局开关：任意账号只能控制自己的聊天入口。
+          db!.setSetting(`chat_enabled:${String(caller.userId)}`, body.enabled ? '1' : '0');
+          writeJson(res, 200, { ok: true, chatEnabled: body.enabled });
         } catch (error) {
           failJson(res, error);
         }
