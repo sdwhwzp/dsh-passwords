@@ -1326,6 +1326,23 @@ export function createGatewayServer(
       // 未知子路径（如 /gateway/api/dsh-ssh/hosts 误拼接）直接 404，
       // 不透传到上游 dsh（否则未登录也返回 SPA 壳，泄露 window.__DSH_BOOT__ 插件清单）
       if (gatePath === '/gateway' || gatePath.startsWith('/gateway/')) {
+        // F-1：编码/压扁变形（/gateway%2Fapi%2Foverview、/gateway//login）——
+        // Express 用【原始 URL】匹配路由，%2F 不算分隔符 → 不会命中任何具体路由；
+        // 若这里按解码后的白名单放行，请求会落进无鉴权代理 → 转发上游 dsh 返回
+        // SPA 壳（泄露 window.__DSH_BOOT__ 插件清单 + 构建 rev，实测 7+ 变体全 200）。
+        // 仅当原始路径与解码归一化结果一致（无编码/压扁差异）才算字面命中网关路由。
+        let rawPathOnly = (req.url ?? '/').split('?')[0];
+        if (/^https?:\/\//i.test(rawPathOnly)) {
+          try {
+            rawPathOnly = new URL(rawPathOnly).pathname;
+          } catch {
+            /* 保持原值 */
+          }
+        }
+        if (normalizeDecodedPath(rawPathOnly) !== rawPathOnly) {
+          res.status(404).type('text/plain').send('404 Not Found');
+          return;
+        }
         // 精确白名单：只放行网关自有路由。
         // /gateway/api/* 不能整段放行——/gateway/api/dsh-ssh/hosts 之类误拼接路径
         // 会透传到上游 dsh 返回 SPA 壳（泄露 window.__DSH_BOOT__ 插件清单）。
@@ -1557,6 +1574,14 @@ export function createGatewayServer(
   }
 
   app.use((req, res) => {
+    // F-1 纵深防御：能到达这里（代理兑底）的 /gateway* 请求必然是未被具体网关路由
+    // 处理的畸形/伪装路径（合法网关路由都在各自处理器里 return 了）——一律 404，
+    // 绝不转发上游（防未登录 SPA 壳泄露 window.__DSH_BOOT__ 插件清单）。
+    const fallbackGatePath = gatePathOf(req.url ?? '/');
+    if (fallbackGatePath === '/gateway' || fallbackGatePath.startsWith('/gateway/')) {
+      res.status(404).type('text/plain').send('404 Not Found');
+      return;
+    }
     const headers: Record<string, string | string[] | undefined> = { ...req.headers };
     // 改写 Host 为上游地址（过 dsh 的 browser-trust fence 第 1 道：Host 检查）
     headers.host = `${upstreamHost}:${upstreamPort}`;
