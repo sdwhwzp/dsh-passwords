@@ -49,6 +49,9 @@ export function isPrivateHost(host: string): boolean {
   // 去掉 [::1] 形式的外层括号
   if (h.startsWith('[') && h.endsWith(']')) return isPrivateHost(h.slice(1, -1));
   if (h.includes(':')) {
+    // G-2：zone-id（fe80::1%eth0、::1%0、%25 编码同）只出现在链路本地/回环作用域地址——
+    // 语义上必属受限地址，直接判私网（Node 解析器会对部分形式抛 EINVAL/挂死，防御不依赖它）
+    if (h.includes('%')) return true;
     // F-29：IPv6 真·16 字节解析后按前缀判。之前只正则匹配 ::1 / :: / fc*: / fe8*:，
     // IPv4-mapped（::ffff:127.0.0.1、::ffff:7f00:1）、IPv4-compatible（::127.0.0.1）
     // 等全部漏判放行（实测 Node socket 把映射地址按 127.0.0.1 连，SSRF 面与 IPv4 侧等同）。
@@ -84,15 +87,18 @@ function parseIpv6Literal(ip: string): number[] | null {
 
   const parseSeq = (chunks: string[]): number[] | null => {
     const out: number[] = [];
-    for (const raw of chunks) {
+    for (let i = 0; i < chunks.length; i++) {
+      const raw = chunks[i];
       if (raw === '') return null;
-      if (raw.includes('.')) {
-        // 内嵌 IPv4：展开成 2 个 16 位组
+      if (/^[0-9a-f]{1,4}$/.test(raw)) {
+        out.push(parseInt(raw, 16));
+      } else if (i === chunks.length - 1) {
+        // G-1：末段非标准 16 位十六进制组（dotted / 单段 32 位整数 / 八进制 / 0x
+        // 十六进制变体）→ 按 IPv4 展开 4 字节为 2 组。覆盖 ::ffff:2130706433 等混合形式
+        // （Node 解析器虽不解析它，防御不应依赖下游能力）。只对末段生效，不影响 ::1 等合法组。
         const lit = parseIpv4Literal(raw);
         if (!lit) return null;
         out.push((lit[0] << 8) | lit[1], (lit[2] << 8) | lit[3]);
-      } else if (/^[0-9a-f]{1,4}$/.test(raw)) {
-        out.push(parseInt(raw, 16));
       } else {
         return null;
       }
