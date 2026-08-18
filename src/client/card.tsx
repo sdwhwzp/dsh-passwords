@@ -8,7 +8,7 @@
 // 语言：卡片词典注册在 locale 命名空间 'dshpw'（见 locales.ts），文字跟随
 // dsh 设置里的语言（Settings → General → Language）。t seat 由注册时的
 // `locale: 'dshpw'` 声明注入。
-import { createElement as h, useEffect, useState } from 'react';
+import { createElement as h, useEffect, useRef, useState } from 'react';
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots';
 
 export interface UserInfo {
@@ -67,6 +67,20 @@ interface PermDraft {
 /** 与 host 侧一致的最小密码策略（本机提示用，最终以服务端校验为准） */
 const PASSWORD_RE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{12,}$/;
 const USERNAME_RE = /^[A-Za-z0-9_-]{3,32}$/;
+
+/**
+ * 严格非负整数解析（限额输入用）：
+ *   空串 → null（=不限）；纯数字 → 整数；其余（1e3/0x10/12.5/-1/超大值）→ NaN（非法）。
+ * 之前用 Number('1e3')=1000 / Number('0x10')=16 会静默接受科学计数与十六进制。
+ * Number.isSafeInteger 同时封顶 2^53-1，低于 SQLite 64 位上限，防精度失真。
+ */
+export function parseLimit(raw: string): number | null {
+  const t = raw.trim();
+  if (t === '') return null;
+  if (!/^\d+$/.test(t)) return Number.NaN;
+  const n = Number(t);
+  return Number.isSafeInteger(n) ? n : Number.NaN;
+}
 
 /** 本地时间格式化（ISO → 可读的 YYYY-MM-DD HH:mm） */
 function fmtTime(iso: string): string {
@@ -137,6 +151,8 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
   const [overview, setOverview] = useState<PermOverview | null>(null);
   const [permDrafts, setPermDrafts] = useState<Record<number, PermDraft>>({});
   const [workspaces, setWorkspaces] = useState<Array<{ path: string; title: string }>>([]);
+  // 正在编辑中的子用户草稿：dirty 时 30s 自动刷新不覆盖本地未保存的修改
+  const dirtyUsersRef = useRef<Set<number>>(new Set());
 
   const refresh = () => {
     api<StateData>('/api/dsh-passwords/state')
@@ -147,21 +163,30 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
           api<PermOverview>('/gateway/api/overview')
             .then((o) => {
               setOverview(o);
-              // 只初始化新出现的用户 draft，已存在的本地编辑（admin 正在改的权限/限额）保留
+              // 草稿同步：新用户初始化；未在编辑（dirty）中的草稿用服务端最新值覆盖
+              // （注释承诺的“主用户在别处修改后页面自动同步最新状态”真正生效）；
+              // 已删除的用户清草稿；正在编辑的用户保留本地未保存修改。
               setPermDrafts((prev) => {
                 const drafts: Record<number, PermDraft> = { ...prev };
+                const live = new Set<number>();
                 for (const u of o.users) {
-                  if (u.role === 'user' && !(u.id in drafts)) {
-                    drafts[u.id] = {
-                      folders: [...(u.permissions.allowedFolders ?? [])],
-                      token: u.permissions.hourlyTokenLimit === null ? '' : String(u.permissions.hourlyTokenLimit),
-                      minutes: u.permissions.dailyMinutesLimit === null ? '' : String(u.permissions.dailyMinutesLimit),
-                      upload: u.permissions.allowUpload,
-                      git: u.permissions.allowGitDownload,
-                      banned: u.permissions.banned,
-                      sandbox: u.permissions.sandboxMode ?? '',
-                    };
+                  if (u.role !== 'user') continue;
+                  live.add(u.id);
+                  const fresh: PermDraft = {
+                    folders: [...(u.permissions.allowedFolders ?? [])],
+                    token: u.permissions.hourlyTokenLimit === null ? '' : String(u.permissions.hourlyTokenLimit),
+                    minutes: u.permissions.dailyMinutesLimit === null ? '' : String(u.permissions.dailyMinutesLimit),
+                    upload: u.permissions.allowUpload,
+                    git: u.permissions.allowGitDownload,
+                    banned: u.permissions.banned,
+                    sandbox: u.permissions.sandboxMode ?? '',
+                  };
+                  if (!(u.id in drafts) || !dirtyUsersRef.current.has(u.id)) {
+                    drafts[u.id] = fresh;
                   }
+                }
+                for (const id of Object.keys(drafts)) {
+                  if (!live.has(Number(id))) delete drafts[Number(id)];
                 }
                 return drafts;
               });
@@ -255,20 +280,21 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
 
   // 权限草稿更新 + 保存（仅主用户）
   const setDraft = (userId: number, patch: Partial<PermDraft>) => {
+    dirtyUsersRef.current.add(userId);
     setPermDrafts((prev) => ({ ...prev, [userId]: { ...prev[userId], ...patch } }));
   };
 
   const savePermissions = (userId: number) => {
     const d = permDrafts[userId];
     if (!d) return;
-    // 非法/小数/负数输入不能静默转 null（=不限）：校验后给出提示
-    const tokenNum = d.token.trim() === '' ? null : Number(d.token);
-    const minutesNum = d.minutes.trim() === '' ? null : Number(d.minutes);
-    if (tokenNum !== null && (!Number.isInteger(tokenNum) || tokenNum < 0)) {
+    // 非法输入不能静默转 null（=不限）：parseLimit 拒绝小数/负数/科学计数/十六进制/超大值
+    const tokenNum = parseLimit(d.token);
+    const minutesNum = parseLimit(d.minutes);
+    if (tokenNum !== null && !Number.isInteger(tokenNum)) {
       setError(t('err.INVALID'));
       return;
     }
-    if (minutesNum !== null && (!Number.isInteger(minutesNum) || minutesNum < 0)) {
+    if (minutesNum !== null && !Number.isInteger(minutesNum)) {
       setError(t('err.INVALID'));
       return;
     }
@@ -283,6 +309,9 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
           allowGitDownload: d.git,
           banned: d.banned,
           sandboxMode: d.sandbox === '' ? null : d.sandbox,
+        }).then(() => {
+          // 保存成功：草稿与服务端一致，解除 dirty（后续 30s 刷新可覆盖）
+          dirtyUsersRef.current.delete(userId);
         }),
       t('permsSaved'),
     );
@@ -482,6 +511,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
                   className: 'dshpw-input',
                   value: d.folders[0] ?? '',
                   'aria-label': t('permsFolders'),
+                  title: d.folders.join('\n'),
                   onChange: (e: { target: { value: string } }) =>
                     setDraft(u.id, { folders: e.target.value === '' ? [] : [e.target.value] }),
                 },
@@ -497,6 +527,9 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
                     });
                 })()),
               ),
+              d.folders.length > 1
+                ? h('div', { className: 'dshpw-hint' }, t('permsFoldersMulti', { n: String(d.folders.length) }))
+                : null,
               h(
                 'select',
                 {
@@ -515,16 +548,18 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
                 { className: 'dshpw-row' },
                 h('input', {
                   className: 'dshpw-input',
-                  type: 'number',
-                  min: 0,
+                  type: 'text',
+                  inputMode: 'numeric',
+                  pattern: '[0-9]*',
                   placeholder: t('permsToken'),
                   value: d.token,
                   onChange: (e: { target: { value: string } }) => setDraft(u.id, { token: e.target.value }),
                 }),
                 h('input', {
                   className: 'dshpw-input',
-                  type: 'number',
-                  min: 0,
+                  type: 'text',
+                  inputMode: 'numeric',
+                  pattern: '[0-9]*',
                   placeholder: t('permsMinutes'),
                   value: d.minutes,
                   onChange: (e: { target: { value: string } }) => setDraft(u.id, { minutes: e.target.value }),

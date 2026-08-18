@@ -52,7 +52,20 @@ function fmtTime(iso: string): string {
   return `${hh}:${mm}`;
 }
 
-function mergeById(prev: ChatMessage[], incoming: ChatMessage[]): ChatMessage[] {
+/** 合并新消息：去重、按 id 升序、保留最近 200 条。
+ *  无新 id 时返回原引用——每 4 秒轮询返回空时若重建数组，
+ *  会触发 [messages] 滚动 effect 把用户硬拽回底部（必现缺陷）。 */
+export function mergeById(prev: ChatMessage[], incoming: ChatMessage[]): ChatMessage[] {
+  if (incoming.length === 0) return prev;
+  const known = new Set(prev.map((m) => m.id));
+  let hasNew = false;
+  for (const m of incoming) {
+    if (!known.has(m.id)) {
+      hasNew = true;
+      break;
+    }
+  }
+  if (!hasNew) return prev; // 无新消息：保持原引用，滚动 effect 不触发
   const map = new Map<number, ChatMessage>();
   for (const m of prev) map.set(m.id, m);
   for (const m of incoming) map.set(m.id, m);
@@ -62,6 +75,9 @@ function mergeById(prev: ChatMessage[], incoming: ChatMessage[]): ChatMessage[] 
 /** 聊天入口 + 面板（挂在 shell.overlay 槽） */
 export function ChatLauncher(props: PropsLocale<'dshpw'>) {
   const t = props.t;
+  // tagDisplay 需要 (key: string) => string，而 dshpw 词典 t 是受限 key 联合类型：
+  // 包一层宽松签名适配器（运行时不变）
+  const tr = (key: string) => t(key as never);
   const [open, setOpen] = useState(false);
   const [closing, setClosing] = useState(false);
   const [me, setMe] = useState<Me | null>(null);
@@ -76,6 +92,10 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
   const lastSeenId = useRef(0);
   const openRef = useRef(false);
   const initializedRef = useRef(false);
+  // 用户是否停留在列表底部（只有贴着底部时才自动滚动，向上翻历史时不被 4s 轮询拽回）
+  const atBottomRef = useRef(true);
+  // 关闭动画的 180ms 定时器：重开面板时取消，避免“开了又被强制关”
+  const closeTimerRef = useRef<number | null>(null);
 
   // ── 中键拖动 FAB：位置 state + ref（拖动用 ref 避免重挂监听器）──
   const fabPosRef = useRef(defaultFabPos());
@@ -168,7 +188,10 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
 
   useEffect(() => {
     openRef.current = open;
-    if (open) setUnread(0);
+    if (open) {
+      setUnread(0);
+      atBottomRef.current = true; // 打开面板：跳到最新（滚动由下方 effect 执行）
+    }
   }, [open]);
 
   // 有未读时让按钮震动一下
@@ -181,10 +204,18 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
   }, [unread]);
 
   // 轮询加载 + 未读统计（不依赖 SSE，消息无需刷新页面）
+  // 超时链调度（非 setInterval）：支持失败退避与 in-flight 守卫，
+  // 响应超过 4s 时不再重叠堆积请求。
   useEffect(() => {
     let disposed = false;
+    let inFlight = false;
+    let failStreak = 0; // 连续失败次数 → 指数退避（4s → 30s 封顶）
+    let emptyStreak = 0; // 连续空响应次数 → 触发一次全量拉取（DB 重置后恢复基线）
+    let timer: number | null = null;
 
     const load = () => {
+      if (disposed || inFlight) return; // 上一轮未返回：跳过本轮，避免请求堆积
+      inFlight = true;
       // 增量拉取：服务端只返回 id > since 的新消息（第一次全量拿基线），
       // 避免每 4 秒轮询都全量下载最近 300 条留言（长期挂机 = 长期无谓带宽/CPU）。
       const since = lastSeenId.current;
@@ -194,6 +225,7 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
           const d = await res.json().catch(() => ({}));
           if (disposed) return;
           if (res.ok && d.ok) {
+            failStreak = 0;
             const incoming = (Array.isArray(d.messages) ? d.messages : []) as ChatMessage[];
             // 服务端返回 id DESC（新在前），这里统一成旧在前、新在后
             incoming.sort((a, b) => a.id - b.id);
@@ -210,33 +242,60 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
             initializedRef.current = true;
             setMessages((prev) => mergeById(prev, incoming));
             setError('');
+            // 连续 3 轮空响应 → 全量拉取一次：覆盖“网关重建数据库后新消息 id
+            // 从头开始，since 永远大于 maxId → 永久收不到新消息”的静默卡死。
+            if (incoming.length === 0) {
+              emptyStreak++;
+              if (emptyStreak >= 3) {
+                emptyStreak = 0;
+                lastSeenId.current = 0; // 下轮 since=0 全量拿基线
+              }
+            } else {
+              emptyStreak = 0;
+            }
           } else if (!res.ok) {
             setError(d.error ?? t('chat.loadFailed'));
           }
         })
         .catch(() => {
-          if (!disposed) setError(t('chat.loadFailed'));
+          if (disposed) return;
+          failStreak++;
+          setError(t('chat.loadFailed'));
+        })
+        .finally(() => {
+          inFlight = false;
+          if (disposed) return;
+          // 失败退避：4s、8s、16s、30s 封顶；成功恢复 4s
+          const delay = failStreak > 0 ? Math.min(POLL_MS * 2 ** failStreak, 30_000) : POLL_MS;
+          timer = window.setTimeout(load, delay);
         });
     };
 
     load();
-    const timer = window.setInterval(load, POLL_MS);
     return () => {
       disposed = true;
-      window.clearInterval(timer);
+      if (timer !== null) window.clearTimeout(timer);
     };
   }, []);
 
-  // 新消息 / 打开面板时滚动到底部
+  // 新消息 / 打开面板时滚动到底部（仅在用户贴着底部时自动跟随）
   useEffect(() => {
-    if (open && listRef.current) {
+    if (open && listRef.current && atBottomRef.current) {
       listRef.current.scrollTop = listRef.current.scrollHeight;
     }
   }, [messages, open]);
 
+  const onListScroll = () => {
+    const el = listRef.current;
+    if (!el) return;
+    atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+  };
+
   const close = () => {
     setClosing(true);
-    window.setTimeout(() => {
+    if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current);
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = null;
       setOpen(false);
       setClosing(false);
       setError('');
@@ -244,6 +303,12 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
   };
 
   const openPanel = () => {
+    // 关闭动画进行中重开：取消 pending 的 close 定时器，否则面板开了又被强制关
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+    setClosing(false);
     setOpen(true);
     setUnread(0);
   };
@@ -324,7 +389,7 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
               </button>
             </div>
 
-            <div className="dshpw-chat-list" ref={listRef}>
+            <div className="dshpw-chat-list" ref={listRef} onScroll={onListScroll}>
               {messages.length === 0 && <div className="dshpw-chat-empty">{t('chat.empty')}</div>}
               {messages.map((m) => {
                 const mine = me ? m.sender_id === me.id : false;
@@ -339,7 +404,7 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
                       <div className="dshpw-chat-tags">
                         {m.tags.map((tag) => (
                           <span className="dshpw-chat-tag" key={tag}>
-                            {tagDisplay(tag, t)}
+                            {tagDisplay(tag, tr)}
                           </span>
                         ))}
                       </div>
@@ -358,7 +423,7 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
                     className={'dshpw-chat-tagbtn' + (tags.includes(tag) ? ' active' : '')}
                     onClick={() => toggleTag(tag)}
                   >
-                    {tagDisplay(tag, t)}
+                    {tagDisplay(tag, tr)}
                   </button>
                 ))}
               </div>
@@ -390,7 +455,7 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
 
 // ── 聊天面板样式：跟随 dsh 设计令牌，主题自动适配 ───────────────
 const CHAT_CSS = `
-.dshpw-chat-fab{position:fixed;left:14px;bottom:116px;z-index:2147483000;width:36px;height:36px;border-radius:50%;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.18);transition:transform .18s,box-shadow .18s,background .18s;pointer-events:auto}
+.dshpw-chat-fab{position:fixed;z-index:2147483000;width:36px;height:36px;border-radius:50%;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.18);transition:transform .18s,box-shadow .18s,background .18s;pointer-events:auto}
 .dshpw-chat-fab.dragging{transition:none;cursor:grabbing;opacity:.85}
 .dshpw-chat-fab:hover{transform:scale(1.05);background:var(--dsw-alias-interactive-bg-hover);box-shadow:0 4px 12px rgba(0,0,0,.25)}
 .dshpw-chat-fab:active{transform:scale(.96)}

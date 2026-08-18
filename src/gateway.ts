@@ -896,10 +896,21 @@ export function createGatewayServer(
   });
 
   // ── 内部辅助：API 路由的输入清洗 ───────────────────────────
+  // 严格非负整数：拒绝 1e3/0x10/小数/负数/超大值（之前 Number() 静默接受科学
+  // 计数与十六进制，1e21 等超大值在 SQLite 64 位整数绑定里精度失真）。
+  // Number.isSafeInteger 封顶 2^53-1，天然低于 int64 上限。
   const nullableInt = (v: unknown): number | null => {
-    const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN;
-    if (!Number.isInteger(n) || n < 0) return null;
-    return n;
+    if (typeof v === 'number') {
+      return Number.isSafeInteger(v) && v >= 0 ? v : null;
+    }
+    if (typeof v === 'string') {
+      const t = v.trim();
+      if (t === '') return null;
+      if (!/^\d+$/.test(t)) return null;
+      const n = Number(t);
+      return Number.isSafeInteger(n) && n >= 0 ? n : null;
+    }
+    return null;
   };
   const stringArray = (v: unknown): string[] =>
     Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string').slice(0, 64) : [];

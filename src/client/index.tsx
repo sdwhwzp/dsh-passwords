@@ -34,8 +34,8 @@ const CSS = `
 .dshpw-perm-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .dshpw-check{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--dsw-alias-label-secondary);cursor:pointer}
 .dshpw-check input{accent-color:var(--dsw-alias-brand-primary)}
-.dshpw-input select,.dshpw-input.multi{height:auto;min-height:36px}
-.dshpw-input[multiple]{height:auto;min-height:72px}
+/* 下拉框自身带 dshpw-input class：用 select.dshpw-input（旧 .dshpw-input select 永远不命中，是死选择器） */
+select.dshpw-input{height:auto;min-height:36px}
 .dshpw-badge{font-size:11px;padding:1px 8px;border-radius:999px;border:1px solid var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary);margin-left:6px;white-space:nowrap}
 .dshpw-badge.admin{border-color:var(--dsw-alias-state-warn-primary,#f7ad31);color:var(--dsw-alias-state-warn-primary,#f7ad31)}
 .dshpw-error{color:var(--dsw-alias-state-error-primary,#ef4444);font-size:12px}

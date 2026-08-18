@@ -25,12 +25,16 @@ interface TokenUsageProjection {
 const REPORT_INTERVAL_MS = 15000;
 
 export function TokenReporter({ useProjection }: { useProjection: UseProjection }) {
-  const read = useProjection as unknown as (key: string) => unknown;
-  const usage = read('tokenUsage') as TokenUsageProjection | undefined;
+  // 槽未注入该 prop（dsh 版本差异/槽位变化）时 read 可能为 undefined：
+  // 守卫后静默不启用，避免 read() 直接抛 TypeError 崩掉整个 dock 槽组件
+  const read = useProjection as unknown as ((key: string) => unknown) | undefined;
+  const usage =
+    typeof read === 'function' ? (read('tokenUsage') as TokenUsageProjection | undefined) : undefined;
 
   const lastTotal = useRef<number | null>(null);
   const pending = useRef(0);
   const inFlight = useRef(false);
+  const inFlightP = useRef<Promise<void> | null>(null);
 
   // 累计投影增量
   useEffect(() => {
@@ -54,7 +58,7 @@ export function TokenReporter({ useProjection }: { useProjection: UseProjection 
       if (n <= 0) return;
       pending.current = 0;
       inFlight.current = true;
-      fetch('/gateway/api/usage/report', {
+      const p = fetch('/gateway/api/usage/report', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ tokens: n }),
@@ -68,12 +72,31 @@ export function TokenReporter({ useProjection }: { useProjection: UseProjection 
         })
         .finally(() => {
           inFlight.current = false;
+          inFlightP.current = null;
         });
+      inFlightP.current = p;
     };
     const timer = window.setInterval(flush, REPORT_INTERVAL_MS);
     return () => {
       window.clearInterval(timer);
       flush();
+      // 卸载时若上一轮仍 in-flight，等它完成后把期间积压的 pending 补发一次
+      // （否则这部分增量直接丢失，配额少计费——注释承诺“卸载不丢增量”才真正成立）
+      const p = inFlightP.current;
+      if (p) {
+        void p.finally(() => {
+          const n = pending.current;
+          if (n <= 0) return;
+          pending.current = 0;
+          void fetch('/gateway/api/usage/report', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ tokens: n }),
+          }).catch(() => {
+            // 页面即将销毁，无法再重试：失败仅影响本次计费，不再回滚
+          });
+        });
+      }
     };
   }, []);
 
