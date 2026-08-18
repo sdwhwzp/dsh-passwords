@@ -1330,7 +1330,11 @@ export function createGatewayServer(
         // Express 用【原始 URL】匹配路由，%2F 不算分隔符 → 不会命中任何具体路由；
         // 若这里按解码后的白名单放行，请求会落进无鉴权代理 → 转发上游 dsh 返回
         // SPA 壳（泄露 window.__DSH_BOOT__ 插件清单 + 构建 rev，实测 7+ 变体全 200）。
-        // 仅当原始路径与解码归一化结果一致（无编码/压扁差异）才算字面命中网关路由。
+        // 判定：段结构一致性——原始路径按 '/' 分段的段数必须与解码归一化后一致。
+        //   %2F 改变段数（/gateway%2Fapi → 原始 2 段 vs 解码 3+ 段）→ 404；
+        //   %2f 小写、%252F 双重、// 压扁同理（段数变化）；
+        //   段内编码（如 %E7%94%A8 非 ASCII 段，段数不变）→ 放行——为未来含
+        //   非 ASCII 段的网关路由留好扩展口（测试方建议：不做过严的字面拒绝）。
         let rawPathOnly = (req.url ?? '/').split('?')[0];
         if (/^https?:\/\//i.test(rawPathOnly)) {
           try {
@@ -1339,7 +1343,7 @@ export function createGatewayServer(
             /* 保持原值 */
           }
         }
-        if (normalizeDecodedPath(rawPathOnly) !== rawPathOnly) {
+        if (rawPathOnly.split('/').length !== gatePath.split('/').length) {
           res.status(404).type('text/plain').send('404 Not Found');
           return;
         }
