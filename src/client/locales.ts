@@ -8,6 +8,8 @@
 export const zh = {
   title: 'dsh-passwords · 密码门',
   desc: '登录网关的账号管理。当前身份：',
+  sectionTitle: '密码门',
+  sectionDesc: 'dsh-passwords 登录网关的设置与账号管理。',
   owner: '主用户',
   subuser: '子用户',
   expand: '展开',
@@ -118,6 +120,8 @@ export const zh = {
 export const en: Record<keyof typeof zh, string> = {
   title: 'dsh-passwords · Password Gate',
   desc: 'Accounts for the login gateway. Signed in as:',
+  sectionTitle: 'Password Gate',
+  sectionDesc: 'dsh-passwords login gateway settings and account management.',
   owner: 'Owner',
   subuser: 'Subuser',
   expand: 'Expand',

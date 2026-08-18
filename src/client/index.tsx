@@ -7,6 +7,7 @@ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client';
 import type {} from '@deepseek-ai/dsh-client-ui-slots/client';
 import type {} from '@deepseek-ai/dsh-client-locale/client';
 import { DshPasswordsCard } from './card';
+import { DshPasswordsSection } from './section';
 import { ChatLauncher } from './chat';
 import { TokenReporter } from './token';
 import { zh, en } from './locales';
@@ -59,12 +60,31 @@ if (typeof document !== 'undefined') {
 export const inject = ['slots', 'locale'] as const;
 
 export function apply(ctx: ClientContext): void {
-  ctx.slots.inject('settings.plugin.item', () =>
+  // 独立设置分区（参考 @linxin666 的 settings.section 模式）：在设置页左侧导航
+  // 注册 dsh-passwords 一级分区，分区体内渲染注册进 dsh-passwords.plugin.item
+  // 的卡片——设置不再挤在官方"插件"列表里，而是单独成区。
+  ctx.slots.inject('settings.section', () =>
     ctx.slots.register(
       {
-        name: 'settings.plugin.item',
+        name: 'settings.section',
         id: 'dsh-passwords',
         key: 'dsh-passwords',
+        order: 105,
+        label: () => ctx.locale.bind('dshpw')('sectionTitle'),
+        locale: 'dshpw',
+        children: { 'dsh-passwords.plugin.item': { kind: 'list', scope: 'root' } },
+      },
+      DshPasswordsSection,
+    ),
+  );
+
+  // 设置卡片：注册进上面分区声明的子槽（分区体 renderSlot 渲染）
+  ctx.slots.inject('dsh-passwords.plugin.item', () =>
+    ctx.slots.register(
+      {
+        name: 'dsh-passwords.plugin.item',
+        id: 'dsh-passwords-card',
+        key: 'dsh-passwords-card',
         order: 55,
         locale: 'dshpw',
         inject: () => ({}),
