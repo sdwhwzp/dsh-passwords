@@ -64,6 +64,7 @@ export function apply(ctx: ClientContext): void {
       {
         name: 'settings.plugin.item',
         id: 'dsh-passwords',
+        key: 'dsh-passwords',
         order: 55,
         locale: 'dshpw',
         inject: () => ({}),
@@ -78,6 +79,7 @@ export function apply(ctx: ClientContext): void {
       {
         name: 'shell.overlay',
         id: 'dsh-passwords-chat',
+        key: 'dsh-passwords-chat',
         order: 100,
         locale: 'dshpw',
         inject: () => ({}),
@@ -90,7 +92,7 @@ export function apply(ctx: ClientContext): void {
   // 读取 dsh 的 tokenUsage 投影并把增量上报给密码门，用于子用户每小时 token 配额。
   ctx.slots.inject('conversation.composer.dock', () =>
     ctx.slots.register(
-      { name: 'conversation.composer.dock', id: 'dsh-passwords-token', order: 90 },
+      { name: 'conversation.composer.dock', id: 'dsh-passwords-token', key: 'dsh-passwords-token', order: 90 },
       TokenReporter,
     ),
   );
