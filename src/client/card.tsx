@@ -153,8 +153,13 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
   const [workspaces, setWorkspaces] = useState<Array<{ path: string; title: string }>>([]);
   // 正在编辑中的子用户草稿：dirty 时 30s 自动刷新不覆盖本地未保存的修改
   const dirtyUsersRef = useRef<Set<number>>(new Set());
+  // 刷新 in-flight 守卫：慢网络下 30s 定时 + 操作后手动 refresh 可能重叠，
+  // 上一轮未返回时跳过本轮（3 个轻量 API，重叠只会无益重发）
+  const refreshingRef = useRef(false);
 
   const refresh = () => {
+    if (refreshingRef.current) return;
+    refreshingRef.current = true;
     api<StateData>('/api/dsh-passwords/state')
       .then((d) => {
         setData(d);
@@ -200,7 +205,10 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
       .catch((e) => setError(errText(e, trErr)));
     api<{ status: PatchState | null }>('/api/dsh-passwords/patch/status')
       .then((r) => setPatchState(r.status))
-      .catch(() => setPatchState(null));
+      .catch(() => setPatchState(null))
+      .finally(() => {
+        refreshingRef.current = false;
+      });
   };
 
   // 密码门已是独立设置分区页（settings.section），无需折叠：

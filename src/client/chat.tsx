@@ -249,12 +249,17 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
             setError('');
             // 连续 3 轮空响应 → 全量拉取一次：覆盖“网关重建数据库后新消息 id
             // 从头开始，since 永远大于 maxId → 永久收不到新消息”的静默卡死。
+            // 仅当已有基线（lastSeenId>0）才探测：无消息基线下 lastSeenId=0，
+            // 每轮本就是全量拉取（URL 无 since 参数），空响应是正常态——
+            // 若不区分会永久性每 3 轮触发一次无意义的全量（每 16 秒，无益开销）。
             if (incoming.length === 0) {
-              emptyStreak++;
-              if (emptyStreak >= 3) {
-                emptyStreak = 0;
-                lastSeenId.current = 0; // 下轮 since=0 全量拿基线
-                forceBaseline = true; // 该次全量仅重建基线，不计未读
+              if (lastSeenId.current > 0) {
+                emptyStreak++;
+                if (emptyStreak >= 3) {
+                  emptyStreak = 0;
+                  lastSeenId.current = 0; // 下轮 since=0 全量拿基线
+                  forceBaseline = true; // 该次全量仅重建基线，不计未读
+                }
               }
             } else {
               emptyStreak = 0;
