@@ -8,7 +8,7 @@
 //   cert.key.pem      证书私钥（P-256，TLS 用）
 //   fullchain.pem     证书链（叶子 + 中间证书）
 import { createHash, createPrivateKey, createPublicKey, createSign, generateKeyPairSync, randomBytes, X509Certificate, type KeyObject } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 import { isPublicIp } from './config.js';
 
@@ -334,7 +334,16 @@ function ensureKeyFile(file: string): KeyObject {
   }
   const { privateKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
   const pem = privateKey.export({ type: 'pkcs8', format: 'pem' }) as string;
-  writeFileSync(file, pem, { mode: 0o600 });
+  // 原子写：进程/主机在写入中断时不留截断的 key 文件（下次 createPrivateKey 失败
+  // 会让自动签发/续期永久不可用）；与证书/meta 的 tmp+rename 同口径
+  const tmp = `${file}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`;
+  try {
+    writeFileSync(tmp, pem, { mode: 0o600 });
+    renameSync(tmp, file);
+  } catch (error) {
+    try { if (existsSync(tmp)) unlinkSync(tmp); } catch { /* best effort */ }
+    throw error;
+  }
   return privateKey;
 }
 

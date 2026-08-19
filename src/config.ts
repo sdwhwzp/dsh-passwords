@@ -62,6 +62,9 @@ export interface PlatformConfig {
 export function loadConfig(): PlatformConfig {
   // F-07：启动时收紧 .env 权限（POSIX 0600），防止同机其他用户/备份泄露密钥
   tightenEnvPerm(envFilePath());
+  // Windows：手动创建/复制来的 .env 不经过安装器，这里启动时同样用 icacls 收紧
+  // （失败仅告警不阻断启动，见 tightenWindowsAcl）
+  tightenWindowsAcl(envFilePath());
   const setupKey = readEnv('SETUP_KEY', '');
   // 无 SETUP_KEY 时拒绝加载（fail-closed）：
   // 之前回退到 sha256('dev') 可被公开计算，攻击者能伪造任意 JWT 认证绕过。

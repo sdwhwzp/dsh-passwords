@@ -267,13 +267,16 @@ export class AuthService {
     return { token, username: user.username };
   }
 
-  /** 校验 JWT（Web 中间件用）；cv 为签入时的凭据版本，改密后旧 token 失效 */
-  verifyToken(token: string): { userId: number; username: string; cv: number } {
+  /** 校验 JWT（Web 中间件用）；cv 为签入时的凭据版本，改密后旧 token 失效。
+   *  exp 为 JWT 自身的到期时间（秒级 epoch，无则 undefined）——网关会话缓存
+   *  的 TTL 必须与其取最小值，否则缓存命中会在 JWT 过期后额外接受最多 30 秒。 */
+  verifyToken(token: string): { userId: number; username: string; cv: number; exp?: number } {
     try {
       // 算法白名单：只接受 HS256（对称密钥），拒绝 alg:none / RS→HS 混淆等变体
       const payload = jwt.verify(token, this.config.jwtSecret, { algorithms: ['HS256'] }) as jwt.JwtPayload;
       const cv = typeof payload.cv === 'number' ? payload.cv : 0;
-      return { userId: Number(payload.sub), username: String(payload.username), cv };
+      const exp = typeof payload.exp === 'number' && Number.isFinite(payload.exp) ? payload.exp : undefined;
+      return { userId: Number(payload.sub), username: String(payload.username), cv, exp };
     } catch {
       throw new AuthError('INVALID_TOKEN', {}, 401);
     }

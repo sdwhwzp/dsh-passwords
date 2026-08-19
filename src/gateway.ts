@@ -740,8 +740,14 @@ export function createGatewayServer(
       const row = db.getUserByUsername(user.username);
       if (row === null) return null;
       if (user.cv !== row.credential_version) return null;
-      sessionCache.set(token, { user, expireAt: now + SESSION_CACHE_TTL_MS });
-      return user;
+      // 缓存 TTL 与 JWT 到期时间取最小值：否则刚过期就被缓存的 token 会在
+      // 命中路径上绕过验签，额外存活最多 30 秒
+      const expMs = user.exp !== undefined ? user.exp * 1000 : undefined;
+      const cacheTtl =
+        expMs !== undefined ? Math.min(SESSION_CACHE_TTL_MS, Math.max(0, expMs - now)) : SESSION_CACHE_TTL_MS;
+      if (cacheTtl <= 0) return null; // JWT 已到期：不得进入缓存
+      sessionCache.set(token, { user: { userId: user.userId, username: user.username }, expireAt: now + cacheTtl });
+      return { userId: user.userId, username: user.username };
     } catch {
       return null;
     }
@@ -907,6 +913,13 @@ export function createGatewayServer(
   });
 
   // ── 登录提交（POST） → Set-Cookie + 302 重定向兼容层 ────────
+  // 成功登录限速：持有有效凭据的用户可反复登录/登出制造唯一 JWT，撑大
+  // revokedTokens 撤销表（12h TTL，不可超容量淘汰）——每用户名每分钟最多
+  // 10 次成功登录（正常多设备使用远低于此）。只在成功后计数：无凭据者
+  // 无法用它锁定受害者用户名。
+  const loginSuccessRate = new Map<string, number[]>();
+  const LOGIN_SUCCESS_MAX_PER_MIN = 10;
+
   app.post('/gateway/login', async (req, res) => {
     const next = safeNext(typeof req.body?.next === 'string' ? req.body.next : undefined);
     const username = typeof req.body?.username === 'string' ? req.body.username : '';
@@ -929,7 +942,22 @@ export function createGatewayServer(
     }
 
     try {
-      const { token } = await auth.login({ username, password }, meta);
+      const { token, username: loggedInAs } = await auth.login({ username, password }, meta);
+      const nowTs = Date.now();
+      const recent = (loginSuccessRate.get(loggedInAs) ?? []).filter((t) => nowTs - t < 60_000);
+      if (recent.length >= LOGIN_SUCCESS_MAX_PER_MIN) {
+        loginSuccessRate.set(loggedInAs, recent);
+        const dbHealthy = await db.health().catch(() => false);
+        const csrf = newCsrfToken(csrfSecret);
+        setCsrfCookie(res, csrf, config.gateway.tls !== null);
+        res
+          .status(429)
+          .type('html')
+          .send(renderLoginPage({ lang: langOf(req), next, error: '登录过于频繁，请稍后再试', dbHealthy, csrf }));
+        return;
+      }
+      recent.push(nowTs);
+      loginSuccessRate.set(loggedInAs, recent);
       res.setHeader(
         'Set-Cookie',
         `${COOKIE_NAME}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=43200${
@@ -1368,8 +1396,28 @@ export function createGatewayServer(
       res.status(400).json({ ok: false, code: 'INVALID', error: '内容过长' });
       return;
     }
-    const recipientId = nullableInt(body.recipientId);
-    const tags = stringArray(body.tags).slice(0, 8);
+    // recipientId 绝不能把非法值静默归一成 null（广播）：调用方本意是私信却因
+    // 拼写/类型错误公开发出属于隐私事故；不存在的用户也不能留下永远不可投递的
+    // 孤儿消息（messages 无 FK）。未提供/null 才是明确的广播语义。
+    const rawRecipient = body.recipientId;
+    let recipientId: number | null = null;
+    if (rawRecipient !== undefined && rawRecipient !== null) {
+      recipientId = nullableInt(rawRecipient);
+      if (recipientId === null || recipientId < 1) {
+        res.status(400).json({ ok: false, code: 'INVALID', error: 'recipientId 无效' });
+        return;
+      }
+      if (db.getUserById(recipientId) === null) {
+        res.status(404).json({ ok: false, code: 'NO_SUCH_USER', error: '收件人不存在' });
+        return;
+      }
+    }
+    // tag 是展示元数据：限制数量、逐项长度并去空白，防 256KB JSON 请求把极长 tag
+    // 持久化到每条消息（content 已有 4k 上限）。保留未知短 tag 兼容旧数据/扩展。
+    const tags = stringArray(body.tags)
+      .map((tag) => tag.trim())
+      .filter((tag) => tag.length > 0 && tag.length <= 64)
+      .slice(0, 8);
     const msg = db.addMessage(me.userId, recipientId, content, tags);
     broadcastMessage(msg);
     res.json({ ok: true, message: msg });
@@ -2410,6 +2458,11 @@ export function createGatewayServer(
       const keep = v.filter((t) => now - t < 60_000);
       if (keep.length > 0) msgRate.set(k, keep);
       else msgRate.delete(k);
+    }
+    for (const [k, v] of loginSuccessRate) {
+      const keep = v.filter((t) => now - t < 60_000);
+      if (keep.length > 0) loginSuccessRate.set(k, keep);
+      else loginSuccessRate.delete(k);
     }
     // 极端 token/IP 洪泛下，TTL 尚未到期的键也可能无界增长；保留最新一半，
     // 牺牲极端情况下的短期缓存命中而不牺牲进程可用性。

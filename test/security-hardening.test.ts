@@ -17,6 +17,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import zlib from 'node:zlib';
 import jwt from 'jsonwebtoken';
+import bcrypt from 'bcryptjs';
 import { generateKeyPairSync } from 'node:crypto';
 
 import { createGatewayServer } from '../src/gateway.js';
@@ -129,6 +130,8 @@ before(async () => {
   subuserId = sub.id;
   const third = db.createUser('third', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   thirdId = third.id;
+  // 登录限速回归：真实 bcrypt 凭据（登录流程需要比对）
+  db.createUser('ratelimit', bcrypt.hashSync('Password123!', 10), 'user');
 
   upstream = await startMockUpstream();
   const upstreamPort = (upstream.address() as { port: number }).port;
@@ -283,6 +286,111 @@ test('M-5c：其他用户私信不堵塞当前用户增量拉取（可见性在 
   const resetContents = body2.messages.map((m) => m.content);
   assert.ok(resetContents.includes('target-for-admin'), 'reset 全量必须包含当前用户可见消息');
   assert.ok(!resetContents.some((c) => c.startsWith('hidden-')), 'reset 全量不得泄露他人私信');
+});
+
+// ── 消息写入：recipientId 显式校验（不再静默转广播） ─────────────
+
+test('消息写入：非法 recipientId 不再静默转广播（400）', async () => {
+  const r = await gatewayReq(
+    'POST',
+    '/gateway/api/messages',
+    {},
+    subuserCookie,
+    JSON.stringify({ content: 'bad-recipient', recipientId: 'abc' }),
+  );
+  assert.equal(r.status, 400);
+});
+
+test('消息写入：不存在的收件人 → 404（不产生孤儿私信）', async () => {
+  const r = await gatewayReq(
+    'POST',
+    '/gateway/api/messages',
+    {},
+    subuserCookie,
+    JSON.stringify({ content: 'ghost-recipient', recipientId: 999999 }),
+  );
+  assert.equal(r.status, 404);
+});
+
+test('消息写入：合法收件人 → 200 且按私信投递', async () => {
+  const r = await gatewayReq(
+    'POST',
+    '/gateway/api/messages',
+    {},
+    subuserCookie,
+    JSON.stringify({ content: 'dm-target', recipientId: thirdId }),
+  );
+  assert.equal(r.status, 200);
+  const parsed = JSON.parse(r.body) as { message?: { recipient_id: number | null } };
+  assert.equal(parsed.message?.recipient_id, thirdId);
+});
+
+// ── 会话缓存不得延长已过期 JWT ───────────────────────────────
+
+test('会话缓存不延长已过期 JWT（缓存 TTL 与 JWT exp 取最小值）', async () => {
+  const shortToken = jwt.sign({ sub: String(adminId), username: 'admin', cv: 0 }, 'test-secret', {
+    expiresIn: '1s',
+  });
+  const cookie = `dsh_gateway_token=${shortToken}`;
+  const first = await gatewayReq('GET', '/html', {}, cookie);
+  assert.equal(first.status, 200, '未过期时正常通过');
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  const second = await gatewayReq('GET', '/html', {}, cookie);
+  assert.equal(second.status, 302, 'JWT 过期后即使仍在会话缓存窗口内也必须拒绝');
+});
+
+// ── 登录限速：revokedTokens 内存面的正当缓解 ──────────────────
+
+function rawHttp(options: {
+  method: string;
+  path: string;
+  headers?: Record<string, string>;
+  body?: string;
+}): Promise<{ status: number; headers: Record<string, string>; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      { host: '127.0.0.1', port: gatewayPort, method: options.method, path: options.path, headers: options.headers ?? {} },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (c: Buffer) => chunks.push(c));
+        res.on('end', () => {
+          const headers: Record<string, string> = {};
+          for (let i = 0; i < res.rawHeaders.length; i += 2) {
+            headers[res.rawHeaders[i].toLowerCase()] = res.rawHeaders[i + 1];
+          }
+          resolve({ status: res.statusCode ?? 0, headers, body: Buffer.concat(chunks).toString('utf8') });
+        });
+      },
+    );
+    req.on('error', reject);
+    req.end(options.body);
+  });
+}
+
+/** 完整登录流程（CSRF 双重提交）：GET 登录页拿 cookie+表单域 → POST 表单编码凭据 */
+async function loginWithCsrf(username: string, password: string): Promise<number> {
+  const page = await rawHttp({ method: 'GET', path: '/gateway/login' });
+  const setCookie = page.headers['set-cookie'] ?? '';
+  const csrfCookie = (setCookie.match(/dsh_csrf=([^;]+)/) ?? [])[1] ?? '';
+  const field = (page.body.match(/name="csrf" value="([^"]+)"/) ?? [])[1] ?? '';
+  const payload = `csrf=${encodeURIComponent(field)}&username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`;
+  return (
+    await rawHttp({
+      method: 'POST',
+      path: '/gateway/login',
+      headers: { cookie: `dsh_csrf=${csrfCookie}`, 'content-type': 'application/x-www-form-urlencoded' },
+      body: payload,
+    })
+  ).status;
+}
+
+test('登录限速：每用户每分钟最多 10 次成功登录（revokedTokens 内存面封顶）', async () => {
+  const statuses: number[] = [];
+  for (let i = 0; i < 11; i++) {
+    statuses.push(await loginWithCsrf('ratelimit', 'Password123!'));
+  }
+  assert.deepEqual(statuses.slice(0, 10), Array(10).fill(302), '前 10 次成功登录应 302');
+  assert.equal(statuses[10], 429, '第 11 次应被限速');
 });
 
 // ── M-1：setup 竞态原子化 ─────────────────────────────────────
