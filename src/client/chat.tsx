@@ -6,6 +6,7 @@
 // 数据面：/gateway/api/messages（列表/发送）。实时采用轮询（4 秒），不依赖 SSE。
 import { useEffect, useRef, useState } from 'react';
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots';
+import { CHAT_ENTRY_CHANGED_EVENT, type ChatEntryChangeDetail } from './events';
 
 export interface ChatMessage {
   id: number;
@@ -116,6 +117,9 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
   const [shaking, setShaking] = useState(false);
   // 账号级偏好异步读取：加载期间不闪现 FAB；请求失败时默认显示，避免 API 暂时异常把聊天永久隐藏。
   const [chatEntry, setChatEntry] = useState<'loading' | 'on' | 'off'>('loading');
+  // 设置卡片事件若先于初始 fetch 返回，记录最新本页偏好，避免旧响应把刚关闭的
+  // 气泡重新打开（两个 slot 组件独立挂载，存在这类微小竞态）。
+  const chatEntryOverrideRef = useRef<boolean | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const lastSeenId = useRef(0);
   const openRef = useRef(false);
@@ -143,15 +147,39 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
     fetch('/api/dsh-passwords/state')
       .then(async (res) => {
         const data = (await res.json().catch(() => ({}))) as { chatEnabled?: unknown };
-        if (disposed) return;
+        if (disposed || chatEntryOverrideRef.current !== null) return;
         setChatEntry(res.ok && data.chatEnabled === false ? 'off' : 'on');
       })
       .catch(() => {
-        if (!disposed) setChatEntry('on');
+        if (!disposed && chatEntryOverrideRef.current === null) setChatEntry('on');
       });
     return () => {
       disposed = true;
     };
+  }, []);
+
+  // 设置卡片与 ChatLauncher 处在不同 slot / React 树，不能靠 props 直传。
+  // 偏好保存成功后立即同步当前页面：关闭时收起面板、清未读并让轮询 effect 清理，
+  // 开启时重新拉取增量消息；无需刷新整个 dsh 页面。
+  useEffect(() => {
+    const onEntryChanged = (event: Event) => {
+      const detail = (event as CustomEvent<ChatEntryChangeDetail>).detail;
+      if (!detail || typeof detail.enabled !== 'boolean') return;
+      chatEntryOverrideRef.current = detail.enabled;
+      setChatEntry(detail.enabled ? 'on' : 'off');
+      if (!detail.enabled) {
+        if (closeTimerRef.current !== null) {
+          window.clearTimeout(closeTimerRef.current);
+          closeTimerRef.current = null;
+        }
+        setOpen(false);
+        setClosing(false);
+        setUnread(0);
+        setError('');
+      }
+    };
+    window.addEventListener(CHAT_ENTRY_CHANGED_EVENT, onEntryChanged);
+    return () => window.removeEventListener(CHAT_ENTRY_CHANGED_EVENT, onEntryChanged);
   }, []);
 
   // 挂载时恢复持久化位置

@@ -219,7 +219,7 @@ async function boot() {
       const result = applyRemotePatch(root);
       if (result === 'applied') {
         console.error(`[dsh-passwords] ${tr('cli.patchApplied')}`);
-        if (config.patch.restartService) restartDshWeb(config.patch.restartService, 2500);
+        if (config.patch.restartService) restartDshWeb(config.patch.restartService, 800);
       } else if (result === 'missing') {
         console.error(`[dsh-passwords] ${tr('cli.patchTargetMissing')}`);
       }

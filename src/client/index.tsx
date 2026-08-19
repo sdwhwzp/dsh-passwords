@@ -16,13 +16,32 @@ import { zh, en } from './locales';
 const CSS = `
 .dshpw-card{display:flex;flex-direction:column;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-layer-3);transition:border-color .16s,background .16s;font-size:13px;line-height:1.5;overflow:hidden}
 .dshpw-card:hover{border-color:var(--dsw-alias-label-dimmed)}
-.dshpw-body{display:flex;flex-direction:column;gap:14px;padding:14px 16px}
-.dshpw-section{display:flex;flex-direction:column;gap:8px}
-.dshpw-label{display:block;font-size:12px;font-weight:600;color:var(--dsw-alias-label-secondary)}
+.dshpw-body{display:flex;flex-direction:column;gap:0;padding:4px 16px 16px}
+.dshpw-section{display:flex;flex-direction:column;gap:10px;padding:16px 0;border-top:1px solid var(--dsw-alias-border-l2)}
+.dshpw-section:first-child{border-top:0}
+.dshpw-section-head{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:22px}
+.dshpw-label{display:block;font-size:12px;font-weight:650;letter-spacing:.01em;color:var(--dsw-alias-label-secondary)}
+.dshpw-action-row{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.dshpw-action-copy{flex:1;min-width:180px}
+.dshpw-form-actions{justify-content:flex-end}
+.dshpw-preference{padding-top:12px}
+.dshpw-switch{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:11px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-2);cursor:pointer;transition:border-color .15s,background .15s}
+.dshpw-switch:hover{border-color:var(--dsw-alias-label-dimmed);background:var(--dsw-alias-bg-layer-1)}
+.dshpw-switch-copy{display:flex;flex-direction:column;gap:2px;min-width:0;color:var(--dsw-alias-label-primary)}
+.dshpw-switch-copy strong{font-size:13px;font-weight:600;line-height:1.35}
+.dshpw-switch-copy small{font-size:12px;line-height:1.4;color:var(--dsw-alias-label-tertiary)}
+.dshpw-switch-control{position:relative;display:inline-flex;flex:0 0 auto;width:42px;height:24px}
+.dshpw-switch-control input{position:absolute;width:1px;height:1px;opacity:0}
+.dshpw-switch-track{position:absolute;inset:0;border-radius:999px;background:var(--dsw-alias-label-dimmed);transition:background .18s,box-shadow .18s}
+.dshpw-switch-thumb{position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:var(--dsw-alias-bg-layer-3);box-shadow:0 1px 3px #0004;transition:transform .18s}
+.dshpw-switch-control input:checked + .dshpw-switch-track{background:var(--dsw-alias-brand-primary);box-shadow:0 0 0 3px color-mix(in srgb,var(--dsw-alias-brand-primary) 15%,transparent)}
+.dshpw-switch-control input:checked + .dshpw-switch-track .dshpw-switch-thumb{transform:translateX(18px)}
+.dshpw-switch-control input:focus-visible + .dshpw-switch-track{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:3px}
 .dshpw-input{width:100%;box-sizing:border-box;min-width:0;padding:7px 10px;font-size:13px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:8px;transition:border-color .15s,box-shadow .15s}
 .dshpw-input:focus{outline:none;border-color:var(--dsw-alias-brand-primary);box-shadow:0 0 0 3px color-mix(in srgb,var(--dsw-alias-brand-primary) 18%,transparent)}
 .dshpw-input::placeholder{color:var(--dsw-alias-label-tertiary)}
-.dshpw-btn{appearance:none;border:0;border-radius:8px;padding:5px 14px;font-size:13px;line-height:1.5;font-weight:500;background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-primary-inverted,#fff);cursor:pointer}
+.dshpw-btn{appearance:none;border:0;border-radius:8px;padding:7px 14px;font-size:13px;line-height:1.35;font-weight:600;background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-primary-inverted,#fff);cursor:pointer;white-space:nowrap;transition:filter .15s,transform .08s}
+.dshpw-btn:active:not(:disabled){transform:translateY(1px)}
 .dshpw-btn:hover:not(:disabled){filter:brightness(1.1)}
 .dshpw-btn:disabled{opacity:.4;cursor:default}
 .dshpw-btn.danger{background:none;border:1px solid var(--dsw-alias-state-error-primary,#ef4444);color:var(--dsw-alias-state-error-primary,#ef4444)}

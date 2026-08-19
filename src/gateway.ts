@@ -476,7 +476,7 @@ function renderSetupPage(params: { lang: Lang; error?: string; csrf: string }): 
   <p class="sub">${tr('gw.setupSub1')}<br/>${tr('gw.setupSub2')}</p>
   <form method="POST" action="/gateway/setup" id="setup-form">
     <input type="hidden" name="csrf" value="${escapeHtml(params.csrf)}" />
-    <label><span>${tr('gw.setupKey')}</span><input type="password" name="setupKey" placeholder="${tr('gw.setupKeyPlaceholder')}" required /></label>
+    <label><span>${tr('gw.setupKey')}</span><input type="password" name="setupKey" placeholder="${tr('gw.setupKeyPlaceholder')}" autocomplete="off" required /></label>
     <label><span>${tr('gw.username')}</span><input type="text" name="username" placeholder="${tr('gw.usernameRule')}" autocomplete="username" required /></label>
     <label><span>${tr('gw.password')}</span><input type="password" name="password" id="pw" placeholder="${tr('gw.passwordRule')}" autocomplete="new-password" required /></label>
     <div class="strength"><i id="pw-bar"></i></div>
@@ -1060,7 +1060,7 @@ export function createGatewayServer(
         if (!root) return;
         const result = applyRemotePatch(root);
         if (result === 'applied' && config.patch.restartService) {
-          restartDshWeb(config.patch.restartService, 2500);
+          restartDshWeb(config.patch.restartService, 800);
         }
       } catch (error) {
         console.error('[dsh-passwords] 补丁重载失败:', error);

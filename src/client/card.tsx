@@ -10,6 +10,7 @@
 // `locale: 'dshpw'` 声明注入。
 import { createElement as h, useEffect, useRef, useState } from 'react';
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots';
+import { publishChatEntryChanged } from './events';
 
 export interface UserInfo {
   id: number;
@@ -229,13 +230,19 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
   const me = data?.me?.username ?? '';
   const chatEnabled = data?.chatEnabled ?? true;
 
-  const run = async (fn: () => Promise<void>, okMessage: string) => {
+  const run = async (fn: () => Promise<void>, okMessage: string, afterSuccess?: () => Promise<void>) => {
     setBusy(true);
     setError('');
     setNotice('');
     try {
       await fn();
+      // 先显示成功/进行中提示：重载补丁的恢复轮询可能持续数秒，不能等到页面
+      // 即将刷新才反馈；聊天开关也能立即给出确认。
       setNotice(okMessage);
+      if (afterSuccess) {
+        await afterSuccess();
+        return;
+      }
       refresh();
     } catch (e) {
       setError(errText(e, trErr));
@@ -244,22 +251,48 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
     }
   };
 
-  /** 重载补丁（仅主用户：服务端 F-02 限 admin + 10 分钟冷却；子用户不显示按钮） */
+  /** 重载补丁（仅主用户）：发送请求后轮询网关恢复，不固定等待 6 秒。 */
   const reloadPatch = () => {
-    void run(async () => {
-      await api('/api/dsh-passwords/patch/reload', {});
-      // 给网关留出应用补丁 + 重启 dsh 的时间，再刷新页面拿到新代码
-      window.setTimeout(() => {
-        window.location.reload();
-      }, 6000);
-    }, t('reloading'));
+    void run(
+      () => api('/api/dsh-passwords/patch/reload', {}),
+      t('reloading'),
+      async () => {
+        // 给 apply + 服务重启一个最短启动窗口；之后每 400ms 探测一次，
+        // 服务恢复即刷新，网络慢时不会过早刷新到旧页面，也不会固定卡 6 秒。
+        await new Promise((resolve) => window.setTimeout(resolve, 1800));
+        const deadline = Date.now() + 30_000;
+        while (Date.now() < deadline) {
+          try {
+            // 探测真实 dsh 上游页面而非网关自有 overview：只有网页服务恢复，
+            // 这里才会返回成功，避免网关本身仍在但 dsh 还没重启完就刷新旧插件。
+            const response = await fetch(`/?reload=${String(Date.now())}`, {
+              cache: 'no-store',
+              credentials: 'same-origin',
+            });
+            if (response.ok) {
+              window.location.reload();
+              return;
+            }
+          } catch {
+            // dsh 网页服务重启窗口：继续探测
+          }
+          await new Promise((resolve) => window.setTimeout(resolve, 400));
+        }
+        throw new Error(t('patchReloadTimeout'));
+      },
+    );
   };
 
-  /** 聊天入口偏好按当前账号存储；ChatLauncher 下次刷新页面读取后停止渲染/轮询。 */
+  /** 聊天入口按账号跨设备同步；保存成功后立即通知 overlay，无需刷新页面。 */
   const toggleChatEntry = () => {
+    const enabled = !chatEnabled;
     void run(
-      () => api('/api/dsh-passwords/chat-enabled', { enabled: !chatEnabled }),
+      () => api('/api/dsh-passwords/chat-enabled', { enabled }),
       t('chatToggleSaved'),
+      async () => {
+        publishChatEntryChanged(enabled);
+        setData((prev) => (prev ? { ...prev, chatEnabled: enabled } : prev));
+      },
     );
   };
 
@@ -283,9 +316,20 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
 
   const rename = () => {
     if (!USERNAME_RE.test(nameNew)) return setError(t('namePolicy'));
+    const target = nameTarget || me;
+    const isSelf = target === me;
     void run(
-      () => api('/api/dsh-passwords/username', { target: nameTarget || me, username: nameNew }),
-      t('nameChanged'),
+      () => api('/api/dsh-passwords/username', { target, username: nameNew }),
+      isSelf ? t('nameChangedSelf') : t('nameChanged'),
+      isSelf
+        ? async () => {
+            // 改名后旧 JWT 已按 credential_version 失效：主动 POST logout 清理服务端
+            // 吊销状态，再跳登录页；即使注销请求因重启/网络失败，也必须跳走，
+            // 避免用户停留在一个注定失效的设置页。
+            await fetch('/gateway/logout', { method: 'POST', credentials: 'same-origin' }).catch(() => undefined);
+            window.location.assign('/gateway/login');
+          }
+        : undefined,
     );
   };
 
@@ -383,35 +427,50 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
     // ── 聊天入口：按当前账号跨设备同步的显示偏好 ──
     h(
       'div',
-      { className: 'dshpw-section' },
-      h('span', { className: 'dshpw-label' }, t('chatToggle')),
+      { className: 'dshpw-section dshpw-preference' },
+      h('div', { className: 'dshpw-section-head' }, h('span', { className: 'dshpw-label' }, t('chatToggle'))),
       h(
         'label',
-        { className: 'dshpw-check' },
-        h('input', {
-          type: 'checkbox',
-          checked: chatEnabled,
-          disabled: busy || data === null,
-          onChange: toggleChatEntry,
-        }),
-        t('chatToggleDesc'),
+        { className: 'dshpw-switch' },
+        h(
+          'span',
+          { className: 'dshpw-switch-copy' },
+          h('strong', null, t('chatToggleDesc')),
+          h('small', null, t('chatToggleHint')),
+        ),
+        h(
+          'span',
+          { className: 'dshpw-switch-control' },
+          h('input', {
+            type: 'checkbox',
+            checked: chatEnabled,
+            disabled: busy || data === null,
+            onChange: toggleChatEntry,
+            'aria-label': t('chatToggleDesc'),
+          }),
+          h('span', { className: 'dshpw-switch-track', 'aria-hidden': 'true' }, h('span', { className: 'dshpw-switch-thumb' })),
+        ),
       ),
-      h('div', { className: 'dshpw-hint' }, t('chatToggleHint')),
     ),
     // ── 远程设置：状态 + 重载 ──
     h(
       'div',
       { className: 'dshpw-section' },
-      h('span', { className: 'dshpw-label' }, t('patch')),
       h(
         'div',
-        { className: 'dshpw-row' },
+        { className: 'dshpw-section-head' },
+        h('span', { className: 'dshpw-label' }, t('patch')),
         h('span', { className: patchOk ? 'dshpw-ok' : 'dshpw-error' }, patchText),
+      ),
+      h(
+        'div',
+        { className: 'dshpw-action-row' },
+        h('span', { className: 'dshpw-hint dshpw-action-copy' }, t('patchHint1')),
         // F-02：重载补丁会重启 dsh 网页服务，仅主用户可触发；子用户只读状态
         isAdmin &&
           h('button', { className: 'dshpw-btn', disabled: busy, onClick: reloadPatch }, t('reloadPatch')),
       ),
-      h('div', { className: 'dshpw-hint' }, t('patchHint1'), ' ', t('patchHint2')),
+      h('div', { className: 'dshpw-hint' }, t('patchHint2')),
     ),
 
     // ── 修改密码 ──
@@ -426,10 +485,10 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
         h('input', {
           className: 'dshpw-input',
           type: 'password',
-          // dsh-passwords 修复：旧密码框用 new-password 而非 current-password——后者会邀请浏览器
-          // 密码管理器自动填充已存凭据对，用户名启发式会误把侧栏会话搜索框当用户名框填入
-          // （实测：搜索框被填入 "admin" → 触发搜索 → 无匹配会话，见 PROCESS.md 步骤 32）
-          autoComplete: 'new-password',
+          // 使用标准 current-password 语义，让密码管理器能正确识别当前密码；
+          // 侧栏搜索框的防自动填充由 dsh 补丁单独处理，不再牺牲这里的兼容性。
+          autoComplete: 'current-password',
+          name: 'current-password',
           placeholder: t('currentPwPh'),
           value: pwCurrent,
           onChange: (e: { target: { value: string } }) => setPwCurrent(e.target.value),
@@ -438,6 +497,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
         className: 'dshpw-input',
         type: 'password',
         autoComplete: 'new-password',
+        name: 'new-password',
         placeholder: t('newPwPh'),
         value: pwNew,
         onChange: (e: { target: { value: string } }) => setPwNew(e.target.value),
@@ -446,13 +506,14 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
         className: 'dshpw-input',
         type: 'password',
         autoComplete: 'new-password',
+        name: 'confirm-password',
         placeholder: t('confirmPwPh'),
         value: pwConfirm,
         onChange: (e: { target: { value: string } }) => setPwConfirm(e.target.value),
       }),
       h(
         'div',
-        { className: 'dshpw-row' },
+        { className: 'dshpw-action-row dshpw-form-actions' },
         h('button', { className: 'dshpw-btn', disabled: busy, onClick: changePassword }, t('savePw')),
       ),
     ),
@@ -474,7 +535,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
       }),
       h(
         'div',
-        { className: 'dshpw-row' },
+        { className: 'dshpw-action-row dshpw-form-actions' },
         h('button', { className: 'dshpw-btn', disabled: busy, onClick: rename }, t('saveName')),
       ),
       h('div', { className: 'dshpw-hint' }, t('nameHint')),
@@ -521,7 +582,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
         }),
         h(
           'div',
-          { className: 'dshpw-row' },
+          { className: 'dshpw-action-row dshpw-form-actions' },
           h('button', { className: 'dshpw-btn', disabled: busy, onClick: addSubUser }, t('addSub')),
         ),
         h('div', { className: 'dshpw-hint' }, t('subHint')),
@@ -656,7 +717,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
               ),
               h(
                 'div',
-                { className: 'dshpw-row' },
+                { className: 'dshpw-action-row dshpw-form-actions' },
                 h(
                   'button',
                   { className: 'dshpw-btn', disabled: busy, onClick: () => savePermissions(u.id) },
