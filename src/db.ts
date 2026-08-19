@@ -877,6 +877,12 @@ export class Database {
     );
   }
 
+  /** 当前最大消息 id（表空时 null）——增量接口用：since 超过它即游标已失效（DB 重建） */
+  latestMessageId(): number | null {
+    const row = this.stmt('SELECT MAX(id) AS n FROM messages').get() as { n: number | null } | undefined;
+    return row?.n === null || row?.n === undefined ? null : Number(row.n);
+  }
+
   private mapMessageRows(
     rows: unknown,
   ): MessageRow[] {

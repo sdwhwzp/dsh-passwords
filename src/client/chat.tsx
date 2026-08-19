@@ -279,17 +279,20 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
             setMe(nextMe);
             const maxId = incoming.length > 0 ? incoming[incoming.length - 1].id : 0;
             const sinceBefore = lastSeenId.current;
-            // 游标倒退（返回的 id ≤ 上次游标）= 服务端数据库被重建、自增从头开始。
-            // 视为新基线：替换列表、只更新游标，不把整批历史算成未读（角标 99+ 的根因）；
-            // 不再用“连续 3 轮空响应”的启发式（无法与正常无消息态区分，会周期性空跑全量）。
-            const cursorReset = isCursorReset(sinceBefore, incoming);
+            // 游标倒退（服务端 reset 信号，或返回的 id ≤ 上次游标）= 服务端数据库
+            // 被重建、自增从头开始。视为新基线：替换列表、重建游标，不把整批历史
+            // 算成未读（角标 99+ 的根因）。旧“连续 3 轮空响应”启发式已删除：
+            // 无法与正常无消息态区分，且空响应下 isCursorReset 永远不可达。
+            const cursorReset = d.reset === true || isCursorReset(sinceBefore, incoming);
             if (!cursorReset && nextMe && initializedRef.current && maxId > sinceBefore) {
               const fresh = incoming.filter(
                 (m) => m.sender_id !== nextMe.id && m.id > sinceBefore,
               ).length;
               if (fresh > 0 && !openRef.current) setUnread((u) => u + fresh);
             }
-            lastSeenId.current = Math.max(sinceBefore, maxId);
+            // reset 时游标直接落到新基线的 maxId（不能用 Math.max 保留旧高游标，
+            // 否则 DB 重建后永远收不到新消息，直到 id 追上旧游标）
+            lastSeenId.current = cursorReset ? maxId : Math.max(sinceBefore, maxId);
             initializedRef.current = true;
             setMessages((prev) => (cursorReset ? incoming : mergeById(prev, incoming)));
             setError('');

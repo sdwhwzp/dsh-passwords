@@ -128,32 +128,39 @@ function notifyGateway(cfg: PlatformConfig): void {
 }
 
 /** 通知网关进程：某用户会话缓存立即失效（改密/改名/删除后，消除 30 秒撤销窗口）。
- *  fire-and-forget：网关不在线时静默——缓存 TTL 到期后自然重新查库。 */
-function notifyGatewaySessionInvalidate(cfg: PlatformConfig, userId: number): void {
-  const mod = cfg.gateway.tls !== null ? https : http;
-  const url = `${cfg.gateway.tls !== null ? 'https' : 'http'}://127.0.0.1:${String(cfg.gateway.port)}/gateway/internal/session-invalidate`;
-  const body = JSON.stringify({ userId });
-  const req = mod.request(
-    url,
-    {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-internal-secret': cfg.internalSecret,
-        'content-length': String(Buffer.byteLength(body)),
+ *  返回 Promise：调用方 await 后再回 200，确保网关已确认清除缓存；
+ *  网关不在线/超时（2s 上限）时静默 resolve——会话缓存 30 秒 TTL 到期后
+ *  自然重新查库校验 credential_version，残余窗口有界。 */
+function notifyGatewaySessionInvalidate(cfg: PlatformConfig, userId: number): Promise<void> {
+  return new Promise((resolve) => {
+    const mod = cfg.gateway.tls !== null ? https : http;
+    const url = `${cfg.gateway.tls !== null ? 'https' : 'http'}://127.0.0.1:${String(cfg.gateway.port)}/gateway/internal/session-invalidate`;
+    const body = JSON.stringify({ userId });
+    const req = mod.request(
+      url,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-internal-secret': cfg.internalSecret,
+          'content-length': String(Buffer.byteLength(body)),
+        },
+        // 网关可能用自签证书，内部回环调用豁免校验
+        rejectUnauthorized: false,
+        timeout: 2000,
       },
-      // 网关可能用自签证书，内部回环调用豁免校验
-      rejectUnauthorized: false,
-      timeout: 4000,
-    },
-    (res) => {
-      res.resume();
-    },
-  );
-  req.on('error', () => {
-    // 网关没起来时静默：会话缓存 30 秒 TTL 到期后自动重新校验凭据版本
+      (res) => {
+        res.resume();
+        resolve();
+      },
+    );
+    req.on('error', () => resolve());
+    req.on('timeout', () => {
+      req.destroy();
+      resolve();
+    });
+    req.end(body);
   });
-  req.end(body);
 }
 
 /** 网关启动错误码（与 cli.ts 保持一致）：30 证书签发失败 / 31 无公网域名 / 32 端口被占 */
@@ -417,8 +424,8 @@ export function apply(ctx: Context): void {
           const currentPassword = typeof body.currentPassword === 'string' ? body.currentPassword : undefined;
           const targetUser = db!.getUserByUsername(target);
           await auth!.changePassword(caller, target, password, metaOf(req), currentPassword);
-          // 改密后旧会话全部失效：通知网关清掉该用户缓存，撤销窗口归零
-          if (targetUser) notifyGatewaySessionInvalidate(cfg, targetUser.id);
+          // 改密后旧会话全部失效：等网关确认清掉缓存再回 200，撤销窗口归零
+          if (targetUser) await notifyGatewaySessionInvalidate(cfg, targetUser.id);
           writeJson(res, 200, { ok: true });
         } catch (error) {
           failJson(res, error);
@@ -438,8 +445,8 @@ export function apply(ctx: Context): void {
           assertNoSqlInjection(username, 'username');
           const targetUser = db!.getUserByUsername(target);
           await auth!.renameUser(caller, target, username, metaOf(req));
-          // 改名同样 bump credential_version：清网关缓存，旧会话立即失效
-          if (targetUser) notifyGatewaySessionInvalidate(cfg, targetUser.id);
+          // 改名同样 bump credential_version：等网关清缓存，旧会话立即失效
+          if (targetUser) await notifyGatewaySessionInvalidate(cfg, targetUser.id);
           writeJson(res, 200, { ok: true });
         } catch (error) {
           failJson(res, error);
@@ -476,7 +483,7 @@ export function apply(ctx: Context): void {
           assertNoSqlInjection(target, 'target');
           const targetUser = db!.getUserByUsername(target);
           await auth!.removeUser(caller, target, metaOf(req));
-          if (targetUser) notifyGatewaySessionInvalidate(cfg, targetUser.id);
+          if (targetUser) await notifyGatewaySessionInvalidate(cfg, targetUser.id);
           writeJson(res, 200, { ok: true });
         } catch (error) {
           failJson(res, error);

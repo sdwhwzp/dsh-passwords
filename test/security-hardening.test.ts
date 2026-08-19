@@ -14,6 +14,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { mkdtempSync, rmSync } from 'node:fs';
+import zlib from 'node:zlib';
 import jwt from 'jsonwebtoken';
 import { generateKeyPairSync } from 'node:crypto';
 
@@ -34,9 +35,11 @@ let gatewayPort = 0;
 let adminCookie = '';
 let subuserCookie = '';
 let subuserId = 0;
-/** 上游最近一次收到的路径（已解码视角，mock 直接取 req.url） */
+/** 上游最后一次收到的路径（已解码视角，mock 直接取 req.url） */
 let lastUpstreamUrl = '';
 const upstreamUrls: string[] = [];
+/** 高压缩比炸弹：70MiB 全零压缩后仅 ~70KB，专门验证 maxOutputLength 前置拦截 */
+let gzipBomb: Buffer | null = null;
 
 function startMockUpstream(): Promise<http.Server> {
   return new Promise((resolve) => {
@@ -60,6 +63,15 @@ function startMockUpstream(): Promise<http.Server> {
           }
         };
         writeMore();
+        return;
+      }
+      if ((req.url ?? '').startsWith('/api/session.list') && req.headers['x-test-mode'] === 'gzip-bomb') {
+        // 压缩后远小于 16MiB 缓冲上限、解压后超 64MiB：旧实现事后检查拦不住内存峰值
+        if (gzipBomb === null) {
+          gzipBomb = zlib.gzipSync(Buffer.alloc(70 * 1024 * 1024, 0x61));
+        }
+        res.writeHead(200, { 'content-type': 'application/json', 'content-encoding': 'gzip' });
+        res.end(gzipBomb);
         return;
       }
       res.writeHead(200, { 'content-type': 'application/json' });
@@ -214,6 +226,33 @@ test('H-1：受限子用户 session.list 响应超 16MiB → 502（不透传未�
   assert.equal(r.status, 502);
 });
 
+test('H-1b：gzip 高压缩比炸弹（解压后 70MiB）→ 502（maxOutputLength 前置拦截）', async () => {
+  const r = await gatewayReq(
+    'POST',
+    '/api/session.list',
+    { 'x-test-mode': 'gzip-bomb' },
+    subuserCookie,
+    '{}',
+  );
+  assert.equal(r.status, 502);
+});
+
+test('M-5b：since 超过最新消息 id（DB 重建后）返回 reset 信号 + 全量列表', async () => {
+  await gatewayReq('POST', '/gateway/api/messages', {}, adminCookie, JSON.stringify({ content: 'reset-a' }));
+  await gatewayReq('POST', '/gateway/api/messages', {}, adminCookie, JSON.stringify({ content: 'reset-b' }));
+  const r1 = await gatewayReq('GET', '/gateway/api/messages?since=999999');
+  assert.equal(r1.status, 200);
+  const body1 = JSON.parse(r1.body) as { reset?: boolean; messages: Array<{ id: number }> };
+  assert.equal(body1.reset, true, '游标超前必须显式告知 reset');
+  assert.equal(body1.messages.length, 2, 'reset 时应回退全量列表');
+  // 服务端全量列表按 id DESC 返回：最新一条是第一个元素
+  const maxId = Math.max(...body1.messages.map((m) => m.id));
+  const r2 = await gatewayReq('GET', `/gateway/api/messages?since=${maxId}`);
+  const body2 = JSON.parse(r2.body) as { reset?: boolean; messages: Array<{ id: number }> };
+  assert.notEqual(body2.reset, true, '正常增量（无新消息）不得误报 reset');
+  assert.equal(body2.messages.length, 0);
+});
+
 // ── M-1：setup 竞态原子化 ─────────────────────────────────────
 
 test('M-1：setupInitialAdmin 只允许成功一次，重复调用返回 null', () => {
@@ -288,12 +327,67 @@ test('M-13：allowedFolders 合法绝对路径 → 200', async () => {
   assert.equal(r.status, 200);
 });
 
-// ── L-4：CSR 含 CN + SAN ──────────────────────────────────────
+// ── L-4：CSR 含 CN + SAN（RFC 5280 结构验证，非浅层字节存在性） ──
 
-test('L-4：buildCsr 同时写入 CN 与 subjectAltName（OID 2.5.29.17）', () => {
+const SAN_OID = Buffer.from([0x55, 0x1d, 0x11]);
+
+/** 极简 DER TLV 解析：返回 { tag, content, end }（content 为值域，end 为下一元素偏移） */
+function parseDer(buf: Buffer, offset: number): { tag: number; content: Buffer; end: number } {
+  const tag = buf[offset];
+  const firstLen = buf[offset + 1];
+  let len = firstLen;
+  let head = 2;
+  if ((firstLen & 0x80) !== 0) {
+    const count = firstLen & 0x7f;
+    len = 0;
+    for (let i = 0; i < count; i++) len = len * 256 + buf[offset + 2 + i];
+    head = 2 + count;
+  }
+  return { tag, content: buf.subarray(offset + head, offset + head + len), end: offset + head + len };
+}
+
+/**
+ * 递归找 subjectAltName 扩展并验证结构：
+ *   Extension = SEQ { OID(2.5.29.17), OCTET STRING{ GeneralNames = SEQ { [2] dNSName } } }
+ * 浅层字节断言（OID+域名存在）无法发现“缺 OCTET STRING 包装”的非法 DER。
+ */
+function hasWellFormedSan(node: { tag: number; content: Buffer }, domain: string): boolean {
+  if ((node.tag & 0x20) === 0) return false; // primitive（值节点）：无子元素
+  const children: Array<{ tag: number; content: Buffer; end: number }> = [];
+  let off = 0;
+  while (off < node.content.length) {
+    const child = parseDer(node.content, off);
+    children.push(child);
+    off = child.end;
+  }
+  for (let i = 0; i + 1 < children.length; i++) {
+    const head = children[i];
+    const next = children[i + 1];
+    if (head.tag === 0x06 && head.content.equals(SAN_OID)) {
+      if (next.tag !== 0x04) return false; // extnValue 必须是 OCTET STRING
+      const generalNames = parseDer(next.content, 0);
+      if (generalNames.tag !== 0x30) return false;
+      const dnsName = parseDer(generalNames.content, 0);
+      if (dnsName.tag !== 0x82) return false;
+      return dnsName.content.toString('utf8') === domain;
+    }
+  }
+  for (const child of children) {
+    if (hasWellFormedSan(child, domain)) return true;
+  }
+  return false;
+}
+
+test('L-4：buildCsr 的 SAN 为合法 RFC 5280 结构（OCTET STRING 包装的 dNSName）', () => {
   const { privateKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
   const der = buildCsr(privateKey, 'example.com');
-  assert.ok(der.includes(Buffer.from([0x55, 0x1d, 0x11])), 'CSR 必须包含 SAN OID');
+  const root = parseDer(der, 0);
+  assert.ok(
+    hasWellFormedSan(root, 'example.com'),
+    'SAN 扩展必须为 SEQ{OID, OCTET STRING{SEQ{[2] dNSName}}}，缺 OCTET STRING 包装会被 CA 拒绝',
+  );
+  // 对照：域名字节与 SAN OID 仍应在场（浅层断言作为回归底网）
+  assert.ok(der.includes(SAN_OID), 'CSR 必须包含 SAN OID');
   assert.ok(der.includes(Buffer.from('example.com', 'utf8')), 'CSR 必须包含域名');
 });
 

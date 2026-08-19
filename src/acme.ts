@@ -58,6 +58,10 @@ function derBitString(bytes: Buffer): Buffer {
   return derWrap(0x03, Buffer.concat([Buffer.from([0]), bytes]));
 }
 
+function derOctetString(bytes: Buffer): Buffer {
+  return derWrap(0x04, bytes);
+}
+
 function derInt(n: number): Buffer {
   if (n === 0) return Buffer.from([0x02, 0x01, 0x00]);
   const bytes: number[] = [];
@@ -91,9 +95,11 @@ const OID_SAN = Buffer.from([0x55, 0x1d, 0x11]);
 export function buildCsr(privateKey: KeyObject, domain: string): Buffer {
   const spki = createPublicKey(privateKey).export({ type: 'spki', format: 'der' }) as Buffer;
   const name = derSeq(derSet(derSeq(derOid(OID_CN), derUtf8(domain))));
-  // SAN：GeneralNames = SEQ { [2] dNSName }；Extension = SEQ { OID, GeneralNames }
+  // SAN：Extension = SEQ { OID(2.5.29.17), OCTET STRING{ GeneralNames = SEQ { [2] dNSName } } }
+  // extnValue 必须是 OCTET STRING（RFC 5280 §4.2），其内容才是 DER GeneralNames——
+  // 少这层封装会被严格 CA/解析器视为非法扩展。
   const generalNames = derSeq(derWrap(0x82, Buffer.from(domain, 'utf8')));
-  const sanExt = derSeq(derOid(OID_SAN), generalNames);
+  const sanExt = derSeq(derOid(OID_SAN), derOctetString(generalNames));
   const extensionRequest = derSeq(derOid(OID_EXT_REQ), derSet(derSeq(sanExt)));
   const attributes = derWrap(0xa0, extensionRequest);
   const info = derSeq(derInt(0), name, spki, attributes);
@@ -343,9 +349,8 @@ export function certExpiryMs(fullchainPath: string): number | null {
   }
 }
 
-/** 读取证书 leaf 的 CN（主域名）——检查旧证书与当前 opts.domain 是否一致，
- *  避免改 MCP_GATEWAY_DOMAIN 后旧证书一直复用导致浏览器报"域名不匹配"。 */
-function readCertMeta(metaPath: string): { domain: string; staging: boolean } | null {
+/** 读取签发元数据（{domain, staging}）；缺失/损坏/结构不符返回 null。 */
+export function readCertMeta(metaPath: string): { domain: string; staging: boolean } | null {
   try {
     const parsed = JSON.parse(readFileSync(metaPath, 'utf8')) as { domain?: unknown; staging?: unknown };
     if (typeof parsed.domain === 'string' && typeof parsed.staging === 'boolean') {
@@ -354,6 +359,26 @@ function readCertMeta(metaPath: string): { domain: string; staging: boolean } | 
     return null;
   } catch {
     return null;
+  }
+}
+
+/** 证书 leaf 的 SAN/CN 是否覆盖目标域名（旧证书无 meta.json 时的兼容判定）。 */
+export function certMatchesDomain(certPath: string, domain: string): boolean {
+  try {
+    const pem = readFileSync(certPath, 'utf8');
+    const leaf = new X509Certificate(pem);
+    const san = String(leaf.subjectAltName ?? '')
+      .split(/,\s*/)
+      .map((entry) => entry.replace(/^DNS:/, '').trim())
+      .filter((entry) => entry !== '');
+    const cn = leaf.subject
+      .split('\n')
+      .find((line) => line.startsWith('CN='))
+      ?.slice(3)
+      .trim();
+    return san.includes(domain) || cn === domain;
+  } catch {
+    return false;
   }
 }
 
@@ -479,7 +504,11 @@ export async function ensureCertificate(opts: {
   const tmpCert = `${certPath}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`;
   writeFileSync(tmpCert, chainPem, { mode: 0o600 });
   renameSync(tmpCert, certPath);
-  writeFileSync(metaPath, JSON.stringify({ domain: opts.domain, staging: opts.staging === true }), { mode: 0o600 });
+  // meta 同样原子写：cert rename 成功、meta 写入中断时，下次启动会把有效证书
+  // 误判为“不匹配”而重复签发（可能撞 ACME 限速）。
+  const tmpMeta = `${metaPath}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`;
+  writeFileSync(tmpMeta, JSON.stringify({ domain: opts.domain, staging: opts.staging === true }), { mode: 0o600 });
+  renameSync(tmpMeta, metaPath);
 
   const expiresAt = certExpiryMs(certPath);
   if (expiresAt === null) throw new AcmeError('certificate', '签发后的证书无法解析有效期');

@@ -1317,16 +1317,27 @@ export function createGatewayServer(
 
   // ── 留言列表（所有登录用户；按收件人过滤） ─────────────────────
   // 支持 ?since=<id> 增量拉取（客户端轮询只取新增消息，避免每次全量下载）。
+  // reset：游标超前于服务端最新 id（数据库重建/消息清空后自增从头开始）时，
+  // 服务端回退全量并显式告知客户端重建基线——只靠客户端“空响应”判断无法
+  // 区分“正常无新消息”与“游标已失效”，会永久收不到新消息。
   app.get('/gateway/api/messages', (req, res) => {
     const me = apiAuth(req, res);
     if (!me) return;
     const sinceRaw = typeof req.query.since === 'string' ? Number(req.query.since) : NaN;
     const since = Number.isFinite(sinceRaw) && sinceRaw > 0 ? Math.floor(sinceRaw) : 0;
-    const all = since > 0 ? db.listMessagesAfter(since, 300) : db.listMessages(300);
+    let all = since > 0 ? db.listMessagesAfter(since, 300) : db.listMessages(300);
+    let reset = false;
+    if (since > 0 && all.length === 0) {
+      const latest = db.latestMessageId();
+      if (latest === null || since > latest) {
+        reset = true;
+        all = db.listMessages(300);
+      }
+    }
     const mine = all.filter(
       (m) => m.recipient_id === null || m.recipient_id === me.userId || m.sender_id === me.userId,
     );
-    res.json({ ok: true, me: { id: me.userId, username: me.username, role: me.role }, messages: mine });
+    res.json({ ok: true, me: { id: me.userId, username: me.username, role: me.role }, messages: mine, reset });
   });
 
   // ── 发送留言（所有登录用户） ─────────────────────────────────
@@ -1525,8 +1536,12 @@ export function createGatewayServer(
       const parsed = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const requestPath = gatePath;
       // 自身插件的写操作必须同源：Sec-Fetch-Site 可被缺省/伪造，且 text/plain
-      // 可避免 CORS 预检；浏览器提供 Origin 时严格与当前 Host 匹配。无 Origin 的
-      // 非浏览器/同源旧客户端保持兼容，仍由 HttpOnly+SameSite Cookie 保护。
+      // 可避免 CORS 预检；浏览器提供 Origin 时严格与请求 Host 一致。跨源攻击的
+      // 本质是跨主机（攻击者无法在受害者主机名上托管内容），因此只比主机:端口、
+      // 不比协议——否则 README 支持的 nginx/caddy 终结 TLS 反代部署（网关收到
+      // 明文 HTTP、req.protocol=http，而浏览器 Origin=https）会全部误判 403。
+      // Host 只信直接对端：仅当对端是本机回环（受信本地反代）才采纳
+      // X-Forwarded-Host，公网直连请求不能带伪造头绕过。
       if (
         ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) &&
         requestPath.startsWith('/api/dsh-passwords/') &&
@@ -1535,8 +1550,19 @@ export function createGatewayServer(
       ) {
         try {
           const origin = new URL(req.headers.origin);
-          const expected = `${req.protocol}://${req.headers.host ?? ''}`;
-          if (origin.origin !== expected) {
+          if (origin.origin === 'null') {
+            res.status(403).type('text/plain').send('403 Forbidden');
+            return;
+          }
+          const peer = req.socket.remoteAddress ?? '';
+          const trustedProxy = peer === '127.0.0.1' || peer === '::1' || peer === '::ffff:127.0.0.1';
+          const forwardedHost =
+            typeof req.headers['x-forwarded-host'] === 'string'
+              ? req.headers['x-forwarded-host'].split(',')[0].trim()
+              : '';
+          const effectiveHost =
+            trustedProxy && forwardedHost !== '' ? forwardedHost : String(req.headers.host ?? '');
+          if (origin.host !== effectiveHost) {
             res.status(403).type('text/plain').send('403 Forbidden');
             return;
           }
@@ -1657,6 +1683,28 @@ export function createGatewayServer(
   const MAX_DECOMPRESSED_BYTES = 64 * 1024 * 1024;
   /** 安全过滤分支专属：解压超限时 fail-closed（502），不得透传未过滤内容 */
   class OversizeResponseError extends Error {}
+
+  /**
+   * 有界解压：用 zlib 的 maxOutputLength 在分配内存前限制输出——事后 body.length 检查
+   * 只能发现炸弹，内存峰值已经发生（高压缩比 payload 可把 16MB 输入解压到数百 MB）。
+   * 超限抛 OversizeResponseError（安全分支 → 502）；其他解压错误（gzip 损坏）原样抛出，
+   * 由调用方按既有“解析失败透传”契约处理。
+   */
+  function gunzipBounded(input: Buffer): Buffer {
+    try {
+      return zlib.gunzipSync(input, { maxOutputLength: MAX_DECOMPRESSED_BYTES });
+    } catch (error) {
+      // 超限错误形态：ERR_BUFFER_TOO_LARGE（code）或 "Cannot create a Buffer larger than ..."（message）
+      const code = (error as { code?: unknown }).code;
+      if (
+        error instanceof Error &&
+        (code === 'ERR_BUFFER_TOO_LARGE' || /too large|larger than/i.test(error.message))
+      ) {
+        throw new OversizeResponseError();
+      }
+      throw error;
+    }
+  }
 
   /**
    * 缓冲上游响应：正常路径在 'end' 时调用 onEnd(body) 做改写/过滤；
@@ -1806,8 +1854,7 @@ export function createGatewayServer(
           bufferUpstream(upstreamRes, res, (raw) => {
             try {
               let body = raw;
-              if (encoding.includes('gzip')) body = zlib.gunzipSync(body);
-              if (body.length > 64 * 1024 * 1024) throw new Error('decompressed HTML exceeds limit');
+              if (encoding.includes('gzip')) body = gunzipBounded(body);
               const html = body.toString('utf8');
               const injected = html.replace(/<head[^>]*>/i, (match) => match + INJECT_SCRIPT);
               let out = Buffer.from(injected, 'utf8');
@@ -1848,8 +1895,7 @@ export function createGatewayServer(
             try {
               let body = raw;
               const enc = String(upstreamRes.headers['content-encoding'] ?? '');
-              if (enc.includes('gzip')) body = zlib.gunzipSync(body);
-              if (body.length > MAX_DECOMPRESSED_BYTES) throw new OversizeResponseError();
+              if (enc.includes('gzip')) body = gunzipBounded(body);
               const parsed = JSON.parse(body.toString('utf8'));
               const cleaned = sanitizeHiddenUnicodeJson(parsed);
               const out = Buffer.from(JSON.stringify(cleaned), 'utf8');
@@ -1877,8 +1923,7 @@ export function createGatewayServer(
             try {
               let body = raw;
               const enc = String(upstreamRes.headers['content-encoding'] ?? '');
-              if (enc.includes('gzip')) body = zlib.gunzipSync(body);
-              if (body.length > MAX_DECOMPRESSED_BYTES) throw new OversizeResponseError();
+              if (enc.includes('gzip')) body = gunzipBounded(body);
               const parsed = JSON.parse(body.toString('utf8'));
               // 先缓存全量 id→path（供 session.create 用 workspaceId 时解析路径）
               collectIdPathPairs(parsed, workspacePathById);
@@ -1923,8 +1968,7 @@ export function createGatewayServer(
           bufferUpstream(upstreamRes, res, (raw) => {
             try {
               const enc = String(upstreamRes.headers['content-encoding'] ?? '');
-              const decoded = enc.includes('gzip') ? zlib.gunzipSync(raw) : raw;
-              if (decoded.length > MAX_DECOMPRESSED_BYTES) throw new OversizeResponseError();
+              const decoded = enc.includes('gzip') ? gunzipBounded(raw) : raw;
               const parsed = JSON.parse(decoded.toString('utf8'));
               const sessionId = extractSessionId(parsed);
               if (sessionId !== null && reqAs.dshpwUser !== undefined) {
@@ -1967,8 +2011,7 @@ export function createGatewayServer(
             try {
               let body = raw;
               const enc = String(upstreamRes.headers['content-encoding'] ?? '');
-              if (enc.includes('gzip')) body = zlib.gunzipSync(body);
-              if (body.length > MAX_DECOMPRESSED_BYTES) throw new OversizeResponseError();
+              if (enc.includes('gzip')) body = gunzipBounded(body);
               const parsed = JSON.parse(body.toString('utf8'));
               // 先收集 sessionId→cwd 缓存（过滤前的原始响应，含受限前创建的旧目录会话），
               // 供会话作用域 RPC（history/prompt 等）做 cwd 白名单校验
@@ -2015,8 +2058,7 @@ export function createGatewayServer(
             try {
               let body = raw;
               const enc = String(upstreamRes.headers['content-encoding'] ?? '');
-              if (enc.includes('gzip')) body = zlib.gunzipSync(body);
-              if (body.length > MAX_DECOMPRESSED_BYTES) throw new OversizeResponseError();
+              if (enc.includes('gzip')) body = gunzipBounded(body);
               const parsed = JSON.parse(body.toString('utf8'));
               if (reqAs.dshpwPerms !== undefined && reqAs.dshpwPerms.sandbox_mode !== null) {
                 void clampSessionHistorySandbox(
@@ -2369,6 +2411,8 @@ export function createGatewayServer(
     }
     // 极端 token/IP 洪泛下，TTL 尚未到期的键也可能无界增长；保留最新一半，
     // 牺牲极端情况下的短期缓存命中而不牺牲进程可用性。
+    // ⚠ revokedTokens 不参与裁剪：它是登出吊销语义（未过期条目=拒绝该 JWT），
+    // “淘汰即放行”会让已登出的会话重新可用；其条目仅能由 sweep 按到期时间清理。
     const cap = <T>(map: Map<T, unknown>, limit = 10_000) => {
       if (map.size <= limit) return;
       let drop = Math.ceil(map.size / 2);
@@ -2378,7 +2422,6 @@ export function createGatewayServer(
       }
     };
     cap(sessionCache);
-    cap(revokedTokens);
     cap(usageThrottle);
     cap(usageReportThrottle);
     cap(setupAttempts);

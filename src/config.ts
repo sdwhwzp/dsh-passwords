@@ -6,6 +6,7 @@ import { config as loadEnv } from 'dotenv';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -175,6 +176,24 @@ function tightenEnvPerm(file: string): void {
 }
 
 /**
+ * Windows 无 POSIX 权限：用 icacls 收紧密钥文件 ACL（仅当前用户 + SYSTEM）。
+ * hardenSecretsAfterSetup 用临时文件+rename 替换 .env 后，新文件继承的是临时
+ * 文件的 ACL（可能随目录宽松）——必须重新收紧，否则 SETUP_KEY/JWT/内部/DB 密钥
+ * 在共享目录下会被同机其他用户读到。失败静默（域策略等环境可能拒绝）。
+ */
+function tightenWindowsAcl(file: string): void {
+  if (process.platform !== 'win32') return;
+  try {
+    const args = [file, '/inheritance:r'];
+    if (process.env.USERNAME) args.push('/grant:r', `${process.env.USERNAME}:F`);
+    args.push('/grant:r', 'SYSTEM:F');
+    spawnSync('icacls', args, { stdio: 'ignore' });
+  } catch {
+    // 收紧失败不影响启动主流程
+  }
+}
+
+/**
  * F-07：首次配置成功后自动加固密钥残留面。
  *   1. 把当前派生密钥固化为显式 .env 变量（MCP_JWT_SECRET / MCP_INTERNAL_SECRET /
  *      MCP_DB_ENC_KEY）——此后即使 SETUP_KEY 泄露，也不再连带伪造会话/解密数据库；
@@ -241,6 +260,9 @@ export function hardenSecretsAfterSetup(config: PlatformConfig): void {
     try {
       writeFileSync(tempFile, out.join('\n') + (out.length > 0 ? '\n' : ''), { encoding: 'utf8', mode: 0o600 });
       renameSync(tempFile, envFile);
+      // rename 后新文件继承临时文件的 ACL：Windows 下重新用 icacls 收紧，
+      // POSIX 下 mode 已随临时文件写入生效
+      tightenWindowsAcl(envFile);
     } catch (error) {
       try { if (existsSync(tempFile)) unlinkSync(tempFile); } catch { /* best effort */ }
       throw error;

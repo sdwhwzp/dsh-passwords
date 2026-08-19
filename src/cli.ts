@@ -15,7 +15,7 @@ import { Database } from './db.js';
 import { AuthService } from './auth.js';
 import { createGatewayServer, createRedirectServer } from './gateway.js';
 import { createFieldCrypto } from './encrypt.js';
-import { ensureCertificate, certExpiryMs, detectPublicIp } from './acme.js';
+import { ensureCertificate, certExpiryMs, certMatchesDomain, detectPublicIp, readCertMeta } from './acme.js';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -267,8 +267,16 @@ async function boot() {
       );
     } catch (error) {
       const oldExpiry = certExpiryMs(config.gateway.tls.cert);
-      if (oldExpiry !== null && oldExpiry > Date.now()) {
-        // 现有证书仍在有效期内（例如续期因网络抖动失败）：继续用它，后台定时重试续期
+      // 旧证书回退前必须确认它仍匹配当前域名/签发环境：换 MCP_GATEWAY_DOMAIN
+      // 或切换 staging 后新证书签发失败时，旧证书已过期语义——继续用它会给新域名
+      // 提供旧域名的证书（浏览器域名不匹配）。旧版本无 meta.json 时退回 SAN/CN 判定。
+      const meta = readCertMeta(path.join(acmeDir, 'meta.json'));
+      const certDomainOk =
+        meta !== null
+          ? meta.domain === config.gateway.domain && meta.staging === config.gateway.acmeStaging
+          : certMatchesDomain(config.gateway.tls.cert, config.gateway.domain);
+      if (oldExpiry !== null && oldExpiry > Date.now() && certDomainOk) {
+        // 现有证书仍在有效期内且匹配当前域名（例如续期因网络抖动失败）：继续用它，后台定时重试续期
         console.error(`[dsh-passwords] ${tr('cli.acmeFallbackOld')}: ${String(error)}`);
       } else {
         // 没有可用证书 → 拒绝启动，绝不静默降级为明文 HTTP
