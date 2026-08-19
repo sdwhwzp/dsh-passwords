@@ -788,7 +788,7 @@ export function createGatewayServer(
     }
   }
 
-  /** 子用户权限：缺行时返回默认（全量允许、未封禁） */
+  /** 子用户权限：缺行时默认关闭全部工作区；已有显式空白名单行仍表示不限目录。 */
   function effectivePermissions(userId: number): UserPermissionsRow {
     return (
       db.getPermissions(userId) ?? {
@@ -2059,8 +2059,7 @@ export function createGatewayServer(
                 ? filterByPathField(parsed, reqAs.dshpwPerms!.allowed_folders, 'path')
                 : parsed;
               // F-25：子用户（含 allowedFolders=[] 全部允许）只能看到自己拥有的会话——
-              // 清空 archivedSessionIds 枚举源，并把 items[].sessionIds 也按归属过滤
-              //（工作区可能被主用户/其他子用户共享，path 命中白名单不等于会话可读）
+              // 清空 archivedSessionIds 枚举源，并把活动 sessionIds 按用户例外关闭过滤
               if (reqAs.dshpwPerms !== undefined) {
                 stripArchivedSessionIds(outBody);
                 const disabled = new Set(reqAs.dshpwPerms.disabled_sessions);
