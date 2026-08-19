@@ -393,6 +393,51 @@ test('登录限速：每用户每分钟最多 10 次成功登录（revokedTokens
   assert.equal(statuses[10], 429, '第 11 次应被限速');
 });
 
+// ── 登出 CSRF：同站子域强制登出被拦截 ───────────────────────
+
+test('登出 CSRF：跨源 Origin 强制登出被拒绝（403）且不吊销 token', async () => {
+  const tmp = db.createUser('logout-tmp', bcrypt.hashSync('Password123!', 4), 'user');
+  const token = jwt.sign(
+    { sub: String(tmp.id), username: 'logout-tmp', cv: 0 },
+    'test-secret',
+    { expiresIn: '12h' },
+  );
+  const cookie = `dsh_gateway_token=${token}`;
+  const r = await gatewayReq('POST', '/gateway/logout', { origin: 'https://evil.example' }, cookie);
+  assert.equal(r.status, 403, '跨源提交必须被拒绝');
+  const after = await gatewayReq('GET', '/html', {}, cookie);
+  assert.equal(after.status, 200, '被拒登出不得吊销会话');
+});
+
+test('登出 CSRF：同源 Origin 登出放行（302）', async () => {
+  const tmp = db.createUser('logout-tmp2', bcrypt.hashSync('Password123!', 4), 'user');
+  const token = jwt.sign(
+    { sub: String(tmp.id), username: 'logout-tmp2', cv: 0 },
+    'test-secret',
+    { expiresIn: '12h' },
+  );
+  const cookie = `dsh_gateway_token=${token}`;
+  const r = await gatewayReq(
+    'POST',
+    '/gateway/logout',
+    { origin: `http://127.0.0.1:${gatewayPort}` },
+    cookie,
+  );
+  assert.equal(r.status, 302, '同源登出应放行并重定向到登录页');
+});
+
+test('登出 CSRF：无 Origin（非浏览器/旧客户端）登出放行（302）', async () => {
+  const tmp = db.createUser('logout-tmp3', bcrypt.hashSync('Password123!', 4), 'user');
+  const token = jwt.sign(
+    { sub: String(tmp.id), username: 'logout-tmp3', cv: 0 },
+    'test-secret',
+    { expiresIn: '12h' },
+  );
+  const cookie = `dsh_gateway_token=${token}`;
+  const r = await gatewayReq('POST', '/gateway/logout', {}, cookie);
+  assert.equal(r.status, 302);
+});
+
 // ── M-1：setup 竞态原子化 ─────────────────────────────────────
 
 test('M-1：setupInitialAdmin 只允许成功一次，重复调用返回 null', () => {

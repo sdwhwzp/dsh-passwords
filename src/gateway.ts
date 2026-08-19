@@ -153,6 +153,35 @@ function safeNext(next: string | undefined): string {
   return decoded;
 }
 
+/**
+ * 同源判定（浏览器 Origin vs 请求 Host），网关写路由与登出共用同一口径。
+ * 跨源攻击的本质是跨主机（攻击者无法在受害者主机名上托管内容），因此只比
+ * 主机:端口、不比协议——否则 nginx/caddy 在 80/443 终结 TLS 的反代部署
+ * （网关收到明文 HTTP、req.protocol=http，浏览器 Origin=https）会全部误判。
+ * Host 只信直接对端：仅当对端是本机回环（受信本地反代）才采纳 X-Forwarded-Host，
+ * 公网直连请求不能带伪造头绕过。无 Origin（非浏览器/旧客户端）返回 true，
+ * 由 HttpOnly+SameSite Cookie 兜底。
+ */
+function originHostMatches(req: Request): boolean {
+  const originRaw = req.headers.origin;
+  if (typeof originRaw !== 'string' || originRaw === '') return true;
+  try {
+    const origin = new URL(originRaw);
+    if (origin.origin === 'null') return false;
+    const peer = req.socket.remoteAddress ?? '';
+    const trustedProxy = peer === '127.0.0.1' || peer === '::1' || peer === '::ffff:127.0.0.1';
+    const forwardedHost =
+      typeof req.headers['x-forwarded-host'] === 'string'
+        ? req.headers['x-forwarded-host'].split(',')[0].trim()
+        : '';
+    const effectiveHost =
+      trustedProxy && forwardedHost !== '' ? forwardedHost : String(req.headers.host ?? '');
+    return origin.host === effectiveHost;
+  } catch {
+    return false;
+  }
+}
+
 // ── CSRF（double-submit token）────────────────────────────────
 // 登录/配置表单：GET 渲染时下发 Cookie + 表单隐藏域同一随机值，
 // POST 时恒定时间比对。无服务端会话也能防跨站表单伪造。
@@ -992,6 +1021,12 @@ export function createGatewayServer(
     res.status(405).type('html').send('405 Method Not Allowed');
   });
   app.post('/gateway/logout', (req, res) => {
+    // 同站子域页面可借表单强制登出（SameSite=Lax 只挡跨站、不挡同站子域）：
+    // 与网关写路由同口径做 Origin 主机校验，提交方与 Host 不一致时拒绝。
+    if (!originHostMatches(req)) {
+      res.status(403).type('text/plain').send('403 Forbidden');
+      return;
+    }
     // F-04：服务端吊销——登出的 token 立即失效（黑名单 12h），
     // 即使 Cookie 已被攻击者复制，该 token 也无法再通过认证门卫
     const token = readCookie(req.headers.cookie, COOKIE_NAME);
@@ -1598,25 +1633,7 @@ export function createGatewayServer(
         !requestPath.startsWith('/api/dsh-passwords/internal/') &&
         typeof req.headers.origin === 'string'
       ) {
-        try {
-          const origin = new URL(req.headers.origin);
-          if (origin.origin === 'null') {
-            res.status(403).type('text/plain').send('403 Forbidden');
-            return;
-          }
-          const peer = req.socket.remoteAddress ?? '';
-          const trustedProxy = peer === '127.0.0.1' || peer === '::1' || peer === '::ffff:127.0.0.1';
-          const forwardedHost =
-            typeof req.headers['x-forwarded-host'] === 'string'
-              ? req.headers['x-forwarded-host'].split(',')[0].trim()
-              : '';
-          const effectiveHost =
-            trustedProxy && forwardedHost !== '' ? forwardedHost : String(req.headers.host ?? '');
-          if (origin.host !== effectiveHost) {
-            res.status(403).type('text/plain').send('403 Forbidden');
-            return;
-          }
-        } catch {
+        if (!originHostMatches(req)) {
           res.status(403).type('text/plain').send('403 Forbidden');
           return;
         }
