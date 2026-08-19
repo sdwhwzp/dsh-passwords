@@ -31,7 +31,8 @@ dsh's built-in web UI has no login, no permissions, and no usage controls — pu
 
 The owner can configure, per subuser, from the settings page:
 
-- **Workspace allowlist**: a subuser only sees and opens the folders you assign
+- **Workspace allowlist**: a subuser only sees and opens the folders you assign; session workspaces are checked against both ownership and the allowlist
+- **Session and message isolation**: subusers only see sessions they created that remain inside an authorized workspace; messages are limited to broadcasts, messages addressed to them, and messages they sent
 - **Hourly token limit** and **daily usage-time limit**: requests are rejected once the cap is hit
 - **Sandbox level**: read-only / workspace-write / full access; when a subuser's AI tries to escalate beyond its level, the gateway forces the approval to "reject"
 - **Upload / git-download toggles** and **ban subusers**
