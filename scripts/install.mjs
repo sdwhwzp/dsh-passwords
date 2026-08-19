@@ -43,14 +43,22 @@ function run(command, args = [], { quiet = false, env } = {}) {
 
 /** Windows 无 POSIX 权限：用 icacls 收紧密钥文件 ACL（仅当前用户 + SYSTEM 可读写），
  *  防止同机其他用户/服务账号读取 .env 与 setup-key.txt（L-3）。
- *  域策略等环境可能拒绝执行，失败静默——不影响安装主流程。 */
+ *  失败不阻塞安装，但必须提示——否则用户以为已收紧。 */
 function tightenWindowsAcl(file) {
   if (!isWin || !existsSync(file)) return;
   try {
+    // 域环境用 DOMAIN\user 完整主体；本地账号 USERDOMAIN=机器名同样可用
+    const account =
+      process.env.USERDOMAIN && process.env.USERNAME
+        ? `${process.env.USERDOMAIN}\\${process.env.USERNAME}`
+        : process.env.USERNAME;
     const args = [file, '/inheritance:r'];
-    if (process.env.USERNAME) args.push('/grant:r', `${process.env.USERNAME}:F`);
+    if (account) args.push('/grant:r', `${account}:F`);
     args.push('/grant:r', 'SYSTEM:F');
-    spawnSync('icacls', args, { stdio: 'ignore' });
+    const result = spawnSync('icacls', args, { stdio: 'ignore' });
+    if (result.status !== 0 || result.error !== undefined) {
+      say(`⚠ 无法收紧密钥文件 ACL（${file}），请检查目录权限`);
+    }
   } catch {
     // 收紧失败不影响安装主流程
   }

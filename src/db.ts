@@ -856,30 +856,43 @@ export class Database {
   }
 
   // ── 留言 / 聊天 ───────────────────────────────────────────
-  listMessages(limit = 100): MessageRow[] {
+  // ⚠ 多租户可见性必须在 SQL 层先过滤再 LIMIT：旧实现先全局 LIMIT 300 再到
+  // 网关里按接收人过滤，其他用户的私信会堵住当前用户的增量拉取（复现：A 游标 1，
+  // 之后 300 条他人私信占满窗口，A 的新消息 id 排在 300 条之后永远取不到）；
+  // 且“全局最大 id”还会泄露全平台消息活动量，并让 reset 判断失真。
+  // 可见性口径：广播（recipient_id NULL）∨ 发给我的 ∨ 我发的。
+  private static readonly MESSAGE_VISIBILITY_SQL =
+    '(m.recipient_id IS NULL OR m.recipient_id = ? OR m.sender_id = ?)';
+
+  listMessagesForUser(userId: number, limit = 100): MessageRow[] {
     return this.mapMessageRows(
       this.stmt(
         `SELECT m.id, m.sender_id, u.username, m.recipient_id, m.content, m.tags, m.created_at
        FROM messages m JOIN users u ON u.id = m.sender_id
+       WHERE ${Database.MESSAGE_VISIBILITY_SQL}
        ORDER BY m.id DESC LIMIT ?`,
-      ).all(Math.min(Math.max(limit, 1), 500)),
+      ).all(userId, userId, Math.min(Math.max(limit, 1), 500)),
     );
   }
 
-  /** 增量拉取：只返回 id > sinceId 的消息（升序），供客户端轮询避免全量下载 */
-  listMessagesAfter(sinceId: number, limit = 300): MessageRow[] {
+  /** 增量拉取：只返回 id > sinceId 且当前用户可见的消息（升序），供客户端轮询避免全量下载 */
+  listMessagesAfterForUser(userId: number, sinceId: number, limit = 300): MessageRow[] {
     return this.mapMessageRows(
       this.stmt(
         `SELECT m.id, m.sender_id, u.username, m.recipient_id, m.content, m.tags, m.created_at
        FROM messages m JOIN users u ON u.id = m.sender_id
-       WHERE m.id > ? ORDER BY m.id ASC LIMIT ?`,
-      ).all(sinceId, Math.min(Math.max(limit, 1), 500)),
+       WHERE ${Database.MESSAGE_VISIBILITY_SQL} AND m.id > ?
+       ORDER BY m.id ASC LIMIT ?`,
+      ).all(userId, userId, sinceId, Math.min(Math.max(limit, 1), 500)),
     );
   }
 
-  /** 当前最大消息 id（表空时 null）——增量接口用：since 超过它即游标已失效（DB 重建） */
-  latestMessageId(): number | null {
-    const row = this.stmt('SELECT MAX(id) AS n FROM messages').get() as { n: number | null } | undefined;
+  /** 当前用户可见的最大消息 id（无可见消息时 null）——增量接口用：
+   *  since 超过它即游标已失效（DB 重建），按用户口径避免泄露全局消息活动量 */
+  latestMessageIdForUser(userId: number): number | null {
+    const row = this.stmt(
+      `SELECT MAX(m.id) AS n FROM messages m WHERE ${Database.MESSAGE_VISIBILITY_SQL}`,
+    ).get(userId, userId) as { n: number | null } | undefined;
     return row?.n === null || row?.n === undefined ? null : Number(row.n);
   }
 

@@ -14,6 +14,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { mkdtempSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import zlib from 'node:zlib';
 import jwt from 'jsonwebtoken';
 import { generateKeyPairSync } from 'node:crypto';
@@ -22,7 +23,7 @@ import { createGatewayServer } from '../src/gateway.js';
 import { AuthService } from '../src/auth.js';
 import { Database } from '../src/db.js';
 import { createFieldCrypto } from '../src/encrypt.js';
-import { buildCsr } from '../src/acme.js';
+import { buildCsr, certMatchesDomain } from '../src/acme.js';
 import { isCursorReset, type ChatMessage } from '../src/client/chat.tsx';
 import type { PlatformConfig } from '../src/config.js';
 
@@ -35,6 +36,8 @@ let gatewayPort = 0;
 let adminCookie = '';
 let subuserCookie = '';
 let subuserId = 0;
+let adminId = 0;
+let thirdId = 0;
 /** 上游最后一次收到的路径（已解码视角，mock 直接取 req.url） */
 let lastUpstreamUrl = '';
 const upstreamUrls: string[] = [];
@@ -119,10 +122,13 @@ before(async () => {
   crypto = createFieldCrypto('testkey', 'testkey');
   db = new Database(path.join(tempDir, 'test.db'), crypto);
   db.init();
-  // 主用户 + 子用户（子用户无 user_permissions 行 = 默认权限）
-  db.createUser('admin', '$2a$10$dummyhashdummyhashdummyhashdu', 'admin');
+  // 主用户 + 子用户（子用户无 user_permissions 行 = 默认权限）+ 第三方账号（消息饥饿回归用）
+  const adminUser = db.createUser('admin', '$2a$10$dummyhashdummyhashdummyhashdu', 'admin');
+  adminId = adminUser.id;
   const sub = db.createUser('subuser', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   subuserId = sub.id;
+  const third = db.createUser('third', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  thirdId = third.id;
 
   upstream = await startMockUpstream();
   const upstreamPort = (upstream.address() as { port: number }).port;
@@ -251,6 +257,32 @@ test('M-5b：since 超过最新消息 id（DB 重建后）返回 reset 信号 + 
   const body2 = JSON.parse(r2.body) as { reset?: boolean; messages: Array<{ id: number }> };
   assert.notEqual(body2.reset, true, '正常增量（无新消息）不得误报 reset');
   assert.equal(body2.messages.length, 0);
+});
+
+test('M-5c：其他用户私信不堵塞当前用户增量拉取（可见性在 SQL 层 LIMIT 前过滤）', async () => {
+  // 基线：admin 发的广播，增量游标从它之后开始
+  const baseline = db.addMessage(adminId, null, 'baseline', []);
+  // 300 条 admin 不可见的私信（subuser → third）占满全局窗口
+  for (let i = 0; i < 300; i++) db.addMessage(subuserId, thirdId, `hidden-${i}`, []);
+  // 之后发给 admin 的目标消息——旧实现全局 LIMIT 300 会把它的 id 挤在窗口外，永远取不到
+  db.addMessage(subuserId, adminId, 'target-for-admin', []);
+
+  // 增量：游标=基线 id，应直接拿到目标消息（不被 300 条隐藏私信堵塞）
+  const r = await gatewayReq('GET', `/gateway/api/messages?since=${baseline.id}`, {}, adminCookie);
+  assert.equal(r.status, 200);
+  const body = JSON.parse(r.body) as { reset?: boolean; messages: Array<{ content: string }> };
+  assert.notEqual(body.reset, true, '有可见新消息时不得误报 reset');
+  const contents = body.messages.map((m) => m.content);
+  assert.ok(contents.includes('target-for-admin'), '发给当前用户的消息必须可见');
+  assert.ok(!contents.includes('hidden-0'), '他人私信不得泄露给当前用户');
+
+  // reset：游标远超自身最新可见 id → reset=true，回退全量且不泄露他人私信
+  const r2 = await gatewayReq('GET', '/gateway/api/messages?since=999999', {}, adminCookie);
+  const body2 = JSON.parse(r2.body) as { reset?: boolean; messages: Array<{ content: string }> };
+  assert.equal(body2.reset, true, '游标超前于自身最新可见 id 时必须报 reset');
+  const resetContents = body2.messages.map((m) => m.content);
+  assert.ok(resetContents.includes('target-for-admin'), 'reset 全量必须包含当前用户可见消息');
+  assert.ok(!resetContents.some((c) => c.startsWith('hidden-')), 'reset 全量不得泄露他人私信');
 });
 
 // ── M-1：setup 竞态原子化 ─────────────────────────────────────
@@ -389,6 +421,45 @@ test('L-4：buildCsr 的 SAN 为合法 RFC 5280 结构（OCTET STRING 包装的 
   // 对照：域名字节与 SAN OID 仍应在场（浅层断言作为回归底网）
   assert.ok(der.includes(SAN_OID), 'CSR 必须包含 SAN OID');
   assert.ok(der.includes(Buffer.from('example.com', 'utf8')), 'CSR 必须包含域名');
+});
+
+test('L-4b：certMatchesDomain 存在 DNS SAN 时以 SAN 为准（CN 不参与，RFC 6125）', (t) => {
+  let hasOpenssl = false;
+  try {
+    execFileSync('openssl', ['version'], { stdio: 'ignore' });
+    hasOpenssl = true;
+  } catch {
+    // 环境无 openssl：跳过（CI 可选）
+  }
+  if (!hasOpenssl) {
+    t.skip('openssl 不可用，跳过 SAN 优先级测试');
+    return;
+  }
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-cert-'));
+  try {
+    // 证书 1：SAN=other.example，CN=target.example——浏览器以 SAN 为准，不得回退 CN
+    const cert1 = path.join(dir, 'c1.pem');
+    execFileSync(
+      'openssl',
+      ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', path.join(dir, 'k1.pem'), '-out', cert1,
+        '-subj', '/CN=target.example', '-addext', 'subjectAltName=DNS:other.example', '-days', '1'],
+      { stdio: 'ignore' },
+    );
+    assert.equal(certMatchesDomain(cert1, 'target.example'), false, 'SAN 存在且不含域名时不得回退 CN');
+    assert.equal(certMatchesDomain(cert1, 'other.example'), true);
+    // 证书 2：无 SAN，仅 CN——允许回退 CN（自签/旧证书兼容）
+    const cert2 = path.join(dir, 'c2.pem');
+    execFileSync(
+      'openssl',
+      ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', path.join(dir, 'k2.pem'), '-out', cert2,
+        '-subj', '/CN=cnonly.example', '-days', '1'],
+      { stdio: 'ignore' },
+    );
+    assert.equal(certMatchesDomain(cert2, 'cnonly.example'), true);
+    assert.equal(certMatchesDomain(cert2, 'other.example'), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ── M-5：聊天游标倒退检测（纯函数） ───────────────────────────

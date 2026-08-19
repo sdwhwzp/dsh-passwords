@@ -362,21 +362,28 @@ export function readCertMeta(metaPath: string): { domain: string; staging: boole
   }
 }
 
-/** 证书 leaf 的 SAN/CN 是否覆盖目标域名（旧证书无 meta.json 时的兼容判定）。 */
+/** 证书 leaf 的 SAN/CN 是否覆盖目标域名（旧证书无 meta.json 时的兼容判定）。
+ *  RFC 6125/2818：证书存在 DNS SAN 时以 SAN 为准，CN 不参与主机名匹配——
+ *  旧实现 `san.includes(domain) || cn === domain` 会接受“SAN=other、CN=target”
+ *  这类浏览器必然拒绝的证书。DNS 名不区分大小写，统一转小写比较。 */
 export function certMatchesDomain(certPath: string, domain: string): boolean {
   try {
     const pem = readFileSync(certPath, 'utf8');
     const leaf = new X509Certificate(pem);
+    const target = domain.toLowerCase();
     const san = String(leaf.subjectAltName ?? '')
       .split(/,\s*/)
-      .map((entry) => entry.replace(/^DNS:/, '').trim())
+      .map((entry) => entry.replace(/^DNS:/, '').trim().toLowerCase())
       .filter((entry) => entry !== '');
+    if (san.length > 0) return san.includes(target);
+    // 无 DNS SAN 才允许回退 CN（自签/旧证书兼容路径）
     const cn = leaf.subject
       .split('\n')
       .find((line) => line.startsWith('CN='))
       ?.slice(3)
-      .trim();
-    return san.includes(domain) || cn === domain;
+      .trim()
+      .toLowerCase();
+    return cn === target;
   } catch {
     return false;
   }

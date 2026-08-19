@@ -703,6 +703,10 @@ export function createGatewayServer(
   // F-04：登出吊销（内存黑名单）。JWT 无状态，登出只能靠网关侧短期黑名单
   // 使已登出 token 立即失效（TTL 与 JWT 有效期一致，到期自动清理）。
   // 改密/改名已有 credential_version 机制使旧 token 失效，此处只补登出路径。
+  // 已知残余（容量权衡）：条目最长保留 12h，持有凭据的用户可反复登录/登出制造
+  // 唯一 token 撑大该 Map（成功登录无速率限制）；不能超容量淘汰——未过期条目
+  // 必须保持拒绝，否则已登出会话复活。后续可考虑 SQLite TTL 撤销表、随机会话
+  // id、或对成功登录/登出加限速（见 PROCESS 步骤 41 残余清单）。
   const revokedTokens = new Map<string, number>();
   const TOKEN_TTL_MS = 12 * 3600 * 1000;
 
@@ -1315,28 +1319,26 @@ export function createGatewayServer(
     res.json({ ok: true });
   });
 
-  // ── 留言列表（所有登录用户；按收件人过滤） ─────────────────────
+  // ── 留言列表（所有登录用户；可见性在 SQL 层按用户过滤） ─────
   // 支持 ?since=<id> 增量拉取（客户端轮询只取新增消息，避免每次全量下载）。
-  // reset：游标超前于服务端最新 id（数据库重建/消息清空后自增从头开始）时，
-  // 服务端回退全量并显式告知客户端重建基线——只靠客户端“空响应”判断无法
-  // 区分“正常无新消息”与“游标已失效”，会永久收不到新消息。
+  // reset：游标超前于【当前用户可见】的最新 id（数据库重建/消息清空后自增从头
+  // 开始）时，服务端回退全量并显式告知客户端重建基线——只靠客户端“空响应”判断
+  // 无法区分“正常无新消息”与“游标已失效”，会永久收不到新消息。
+  // 不能用全局最大 id：既泄露全平台消息活动量，也会被其他用户私信干扰判定。
   app.get('/gateway/api/messages', (req, res) => {
     const me = apiAuth(req, res);
     if (!me) return;
     const sinceRaw = typeof req.query.since === 'string' ? Number(req.query.since) : NaN;
     const since = Number.isFinite(sinceRaw) && sinceRaw > 0 ? Math.floor(sinceRaw) : 0;
-    let all = since > 0 ? db.listMessagesAfter(since, 300) : db.listMessages(300);
+    let mine = since > 0 ? db.listMessagesAfterForUser(me.userId, since, 300) : db.listMessagesForUser(me.userId, 300);
     let reset = false;
-    if (since > 0 && all.length === 0) {
-      const latest = db.latestMessageId();
+    if (since > 0 && mine.length === 0) {
+      const latest = db.latestMessageIdForUser(me.userId);
       if (latest === null || since > latest) {
         reset = true;
-        all = db.listMessages(300);
+        mine = db.listMessagesForUser(me.userId, 300);
       }
     }
-    const mine = all.filter(
-      (m) => m.recipient_id === null || m.recipient_id === me.userId || m.sender_id === me.userId,
-    );
     res.json({ ok: true, me: { id: me.userId, username: me.username, role: me.role }, messages: mine, reset });
   });
 

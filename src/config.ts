@@ -179,15 +179,27 @@ function tightenEnvPerm(file: string): void {
  * Windows 无 POSIX 权限：用 icacls 收紧密钥文件 ACL（仅当前用户 + SYSTEM）。
  * hardenSecretsAfterSetup 用临时文件+rename 替换 .env 后，新文件继承的是临时
  * 文件的 ACL（可能随目录宽松）——必须重新收紧，否则 SETUP_KEY/JWT/内部/DB 密钥
- * 在共享目录下会被同机其他用户读到。失败静默（域策略等环境可能拒绝）。
+ * 在共享目录下会被同机其他用户读到。icacls 的失败（账号无法解析/策略禁止）
+ * 不阻塞启动主流程，但必须留告警——否则“已收紧”是静默假象。
  */
 function tightenWindowsAcl(file: string): void {
   if (process.platform !== 'win32') return;
   try {
+    // 域环境用 DOMAIN\user 完整主体；本地账号 USERDOMAIN=机器名同样可用
+    const account =
+      process.env.USERDOMAIN && process.env.USERNAME
+        ? `${process.env.USERDOMAIN}\\${process.env.USERNAME}`
+        : process.env.USERNAME;
     const args = [file, '/inheritance:r'];
-    if (process.env.USERNAME) args.push('/grant:r', `${process.env.USERNAME}:F`);
+    if (account) args.push('/grant:r', `${account}:F`);
     args.push('/grant:r', 'SYSTEM:F');
-    spawnSync('icacls', args, { stdio: 'ignore' });
+    const result = spawnSync('icacls', args, { stdio: 'ignore' });
+    if (result.status !== 0 || result.error !== undefined) {
+      console.warn(
+        `[dsh-passwords] 无法收紧密钥文件 ACL（${file}）：` +
+          (result.error !== undefined ? String(result.error) : `icacls 退出码 ${String(result.status)}`),
+      );
+    }
   } catch {
     // 收紧失败不影响启动主流程
   }
