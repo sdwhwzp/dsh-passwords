@@ -374,31 +374,6 @@ export function collectSessionCwd(value: unknown, out: Map<string, string> = new
   return out;
 }
 
-/**
- * 会话注册表元数据（Discussion #6 实施项 1）：从 session.list 响应收集
- * sessionId → {cwd?, title?}，供主用户「会话归属管理」界面展示与分配。
- * 与 collectSessionCwd 同源结构（depth 上限 8 防深嵌套 DoS），额外带 title。
- */
-export function collectSessionMeta(
-  value: unknown,
-  out: Map<string, { cwd: string | null; title: string | null }> = new Map(),
-  depth = 0,
-): Map<string, { cwd: string | null; title: string | null }> {
-  if (depth > 8 || value === null) return out;
-  if (Array.isArray(value)) {
-    for (const item of value) collectSessionMeta(item, out, depth + 1);
-  } else if (typeof value === 'object') {
-    const obj = value as Record<string, unknown>;
-    if (typeof obj.sessionId === 'string' && obj.sessionId.length > 0) {
-      const entry = out.get(obj.sessionId) ?? { cwd: null, title: null };
-      if (typeof obj.cwd === 'string' && obj.cwd.length > 0) entry.cwd = obj.cwd;
-      if (typeof obj.title === 'string' && obj.title.length > 0) entry.title = obj.title;
-      out.set(obj.sessionId, entry);
-    }
-    for (const v of Object.values(obj)) collectSessionMeta(v, out, depth + 1);
-  }
-  return out;
-}
 
 /** 从 workspace.list 响应收集会话归属工作区：工作区 path → 其 sessionIds 的每个会话的 cwd（无则覆盖）。 */
 export function collectSessionCwdFromWorkspaces(value: unknown, out: Map<string, string> = new Map(), depth = 0): Map<string, string> {
@@ -681,9 +656,9 @@ export function isWorkspaceWrite(pathname: string): boolean {
 export const WORKSPACE_ENDPOINT_RE = /^\/api\/session[.\/](create)([.\/]|$)/;
 
 /**
- * 会话作用域 RPC（F-25）：这些端点带一个 sessionId，能读/写/改某个会话——
- * 子用户必须拥有该会话（session_owner 命中本人）才放行，否则跨租户读写任意会话。
- * create 无源会话、list 单独按归属过滤，均不在此列。
+ * 会话作用域 RPC：这些端点带一个 sessionId，能读/写/改某个会话——
+ * 子用户必须启用其所在工作区，且该会话未被管理员单独关闭。
+ * create 无源会话、list 单独做工作区/会话过滤，均不在此列。
  */
 export const SESSION_SCOPED_RE = /^\/api\/session[.\/](history|prompt|respond|archive|delete|rename|retitle|title|resume|fork|truncate|export)([.\/]|$)/;
 
@@ -697,6 +672,21 @@ export function extractSessionId(value: unknown, depth = 0): string | null {
     if (nested !== null) return nested;
   }
   return null;
+}
+
+/** 收集全局/工作区 archivedSessionIds，供 workspace.list 同时过滤 sessionIds。 */
+export function collectArchivedSessionIds(value: unknown, out: Set<string> = new Set(), depth = 0): Set<string> {
+  if (depth > 8 || value === null || typeof value !== 'object') return out;
+  if (Array.isArray(value)) {
+    for (const item of value) collectArchivedSessionIds(item, out, depth + 1);
+    return out;
+  }
+  const obj = value as Record<string, unknown>;
+  if (Array.isArray(obj.archivedSessionIds)) {
+    for (const id of obj.archivedSessionIds) if (typeof id === 'string') out.add(id);
+  }
+  for (const value of Object.values(obj)) collectArchivedSessionIds(value, out, depth + 1);
+  return out;
 }
 
 /**

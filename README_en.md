@@ -31,9 +31,8 @@ dsh's built-in web UI has no login, no permissions, and no usage controls — pu
 
 The owner can configure, per subuser, from the settings page:
 
-- **Workspace allowlist**: a subuser only sees and opens the folders you assign; session workspaces are checked against both ownership and the allowlist
-- **Session and message isolation**: subusers only see sessions they created that remain inside an authorized workspace; messages are limited to broadcasts, messages addressed to them, and messages they sent
-- **Legacy session ownership**: sessions created before the ownership tracking update are hidden from subusers; the owner can batch-assign them per workspace in Settings → Password Gate → Session ownership (authorized folders are re-checked)
+- **Workspace and session permissions**: the owner enables workspaces per subuser with switches; enabled workspaces expose active sessions by default, with per-session checkboxes to turn individual sessions off. Archived sessions are excluded from the settings list
+- **Session and message isolation**: subusers only see enabled workspaces and enabled sessions; messages are limited to broadcasts, messages addressed to them, and messages they sent
 - **DM-by-default messages**: subuser messages go to the owner by default; broadcasting is owner-only and must be explicitly chosen
 - **Hourly token limit** and **daily usage-time limit**: requests are rejected once the cap is hit
 - **Sandbox level**: read-only / workspace-write / full access; when a subuser's AI tries to escalate beyond its level, the gateway forces the approval to "reject"
@@ -162,8 +161,7 @@ After logging in to dsh, open **Settings → Plugins** to find the "dsh-password
 | **Change password** | Yourself; the owner can change anyone's | Old sessions are invalidated immediately |
 | **Change username** | Yourself; the owner can change anyone's | Sign in with the new username afterwards |
 | **Subuser management** | Owner only | Create/delete subusers (subusers can sign in but have no admin rights) |
-| **Subuser permissions** | Owner only | Workspace allowlist, hourly token limit, daily time limit, sandbox level, upload/git-download toggles, ban |
-| **Session ownership** | Owner only | Batch-assign pre-upgrade unassigned sessions to subusers per workspace (authorized folders are re-checked) |
+| **Subuser permissions** | Owner only | Workspace switches, per-session checkboxes, hourly token limit, daily time limit, sandbox level, upload/git-download toggles, ban |
 | **Chat / messages** | All signed-in users | Chat button in the bottom-left corner, with tags (issue/pull request/discussion/announcement/question); subusers DM the owner by default, broadcasting is owner-only |
 
 - **Owner** = the account created at first-time setup; everything added later is a **subuser**.

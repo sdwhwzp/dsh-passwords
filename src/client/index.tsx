@@ -51,6 +51,14 @@ const CSS = `
 .dshpw-user:last-child{border-bottom:none}
 .dshpw-perm{border:1px solid var(--dsw-alias-border-l2);border-radius:10px;padding:10px;display:flex;flex-direction:column;gap:8px}
 .dshpw-perm-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.dshpw-workspaces{display:flex;flex-direction:column;gap:8px}
+.dshpw-workspace{border:1px solid var(--dsw-alias-border-l2);border-radius:8px;overflow:hidden;background:var(--dsw-alias-bg-layer-2)}
+.dshpw-workspace-switch{border:0;border-radius:0;background:transparent}
+.dshpw-workspace-switch:hover{background:var(--dsw-alias-bg-layer-1)}
+.dshpw-session-list{display:flex;flex-direction:column;gap:6px;padding:8px 12px 10px 18px;border-top:1px solid var(--dsw-alias-border-l2)}
+.dshpw-session-check{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--dsw-alias-label-secondary);cursor:pointer;min-height:26px}
+.dshpw-session-check input{accent-color:var(--dsw-alias-brand-primary);flex:0 0 auto}
+.dshpw-session-check span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dshpw-check{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--dsw-alias-label-secondary);cursor:pointer}
 .dshpw-check input{accent-color:var(--dsw-alias-brand-primary)}
 /* 下拉框自身带 dshpw-input class：用 select.dshpw-input（旧 .dshpw-input select 永远不命中，是死选择器） */

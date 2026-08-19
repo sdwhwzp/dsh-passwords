@@ -47,6 +47,7 @@ export interface PermOverview {
       allowGitDownload: boolean;
       banned: boolean;
       sandboxMode: string | null;
+      disabledSessions: string[];
     };
     usage: {
       day: string;
@@ -66,15 +67,13 @@ interface PermDraft {
   git: boolean;
   banned: boolean;
   sandbox: string;
+  disabledSessions: string[];
 }
 
-/** 无归属会话（Discussion #6：会话归属管理） */
-interface UnassignedSession {
-  sessionId: string;
-  cwd: string | null;
-  title: string | null;
-  firstSeenAt: string;
-  lastSeenAt: string;
+interface WorkspaceInfo {
+  path: string;
+  title: string;
+  sessions: Array<{ id: string; title: string }>;
 }
 
 /** 与 host 侧一致的最小密码策略（本机提示用，最终以服务端校验为准） */
@@ -103,31 +102,7 @@ function fmtTime(iso: string): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-/** 无归属会话按工作区（cwd）分组：组内批量分配，单会话组即单个分配。
- *  哨兵键：真实路径必以 / 开头，不会与 null 分组键碰撞。 */
-const SESS_NO_CWD_KEY = '__no_cwd__';
-function groupUnassignedByCwd(list: UnassignedSession[]): Array<{
-  cwd: string | null;
-  title: string | null;
-  sessions: UnassignedSession[];
-}> {
-  const map = new Map<string, { cwd: string | null; title: string | null; sessions: UnassignedSession[] }>();
-  for (const s of list) {
-    const key = s.cwd ?? SESS_NO_CWD_KEY;
-    let group = map.get(key);
-    if (!group) {
-      group = { cwd: s.cwd, title: null, sessions: [] };
-      map.set(key, group);
-    }
-    group.sessions.push(s);
-  }
-  const groups = [...map.values()];
-  for (const group of groups) {
-    group.title = group.sessions.find((s) => s.title !== null && s.title !== '')?.title ?? null;
-    group.sessions.sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt));
-  }
-  return groups.sort((a, b) => (b.sessions[0]?.lastSeenAt ?? '').localeCompare(a.sessions[0]?.lastSeenAt ?? ''));
-}
+
 
 type ApiError = { error?: string; code?: string };
 
@@ -190,13 +165,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
   // 权限管理（仅主用户）
   const [overview, setOverview] = useState<PermOverview | null>(null);
   const [permDrafts, setPermDrafts] = useState<Record<number, PermDraft>>({});
-  const [workspaces, setWorkspaces] = useState<Array<{ path: string; title: string }>>([]);
-  // 会话归属管理（仅主用户，Discussion #6）
-  const [unassigned, setUnassigned] = useState<UnassignedSession[] | null>(null);
-  /** 按工作区分组的分配目标选择：key = 工作区路径（无 cwd 用 ''） */
-  const [sessTargets, setSessTargets] = useState<Record<string, string>>({});
-  /** 分配失败明细：sessionId → 本地化错误文案 */
-  const [sessAssignErrors, setSessAssignErrors] = useState<Record<string, string>>({});
+  const [workspaces, setWorkspaces] = useState<WorkspaceInfo[]>([]);
   // 正在编辑中的子用户草稿：dirty 时 30s 自动刷新不覆盖本地未保存的修改
   const dirtyUsersRef = useRef<Set<number>>(new Set());
   // 刷新 in-flight 守卫：慢网络下 30s 定时 + 操作后手动 refresh 不重叠。
@@ -237,6 +206,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
                   git: u.permissions.allowGitDownload,
                   banned: u.permissions.banned,
                   sandbox: u.permissions.sandboxMode ?? '',
+                  disabledSessions: [...(u.permissions.disabledSessions ?? [])],
                 };
                 if (!(u.id in drafts) || !dirtyUsersRef.current.has(u.id)) {
                   drafts[u.id] = fresh;
@@ -247,27 +217,13 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
               }
               return drafts;
             });
-            return api<{ workspaces: Array<{ path: string; title: string }> }>('/api/dsh-passwords/workspaces')
-              .then((r) => setWorkspaces(r.workspaces ?? []))
-              .catch(() => setWorkspaces([]))
-              .then(() =>
-                api<{ sessions: UnassignedSession[] }>('/gateway/api/session-ownership/unassigned')
-                  .then((r) => {
-                    if (refreshQueuedRef.current) return;
-                    setUnassigned(r.sessions ?? []);
-                    // 清理已不在无归属清单中的失败提示（会话已被分配或消失）
-                    const live = new Set((r.sessions ?? []).map((s) => s.sessionId));
-                    setSessAssignErrors((prev) => {
-                      const next: Record<string, string> = {};
-                      for (const [id, msg] of Object.entries(prev)) if (live.has(id)) next[id] = msg;
-                      return next;
-                    });
-
-                  })
-                  .catch(() => {
-                    if (!refreshQueuedRef.current) setUnassigned(null);
-                  }),
-              );
+            return api<{ workspaces: WorkspaceInfo[] }>('/api/dsh-passwords/workspaces')
+              .then((r) => {
+                if (!refreshQueuedRef.current) setWorkspaces(r.workspaces ?? []);
+              })
+              .catch(() => {
+                if (!refreshQueuedRef.current) setWorkspaces([]);
+              });
           })
           .catch(() => setOverview(null));
       })
@@ -424,6 +380,34 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
     setPermDrafts((prev) => ({ ...prev, [userId]: { ...prev[userId], ...patch } }));
   };
 
+  const enabledFolderSet = (draft: PermDraft): Set<string> => {
+    if (draft.folders.includes('__deny__')) return new Set();
+    if (draft.folders.length === 0) return new Set(workspaces.map((workspace) => workspace.path));
+    return new Set(draft.folders);
+  };
+
+  const toggleWorkspace = (userId: number, workspace: WorkspaceInfo, enabled: boolean) => {
+    const draft = permDrafts[userId];
+    if (!draft) return;
+    const enabledFolders = enabledFolderSet(draft);
+    if (enabled) enabledFolders.add(workspace.path);
+    else enabledFolders.delete(workspace.path);
+    const workspaceSessionIds = new Set(workspace.sessions.map((session) => session.id));
+    setDraft(userId, {
+      folders: enabledFolders.size === 0 ? ['__deny__'] : [...enabledFolders],
+      disabledSessions: draft.disabledSessions.filter((id) => !workspaceSessionIds.has(id)),
+    });
+  };
+
+  const toggleSession = (userId: number, sessionId: string, enabled: boolean) => {
+    const draft = permDrafts[userId];
+    if (!draft) return;
+    const disabled = new Set(draft.disabledSessions);
+    if (enabled) disabled.delete(sessionId);
+    else disabled.add(sessionId);
+    setDraft(userId, { disabledSessions: [...disabled] });
+  };
+
   const savePermissions = (userId: number) => {
     const d = permDrafts[userId];
     if (!d) return;
@@ -438,6 +422,12 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
       setError(t('err.INVALID'));
       return;
     }
+    const enabledFolders = enabledFolderSet(d);
+    const liveEnabledSessions = new Set(
+      workspaces
+        .filter((workspace) => enabledFolders.has(workspace.path))
+        .flatMap((workspace) => workspace.sessions.map((session) => session.id)),
+    );
     void run(
       () =>
         api('/gateway/api/permissions', {
@@ -449,6 +439,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
           allowGitDownload: d.git,
           banned: d.banned,
           sandboxMode: d.sandbox === '' ? null : d.sandbox,
+          disabledSessions: d.disabledSessions.filter((id) => liveEnabledSessions.has(id)),
         }).then(() => {
           // 保存成功：草稿与服务端一致，解除 dirty（后续 30s 刷新可覆盖）
           dirtyUsersRef.current.delete(userId);
@@ -457,63 +448,6 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
     );
   };
 
-  // 会话归属分配（仅主用户）：按工作区分组批量分配，逐会话返回结果与失败原因
-  const assignSessions = (
-    group: { cwd: string | null; sessions: UnassignedSession[] },
-  ) => {
-    const key = group.cwd ?? SESS_NO_CWD_KEY;
-    const targetName = sessTargets[key] ?? '';
-    const target = data?.users.find((u) => u.username === targetName);
-    if (!target) {
-      setError(t('sessNoTarget'));
-      return;
-    }
-    const sessionIds = group.sessions.map((s) => s.sessionId);
-    void run(
-      () =>
-        api<{ results?: Array<{ sessionId: string; ok: boolean; error?: string }> }>(
-          '/gateway/api/session-ownership/assign',
-          { userId: target.id, sessionIds },
-        ).then((r) => {
-          const results = r.results ?? [];
-          const errors: Record<string, string> = {};
-          for (const result of results) {
-            if (!result.ok && result.error) {
-              const localized = trErr(`sess.err.${result.error}`);
-              errors[result.sessionId] = localized === `sess.err.${result.error}` ? result.error : localized;
-
-            }
-          }
-          const okIds = new Set(results.filter((result) => result.ok).map((result) => result.sessionId));
-          setSessAssignErrors((prev) => {
-            const next = { ...prev };
-            for (const id of okIds) delete next[id];
-            return { ...next, ...errors };
-          });
-
-          if (okIds.size > 0) {
-            setUnassigned((prev) => (prev ?? []).filter((s) => !okIds.has(s.sessionId)));
-          }
-          if (results.length > 0 && results.every((result) => result.ok)) {
-            setSessTargets((prev) => {
-              const next = { ...prev };
-              delete next[key];
-              return next;
-            });
-          }
-          const failed = results.filter((result) => !result.ok).length;
-          return {
-            notice:
-              results.length === 0 || failed === results.length
-                ? t('sessAssignFailed')
-                : failed > 0
-                  ? t('sessAssignPartial')
-                  : t('sessAssigned'),
-          };
-        }),
-      t('sessAssigned'),
-    );
-  };
 
   // 管理员的目标用户下拉：列出全部用户（默认自己，即当前账号在列表中的那一项）
   const targetSelect = (value: string, onChange: (v: string) => void) =>
@@ -749,31 +683,67 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
                   : null,
                 u.permissions.banned ? h('span', { className: 'dshpw-badge' }, t('banned')) : null,
               ),
-              h(
-                'select',
-                {
-                  className: 'dshpw-input',
-                  value: d.folders[0] ?? '',
-                  'aria-label': t('permsFolders'),
-                  title: d.folders.join('\n'),
-                  onChange: (e: { target: { value: string } }) =>
-                    setDraft(u.id, { folders: e.target.value === '' ? [] : [e.target.value] }),
-                },
-                h('option', { value: '' }, t('permsAll')),
-                h('option', { value: '__deny__' }, t('permsDenyAll')),
-                ...((() => {
-                  const paths = Array.from(new Set([...workspaces.map((w) => w.path), ...d.folders]));
-                  return paths
-                    .filter((p) => p !== '__deny__')
-                    .map((p) => {
-                      const ws = workspaces.find((w) => w.path === p);
-                      return h('option', { key: p, value: p }, ws?.title || p);
-                    });
-                })()),
-              ),
-              d.folders.length > 1
-                ? h('div', { className: 'dshpw-hint' }, t('permsFoldersMulti', { n: String(d.folders.length) }))
-                : null,
+              h('div', { className: 'dshpw-label' }, t('permsFolders')),
+              workspaces.length === 0
+                ? h('div', { className: 'dshpw-hint' }, t('permsNoWorkspaces'))
+                : h(
+                    'div',
+                    { className: 'dshpw-workspaces' },
+                    ...workspaces.map((workspace) => {
+                      const enabled = enabledFolderSet(d).has(workspace.path);
+                      return h(
+                        'div',
+                        { className: 'dshpw-workspace', key: workspace.path },
+                        h(
+                          'label',
+                          { className: 'dshpw-switch dshpw-workspace-switch' },
+                          h(
+                            'span',
+                            { className: 'dshpw-switch-copy' },
+                            h('strong', null, workspace.title || workspace.path),
+                            h('small', null, workspace.path),
+                          ),
+                          h(
+                            'span',
+                            { className: 'dshpw-switch-control' },
+                            h('input', {
+                              type: 'checkbox',
+                              checked: enabled,
+                              disabled: busy,
+                              onChange: (e: { target: { checked: boolean } }) =>
+                                toggleWorkspace(u.id, workspace, e.target.checked),
+                              'aria-label': workspace.title || workspace.path,
+                            }),
+                            h('span', { className: 'dshpw-switch-track', 'aria-hidden': 'true' },
+                              h('span', { className: 'dshpw-switch-thumb' }),
+                            ),
+                          ),
+                        ),
+                        enabled
+                          ? h(
+                              'div',
+                              { className: 'dshpw-session-list' },
+                              ...(workspace.sessions.length === 0
+                                ? [h('span', { className: 'dshpw-hint' }, t('permsNoSessions'))]
+                                : workspace.sessions.map((session) =>
+                                    h(
+                                      'label',
+                                      { className: 'dshpw-session-check', key: session.id },
+                                      h('input', {
+                                        type: 'checkbox',
+                                        checked: !d.disabledSessions.includes(session.id),
+                                        disabled: busy,
+                                        onChange: (e: { target: { checked: boolean } }) =>
+                                          toggleSession(u.id, session.id, e.target.checked),
+                                      }),
+                                      h('span', null, session.title || session.id),
+                                    ),
+                                  )),
+                            )
+                          : null,
+                      );
+                    }),
+                  ),
               h(
                 'select',
                 {
@@ -860,75 +830,6 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
           }),
       ),
 
-    // ── 会话归属管理（仅主用户，Discussion #6） ──
-    isAdmin &&
-      unassigned !== null &&
-      h(
-        'div',
-        { className: 'dshpw-section' },
-        h('span', { className: 'dshpw-label' }, t('sess')),
-        h('div', { className: 'dshpw-hint' }, t('sessHint')),
-        ...(unassigned.length === 0
-          ? [h('div', { className: 'dshpw-hint' }, t('sessEmpty'))]
-          : groupUnassignedByCwd(unassigned).map((group) => {
-              const key = group.cwd ?? SESS_NO_CWD_KEY;
-              return h(
-                'div',
-                { className: 'dshpw-perm', key: `sess-${key}` },
-                h(
-                  'div',
-                  { className: 'dshpw-perm-head' },
-                  h('strong', null, group.title ?? group.cwd ?? group.sessions[0]?.sessionId ?? ''),
-                  group.cwd
-                    ? h('span', { className: 'dshpw-hint' }, group.cwd)
-                    : h('span', { className: 'dshpw-hint' }, t('sessFolder')),
-                ),
-                h(
-                  'div',
-                  { className: 'dshpw-row' },
-                  h('span', { className: 'dshpw-hint' }, t('sessAssignGroup')),
-                  h(
-                    'select',
-                    {
-                      className: 'dshpw-input',
-                      value: sessTargets[key] ?? '',
-                      'aria-label': t('sessTarget'),
-                      onChange: (e: { target: { value: string } }) =>
-                        setSessTargets((prev) => ({ ...prev, [key]: e.target.value })),
-                    },
-                    h('option', { value: '' }, t('sessTarget')),
-                    ...(data?.users ?? [])
-                      .filter((u) => u.role === 'user')
-                      .map((u) => h('option', { key: u.id, value: u.username }, u.username)),
-                  ),
-                  h(
-                    'button',
-                    {
-                      className: 'dshpw-btn',
-                      disabled: busy || (sessTargets[key] ?? '') === '',
-                      onClick: () => assignSessions(group),
-                    },
-                    t('sessAssign') + (group.sessions.length > 1 ? ` (${group.sessions.length})` : ''),
-                  ),
-
-                ),
-                ...group.sessions.map((s) =>
-                  h(
-                    'div',
-                    { className: 'dshpw-row', key: s.sessionId },
-                    h(
-                      'span',
-                      { className: 'dshpw-hint', title: s.sessionId },
-                      `${s.title ?? s.sessionId} · ${t('sessLastSeen')} ${fmtTime(s.lastSeenAt)}`,
-                    ),
-                    sessAssignErrors[s.sessionId]
-                      ? h('span', { className: 'dshpw-error' }, sessAssignErrors[s.sessionId])
-                      : null,
-                  ),
-                ),
-              );
-            })),
-      ),
 
     error && h('div', { className: 'dshpw-error' }, error),
     notice && h('div', { className: 'dshpw-ok' }, notice),

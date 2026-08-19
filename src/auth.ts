@@ -361,7 +361,18 @@ export class AuthService {
     }
     const pw = assertPassword(password);
     const hash = await bcrypt.hash(pw, BCRYPT_ROUNDS);
-    await this.db.createUser(name, hash, 'user');
+    const user = await this.db.createUser(name, hash, 'user');
+    // 新子用户默认关闭全部工作区；主用户在权限面板中逐个滑动开启。
+    this.db.setPermissions(user.id, {
+      allowedFolders: ['__deny__'],
+      hourlyTokenLimit: null,
+      dailyMinutesLimit: null,
+      allowUpload: true,
+      allowGitDownload: false,
+      banned: false,
+      sandboxMode: null,
+      disabledSessions: [],
+    });
     await this.db.audit('subuser_created', {
       username: name,
       ip: meta.ip,

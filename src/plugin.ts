@@ -613,9 +613,29 @@ export function apply(ctx: Context): void {
         // 读取 dsh 已注册的工作区目录（供主用户配置子用户可访问文件夹时下拉选择）
         try {
           const reg = ctx.get('workspaceRegistry') as unknown as
-            | { list(): Array<{ path: string; title: string }> }
+            | {
+                list(): Array<{ path: string; title: string; sessionIds: readonly string[] }>;
+                archivedSessionIds: readonly string[];
+              }
             | undefined;
-          const workspaces = (reg?.list() ?? []).map((w) => ({ path: w.path, title: w.title }));
+          const sessions = ctx.get('sessions') as unknown as
+            | { get(id: string): unknown }
+            | undefined;
+          const sessionTitle = ctx.get('sessionTitle') as unknown as
+            | { get(session: unknown): { title?: string } | undefined }
+            | undefined;
+          const archived = new Set(reg?.archivedSessionIds ?? []);
+          const workspaces = (reg?.list() ?? []).map((workspace) => ({
+            path: workspace.path,
+            title: workspace.title,
+            sessions: workspace.sessionIds
+              .filter((sessionId) => !archived.has(sessionId))
+              .map((sessionId) => {
+                const session = sessions?.get(sessionId);
+                const title = session === undefined ? undefined : sessionTitle?.get(session)?.title;
+                return { id: sessionId, title: title || sessionId };
+              }),
+          }));
           writeJson(res, 200, { ok: true, workspaces });
         } catch {
           writeJson(res, 200, { ok: true, workspaces: [] });

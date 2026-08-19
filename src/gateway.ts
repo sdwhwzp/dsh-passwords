@@ -39,13 +39,13 @@ import {
   filterByPathField,
   collectIdPathPairs,
   collectSessionCwd,
-  collectSessionMeta,
   collectSessionCwdFromWorkspaces,
   extractWorkspaceId,
   findStringField,
   SESSION_SCOPED_RE,
   extractSessionId,
   stripArchivedSessionIds,
+  collectArchivedSessionIds,
   filterOwnedSessionIds,
   filterSessionItems,
   sandboxPresetRank,
@@ -793,7 +793,8 @@ export function createGatewayServer(
     return (
       db.getPermissions(userId) ?? {
         user_id: userId,
-        allowed_folders: [],
+        // 新子用户默认关闭全部工作区；旧的显式空数组权限行仍保留“不限制”兼容语义。
+        allowed_folders: ['__deny__'],
         hourly_token_limit: null,
         daily_minutes_limit: null,
         allow_upload: true,
@@ -802,6 +803,7 @@ export function createGatewayServer(
         allow_git_download: false,
         banned: false,
         sandbox_mode: null,
+        disabled_sessions: [],
         updated_at: '',
       }
     );
@@ -1165,6 +1167,7 @@ export function createGatewayServer(
           allowGitDownload: perms.allow_git_download,
           banned: perms.banned,
           sandboxMode: perms.sandbox_mode,
+          disabledSessions: perms.disabled_sessions,
         },
         usage: usage
           ? {
@@ -1333,6 +1336,8 @@ export function createGatewayServer(
       rawSandbox === 'read-only' || rawSandbox === 'workspace-write' || rawSandbox === 'danger-full-access'
         ? rawSandbox
         : null;
+    const disabledSessions = stringArray(body.disabledSessions, 2000)
+      .filter((id) => id.length > 0 && id.length <= 200);
     // 配额语义："改配额 = 重新给额度"——当 token/时长上限发生变化时
     // 重置该子用户已累计的用量（不同子用户每时段用量不同，改上限应重新计）。
     // 只改文件夹/上传/封禁等非配额字段时不重置（避免误清用量）。
@@ -1347,6 +1352,7 @@ export function createGatewayServer(
       allowGitDownload,
       banned,
       sandboxMode,
+      disabledSessions,
     });
     if (quotaChanged) {
       db.resetUsage(userId);
@@ -1364,103 +1370,12 @@ export function createGatewayServer(
         allowGitDownload,
         banned,
         sandboxMode,
+        disabledSessions,
       }),
     });
     res.json({ ok: true });
   });
 
-  // ── 会话归属管理（仅主用户）：无归属旧会话扫描 + 分配（Discussion #6 实施项 1-4） ──
-  app.get('/gateway/api/session-ownership/unassigned', (req, res) => {
-    const me = apiAuth(req, res, true);
-    if (!me) return;
-    const sessions = db.listUnassignedSessions(200).map((row) => ({
-      sessionId: row.session_id,
-      cwd: row.cwd,
-      title: row.title,
-      firstSeenAt: row.first_seen_at,
-      lastSeenAt: row.last_seen_at,
-    }));
-    res.json({ ok: true, sessions });
-  });
-
-  app.post('/gateway/api/session-ownership/assign', jsonBody, (req, res) => {
-    const me = apiAuth(req, res, true);
-    if (!me) return;
-    const body = (req.body ?? {}) as Record<string, unknown>;
-    // 严格整数解析（与 nullableInt 同口径：拒绝 1e3/十六进制/布尔/数组的宽松强转）
-    const userId = nullableInt(body.userId);
-    if (userId === null || userId < 1) {
-      res.status(400).json({ ok: false, code: 'INVALID', error: 'userId 无效' });
-      return;
-    }
-    const target = db.getUserById(userId);
-    if (!target) {
-      res.status(404).json({ ok: false, code: 'NO_SUCH_USER', error: '目标用户不存在' });
-      return;
-    }
-    // 归属管理面向子用户：主用户本就可访问全部会话，无需（也不允许）被分配目标
-    if (target.role === 'admin') {
-      res.status(400).json({ ok: false, code: 'INVALID', error: '不能把会话分配给主用户' });
-      return;
-    }
-    // 去重（重复 id 会让结果与审计出现重复条目）；stringArray 已截断到 64
-    const sessionIds = [...new Set(stringArray(body.sessionIds, 200))];
-    if (sessionIds.length === 0) {
-      res.status(400).json({ ok: false, code: 'INVALID', error: 'sessionIds 为空' });
-      return;
-    }
-    if (sessionIds.some((id) => id.length > 200)) {
-      res.status(400).json({ ok: false, code: 'INVALID', error: 'sessionId 长度非法' });
-      return;
-    }
-    // 分配前校验：会话必须已被注册表观察到（未知 id 拒绝，防止写入垃圾归属行）；
-    // 已归属他人的会话默认拒绝（force=true 显式重分配）——防止 UI 过期/竞态窗口
-    // 把用户正在使用的会话静默改派；目标子用户受工作区白名单约束时，cwd 必须命中
-    // 白名单；cwd 缺失无法校验 → fail-closed 拒绝（宁可少分配，不可越权分配）。
-    const perms = effectivePermissions(userId);
-    const restricted = isWorkspaceRestricted(perms.allowed_folders);
-    const results: Array<{ sessionId: string; ok: boolean; error?: string }> = [];
-    for (const sessionId of sessionIds) {
-      try {
-        const reg = db.getSessionRegistry(sessionId);
-        if (reg === null) {
-          results.push({ sessionId, ok: false, error: 'SESSION_UNKNOWN' });
-          continue;
-        }
-        const currentOwner = db.getSessionOwner(sessionId);
-        if (currentOwner !== null && currentOwner !== userId && body.force !== true) {
-          results.push({ sessionId, ok: false, error: 'ALREADY_OWNED' });
-          continue;
-        }
-        if (reg.cwd === null) {
-          if (restricted) {
-            results.push({ sessionId, ok: false, error: 'CWD_UNKNOWN' });
-            continue;
-          }
-        } else if (restricted && !folderAllowed(reg.cwd, perms.allowed_folders)) {
-          results.push({ sessionId, ok: false, error: 'FOLDER_NOT_ALLOWED' });
-          continue;
-        }
-        db.assignSessionOwner(sessionId, userId);
-        results.push({ sessionId, ok: true });
-      } catch (error) {
-        // 单条失败不影响其余批次；无论结果如何审计都落盘（问责链不断）
-        console.warn('[dsh-passwords] 会话分配失败 session=%s:', sessionId, String(error));
-        results.push({ sessionId, ok: false, error: 'INTERNAL' });
-      }
-    }
-    try {
-      // 审计记操作者（me）而非被分配者：保留"谁把会话分给了谁"的问责链
-      db.audit('session_ownership_assigned', {
-        username: me.username,
-        ip: typeof req.headers['x-forwarded-for'] === 'string' ? req.headers['x-forwarded-for'] : null,
-        detail: JSON.stringify({ target: target.username, targetId: userId, results }),
-      });
-    } catch (error) {
-      console.warn('[dsh-passwords] 会话分配审计写入失败:', String(error));
-    }
-    res.json({ ok: true, results });
-  });
 
   // ── token 用量上报（客户端 liveTokenUsage 投影增量，所有登录用户） ──
   // 替代旧的 HTTP 响应正则计量：客户端复用 dsh 的 tokenUsage 投影（与
@@ -1726,8 +1641,6 @@ export function createGatewayServer(
           gatePath === '/gateway/api/' ||
           gatePath === '/gateway/api/overview' ||
           gatePath === '/gateway/api/permissions' ||
-          gatePath === '/gateway/api/session-ownership/unassigned' ||
-          gatePath === '/gateway/api/session-ownership/assign' ||
           gatePath === '/gateway/api/usage/report' ||
           gatePath === '/gateway/api/messages' ||
           gatePath.startsWith('/gateway/api/messages/') ||
@@ -2150,15 +2063,9 @@ export function createGatewayServer(
               //（工作区可能被主用户/其他子用户共享，path 命中白名单不等于会话可读）
               if (reqAs.dshpwPerms !== undefined) {
                 stripArchivedSessionIds(outBody);
-                filterOwnedSessionIds(outBody, (id) => {
-                  try {
-                    return db.getSessionOwner(id) === reqAs.dshpwUser;
-                  } catch (error) {
-                    // 单条 DB 读失败按"未授权"丢弃（fail-closed），不得让整份列表走外层透传
-                    console.warn('[dsh-passwords] 会话归属查询失败（按未授权丢弃）:', String(error));
-                    return false;
-                  }
-                });
+                const disabled = new Set(reqAs.dshpwPerms.disabled_sessions);
+                const archived = collectArchivedSessionIds(parsed);
+                filterOwnedSessionIds(outBody, (id) => !disabled.has(id) && !archived.has(id));
               }
               const out = Buffer.from(JSON.stringify(outBody), 'utf8');
               const respHeaders = headersForRewrittenBody(upstreamRes.headers);
@@ -2185,10 +2092,8 @@ export function createGatewayServer(
           return;
         }
 
-        // ── session.create / fork 响应：记录会话归属（F-25）+ 注入真实沙盒（F-26） ──
-        // 响应体不变（原样转发），只做两个副作用：
-        //   1) sessionId → 创建者 user_id 写入 session_owner（含主用户，保证其新会话不被子用户读）
-        //   2) 受限子用户（sandbox_mode 非空）→ 通知 dsh 插件追加 sandbox/mode 事件
+        // ── session.create / fork 响应：缓存 cwd + 注入真实沙盒（F-26） ──
+        // 响应体不变；新会话是否可见由工作区开关与逐会话禁用覆盖决定。
         if (req.method === 'POST' && /^\/api\/session[.\/](create|fork)$/.test(proxyPath)) {
           bufferUpstream(upstreamRes, res, (raw) => {
             try {
@@ -2197,27 +2102,11 @@ export function createGatewayServer(
               const parsed = JSON.parse(decoded.toString('utf8'));
               const sessionId = extractSessionId(parsed);
               if (sessionId !== null && reqAs.dshpwUser !== undefined) {
-                // 归属登记失败只记日志：该会话随后会被 session.list 的 fail-closed
-                // 归属过滤隐藏（不会泄露给子用户），响应仍原样转发。
-                // 之前这里抛错会落到下方 catch 被误标为"上游响应非 JSON"，排障误导。
-                try {
-                  db.setSessionOwner(sessionId, reqAs.dshpwUser);
-                } catch (error) {
-                  console.warn('[dsh-passwords] 会话归属登记失败 session=%s:', sessionId, String(error));
-                }
-                // 记录 sessionId → 创建时的目标 cwd（needsFolderCheck 已算出，存于 req）
                 const reqCwd = reqAs.dshpwSessionCwd;
-                const cwd = typeof reqCwd === 'string' && reqCwd.length > 0 ? reqCwd : null;
-                if (cwd !== null) sessionCwdById.set(sessionId, cwd);
-                // Discussion #6：新会话同步进入注册表（已有归属，不会再出现在无归属清单）。
-                // 优先取创建响应自带的 cwd/title（不受限用户无 needsFolderCheck，reqCwd 恒空）；
-                // 收割写库失败只丢登记，绝不影响会话创建响应。
-                const meta = collectSessionMeta(parsed).get(sessionId) ?? { cwd, title: null };
-                try {
-                  db.upsertSessionRegistry([{ sessionId, cwd: meta.cwd, title: meta.title }]);
-                } catch (error) {
-                  console.warn('[dsh-passwords] 会话注册表登记失败（不影响会话创建）:', String(error));
-                }
+                const cwd = typeof reqCwd === 'string' && reqCwd.length > 0
+                  ? reqCwd
+                  : collectSessionCwd(parsed).get(sessionId);
+                if (cwd) sessionCwdById.set(sessionId, cwd);
                 if (reqAs.dshpwPerms !== undefined && reqAs.dshpwPerms.sandbox_mode !== null) {
                   applySandboxToSession(sessionId, reqAs.dshpwPerms.sandbox_mode);
                 }
@@ -2230,9 +2119,8 @@ export function createGatewayServer(
                 if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response too large');
                 return;
               }
-              // 非 JSON 响应：原样透传，但副作用（归属/沙盒）缺失——记录 warn 便于排查
-              // （正常上游响应都是 JSON，走到这里说明上游行为异常或响应被截断）
-              console.warn(`[dsh-passwords] session.create/fork 上游响应非 JSON，会话归属/沙盒副作用缺失: ${proxyPath}`);
+              // 非 JSON 响应：原样透传，但 cwd 缓存/沙盒副作用缺失——记录 warn 便于排查。
+              console.warn(`[dsh-passwords] session.create/fork 上游响应非 JSON，cwd/沙盒副作用缺失: ${proxyPath}`);
               const respHeaders = headersForStreaming(upstreamRes.headers);
               if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
               if (!res.writableEnded) res.end(raw);
@@ -2241,51 +2129,9 @@ export function createGatewayServer(
           return;
         }
 
-        // ── session.list（主用户）：收割全量会话元数据到注册表（Discussion #6）──
-        // 主用户列表不受限：解析仅为收割，响应按原始字节回放（保持流式分帧语义）。
-        if (
-          reqAs.dshpwPerms === undefined &&
-          reqAs.dshpwUser !== undefined &&
-          req.method === 'POST' &&
-          /^\/api\/session[.\/]list$/.test(proxyPath)
-        ) {
-          bufferUpstream(
-            upstreamRes,
-            res,
-            (raw) => {
-              try {
-                const enc = String(upstreamRes.headers['content-encoding'] ?? '');
-                const decoded = enc.includes('gzip') ? gunzipBounded(raw) : raw;
-                const parsed = JSON.parse(decoded.toString('utf8'));
-                collectSessionCwd(parsed, sessionCwdById);
-                // 收割写库失败只丢登记，不影响主用户列表回放
-                try {
-                  db.upsertSessionRegistry(
-                    [...collectSessionMeta(parsed)].map(([id, m]) => ({
-                      sessionId: id,
-                      cwd: m.cwd,
-                      title: m.title,
-                    })),
-                  );
-                } catch (error) {
-                  console.warn('[dsh-passwords] 会话注册表收割失败（主用户列表不受影响）:', String(error));
-                }
-              } catch (error) {
-                // 解压超限 / 非 JSON 上游响应：不收割，原样回放（主用户列表不受限，不 fail）
-                void error;
-              }
-              const respHeaders = headersForStreaming(upstreamRes.headers);
-              if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
-              if (!res.writableEnded) res.end(raw);
-            },
-            'stream',
-          );
-          return;
-        }
 
-        // ── session.list 响应过滤：子用户只看得到自己拥有的会话（F-25）──
-        // 归属未记录的旧会话（本修复前创建）对子用户也不可见（fail-closed）；
-        // 主用户不受限。这样侧栏不会再泄露其他用户/主用户的会话列表。
+        // ── session.list 响应过滤：工作区授权 + 逐会话禁用覆盖 ──
+        // 子用户只看到已开启工作区里的活动会话；默认全部启用，管理员可逐条关闭。
         if (
           reqAs.dshpwPerms !== undefined &&
           req.method === 'POST' &&
@@ -2300,39 +2146,16 @@ export function createGatewayServer(
               // 先收集 sessionId→cwd 缓存（过滤前的原始响应，含受限前创建的旧目录会话），
               // 供会话作用域 RPC（history/prompt 等）做 cwd 白名单校验
               collectSessionCwd(parsed, sessionCwdById);
-              // Discussion #6：过滤前收割全量会话元数据（含其他用户/无归属旧会话），
-              // 供主用户「会话归属管理」扫描升级前创建的旧会话并分配。
-              // ⚠ 收割写库失败只能丢登记，绝不能落到下方 catch 把未过滤列表透传（fail-open）——
-              // 这里单独包住，注册表异常与过滤互不影响。
-              try {
-                db.upsertSessionRegistry(
-                  [...collectSessionMeta(parsed)].map(([id, m]) => ({
-                    sessionId: id,
-                    cwd: m.cwd,
-                    title: m.title,
-                  })),
-                );
-              } catch (error) {
-                console.warn('[dsh-passwords] 会话注册表收割失败（不影响会话过滤）:', String(error));
-              }
-              const caller = reqAs.dshpwUser!;
-              // 受限子用户按 cwd 白名单过滤：权限撤销前在老目录创建的旧会话，其工作区
-              // 已被 workspace.list 隐藏，不丢弃会导致前端出现「未分组+新会话」孤儿项
+
+              // 子用户按工作区开关过滤：关闭工作区后，其会话一并从侧栏消失，
+              // 不产生「未分组」孤儿项。
               const perms = reqAs.dshpwPerms!;
               const cwdAllowed = isWorkspaceRestricted(perms.allowed_folders)
                 ? (cwd: string) => folderAllowed(cwd, perms.allowed_folders)
                 : null;
-              // 归属判定 per-item 兑底：单条 DB 读失败按"未授权"丢弃（fail-closed），
-              // 不能因一条异常让整份未过滤列表走外层 catch 透传
-              const keep = (id: string): boolean => {
-                try {
-                  return db.getSessionOwner(id) === caller;
-                } catch (error) {
-                  console.warn('[dsh-passwords] 会话归属查询失败（按未授权丢弃）:', String(error));
-                  return false;
-                }
-              };
-              const filtered = filterSessionItems(parsed, keep, cwdAllowed);
+              const disabled = new Set(perms.disabled_sessions);
+              const archived = collectArchivedSessionIds(parsed);
+              const filtered = filterSessionItems(parsed, (id) => !disabled.has(id) && !archived.has(id), cwdAllowed);
               const out = Buffer.from(JSON.stringify(filtered), 'utf8');
               const respHeaders = headersForRewrittenBody(upstreamRes.headers);
               respHeaders['content-length'] = String(out.length);
@@ -2469,8 +2292,8 @@ export function createGatewayServer(
       reqAs.dshpwPerms.sandbox_mode !== null &&
       (req.method === 'POST' || req.method === 'PUT') &&
       /^\/api\/respond$/.test(proxyPath);
-    // F-25：会话作用域 RPC（history/prompt/respond/archive/delete/rename/fork 等）
-    // 必须命中 session_owner 且属本人，否则封堵跨租户读写任意会话。
+    // 会话作用域 RPC（history/prompt/respond/archive/delete/rename/fork 等）
+    // 必须位于已开启工作区且未被管理员逐会话关闭。
     const needsOwnershipCheck =
       reqAs.dshpwPerms !== undefined &&
       (req.method === 'POST' || req.method === 'PUT') &&
@@ -2630,26 +2453,20 @@ export function createGatewayServer(
           }
         }
 
-        // F-25：会话归属校验——非本用户拥有的会话一律 403（历史旧会话无归属记录
-        // 也拒绝，fail-closed；主用户不受限）。
+        // 会话访问校验：逐会话关闭优先；其余必须仍位于已开启工作区。
         if (needsOwnershipCheck && bodyObj !== null) {
           const sessionId = extractSessionId(bodyObj) ?? parsedUrl.searchParams.get('sessionId');
-          if (sessionId === null || db.getSessionOwner(sessionId) !== reqAs.dshpwUser) {
+          const perms = reqAs.dshpwPerms!;
+          const cwd = sessionId === null ? undefined : sessionCwdById.get(sessionId);
+          if (
+            sessionId === null ||
+            perms.disabled_sessions.includes(sessionId) ||
+            cwd === undefined ||
+            !folderAllowed(cwd, perms.allowed_folders)
+          ) {
             upstreamReq.destroy();
             res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
             return;
-          }
-          // 受限子用户：会话 cwd 必须仍在授权目录内。
-          // 否则权限撤销后仍能按 sessionId 直读/写旧目录会话（网关只做了列表隐藏）。
-          // cwd 未知（无缓存记录）→ fail-closed 拒绝，避免扩大对新会话的误伤：
-          // session.create 响应与 session.list/workspace.list 响应都会填充缓存。
-          if (isWorkspaceRestricted(reqAs.dshpwPerms!.allowed_folders)) {
-            const cwd = sessionCwdById.get(sessionId);
-            if (cwd === undefined || !folderAllowed(cwd, reqAs.dshpwPerms!.allowed_folders)) {
-              upstreamReq.destroy();
-              res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
-              return;
-            }
           }
         }
 
@@ -2755,7 +2572,6 @@ export function createGatewayServer(
     // 数据库周期清理：登录失败/节流表与注册表幽灵会话（写失败只告警不致命）
     try {
       db.pruneStaleSecurityRows();
-      db.pruneSessionRegistry(30);
     } catch (error) {
       console.warn('[dsh-passwords] 周期清理失败:', String(error));
     }

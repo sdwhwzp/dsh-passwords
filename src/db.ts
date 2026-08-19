@@ -57,6 +57,7 @@ export interface UserPermissionsRow {
   allow_git_download: boolean;
   banned: boolean;
   sandbox_mode: string | null;
+  disabled_sessions: string[];
   updated_at: string;
 }
 
@@ -82,14 +83,6 @@ export interface MessageRow {
   created_at: string;
 }
 
-/** 会话注册表行（session_registry 表：session.list 响应收割的会话元数据镜像） */
-export interface SessionRegistryRow {
-  session_id: string;
-  cwd: string | null;
-  title: string | null;
-  first_seen_at: string;
-  last_seen_at: string;
-}
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
@@ -141,6 +134,7 @@ CREATE TABLE IF NOT EXISTS user_permissions (
   allow_git_download INTEGER NOT NULL DEFAULT 0,
   banned             INTEGER NOT NULL DEFAULT 0,
   sandbox_mode       TEXT,                          -- NULL = 不更改；read-only/workspace-write/danger-full-access
+  disabled_sessions  TEXT NOT NULL DEFAULT '[]',    -- 已开启工作区内逐会话关闭的 sessionId JSON 数组
   updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS user_usage (
@@ -162,25 +156,7 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(id DESC);
--- F-25：会话归属（sessionId → 创建者 user_id）。子用户访问会话作用域 RPC 前
--- 必须命中此表且 user_id 为本人，否则 403（跨租户读写封堵）。
-CREATE TABLE IF NOT EXISTS session_owner (
-  session_id TEXT PRIMARY KEY,
-  user_id    INTEGER NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
--- Discussion #6：会话注册表（session.list 响应收割）。记录网关观察到的全部会话
--- 元数据（cwd/title），供主用户「会话归属管理」扫描升级前创建的无归属旧会话并分配。
--- 仅元数据镜像，分配结果仍以 session_owner 为准。
-CREATE TABLE IF NOT EXISTS session_registry (
-  session_id    TEXT PRIMARY KEY,
-  cwd           TEXT,
-  title         TEXT,
-  first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
-  last_seen_at  TEXT NOT NULL DEFAULT (datetime('now'))
-);
--- 无归属扫描按 last_seen_at 排序 + 修剪按它过滤，建索引避免每次全表排序
-CREATE INDEX IF NOT EXISTS idx_session_registry_seen ON session_registry(last_seen_at);
+
 `;
 
 /** 安全解析 JSON 字符串数组（权限目录 / 留言标签）；损坏时返回空数组 */
@@ -307,11 +283,14 @@ export class Database {
     }
   }
 
-  // ── 迁移：user_permissions 补 sandbox_mode 列 ─────────────────
+  // ── 迁移：user_permissions 补 sandbox_mode / disabled_sessions 列 ─────────────────
   private migratePermissions(): void {
     const cols = this.stmt('PRAGMA table_info(user_permissions)').all() as { name: string }[];
     if (!cols.some((c) => c.name === 'sandbox_mode')) {
       this.db.exec('ALTER TABLE user_permissions ADD COLUMN sandbox_mode TEXT');
+    }
+    if (!cols.some((c) => c.name === 'disabled_sessions')) {
+      this.db.exec("ALTER TABLE user_permissions ADD COLUMN disabled_sessions TEXT NOT NULL DEFAULT '[]'");
     }
   }
 
@@ -591,7 +570,7 @@ export class Database {
       if (user) {
         this.stmt('DELETE FROM login_attempts WHERE username_hash = ?').run(this.crypto.lookupHash(user.username));
       }
-      this.stmt('DELETE FROM session_owner WHERE user_id = ?').run(id);
+
       this.stmt('DELETE FROM user_permissions WHERE user_id = ?').run(id);
       this.stmt('DELETE FROM user_usage WHERE user_id = ?').run(id);
       this.stmt('DELETE FROM messages WHERE sender_id = ? OR recipient_id = ?').run(id, id);
@@ -789,7 +768,7 @@ export class Database {
   // ── 子用户权限（网关强制执行） ────────────────────────────
   getPermissions(userId: number): UserPermissionsRow | null {
     const row = this.stmt(
-      'SELECT user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, allow_upload, allow_git_download, banned, sandbox_mode, updated_at FROM user_permissions WHERE user_id = ?',
+      'SELECT user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, allow_upload, allow_git_download, banned, sandbox_mode, disabled_sessions, updated_at FROM user_permissions WHERE user_id = ?',
     ).get(userId) as
       | {
           user_id: number;
@@ -800,6 +779,7 @@ export class Database {
           allow_git_download: number;
           banned: number;
           sandbox_mode: string | null;
+          disabled_sessions: string | null;
           updated_at: string;
         }
       | undefined;
@@ -813,6 +793,7 @@ export class Database {
       allow_git_download: row.allow_git_download === 1,
       banned: row.banned === 1,
       sandbox_mode: row.sandbox_mode,
+      disabled_sessions: parseJsonArray(row.disabled_sessions),
       updated_at: row.updated_at,
     };
   }
@@ -827,14 +808,16 @@ export class Database {
       allowGitDownload: boolean;
       banned: boolean;
       sandboxMode: string | null;
+      disabledSessions?: string[];
     },
   ): void {
     // 防御性清洗：空串/当前目录/根目录条目在 folderAllowed 里语义=全盘允许
     // （fail-open 陷阱）——网关端点已拒绝，数据层再兑底一次。
     const allowedFolders = sanitizeAllowedFolders(perms.allowedFolders);
+    const disabledSessions = [...new Set((perms.disabledSessions ?? []).filter((id) => typeof id === 'string' && id.length > 0 && id.length <= 200))].slice(0, 2000);
     this.stmt(
-      `INSERT INTO user_permissions (user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, allow_upload, allow_git_download, banned, sandbox_mode)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO user_permissions (user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, allow_upload, allow_git_download, banned, sandbox_mode, disabled_sessions)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(user_id) DO UPDATE SET
          allowed_folders = excluded.allowed_folders,
          hourly_token_limit = excluded.hourly_token_limit,
@@ -843,6 +826,7 @@ export class Database {
          allow_git_download = excluded.allow_git_download,
          banned = excluded.banned,
          sandbox_mode = excluded.sandbox_mode,
+         disabled_sessions = excluded.disabled_sessions,
          updated_at = datetime('now')`,
     ).run(
       userId,
@@ -853,6 +837,7 @@ export class Database {
       perms.allowGitDownload ? 1 : 0,
       perms.banned ? 1 : 0,
       perms.sandboxMode,
+      JSON.stringify(disabledSessions),
     );
   }
 
@@ -1022,23 +1007,6 @@ export class Database {
     };
   }
 
-  // ── 会话归属（F-25）：记录创建者 / 查询创建者 ──────────────────
-  /** 会话创建时记录归属（幂等；fork 出的新会话同样走这里）
-   *  ON CONFLICT DO NOTHING：禁止覆盖已有归属——避免 dsh 侧会话 ID 可被
-   *  客户端指定时，攻击者把他人会话归属改为自己（夺会话）。 */
-  setSessionOwner(sessionId: string, userId: number): void {
-    this.stmt(
-      'INSERT INTO session_owner (session_id, user_id) VALUES (?, ?) ON CONFLICT(session_id) DO NOTHING',
-    ).run(sessionId, userId);
-  }
-
-  /** 查询会话创建者 user_id；旧会话（本修复之前创建）无记录返回 null */
-  getSessionOwner(sessionId: string): number | null {
-    const row = this.stmt('SELECT user_id FROM session_owner WHERE session_id = ?').get(sessionId) as
-      | { user_id: number }
-      | undefined;
-    return row ? Number(row.user_id) : null;
-  }
 
   /** 平台主用户 id（首个 admin）；平台必有主用户，缺失说明数据损坏 */
   findAdminId(): number | null {
@@ -1048,48 +1016,6 @@ export class Database {
     return row ? Number(row.id) : null;
   }
 
-  // ── 会话注册表（Discussion #6）：元数据镜像 + 无归属扫描 ─────────
-  /** session.list 响应收割：批量 upsert 会话元数据（原子事务，不覆盖 first_seen_at）。
-   *  去重 + 单批上限：一次收割异常大的响应时保护事务体积；同一会话多条记录合并
-   *  （非 null 值优先：create 路径只带 cwd、list 路径补 title，后者不得擦除前者）。 */
-  upsertSessionRegistry(rows: Array<{ sessionId: string; cwd: string | null; title: string | null }>): void {
-    if (rows.length === 0) return;
-    const merged = new Map<string, { cwd: string | null; title: string | null }>();
-    for (const row of rows.slice(0, 500)) {
-      const prev = merged.get(row.sessionId);
-      if (!prev) {
-        merged.set(row.sessionId, { cwd: row.cwd, title: row.title });
-        continue;
-      }
-      if (prev.cwd === null && row.cwd !== null) prev.cwd = row.cwd;
-      if (prev.title === null && row.title !== null) prev.title = row.title;
-    }
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      const stmt = this.stmt(
-        `INSERT INTO session_registry (session_id, cwd, title) VALUES (?, ?, ?)
-         ON CONFLICT(session_id) DO UPDATE SET
-           cwd = COALESCE(excluded.cwd, session_registry.cwd),
-           title = COALESCE(excluded.title, session_registry.title),
-           last_seen_at = datetime('now')`,
-      );
-      for (const [sessionId, row] of merged) {
-        stmt.run(sessionId, row.cwd, row.title);
-      }
-      this.db.exec('COMMIT');
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
-    }
-  }
-
-  /** 注册表修剪：超过保留天数未再被 session.list 观察到的会话移出注册表（幽灵会话回收）。
-   *  仅影响"无归属扫描"镜像，不触碰 session_owner 归属。 */
-  pruneSessionRegistry(days = 30): void {
-    this.stmt("DELETE FROM session_registry WHERE last_seen_at < datetime('now', ?)").run(
-      `-${Math.max(days, 1)} days`,
-    );
-  }
 
   /** 登录失败/节流表修剪：防随机用户名+轮换 IP 喷洒让表无界增长 */
   pruneStaleSecurityRows(days = 7): void {
@@ -1098,58 +1024,4 @@ export class Database {
     this.stmt("DELETE FROM ip_throttle WHERE updated_at < datetime('now', ?)").run(cutoff);
   }
 
-  getSessionRegistry(sessionId: string): SessionRegistryRow | null {
-    const row = this.stmt(
-      'SELECT session_id, cwd, title, first_seen_at, last_seen_at FROM session_registry WHERE session_id = ?',
-    ).get(sessionId) as
-      | {
-          session_id: string;
-          cwd: string | null;
-          title: string | null;
-          first_seen_at: string;
-          last_seen_at: string;
-        }
-      | undefined;
-    if (!row) return null;
-    return {
-      session_id: row.session_id,
-      cwd: row.cwd,
-      title: row.title,
-      first_seen_at: row.first_seen_at,
-      last_seen_at: row.last_seen_at,
-    };
-  }
-
-  /** 无归属会话清单（升级前创建的旧会话）：注册表有、session_owner 无 */
-  listUnassignedSessions(limit = 200): SessionRegistryRow[] {
-    const rows = this.stmt(
-      `SELECT sr.session_id, sr.cwd, sr.title, sr.first_seen_at, sr.last_seen_at
-       FROM session_registry sr
-       LEFT JOIN session_owner so ON so.session_id = sr.session_id
-       WHERE so.session_id IS NULL
-       ORDER BY sr.last_seen_at DESC, sr.session_id ASC
-       LIMIT ?`,
-    ).all(Math.min(Math.max(limit, 1), 500)) as Array<{
-      session_id: string;
-      cwd: string | null;
-      title: string | null;
-      first_seen_at: string;
-      last_seen_at: string;
-    }>;
-    return rows.map((row) => ({
-      session_id: row.session_id,
-      cwd: row.cwd,
-      title: row.title,
-      first_seen_at: row.first_seen_at,
-      last_seen_at: row.last_seen_at,
-    }));
-  }
-
-  /** 管理员分配/重新分配会话归属：与 setSessionOwner 不同，允许覆盖已有归属。 */
-  assignSessionOwner(sessionId: string, userId: number): void {
-    this.stmt(
-      `INSERT INTO session_owner (session_id, user_id) VALUES (?, ?)
-       ON CONFLICT(session_id) DO UPDATE SET user_id = excluded.user_id`,
-    ).run(sessionId, userId);
-  }
 }
