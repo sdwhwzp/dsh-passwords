@@ -199,12 +199,16 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
   const [sessAssignErrors, setSessAssignErrors] = useState<Record<string, string>>({});
   // 正在编辑中的子用户草稿：dirty 时 30s 自动刷新不覆盖本地未保存的修改
   const dirtyUsersRef = useRef<Set<number>>(new Set());
-  // 刷新 in-flight 守卫：慢网络下 30s 定时 + 操作后手动 refresh 可能重叠，
-  // 上一轮未返回时跳过本轮（3 个轻量 API，重叠只会无益重发）
+  // 刷新 in-flight 守卫：慢网络下 30s 定时 + 操作后手动 refresh 不重叠。
+  // 若刷新期间又有请求，排队在当前响应结束后补跑，避免旧快照覆盖乐观分配结果。
   const refreshingRef = useRef(false);
+  const refreshQueuedRef = useRef(false);
 
   const refresh = () => {
-    if (refreshingRef.current) return;
+    if (refreshingRef.current) {
+      refreshQueuedRef.current = true;
+      return;
+    }
     refreshingRef.current = true;
     // in-flight 守卫覆盖整个 state→overview→workspaces 链（而非只覆盖 patch/status）：
     // 否则慢网络下 overview 未返回时守卫已被 patch/status 提前释放，30s 定时又会叠一轮。
@@ -249,6 +253,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
               .then(() =>
                 api<{ sessions: UnassignedSession[] }>('/gateway/api/session-ownership/unassigned')
                   .then((r) => {
+                    if (refreshQueuedRef.current) return;
                     setUnassigned(r.sessions ?? []);
                     // 清理已不在无归属清单中的失败提示（会话已被分配或消失）
                     const live = new Set((r.sessions ?? []).map((s) => s.sessionId));
@@ -257,8 +262,11 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
                       for (const [id, msg] of Object.entries(prev)) if (live.has(id)) next[id] = msg;
                       return next;
                     });
+
                   })
-                  .catch(() => setUnassigned(null)),
+                  .catch(() => {
+                    if (!refreshQueuedRef.current) setUnassigned(null);
+                  }),
               );
           })
           .catch(() => setOverview(null));
@@ -266,6 +274,10 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
       .catch((e) => setError(errText(e, trErr)))
       .finally(() => {
         refreshingRef.current = false;
+        if (refreshQueuedRef.current) {
+          refreshQueuedRef.current = false;
+          refresh();
+        }
       });
     // patch 状态独立于主链（轻量 + 失败只影响状态展示）
     api<{ status: PatchState | null }>('/api/dsh-passwords/patch/status')
@@ -286,15 +298,21 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
   const me = data?.me?.username ?? '';
   const chatEnabled = data?.chatEnabled ?? true;
 
-  const run = async (fn: () => Promise<void>, okMessage: string, afterSuccess?: () => Promise<void>) => {
+  const run = async (
+    fn: () => Promise<unknown>,
+    okMessage: string,
+    afterSuccess?: () => Promise<void>,
+  ) => {
     setBusy(true);
     setError('');
     setNotice('');
     try {
-      await fn();
-      // 先显示成功/进行中提示：重载补丁的恢复轮询可能持续数秒，不能等到页面
-      // 即将刷新才反馈；聊天开关也能立即给出确认。
-      setNotice(okMessage);
+      const result = await fn();
+      const customNotice =
+        result !== null && typeof result === 'object' && 'notice' in result && typeof result.notice === 'string'
+          ? result.notice
+          : null;
+      setNotice(customNotice ?? okMessage);
       if (afterSuccess) {
         await afterSuccess();
         return;
@@ -440,7 +458,9 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
   };
 
   // 会话归属分配（仅主用户）：按工作区分组批量分配，逐会话返回结果与失败原因
-  const assignSessions = (group: { cwd: string | null; sessions: UnassignedSession[] }) => {
+  const assignSessions = (
+    group: { cwd: string | null; sessions: UnassignedSession[] },
+  ) => {
     const key = group.cwd ?? SESS_NO_CWD_KEY;
     const targetName = sessTargets[key] ?? '';
     const target = data?.users.find((u) => u.username === targetName);
@@ -455,26 +475,41 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
           '/gateway/api/session-ownership/assign',
           { userId: target.id, sessionIds },
         ).then((r) => {
+          const results = r.results ?? [];
           const errors: Record<string, string> = {};
-          for (const res of r.results ?? []) {
-            if (!res.ok && res.error) {
-              // 未知错误码回退服务端原文，避免界面出现字面 sess.err.XXX
-              const localized = trErr(`sess.err.${res.error}`);
-              errors[res.sessionId] = localized === `sess.err.${res.error}` ? res.error : localized;
+          for (const result of results) {
+            if (!result.ok && result.error) {
+              const localized = trErr(`sess.err.${result.error}`);
+              errors[result.sessionId] = localized === `sess.err.${result.error}` ? result.error : localized;
+
             }
           }
-          // 失败提示合并而非整体替换：分配其他组时不清掉本组仍在列表中的失败原因
-          setSessAssignErrors((prev) => ({ ...prev, ...errors }));
-          // 成功项立即从本地列表移除（乐观）：与 30s 定时刷新竞态时不显示"已分配"旧会话
-          const okIds = new Set((r.results ?? []).filter((res) => res.ok).map((res) => res.sessionId));
+          const okIds = new Set(results.filter((result) => result.ok).map((result) => result.sessionId));
+          setSessAssignErrors((prev) => {
+            const next = { ...prev };
+            for (const id of okIds) delete next[id];
+            return { ...next, ...errors };
+          });
+
           if (okIds.size > 0) {
             setUnassigned((prev) => (prev ?? []).filter((s) => !okIds.has(s.sessionId)));
           }
-          setSessTargets((prev) => {
-            const next = { ...prev };
-            delete next[key];
-            return next;
-          });
+          if (results.length > 0 && results.every((result) => result.ok)) {
+            setSessTargets((prev) => {
+              const next = { ...prev };
+              delete next[key];
+              return next;
+            });
+          }
+          const failed = results.filter((result) => !result.ok).length;
+          return {
+            notice:
+              results.length === 0 || failed === results.length
+                ? t('sessAssignFailed')
+                : failed > 0
+                  ? t('sessAssignPartial')
+                  : t('sessAssigned'),
+          };
         }),
       t('sessAssigned'),
     );
@@ -875,6 +910,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
                     },
                     t('sessAssign') + (group.sessions.length > 1 ? ` (${group.sessions.length})` : ''),
                   ),
+
                 ),
                 ...group.sessions.map((s) =>
                   h(

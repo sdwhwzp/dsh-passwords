@@ -9,6 +9,7 @@ import {
   clampSessionHistorySandbox,
   filterByPathField,
   filterOwnedSessionIds,
+  normalizePath,
   sandboxPresetRank,
 } from '../src/permissions.js';
 
@@ -122,6 +123,21 @@ test('filterByPathField：空白名单 = 全部允许；__deny__ 哨兵 = 全部
   const input = { items: [{ path: '/x' }] };
   assert.equal((filterByPathField(input, [], 'path') as any).items.length, 1);
   assert.equal((filterByPathField(input, ['__deny__'], 'path') as any).items.length, 0);
+});
+
+test('normalizePath：根目录等价值统一识别，禁止权限写入层放行', () => {
+  assert.equal(normalizePath('/..'), '/');
+  assert.equal(normalizePath('//'), '/');
+  assert.equal(normalizePath('/root/work/..'), '/root');
+});
+
+test('递归过滤：超过深度上限的路径子树不原样透传', () => {
+  let value: Record<string, unknown> = { path: '/secret' };
+  for (let i = 0; i < 10; i++) value = { nested: value };
+  const out = filterByPathField(value, ['/allowed'], 'path') as Record<string, unknown>;
+  let cursor: unknown = out;
+  for (let i = 0; i < 10; i++) cursor = (cursor as Record<string, unknown>)?.nested;
+  assert.ok(cursor === null || cursor === undefined, '深层不可验证子树应被丢弃');
 });
 
 // ── filterOwnedSessionIds（会话归属过滤） ───────────────────────

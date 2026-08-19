@@ -20,7 +20,7 @@ import path from 'node:path';
  * 可写/删白名单外文件、建会话到 /etc）。posix.normalize 与 dsh 的
  * 路径解析口径一致（dsh 运行于 Linux 且自身也用 URL/路径归一化）。
  */
-function normalizePath(p: string): string {
+export function normalizePath(p: string): string {
   let n = p.replace(/\\/g, '/');
   n = path.posix.normalize(n);
   if (n.length >= 2 && n[1] === ':') n = n[0].toLowerCase() + n.slice(1);
@@ -310,7 +310,9 @@ export function folderAllowed(path: string, allowedFolders: string[]): boolean {
  * depth 上限 8：防上游投毒深嵌套 JSON 导致栈溢出 DoS（与同文件其他递归函数口径一致）。
  */
 export function filterByPathField(value: unknown, allowedFolders: string[], field: string, depth = 0): unknown {
-  if (depth > 8 || value === null) return value;
+  // 深度超限时无法可靠检查路径字段，丢弃该子树而不是原样返回（fail-closed）。
+  if (depth > 8) return null;
+  if (value === null) return value;
   if (Array.isArray(value)) {
     const out: unknown[] = [];
     for (const item of value) {
@@ -729,7 +731,19 @@ export function filterOwnedSessionIds(
   keep: (id: string) => boolean,
   depth = 0,
 ): void {
-  if (depth > 8 || value === null || typeof value !== 'object') return;
+  if (value === null || typeof value !== 'object') return;
+  // 深度超限时清空该容器，不能把不可验证的深层 sessionIds 原样保留。
+  if (depth > 8) {
+    if (Array.isArray(value)) value.length = 0;
+    else {
+      const obj = value as Record<string, unknown>;
+      delete obj.sessionId;
+      delete obj.sessionIds;
+      delete obj.cwd;
+      delete obj.path;
+    }
+    return;
+  }
   if (Array.isArray(value)) {
     for (const item of value) filterOwnedSessionIds(item, keep, depth + 1);
     return;
@@ -762,7 +776,9 @@ export function filterSessionItems(
   cwdAllowed: ((cwd: string) => boolean) | null = null,
   depth = 0,
 ): unknown {
-  if (depth > 8 || value === null) return value;
+  // 深度超限时丢弃子树；保留原对象会让深层 sessionId/cwd 绕过归属和目录检查。
+  if (depth > 8) return null;
+  if (value === null) return value;
   if (Array.isArray(value)) {
     const out: unknown[] = [];
     for (const item of value) {

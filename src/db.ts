@@ -195,6 +195,37 @@ function parseJsonArray(raw: string | null): string[] {
 }
 
 /**
+ * 权限目录 JSON 的严格解析：
+ *   - NULL 表示旧库/缺省配置，保持“未限制”兼容语义；
+ *   - 非空但损坏或包含非字符串元素表示权限数据损坏，必须“禁止所有”，
+ *     不能把损坏值降级为空数组后放开全盘访问。
+ */
+function parseAllowedFolders(raw: string | null): string[] {
+  if (raw === null) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed) || parsed.some((value) => typeof value !== 'string')) return ['__deny__'];
+    return sanitizeAllowedFolders(parsed);
+  } catch {
+    return ['__deny__'];
+  }
+}
+
+function sanitizeAllowedFolders(folders: string[]): string[] {
+  if (folders.length === 0) return [];
+  if (folders.includes('__deny__')) return ['__deny__'];
+  const cleaned = folders.map((folder) => folder.trim().replace(/\\/g, '/'));
+  const invalid = cleaned.some((folder) => {
+    const absolute = folder.startsWith('/') || /^[A-Za-z]:\//.test(folder);
+    if (folder === '' || !absolute) return true;
+    if (/(^|\/)\.\.?($|\/)/.test(folder)) return true;
+    const normalized = path.posix.normalize(folder);
+    return normalized === '.' || normalized === '/' || /^[a-z]:\/$/i.test(normalized);
+  });
+  return invalid ? ['__deny__'] : cleaned;
+}
+
+/**
  * 密文判定（users.username / audit_logs 各列共用）：不能只看 v1: 前缀——
  * 明文值恰好以 v1: 开头时会被误判为密文。只有同时满足
  * “v1: 前缀 + 合法 base64 + 长度 ≥ 28（iv12+tag16）”才视为密文。
@@ -552,12 +583,14 @@ export class Database {
 
   deleteUser(id: number): void {
     // 无外键约束（SQLite 未开 FK），关联行需手动级联清理：会话归属、
-    // 权限、用量、留言（发件人/收件人）。不清理会留下孤儿数据：
-    //   - session_owner 残留 → 子用户侧 keep() 命中已删 userId 不匹配 → 恰好 deny，但行永远占用空间
-    //   - messages 残留 → 联表 JOIN 不出用户名，列表永远少消息
-    // 多语句包事务：中途失败回滚，不留半清理状态。
+    // 权限、用量、留言（发件人/收件人）以及登录失败记录。
+    // 注册表是会话维度，不带 user_id，故保留：删用户后会话回到无归属扫描。
+    const user = this.getUserById(id);
     this.db.exec('BEGIN IMMEDIATE');
     try {
+      if (user) {
+        this.stmt('DELETE FROM login_attempts WHERE username_hash = ?').run(this.crypto.lookupHash(user.username));
+      }
       this.stmt('DELETE FROM session_owner WHERE user_id = ?').run(id);
       this.stmt('DELETE FROM user_permissions WHERE user_id = ?').run(id);
       this.stmt('DELETE FROM user_usage WHERE user_id = ?').run(id);
@@ -657,8 +690,10 @@ export class Database {
 
   recordLoginFailure(username: string, ip: string): number {
     this.stmt(
-      `INSERT INTO login_attempts (username_hash, ip_hash, failed_count) VALUES (?, ?, 1)
-       ON CONFLICT(username_hash, ip_hash) DO UPDATE SET failed_count = failed_count + 1`,
+      `INSERT INTO login_attempts (username_hash, ip_hash, failed_count, updated_at) VALUES (?, ?, 1, datetime('now'))
+       ON CONFLICT(username_hash, ip_hash) DO UPDATE SET
+         failed_count = failed_count + 1,
+         updated_at = datetime('now')`,
     ).run(this.crypto.lookupHash(username), this.crypto.lookupHash(ip));
     return this.getLoginAttempt(username, ip)?.failed_count ?? 1;
   }
@@ -673,7 +708,7 @@ export class Database {
 
   /** 锁定该用户名在所有 IP 上的失败记录（分布式爆破兜底） */
   lockAllAttemptsByUsername(username: string, until: Date): void {
-    this.stmt('UPDATE login_attempts SET locked_until = ? WHERE username_hash = ?').run(
+    this.stmt("UPDATE login_attempts SET locked_until = ?, updated_at = datetime('now') WHERE username_hash = ?").run(
       until.toISOString(),
       this.crypto.lookupHash(username),
     );
@@ -681,8 +716,10 @@ export class Database {
 
   lockLoginAttempt(username: string, ip: string, until: Date): void {
     this.stmt(
-      `INSERT INTO login_attempts (username_hash, ip_hash, failed_count, locked_until) VALUES (?, ?, 0, ?)
-       ON CONFLICT(username_hash, ip_hash) DO UPDATE SET locked_until = excluded.locked_until`,
+      `INSERT INTO login_attempts (username_hash, ip_hash, failed_count, locked_until, updated_at) VALUES (?, ?, 0, ?, datetime('now'))
+       ON CONFLICT(username_hash, ip_hash) DO UPDATE SET
+         locked_until = excluded.locked_until,
+         updated_at = datetime('now')`,
     ).run(this.crypto.lookupHash(username), this.crypto.lookupHash(ip), until.toISOString());
   }
 
@@ -718,7 +755,7 @@ export class Database {
     const hash = this.crypto.lookupHash(ip);
     const existing = this.getIpThrottle(ip);
     if (!existing) {
-      this.stmt('INSERT INTO ip_throttle (ip_hash, failed_count, window_started) VALUES (?, 1, ?)').run(
+      this.stmt("INSERT INTO ip_throttle (ip_hash, failed_count, window_started, updated_at) VALUES (?, 1, ?, datetime('now'))").run(
         hash,
         now.toISOString(),
       );
@@ -728,11 +765,11 @@ export class Database {
     const throttleExpired = existing.throttled_until !== null && existing.throttled_until.getTime() <= now.getTime();
     if (windowExpired || throttleExpired) {
       this.stmt(
-        'UPDATE ip_throttle SET failed_count = 1, window_started = ?, throttled_until = NULL WHERE ip_hash = ?',
+        "UPDATE ip_throttle SET failed_count = 1, window_started = ?, throttled_until = NULL, updated_at = datetime('now') WHERE ip_hash = ?",
       ).run(now.toISOString(), hash);
       return 1;
     }
-    this.stmt('UPDATE ip_throttle SET failed_count = failed_count + 1 WHERE ip_hash = ?').run(hash);
+    this.stmt("UPDATE ip_throttle SET failed_count = failed_count + 1, updated_at = datetime('now') WHERE ip_hash = ?").run(hash);
     return existing.failed_count + 1;
   }
 
@@ -769,7 +806,7 @@ export class Database {
     if (!row) return null;
     return {
       user_id: row.user_id,
-      allowed_folders: parseJsonArray(row.allowed_folders),
+      allowed_folders: parseAllowedFolders(row.allowed_folders),
       hourly_token_limit: row.hourly_token_limit,
       daily_minutes_limit: row.daily_minutes_limit,
       allow_upload: row.allow_upload === 1,
@@ -794,9 +831,7 @@ export class Database {
   ): void {
     // 防御性清洗：空串/当前目录/根目录条目在 folderAllowed 里语义=全盘允许
     // （fail-open 陷阱）——网关端点已拒绝，数据层再兑底一次。
-    const allowedFolders = perms.allowedFolders
-      .map((folder) => folder.trim())
-      .filter((folder) => folder !== '' && folder !== '.' && folder !== '/');
+    const allowedFolders = sanitizeAllowedFolders(perms.allowedFolders);
     this.stmt(
       `INSERT INTO user_permissions (user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, allow_upload, allow_git_download, banned, sandbox_mode)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)

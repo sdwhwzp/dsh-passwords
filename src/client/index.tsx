@@ -62,15 +62,20 @@ select.dshpw-input{height:auto;min-height:36px}
 .dshpw-hint{font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}
 `;
 
-if (typeof document !== 'undefined') {
-  const el = document.createElement('style');
-  el.textContent = CSS;
-  document.head.appendChild(el);
-}
-
 export const inject = ['slots', 'locale'] as const;
 
 export function apply(ctx: ClientContext): void {
+  ctx.effect(() => {
+    if (typeof document === 'undefined') return () => {};
+    const existing = document.querySelector('style[data-dshpw-style="1"]');
+    if (existing) return () => {};
+    const el = document.createElement('style');
+    el.dataset.dshpwStyle = '1';
+    el.textContent = CSS;
+    document.head.appendChild(el);
+    return () => el.remove();
+  }, 'dsh-passwords: styles');
+
   // 独立设置分区（参考 @linxin666 的 settings.section 模式）：在设置页左侧导航
   // 注册 dsh-passwords 一级分区，分区体内渲染注册进 dsh-passwords.plugin.item
   // 的卡片——设置不再挤在官方"插件"列表里，而是单独成区。
@@ -155,7 +160,7 @@ export function apply(ctx: ClientContext): void {
     };
     const original = workspaces.openPath?.bind(workspaces);
     if (typeof original !== 'function') return;
-    workspaces.openPath = async (filePath: string) => {
+    const wrapped = async (filePath: string) => {
       if (await isBehindGateway()) {
         // 经网关：下载到浏览器（路径由网关侧再做目录/敏感校验）
         const url = '/gateway/api/download?path=' + encodeURIComponent(filePath);
@@ -163,6 +168,12 @@ export function apply(ctx: ClientContext): void {
         return { opened: true };
       }
       return original(filePath);
+    };
+    workspaces.openPath = wrapped;
+    // ctx.inject 的回调返回值由 Cordis 作为 fiber disposer 收集；恢复共享服务，
+    // 避免插件重载后包装层叠加或禁用插件后残留网关下载行为。
+    return () => {
+      if (workspaces.openPath === wrapped) workspaces.openPath = original;
     };
   });
 

@@ -21,6 +21,7 @@ import { AuthService, AuthError, type RequestMeta } from './auth.js';
 import { Database, type UserPermissionsRow, type MessageRow } from './db.js';
 import {
   folderAllowed,
+  normalizePath,
   isWorkspaceRestricted,
   isUploadRequest,
   isGitRequest,
@@ -1117,8 +1118,8 @@ export function createGatewayServer(
     }
     return null;
   };
-  const stringArray = (v: unknown): string[] =>
-    Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string').slice(0, 64) : [];
+  const stringArray = (v: unknown, max = 64): string[] =>
+    Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string').slice(0, max) : [];
 
   // 统一 API 鉴权：跨站拒绝 + 会话校验 + 可选主用户门控
   const apiAuth = (req: Request, res: Response, requireAdmin = false) => {
@@ -1305,7 +1306,16 @@ export function createGatewayServer(
     // “允许的工作区”语义相反；显式拒绝，管理员应使用空数组表示不限制。
     if (allowedFolders.some((folder) => {
       const trimmed = folder.trim().replace(/\\/g, '/');
-      return trimmed === '' || trimmed === '.' || trimmed === '/';
+      return (
+        trimmed === '' ||
+        trimmed === '.' ||
+        trimmed === '/' ||
+        (!(trimmed.startsWith('/') || /^[A-Za-z]:\//.test(trimmed))) ||
+        /(^|\/)\.\.?($|\/)/.test(trimmed) ||
+        normalizePath(trimmed) === '/' ||
+        normalizePath(trimmed) === '.' ||
+        /^[a-z]:\/$/i.test(normalizePath(trimmed))
+      );
     })) {
       res.status(400).json({ ok: false, code: 'INVALID', error: '允许的工作区不能包含空路径、当前目录或根目录' });
       return;
@@ -1394,7 +1404,7 @@ export function createGatewayServer(
       return;
     }
     // 去重（重复 id 会让结果与审计出现重复条目）；stringArray 已截断到 64
-    const sessionIds = [...new Set(stringArray(body.sessionIds))];
+    const sessionIds = [...new Set(stringArray(body.sessionIds, 200))];
     if (sessionIds.length === 0) {
       res.status(400).json({ ok: false, code: 'INVALID', error: 'sessionIds 为空' });
       return;

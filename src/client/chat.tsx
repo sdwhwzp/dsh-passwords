@@ -145,6 +145,8 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
   const atBottomRef = useRef(true);
   // 关闭动画的 180ms 定时器：重开面板时取消，避免“开了又被强制关”
   const closeTimerRef = useRef<number | null>(null);
+  // 发送请求期间用户可能继续编辑；失败回滚只允许覆盖未发生新编辑的草稿
+  const draftRevisionRef = useRef(0);
 
   // ── 中键拖动 FAB：位置 state + ref（拖动用 ref 避免重挂监听器）──
   const fabPosRef = useRef(defaultFabPos());
@@ -169,7 +171,11 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
           users?: Array<{ id: number; username: string; role: string }>;
         };
         if (disposed) return;
-        setContacts(Array.isArray(data.users) ? data.users.filter((u) => u.role === 'user') : []);
+        const nextContacts = Array.isArray(data.users) ? data.users.filter((u) => u.role === 'user') : [];
+        setContacts(nextContacts);
+        setTo((prev) =>
+          prev !== 'broadcast' && !nextContacts.some((contact) => contact.id === prev) ? 'broadcast' : prev,
+        );
         if (chatEntryOverrideRef.current === null) {
           setChatEntry(res.ok && data.chatEnabled === false ? 'off' : 'on');
         }
@@ -189,7 +195,11 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
         const data = (await res.json().catch(() => ({}))) as {
           users?: Array<{ id: number; username: string; role: string }>;
         };
-        setContacts(Array.isArray(data.users) ? data.users.filter((u) => u.role === 'user') : []);
+        const nextContacts = Array.isArray(data.users) ? data.users.filter((u) => u.role === 'user') : [];
+        setContacts(nextContacts);
+        setTo((prev) =>
+          prev !== 'broadcast' && !nextContacts.some((contact) => contact.id === prev) ? 'broadcast' : prev,
+        );
       })
       .catch(() => {});
   };
@@ -444,6 +454,7 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
     // 乐观更新：立即把临时消息放进列表（微信式即时发送手感），
     // 服务器确认后用真实消息替换；失败回滚（移除临时 + 恢复草稿 + 报错）。
     // 临时 id 用 Date.now()（远大于自增 id，不会被 mergeById 的 200 条截断丢出列表）。
+    const sendRevision = draftRevisionRef.current;
     const tempId = Date.now();
     const temp: ChatMessage = {
       id: tempId,
@@ -483,15 +494,19 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
           });
         } else {
           setMessages((prev) => prev.filter((p) => p.id !== tempId));
-          setDraft(content);
-          setTags(tags);
+          if (draftRevisionRef.current === sendRevision) {
+            setDraft(content);
+            setTags(tags);
+          }
           setError(chatErrText(d, t('chat.sendFailed'), tr));
         }
       })
       .catch(() => {
         setMessages((prev) => prev.filter((p) => p.id !== tempId));
-        setDraft(content);
-        setTags(tags);
+        if (draftRevisionRef.current === sendRevision) {
+          setDraft(content);
+          setTags(tags);
+        }
         setError(t('chat.sendFailed'));
       })
       .finally(() => setBusy(false));
@@ -499,6 +514,7 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
 
   const toggleTag = (tag: string) => {
     haptic();
+    draftRevisionRef.current += 1;
     setTags((prev) => (prev.includes(tag) ? prev.filter((x) => x !== tag) : [...prev, tag]));
   };
 
@@ -643,7 +659,10 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
                   placeholder={t('chat.placeholder')}
                   autoComplete="off"
                   name="dshpw-chat-draft"
-                  onChange={(e) => setDraft(e.target.value)}
+                  onChange={(e) => {
+                    draftRevisionRef.current += 1;
+                    setDraft(e.target.value);
+                  }}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();

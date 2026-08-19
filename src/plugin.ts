@@ -37,6 +37,7 @@ const MAX_BODY = 4096;
 
 /** 请求体超限专用错误：读完后回 413，而不是销毁 socket 造成代理 502 */
 class BodyTooLargeError extends Error {}
+class InvalidJsonBodyError extends Error {}
 
 function readCookie(cookieHeader: string | undefined, cookieName: string): string | null {
   if (!cookieHeader) return null;
@@ -90,9 +91,14 @@ function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
         return;
       }
       try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'));
-      } catch (error) {
-        reject(error);
+        const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          reject(new InvalidJsonBodyError());
+          return;
+        }
+        resolve(parsed as Record<string, unknown>);
+      } catch {
+        reject(new InvalidJsonBodyError());
       }
     });
     req.on('error', reject);
@@ -380,8 +386,19 @@ export function apply(ctx: Context): void {
     userAgent: typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : null,
   });
 
+  const requireMethod = (req: IncomingMessage, res: ServerResponse, method: string): boolean => {
+    if (req.method === method) return true;
+    res.setHeader('Allow', method);
+    writeJson(res, 405, { ok: false, code: 'METHOD_NOT_ALLOWED', error: 'Method not allowed' });
+    return false;
+  };
+
   /** 错误响应：携带稳定 code（设置页卡片按 dsh 语言本地化）+ 中文兜底文案 */
   const failJson = (res: ServerResponse, error: unknown): void => {
+    if (error instanceof InvalidJsonBodyError) {
+      writeJson(res, 400, { ok: false, code: 'INVALID', error: '请求体必须是 JSON 对象' });
+      return;
+    }
     if (error instanceof AuthError) {
       writeJson(res, error.status, { ok: false, code: error.code, error: error.message });
       return;
@@ -405,6 +422,7 @@ export function apply(ctx: Context): void {
       handler: (req, res) => {
         const caller = guard(req, res);
         if (!caller) return;
+        if (!requireMethod(req, res, 'GET')) return;
         // F-05：全量用户列表仅主用户可见；子用户只见自己 + 有消息往来的用户
         // （避免多租户场景下的用户名目录泄露给低权限账号）
         // F-10：子用户的“自己”行用安全投影（getUserListRowById），不泄露 password_hash
@@ -426,9 +444,15 @@ export function apply(ctx: Context): void {
       handler: async (req, res) => {
         const caller = guard(req, res);
         if (!caller) return;
+        if (!requireMethod(req, res, 'POST')) return;
         try {
           const body = await readJsonBody(req);
-          const target = typeof body.target === 'string' && body.target !== '' ? body.target : caller.username;
+          const hasTarget = Object.prototype.hasOwnProperty.call(body, 'target');
+          if (hasTarget && (typeof body.target !== 'string' || body.target === '')) {
+            writeJson(res, 400, { ok: false, code: 'INVALID', error: 'target 无效' });
+            return;
+          }
+          const target = hasTarget ? (body.target as string) : caller.username;
           assertNoSqlInjection(target, 'target'); // 与 /users/remove 同口径的纵深防御
           const password = typeof body.password === 'string' ? body.password : '';
           // F-06：自助改密（target 为自己）需携带当前密码，服务端 bcrypt 校验
@@ -449,9 +473,15 @@ export function apply(ctx: Context): void {
       handler: async (req, res) => {
         const caller = guard(req, res);
         if (!caller) return;
+        if (!requireMethod(req, res, 'POST')) return;
         try {
           const body = await readJsonBody(req);
-          const target = typeof body.target === 'string' && body.target !== '' ? body.target : caller.username;
+          const hasTarget = Object.prototype.hasOwnProperty.call(body, 'target');
+          if (hasTarget && (typeof body.target !== 'string' || body.target === '')) {
+            writeJson(res, 400, { ok: false, code: 'INVALID', error: 'target 无效' });
+            return;
+          }
+          const target = hasTarget ? (body.target as string) : caller.username;
           assertNoSqlInjection(target, 'target'); // 与 /users/remove 同口径的纵深防御
           const username = typeof body.username === 'string' ? body.username : '';
           assertNoSqlInjection(username, 'username');
@@ -471,6 +501,7 @@ export function apply(ctx: Context): void {
       handler: async (req, res) => {
         const caller = guard(req, res);
         if (!caller) return;
+        if (!requireMethod(req, res, 'POST')) return;
         try {
           const body = await readJsonBody(req);
           const username = typeof body.username === 'string' ? body.username : '';
@@ -489,6 +520,7 @@ export function apply(ctx: Context): void {
       handler: async (req, res) => {
         const caller = guard(req, res);
         if (!caller) return;
+        if (!requireMethod(req, res, 'POST')) return;
         try {
           const body = await readJsonBody(req);
           const target = typeof body.target === 'string' ? body.target : '';
@@ -508,6 +540,7 @@ export function apply(ctx: Context): void {
       handler: async (req, res) => {
         const caller = guard(req, res);
         if (!caller) return;
+        if (!requireMethod(req, res, 'POST')) return;
         try {
           const body = await readJsonBody(req);
           if (typeof body.enabled !== 'boolean') {
@@ -528,6 +561,7 @@ export function apply(ctx: Context): void {
       handler: (req, res) => {
         const caller = guard(req, res);
         if (!caller) return;
+        if (!requireMethod(req, res, 'GET')) return;
         try {
           const root = findDshRoot(cfg.patch.dshRoot);
           const status = root ? patchStatus(root) : null;
@@ -543,6 +577,7 @@ export function apply(ctx: Context): void {
       handler: (req, res) => {
         const caller = guard(req, res);
         if (!caller) return;
+        if (!requireMethod(req, res, 'POST')) return;
         // 仅主用户可触发 + 冷却（10 分钟一次）：防止任意登录用户（含只读沙盒子用户）
         // 反复重启 dsh 网页服务造成认证后横向 DoS
         if (caller.role !== 'admin') {
@@ -568,6 +603,7 @@ export function apply(ctx: Context): void {
       handler: (req, res) => {
         const caller = guard(req, res);
         if (!caller) return;
+        if (!requireMethod(req, res, 'GET')) return;
         // F-20：工作区路径清单仅主用户可读（供其配置子用户白名单下拉选择）；
         // 子用户不应看到全部工作区目录清单（信息泄露面）
         if (caller.role !== 'admin') {
@@ -590,6 +626,7 @@ export function apply(ctx: Context): void {
       kind: 'exact',
       path: '/api/dsh-passwords/internal/sandbox',
       handler: (req, res) => {
+        if (!requireMethod(req, res, 'POST')) return;
         // F-26：仅网关进程（loopback + 内部密钥）可调——把受限子用户新会话的
         // 沙盒从 dsh 默认的 workspace-write 降为其真实授权级别（append sandbox/mode）。
         const remoteIp = req.socket.remoteAddress ?? '';
@@ -623,6 +660,7 @@ export function apply(ctx: Context): void {
             session.append('sandbox/mode', { mode });
             writeJson(res, 200, { ok: true });
           })
+          .catch((error) => failJson(res, error))
           .catch(() => writeJson(res, 400, { ok: false, error: 'bad body' }));
       },
     },
