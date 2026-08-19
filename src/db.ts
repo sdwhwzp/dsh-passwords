@@ -82,6 +82,15 @@ export interface MessageRow {
   created_at: string;
 }
 
+/** 会话注册表行（session_registry 表：session.list 响应收割的会话元数据镜像） */
+export interface SessionRegistryRow {
+  session_id: string;
+  cwd: string | null;
+  title: string | null;
+  first_seen_at: string;
+  last_seen_at: string;
+}
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
   id                 INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -159,6 +168,16 @@ CREATE TABLE IF NOT EXISTS session_owner (
   session_id TEXT PRIMARY KEY,
   user_id    INTEGER NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+-- Discussion #6：会话注册表（session.list 响应收割）。记录网关观察到的全部会话
+-- 元数据（cwd/title），供主用户「会话归属管理」扫描升级前创建的无归属旧会话并分配。
+-- 仅元数据镜像，分配结果仍以 session_owner 为准。
+CREATE TABLE IF NOT EXISTS session_registry (
+  session_id    TEXT PRIMARY KEY,
+  cwd           TEXT,
+  title         TEXT,
+  first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_seen_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 `;
 
@@ -969,5 +988,91 @@ export class Database {
       | { user_id: number }
       | undefined;
     return row ? Number(row.user_id) : null;
+  }
+
+  /** 平台主用户 id（首个 admin）；平台必有主用户，缺失说明数据损坏 */
+  findAdminId(): number | null {
+    const row = this.stmt("SELECT id FROM users WHERE role = 'admin' ORDER BY id ASC LIMIT 1").get() as
+      | { id: number }
+      | undefined;
+    return row ? Number(row.id) : null;
+  }
+
+  // ── 会话注册表（Discussion #6）：元数据镜像 + 无归属扫描 ─────────
+  /** session.list 响应收割：批量 upsert 会话元数据（原子事务，不覆盖 first_seen_at） */
+  upsertSessionRegistry(rows: Array<{ sessionId: string; cwd: string | null; title: string | null }>): void {
+    if (rows.length === 0) return;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const stmt = this.stmt(
+        `INSERT INTO session_registry (session_id, cwd, title) VALUES (?, ?, ?)
+         ON CONFLICT(session_id) DO UPDATE SET
+           cwd = excluded.cwd,
+           title = excluded.title,
+           last_seen_at = datetime('now')`,
+      );
+      for (const row of rows) {
+        stmt.run(row.sessionId, row.cwd, row.title);
+      }
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  getSessionRegistry(sessionId: string): SessionRegistryRow | null {
+    const row = this.stmt(
+      'SELECT session_id, cwd, title, first_seen_at, last_seen_at FROM session_registry WHERE session_id = ?',
+    ).get(sessionId) as
+      | {
+          session_id: string;
+          cwd: string | null;
+          title: string | null;
+          first_seen_at: string;
+          last_seen_at: string;
+        }
+      | undefined;
+    if (!row) return null;
+    return {
+      session_id: row.session_id,
+      cwd: row.cwd,
+      title: row.title,
+      first_seen_at: row.first_seen_at,
+      last_seen_at: row.last_seen_at,
+    };
+  }
+
+  /** 无归属会话清单（升级前创建的旧会话）：注册表有、session_owner 无 */
+  listUnassignedSessions(limit = 200): SessionRegistryRow[] {
+    const rows = this.stmt(
+      `SELECT sr.session_id, sr.cwd, sr.title, sr.first_seen_at, sr.last_seen_at
+       FROM session_registry sr
+       LEFT JOIN session_owner so ON so.session_id = sr.session_id
+       WHERE so.session_id IS NULL
+       ORDER BY sr.last_seen_at DESC, sr.session_id ASC
+       LIMIT ?`,
+    ).all(Math.min(Math.max(limit, 1), 500)) as Array<{
+      session_id: string;
+      cwd: string | null;
+      title: string | null;
+      first_seen_at: string;
+      last_seen_at: string;
+    }>;
+    return rows.map((row) => ({
+      session_id: row.session_id,
+      cwd: row.cwd,
+      title: row.title,
+      first_seen_at: row.first_seen_at,
+      last_seen_at: row.last_seen_at,
+    }));
+  }
+
+  /** 管理员分配/重新分配会话归属：与 setSessionOwner 不同，允许覆盖已有归属。 */
+  assignSessionOwner(sessionId: string, userId: number): void {
+    this.stmt(
+      `INSERT INTO session_owner (session_id, user_id) VALUES (?, ?)
+       ON CONFLICT(session_id) DO UPDATE SET user_id = excluded.user_id`,
+    ).run(sessionId, userId);
   }
 }

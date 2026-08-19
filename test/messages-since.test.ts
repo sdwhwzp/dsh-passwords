@@ -119,7 +119,7 @@ after(() => {
 test('留言：POST 三条 → since 增量拉取只返回新消息（升序）', async () => {
   const ids: number[] = [];
   for (const text of ['first', 'second', 'third']) {
-    const r = await req('POST', '/gateway/api/messages', { content: text });
+    const r = await req('POST', '/gateway/api/messages', { content: text, broadcast: true });
     assert.equal(r.status, 200);
     assert.ok(r.body.message, 'POST 应返回新消息体');
     ids.push(r.body.message!.id);

@@ -117,6 +117,9 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
   const [shaking, setShaking] = useState(false);
   // 账号级偏好异步读取：加载期间不闪现 FAB；请求失败时默认显示，避免 API 暂时异常把聊天永久隐藏。
   const [chatEntry, setChatEntry] = useState<'loading' | 'on' | 'off'>('loading');
+  // 主用户收件人选择（Discussion #6）：'broadcast' | 用户 id；子用户无需选择（服务端默认私信主用户）
+  const [to, setTo] = useState<'broadcast' | number>('broadcast');
+  const [contacts, setContacts] = useState<Array<{ id: number; username: string; role: string }>>([]);
   // 设置卡片事件若先于初始 fetch 返回，记录最新本页偏好，避免旧响应把刚关闭的
   // 气泡重新打开（两个 slot 组件独立挂载，存在这类微小竞态）。
   const chatEntryOverrideRef = useRef<boolean | null>(null);
@@ -141,14 +144,21 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
     lastPos: { left: number; top: number } | null;
   } | null>(null);
 
-  // 读取按用户存储的聊天入口偏好（服务端默认开启，跨设备同步）。
+  // 读取按用户存储的聊天入口偏好（服务端默认开启，跨设备同步），
+  // 同时取子用户列表供主用户选择私信收件人（state 仅对主用户返回全量用户）。
   useEffect(() => {
     let disposed = false;
     fetch('/api/dsh-passwords/state')
       .then(async (res) => {
-        const data = (await res.json().catch(() => ({}))) as { chatEnabled?: unknown };
-        if (disposed || chatEntryOverrideRef.current !== null) return;
-        setChatEntry(res.ok && data.chatEnabled === false ? 'off' : 'on');
+        const data = (await res.json().catch(() => ({}))) as {
+          chatEnabled?: unknown;
+          users?: Array<{ id: number; username: string; role: string }>;
+        };
+        if (disposed) return;
+        setContacts(Array.isArray(data.users) ? data.users.filter((u) => u.role === 'user') : []);
+        if (chatEntryOverrideRef.current === null) {
+          setChatEntry(res.ok && data.chatEnabled === false ? 'off' : 'on');
+        }
       })
       .catch(() => {
         if (!disposed && chatEntryOverrideRef.current === null) setChatEntry('on');
@@ -412,10 +422,17 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
     setError('');
     setMessages((prev) => mergeById(prev, [temp]));
     atBottomRef.current = true; // 发送后强制滚到底部
+    // 投递口径（Discussion #6）：主用户显式选择广播或收件人；
+    // 子用户不携带收件人字段，服务端默认私信主用户。
+    const payload: Record<string, unknown> = { content, tags };
+    if (me?.role === 'admin') {
+      if (to === 'broadcast') payload.broadcast = true;
+      else payload.recipientId = to;
+    }
     fetch('/gateway/api/messages', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ content, tags }),
+      body: JSON.stringify(payload),
     })
       .then(async (res) => {
         const d = await res.json().catch(() => ({}));
@@ -560,6 +577,28 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
                   </button>
                 ))}
               </div>
+              {me?.role === 'admin' && (
+                <div className="dshpw-chat-to">
+                  <span className="dshpw-chat-to-label">{t('chat.to')}</span>
+                  <select
+                    className="dshpw-chat-to-select"
+                    value={to === 'broadcast' ? 'broadcast' : String(to)}
+                    aria-label={t('chat.to')}
+                    onChange={(e) =>
+                      setTo(e.target.value === 'broadcast' ? 'broadcast' : Number(e.target.value))
+                    }
+                  >
+                    <option value="broadcast">{t('chat.toBroadcast')}</option>
+                    {contacts
+                      .filter((c) => me?.id !== c.id)
+                      .map((c) => (
+                        <option key={c.id} value={String(c.id)}>
+                          {c.username}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+              )}
               <div className="dshpw-chat-inputrow">
                 <input
                   className="dshpw-chat-input"
@@ -658,6 +697,10 @@ const CHAT_CSS = `
 .dshpw-chat-inputrow{display:flex;gap:8px;align-items:center}
 .dshpw-chat-input{flex:1;box-sizing:border-box;min-width:0;padding:9px 14px;font-size:13px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-3);border:1px solid var(--dsw-alias-border-l2);border-radius:18px;outline:none;transition:border-color .15s,box-shadow .15s}
 .dshpw-chat-input:focus{border-color:var(--dsw-alias-brand-primary);box-shadow:0 0 0 3px color-mix(in srgb,var(--dsw-alias-brand-primary) 18%,transparent)}
+.dshpw-chat-to{display:flex;align-items:center;gap:8px}
+.dshpw-chat-to-label{font-size:12px;color:var(--dsw-alias-label-tertiary);flex-shrink:0}
+.dshpw-chat-to-select{flex:1;min-width:0;height:30px;padding:0 8px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-primary);font-size:13px;outline:none;cursor:pointer;transition:border-color .15s}
+.dshpw-chat-to-select:focus{border-color:var(--dsw-alias-brand-primary)}
 /* 圆形纸飞机发送按钮 */
 .dshpw-chat-send{appearance:none;border:0;width:34px;height:34px;flex-shrink:0;border-radius:50%;display:flex;align-items:center;justify-content:center;background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-primary-inverted,#fff);cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.15);transition:transform .2s cubic-bezier(.34,1.56,.64,1),filter .15s,opacity .15s,box-shadow .15s}
 .dshpw-chat-send svg{display:block;transition:transform .2s cubic-bezier(.34,1.56,.64,1)}

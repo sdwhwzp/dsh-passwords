@@ -7,6 +7,7 @@ import {
   stripArchivedSessionIds,
   filterSessionItems,
   collectSessionCwd,
+  collectSessionMeta,
   collectSessionCwdFromWorkspaces,
 } from '../src/permissions.js';
 
@@ -122,4 +123,35 @@ test('F-25：collectSessionCwdFromWorkspaces 用工作区 path 反推会话 cwd'
   assert.equal(m.get('s-2'), '/root/11');
   assert.equal(m.get('s-3'), '/root/21');
   assert.equal(m.has('s-4'), false, 'archived 不在工作区 items 里 → 不映射（fail-closed）');
+});
+
+// ── D6：collectSessionMeta（会话注册表收割） ─────────────────
+
+test('D6：collectSessionMeta 收集 sessionId → {cwd, title}', () => {
+  const tree = {
+    result: {
+      value: [
+        { sessionId: 's-1', cwd: '/root/11', title: 'one' },
+        { sessionId: 's-2', cwd: '/root/21' }, // 无 title
+        { sessionId: 's-3', title: 'only-title' }, // 无 cwd
+        { sessionId: '' }, // 空 sessionId 忽略
+        { cwd: '/orphan' }, // 无 sessionId 忽略
+      ],
+    },
+  };
+  const m = collectSessionMeta(tree);
+  assert.deepEqual(m.get('s-1'), { cwd: '/root/11', title: 'one' });
+  assert.deepEqual(m.get('s-2'), { cwd: '/root/21', title: null });
+  assert.deepEqual(m.get('s-3'), { cwd: null, title: 'only-title' });
+  assert.equal(m.has(''), false, '空 sessionId 不收集');
+  assert.equal(m.has('s-orphan'), false, '无 sessionId 对象不收集');
+});
+
+test('D6：collectSessionMeta 同 id 多次出现合并（后值覆盖空值）', () => {
+  const tree = [
+    { sessionId: 's-x', cwd: '/root/11' }, // 先只有 cwd
+    { sessionId: 's-x', title: 'later' }, // 后出现补 title
+  ];
+  const m = collectSessionMeta(tree);
+  assert.deepEqual(m.get('s-x'), { cwd: '/root/11', title: 'later' }, '同一会话跨条目合并 cwd+title');
 });

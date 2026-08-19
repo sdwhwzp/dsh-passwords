@@ -372,6 +372,32 @@ export function collectSessionCwd(value: unknown, out: Map<string, string> = new
   return out;
 }
 
+/**
+ * 会话注册表元数据（Discussion #6 实施项 1）：从 session.list 响应收集
+ * sessionId → {cwd?, title?}，供主用户「会话归属管理」界面展示与分配。
+ * 与 collectSessionCwd 同源结构（depth 上限 8 防深嵌套 DoS），额外带 title。
+ */
+export function collectSessionMeta(
+  value: unknown,
+  out: Map<string, { cwd: string | null; title: string | null }> = new Map(),
+  depth = 0,
+): Map<string, { cwd: string | null; title: string | null }> {
+  if (depth > 8 || value === null) return out;
+  if (Array.isArray(value)) {
+    for (const item of value) collectSessionMeta(item, out, depth + 1);
+  } else if (typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    if (typeof obj.sessionId === 'string' && obj.sessionId.length > 0) {
+      const entry = out.get(obj.sessionId) ?? { cwd: null, title: null };
+      if (typeof obj.cwd === 'string' && obj.cwd.length > 0) entry.cwd = obj.cwd;
+      if (typeof obj.title === 'string' && obj.title.length > 0) entry.title = obj.title;
+      out.set(obj.sessionId, entry);
+    }
+    for (const v of Object.values(obj)) collectSessionMeta(v, out, depth + 1);
+  }
+  return out;
+}
+
 /** 从 workspace.list 响应收集会话归属工作区：工作区 path → 其 sessionIds 的每个会话的 cwd（无则覆盖）。 */
 export function collectSessionCwdFromWorkspaces(value: unknown, out: Map<string, string> = new Map(), depth = 0): Map<string, string> {
   if (depth > 8 || value === null) return out;

@@ -247,8 +247,8 @@ test('H-1b：gzip 高压缩比炸弹（解压后 70MiB）→ 502（maxOutputLeng
 });
 
 test('M-5b：since 超过最新消息 id（DB 重建后）返回 reset 信号 + 全量列表', async () => {
-  await gatewayReq('POST', '/gateway/api/messages', {}, adminCookie, JSON.stringify({ content: 'reset-a' }));
-  await gatewayReq('POST', '/gateway/api/messages', {}, adminCookie, JSON.stringify({ content: 'reset-b' }));
+  await gatewayReq('POST', '/gateway/api/messages', {}, adminCookie, JSON.stringify({ content: 'reset-a', broadcast: true }));
+  await gatewayReq('POST', '/gateway/api/messages', {}, adminCookie, JSON.stringify({ content: 'reset-b', broadcast: true }));
   const r1 = await gatewayReq('GET', '/gateway/api/messages?since=999999');
   assert.equal(r1.status, 200);
   const body1 = JSON.parse(r1.body) as { reset?: boolean; messages: Array<{ id: number }> };
@@ -312,17 +312,30 @@ test('消息写入：不存在的收件人 → 404（不产生孤儿私信）', 
   assert.equal(r.status, 404);
 });
 
-test('消息写入：合法收件人 → 200 且按私信投递', async () => {
+test('消息写入：合法收件人 → 200 且按私信投递（子用户只能私信主用户）', async () => {
   const r = await gatewayReq(
     'POST',
     '/gateway/api/messages',
     {},
     subuserCookie,
-    JSON.stringify({ content: 'dm-target', recipientId: thirdId }),
+    JSON.stringify({ content: 'dm-target', recipientId: adminId }),
   );
   assert.equal(r.status, 200);
   const parsed = JSON.parse(r.body) as { message?: { recipient_id: number | null } };
-  assert.equal(parsed.message?.recipient_id, thirdId);
+  assert.equal(parsed.message?.recipient_id, adminId, '子用户显式私信主用户投递成功');
+});
+
+test('消息写入：子用户私信其他子用户 → 403（不产生跨子用户消息）', async () => {
+  const r = await gatewayReq(
+    'POST',
+    '/gateway/api/messages',
+    {},
+    subuserCookie,
+    JSON.stringify({ content: 'cross-sub', recipientId: thirdId }),
+  );
+  assert.equal(r.status, 403);
+  const parsed = JSON.parse(r.body) as { code?: string };
+  assert.equal(parsed.code, 'FORBIDDEN_RECIPIENT');
 });
 
 // ── 会话缓存不得延长已过期 JWT ───────────────────────────────

@@ -68,6 +68,15 @@ interface PermDraft {
   sandbox: string;
 }
 
+/** 无归属会话（Discussion #6：会话归属管理） */
+interface UnassignedSession {
+  sessionId: string;
+  cwd: string | null;
+  title: string | null;
+  firstSeenAt: string;
+  lastSeenAt: string;
+}
+
 /** 与 host 侧一致的最小密码策略（本机提示用，最终以服务端校验为准） */
 const PASSWORD_RE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{12,}$/;
 const USERNAME_RE = /^[A-Za-z0-9_-]{3,32}$/;
@@ -92,6 +101,30 @@ function fmtTime(iso: string): string {
   if (Number.isNaN(d.getTime())) return iso;
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** 无归属会话按工作区（cwd）分组：组内批量分配，单会话组即单个分配 */
+function groupUnassignedByCwd(list: UnassignedSession[]): Array<{
+  cwd: string | null;
+  title: string | null;
+  sessions: UnassignedSession[];
+}> {
+  const map = new Map<string, { cwd: string | null; title: string | null; sessions: UnassignedSession[] }>();
+  for (const s of list) {
+    const key = s.cwd ?? '';
+    let group = map.get(key);
+    if (!group) {
+      group = { cwd: s.cwd, title: null, sessions: [] };
+      map.set(key, group);
+    }
+    group.sessions.push(s);
+  }
+  const groups = [...map.values()];
+  for (const group of groups) {
+    group.title = group.sessions.find((s) => s.title !== null && s.title !== '')?.title ?? null;
+    group.sessions.sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt));
+  }
+  return groups.sort((a, b) => (b.sessions[0]?.lastSeenAt ?? '').localeCompare(a.sessions[0]?.lastSeenAt ?? ''));
 }
 
 type ApiError = { error?: string; code?: string };
@@ -155,6 +188,12 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
   const [overview, setOverview] = useState<PermOverview | null>(null);
   const [permDrafts, setPermDrafts] = useState<Record<number, PermDraft>>({});
   const [workspaces, setWorkspaces] = useState<Array<{ path: string; title: string }>>([]);
+  // 会话归属管理（仅主用户，Discussion #6）
+  const [unassigned, setUnassigned] = useState<UnassignedSession[] | null>(null);
+  /** 按工作区分组的分配目标选择：key = 工作区路径（无 cwd 用 ''） */
+  const [sessTargets, setSessTargets] = useState<Record<string, string>>({});
+  /** 分配失败明细：sessionId → 本地化错误文案 */
+  const [sessAssignErrors, setSessAssignErrors] = useState<Record<string, string>>({});
   // 正在编辑中的子用户草稿：dirty 时 30s 自动刷新不覆盖本地未保存的修改
   const dirtyUsersRef = useRef<Set<number>>(new Set());
   // 刷新 in-flight 守卫：慢网络下 30s 定时 + 操作后手动 refresh 可能重叠，
@@ -203,7 +242,12 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
             });
             return api<{ workspaces: Array<{ path: string; title: string }> }>('/api/dsh-passwords/workspaces')
               .then((r) => setWorkspaces(r.workspaces ?? []))
-              .catch(() => setWorkspaces([]));
+              .catch(() => setWorkspaces([]))
+              .then(() =>
+                api<{ sessions: UnassignedSession[] }>('/gateway/api/session-ownership/unassigned')
+                  .then((r) => setUnassigned(r.sessions ?? []))
+                  .catch(() => setUnassigned(null)),
+              );
           })
           .catch(() => setOverview(null));
       })
@@ -380,6 +424,37 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
           dirtyUsersRef.current.delete(userId);
         }),
       t('permsSaved'),
+    );
+  };
+
+  // 会话归属分配（仅主用户）：按工作区分组批量分配，逐会话返回结果与失败原因
+  const assignSessions = (group: { cwd: string | null; sessions: UnassignedSession[] }) => {
+    const key = group.cwd ?? '';
+    const targetName = sessTargets[key] ?? '';
+    const target = data?.users.find((u) => u.username === targetName);
+    if (!target) {
+      setError(t('sessNoTarget'));
+      return;
+    }
+    const sessionIds = group.sessions.map((s) => s.sessionId);
+    void run(
+      () =>
+        api<{ results?: Array<{ sessionId: string; ok: boolean; error?: string }> }>(
+          '/gateway/api/session-ownership/assign',
+          { userId: target.id, sessionIds },
+        ).then((r) => {
+          const errors: Record<string, string> = {};
+          for (const res of r.results ?? []) {
+            if (!res.ok && res.error) errors[res.sessionId] = trErr(`sess.err.${res.error}`);
+          }
+          setSessAssignErrors(errors);
+          setSessTargets((prev) => {
+            const next = { ...prev };
+            delete next[key];
+            return next;
+          });
+        }),
+      t('sessAssigned'),
     );
   };
 
@@ -726,6 +801,75 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
               ),
             );
           }),
+      ),
+
+    // ── 会话归属管理（仅主用户，Discussion #6） ──
+    isAdmin &&
+      unassigned !== null &&
+      h(
+        'div',
+        { className: 'dshpw-section' },
+        h('span', { className: 'dshpw-label' }, t('sess')),
+        h('div', { className: 'dshpw-hint' }, t('sessHint')),
+        ...(unassigned.length === 0
+          ? [h('div', { className: 'dshpw-hint' }, t('sessEmpty'))]
+          : groupUnassignedByCwd(unassigned).map((group) => {
+              const key = group.cwd ?? '';
+              return h(
+                'div',
+                { className: 'dshpw-perm', key: `sess-${key}` },
+                h(
+                  'div',
+                  { className: 'dshpw-perm-head' },
+                  h('strong', null, group.title ?? group.cwd ?? group.sessions[0]?.sessionId ?? ''),
+                  group.cwd
+                    ? h('span', { className: 'dshpw-hint' }, group.cwd)
+                    : h('span', { className: 'dshpw-hint' }, t('sessFolder')),
+                ),
+                h(
+                  'div',
+                  { className: 'dshpw-row' },
+                  h('span', { className: 'dshpw-hint' }, t('sessAssignGroup')),
+                  h(
+                    'select',
+                    {
+                      className: 'dshpw-input',
+                      value: sessTargets[key] ?? '',
+                      'aria-label': t('sessTarget'),
+                      onChange: (e: { target: { value: string } }) =>
+                        setSessTargets((prev) => ({ ...prev, [key]: e.target.value })),
+                    },
+                    h('option', { value: '' }, t('sessTarget')),
+                    ...(data?.users ?? [])
+                      .filter((u) => u.role === 'user')
+                      .map((u) => h('option', { key: u.id, value: u.username }, u.username)),
+                  ),
+                  h(
+                    'button',
+                    {
+                      className: 'dshpw-btn',
+                      disabled: busy || (sessTargets[key] ?? '') === '',
+                      onClick: () => assignSessions(group),
+                    },
+                    t('sessAssign') + (group.sessions.length > 1 ? ` (${group.sessions.length})` : ''),
+                  ),
+                ),
+                ...group.sessions.map((s) =>
+                  h(
+                    'div',
+                    { className: 'dshpw-row', key: s.sessionId },
+                    h(
+                      'span',
+                      { className: 'dshpw-hint', title: s.sessionId },
+                      `${s.title ?? s.sessionId} · ${t('sessLastSeen')} ${fmtTime(s.lastSeenAt)}`,
+                    ),
+                    sessAssignErrors[s.sessionId]
+                      ? h('span', { className: 'dshpw-error' }, sessAssignErrors[s.sessionId])
+                      : null,
+                  ),
+                ),
+              );
+            })),
       ),
 
     error && h('div', { className: 'dshpw-error' }, error),
