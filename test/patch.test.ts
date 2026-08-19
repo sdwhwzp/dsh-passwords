@@ -128,9 +128,14 @@ test('补丁：工作区搜索粘滞态 → 无结果时点击别处自动收起
     assert.ok(!ws.includes('if (normalizedQuery !== "") return;'), '旧粘滞行为（query 非空直接 return）已移除');
     assert.ok(ws.includes('remoteSearch.status !== "loading"'), '已注入无结果自动收起逻辑');
     assert.ok(ws.includes('remoteSearch,'), 'click-outside effect 依赖数组已补 remoteSearch（防闭包过期）');
-    // 搜索框 autocomplete 加固：阻断密码管理器把搜索框当用户名框自动填充（真凶：admin 被填入 → 无匹配会话）
-    assert.ok(ws.includes('autoComplete: "off"'), '搜索框已注入 autocomplete="off"');
-    assert.ok(ws.includes('dshpw-session-search'), '搜索框已注入中性 name，摘掉用户名框资格');
+    // 搜索框 v2 自动填充加固：off 会被部分密码管理器忽略，改用 search + 折叠态
+    // readOnly + 常见密码管理器忽略标记，避免 admin 被填入触发无匹配会话。
+    assert.ok(ws.includes('autoComplete: "search"'), '搜索框已使用 search 自动完成语义');
+    assert.ok(ws.includes('readOnly: !searchExpanded'), '搜索框折叠态已设为只读');
+    assert.ok(ws.includes('data-lpignore'), '已加入 LastPass 忽略标记');
+    assert.ok(ws.includes('data-1p-ignore'), '已加入 1Password 忽略标记');
+    assert.ok(ws.includes('data-bwignore'), '已加入 Bitwarden 忽略标记');
+    assert.ok(ws.includes('dshpw-session-search'), '搜索框已注入中性 name');
 
     const after = patchStatus(root);
     assert.equal(after.workspaceSearch, true, '状态检测为已打');

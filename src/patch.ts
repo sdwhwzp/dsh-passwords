@@ -53,10 +53,17 @@ const SEARCH_DEPS_TO = '$1\n\t\t\t\tremoteSearch,\n\t\t\t\tnormalizedQuery,\n\t\
 // 选中并填入已存用户名（实测被填 "admin" → 触发搜索 → 无匹配会话，见 PROCESS.md
 // 步骤 32）。子补丁：给搜索框加 autocomplete="off" + 中性 name，摘掉用户名框资格。
 const SEARCH_AUTOFILL_MARK = 'dshpw-session-search';
+const SEARCH_AUTOFILL_HARDEN_MARK = 'data-dshpw-autofill-harden';
 const SEARCH_AUTOFILL_RE =
   /(className: WorkspaceBrowser_module_css_default\.searchInput,[\t ]*\n[\t ]*type: "text",)/;
+// v2：autocomplete=off 会被部分密码管理器忽略；search + 折叠态 readOnly + 厂商忽略
+// 标记组合更稳。readOnly 只在搜索框折叠时生效，用户主动展开后仍可正常输入。
 const SEARCH_AUTOFILL_TO =
-  '$1\n\t\t\t\t\t\t\tautoComplete: "off",\n\t\t\t\t\t\t\tname: "dshpw-session-search",';
+  '$1\n\t\t\t\t\t\t\tautoComplete: "search",\n\t\t\t\t\t\t\tname: "dshpw-session-search",\n\t\t\t\t\t\t\treadOnly: !searchExpanded,\n\t\t\t\t\t\t\t\'data-dshpw-autofill-harden\': "v2",\n\t\t\t\t\t\t\t\'data-lpignore\': "true",\n\t\t\t\t\t\t\t\'data-1p-ignore\': "true",\n\t\t\t\t\t\t\t\'data-bwignore\': "true",';
+const SEARCH_AUTOFILL_V2_RE =
+  /(autoComplete:\s*)"off"(,\s*\n\s*name:\s*"dshpw-session-search",)/;
+const SEARCH_AUTOFILL_V2_TO =
+  '$1"search"$2\n\t\t\t\t\t\t\treadOnly: !searchExpanded,\n\t\t\t\t\t\t\t\'data-dshpw-autofill-harden\': "v2",\n\t\t\t\t\t\t\t\'data-lpignore\': "true",\n\t\t\t\t\t\t\t\'data-1p-ignore\': "true",\n\t\t\t\t\t\t\t\'data-bwignore\': "true",';
 
 /**
  * 命名空间白名单补丁是否适用当前 dsh。
@@ -123,8 +130,8 @@ export function patchStatus(
     workspaceSearch =
       !ws.includes('if (normalizedQuery !== "") return;') &&
       ws.includes('remoteSearch.status !== "loading"') &&
-      // 搜索框 autocomplete 加固（v2.5.1）：未含标记且仍可匹配 = 未打
-      (ws.includes(SEARCH_AUTOFILL_MARK) || !SEARCH_AUTOFILL_RE.test(ws));
+      // 搜索框自动填充加固：v2 标记存在才算完成；旧 v1（仅 off+name）会自动升级
+      ws.includes(SEARCH_AUTOFILL_HARDEN_MARK) || !SEARCH_AUTOFILL_RE.test(ws);
   } catch { /* 同上 */ }
   return { settingsHostMode, whitelist, workspaceSearch };
 }
@@ -182,9 +189,25 @@ export function applyRemotePatch(dshRoot: string): 'applied' | 'unchanged' | 'mi
       wsNext = wsNext.replace(SEARCH_STICKY_RE, SEARCH_STICKY_TO).replace(SEARCH_DEPS_RE, SEARCH_DEPS_TO);
       wsChanged = true;
     }
-    if (!wsNext.includes(SEARCH_AUTOFILL_MARK) && SEARCH_AUTOFILL_RE.test(wsNext)) {
-      wsNext = wsNext.replace(SEARCH_AUTOFILL_RE, SEARCH_AUTOFILL_TO);
-      wsChanged = true;
+    if (!wsNext.includes(SEARCH_AUTOFILL_HARDEN_MARK)) {
+      if (SEARCH_AUTOFILL_RE.test(wsNext) && !wsNext.includes(SEARCH_AUTOFILL_MARK)) {
+        wsNext = wsNext.replace(SEARCH_AUTOFILL_RE, SEARCH_AUTOFILL_TO);
+        wsChanged = true;
+      } else if (SEARCH_AUTOFILL_V2_RE.test(wsNext)) {
+        // 已应用 v1：只升级属性，不重复插入 name/搜索字段
+        wsNext = wsNext.replace(SEARCH_AUTOFILL_V2_RE, SEARCH_AUTOFILL_V2_TO);
+        wsChanged = true;
+      } else if (wsNext.includes(SEARCH_AUTOFILL_MARK)) {
+        // 容错：dsh bundle 格式变化但保留 v1 name，补齐 v2 属性
+        const nameRe = /(name:\s*"dshpw-session-search",)/;
+        if (nameRe.test(wsNext)) {
+          wsNext = wsNext.replace(
+            nameRe,
+            '$1\n\t\t\t\t\t\t\treadOnly: !searchExpanded,\n\t\t\t\t\t\t\t\'data-dshpw-autofill-harden\': "v2",\n\t\t\t\t\t\t\t\'data-lpignore\': "true",\n\t\t\t\t\t\t\t\'data-1p-ignore\': "true",\n\t\t\t\t\t\t\t\'data-bwignore\': "true",',
+          );
+          wsChanged = true;
+        }
+      }
     }
     if (wsChanged) {
       if (!existsSync(wsFile + BAK_SUFFIX)) writeFileSync(wsFile + BAK_SUFFIX, ws);
