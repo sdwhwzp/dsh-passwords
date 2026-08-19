@@ -47,6 +47,20 @@ function tagDisplay(tag: string, tr: (key: string) => string): string {
   return localized === `tag.${key}` ? tag : localized;
 }
 
+/** 聊天错误文案：按服务端稳定 code 本地化（跟随 dsh 语言），未知 code 回退服务端文案 */
+function chatErrText(
+  d: { error?: string; code?: string },
+  fallback: string,
+  tr: (key: string) => string,
+): string {
+  if (d.code) {
+    const key = `err.${d.code}`;
+    const localized = tr(key);
+    if (localized !== key) return localized;
+  }
+  return d.error ?? fallback;
+}
+
 /** 头像色板：按用户名哈希取固定色（同一个人颜色稳定） */
 const AVATAR_COLORS = ['#5b8ff9', '#5ad8a6', '#f6bd16', '#e8684a', '#6dc8ec', '#9270ca', '#ff9d4d', '#269a99'];
 function avatarColor(name: string): string {
@@ -165,6 +179,28 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
       });
     return () => {
       disposed = true;
+    };
+  }, []);
+
+  /** 收件人列表刷新：面板打开时同步（其他端删/建子用户后下拉及时更新） */
+  const refreshContacts = () => {
+    fetch('/api/dsh-passwords/state')
+      .then(async (res) => {
+        const data = (await res.json().catch(() => ({}))) as {
+          users?: Array<{ id: number; username: string; role: string }>;
+        };
+        setContacts(Array.isArray(data.users) ? data.users.filter((u) => u.role === 'user') : []);
+      })
+      .catch(() => {});
+  };
+
+  // 卸载时清理关闭动画定时器（组件在 180ms 动画窗口内被卸载时避免泄漏）
+  useEffect(() => {
+    return () => {
+      if (closeTimerRef.current !== null) {
+        window.clearTimeout(closeTimerRef.current);
+        closeTimerRef.current = null;
+      }
     };
   }, []);
 
@@ -337,7 +373,7 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
           } else if (!res.ok) {
             // HTTP 错误同样计入退避：连续 5xx/401 时拉长轮询间隔，避免失败请求风暴
             failStreak++;
-            setError(d.error ?? t('chat.loadFailed'));
+            setError(chatErrText(d, t('chat.loadFailed'), tr));
           }
         })
         .catch(() => {
@@ -396,11 +432,14 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
     setClosing(false);
     setOpen(true);
     setUnread(0);
+    refreshContacts();
   };
 
   const send = () => {
     const content = draft.trim();
-    if (!content || busy) return;
+    // me 未加载（首轮 messages 响应未返回）时禁用发送：此时无法确定身份/收件人口径，
+    // 主用户会被服务端 400、临时消息也会因 sender_id=0 渲染到错误一侧
+    if (!content || busy || me === null) return;
     haptic();
     // 乐观更新：立即把临时消息放进列表（微信式即时发送手感），
     // 服务器确认后用真实消息替换；失败回滚（移除临时 + 恢复草稿 + 报错）。
@@ -446,7 +485,7 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
           setMessages((prev) => prev.filter((p) => p.id !== tempId));
           setDraft(content);
           setTags(tags);
-          setError(d.error ?? t('chat.sendFailed'));
+          setError(chatErrText(d, t('chat.sendFailed'), tr));
         }
       })
       .catch(() => {
@@ -589,13 +628,11 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
                     }
                   >
                     <option value="broadcast">{t('chat.toBroadcast')}</option>
-                    {contacts
-                      .filter((c) => me?.id !== c.id)
-                      .map((c) => (
-                        <option key={c.id} value={String(c.id)}>
-                          {c.username}
-                        </option>
-                      ))}
+                    {contacts.map((c) => (
+                      <option key={c.id} value={String(c.id)}>
+                        {c.username}
+                      </option>
+                    ))}
                   </select>
                 </div>
               )}
@@ -617,7 +654,7 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
                 <button
                   type="button"
                   className="dshpw-chat-send"
-                  disabled={busy || !draft.trim()}
+                  disabled={busy || !draft.trim() || me === null}
                   onClick={send}
                   aria-label={t('chat.send')}
                   title={t('chat.send')}

@@ -81,6 +81,11 @@ const prompt = isEn
   : `确认以 HTTP 模式启动密码门（监听 ${host}:${port}）？输入 y 继续 [y/N] `;
 
 const rl = createInterface({ input: process.stdin, output: process.stderr });
+// stdin 关闭（非交互 / </dev/null）：question 永不回调会挂死——直接按取消处理退出
+process.stdin.on('close', () => {
+  console.error(isEn ? 'Cancelled (no interactive input).' : '已取消（无交互输入）。');
+  process.exit(1);
+});
 rl.question(prompt, (answer) => {
   rl.close();
   if (!/^y(es)?$/i.test(answer.trim())) {

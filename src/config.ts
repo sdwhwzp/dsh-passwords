@@ -141,6 +141,8 @@ export function loadConfig(): PlatformConfig {
       // 自动 HTTPS 默认开 80（同时承载 ACME 挑战应答）
       redirectPort: (() => {
         const raw = readEnv('MCP_GATEWAY_REDIRECT_PORT', '').trim();
+        // 0 = 显式关闭跳转端口（此前 0 不满足 >0 被当作"未配置"落到默认 80，文档承诺失效）
+        if (raw === '0') return null;
         const n = Number(raw);
         const explicit = raw !== '' && Number.isInteger(n) && n > 0 && n <= 65535 ? n : null;
         if (explicit !== null) return explicit;

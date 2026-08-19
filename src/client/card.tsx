@@ -103,7 +103,9 @@ function fmtTime(iso: string): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-/** 无归属会话按工作区（cwd）分组：组内批量分配，单会话组即单个分配 */
+/** 无归属会话按工作区（cwd）分组：组内批量分配，单会话组即单个分配。
+ *  哨兵键：真实路径必以 / 开头，不会与 null 分组键碰撞。 */
+const SESS_NO_CWD_KEY = '__no_cwd__';
 function groupUnassignedByCwd(list: UnassignedSession[]): Array<{
   cwd: string | null;
   title: string | null;
@@ -111,7 +113,7 @@ function groupUnassignedByCwd(list: UnassignedSession[]): Array<{
 }> {
   const map = new Map<string, { cwd: string | null; title: string | null; sessions: UnassignedSession[] }>();
   for (const s of list) {
-    const key = s.cwd ?? '';
+    const key = s.cwd ?? SESS_NO_CWD_KEY;
     let group = map.get(key);
     if (!group) {
       group = { cwd: s.cwd, title: null, sessions: [] };
@@ -146,14 +148,15 @@ function api<T>(path: string, body?: unknown): Promise<T> {
   });
 }
 
-/** 错误文案：有 code 走本地词典，未知 code / 无 code 回退服务端文案 */
+/** 错误文案：有 code 走本地词典，未知 code / 无 code 回退服务端文案。
+ *  词典项含占位符（{minutes}/{count} 等）时客户端无参数可填，回退服务端已插值文案。 */
 function errText(error: unknown, tr: (key: string, params?: Record<string, string | number>) => string): string {
   if (error instanceof Error) {
     const code = (error as Error & { code?: string }).code;
     if (code) {
       const key = `err.${code}`;
       const localized = tr(key);
-      if (localized !== key) return localized;
+      if (localized !== key && !localized.includes('{')) return localized;
     }
     return error.message;
   }
@@ -245,7 +248,16 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
               .catch(() => setWorkspaces([]))
               .then(() =>
                 api<{ sessions: UnassignedSession[] }>('/gateway/api/session-ownership/unassigned')
-                  .then((r) => setUnassigned(r.sessions ?? []))
+                  .then((r) => {
+                    setUnassigned(r.sessions ?? []);
+                    // 清理已不在无归属清单中的失败提示（会话已被分配或消失）
+                    const live = new Set((r.sessions ?? []).map((s) => s.sessionId));
+                    setSessAssignErrors((prev) => {
+                      const next: Record<string, string> = {};
+                      for (const [id, msg] of Object.entries(prev)) if (live.has(id)) next[id] = msg;
+                      return next;
+                    });
+                  })
                   .catch(() => setUnassigned(null)),
               );
           })
@@ -429,7 +441,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
 
   // 会话归属分配（仅主用户）：按工作区分组批量分配，逐会话返回结果与失败原因
   const assignSessions = (group: { cwd: string | null; sessions: UnassignedSession[] }) => {
-    const key = group.cwd ?? '';
+    const key = group.cwd ?? SESS_NO_CWD_KEY;
     const targetName = sessTargets[key] ?? '';
     const target = data?.users.find((u) => u.username === targetName);
     if (!target) {
@@ -445,9 +457,19 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
         ).then((r) => {
           const errors: Record<string, string> = {};
           for (const res of r.results ?? []) {
-            if (!res.ok && res.error) errors[res.sessionId] = trErr(`sess.err.${res.error}`);
+            if (!res.ok && res.error) {
+              // 未知错误码回退服务端原文，避免界面出现字面 sess.err.XXX
+              const localized = trErr(`sess.err.${res.error}`);
+              errors[res.sessionId] = localized === `sess.err.${res.error}` ? res.error : localized;
+            }
           }
-          setSessAssignErrors(errors);
+          // 失败提示合并而非整体替换：分配其他组时不清掉本组仍在列表中的失败原因
+          setSessAssignErrors((prev) => ({ ...prev, ...errors }));
+          // 成功项立即从本地列表移除（乐观）：与 30s 定时刷新竞态时不显示"已分配"旧会话
+          const okIds = new Set((r.results ?? []).filter((res) => res.ok).map((res) => res.sessionId));
+          if (okIds.size > 0) {
+            setUnassigned((prev) => (prev ?? []).filter((s) => !okIds.has(s.sessionId)));
+          }
           setSessTargets((prev) => {
             const next = { ...prev };
             delete next[key];
@@ -814,7 +836,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
         ...(unassigned.length === 0
           ? [h('div', { className: 'dshpw-hint' }, t('sessEmpty'))]
           : groupUnassignedByCwd(unassigned).map((group) => {
-              const key = group.cwd ?? '';
+              const key = group.cwd ?? SESS_NO_CWD_KEY;
               return h(
                 'div',
                 { className: 'dshpw-perm', key: `sess-${key}` },

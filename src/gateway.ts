@@ -637,26 +637,30 @@ function sanitizeHiddenUnicodeJson(value: unknown, depth = 0): unknown {
 }
 
 /**
- * dsh-ssh host SSRF 判定（异步版，F-28）：
- *   - IP 字面量（含八进制/十六进制/简写段变体）→ isPrivateHost 立刻判
- *   - hostname（如 127.0.0.1.nip.io、sslip.io 通配）→ DNS 全量解析后
- *     逐地址判定，任一解析结果命中私网/回环 → 拦截
- *   - 3 秒超时防 DNS 卡死（请求被 hang 住）；解析失败视为不拦截
- *     （公网域名解析失败时 dsh-ssh 自身也会连接失败，无 SSRF 面）
+ * dsh-ssh host SSRF 判定（F-28/F-29，异步版）：
+ *   - IP 字面量（含八进制/十六进制/简写段/映射形态）→ isPrivateHost 立即判
+ *   - hostname（如 127.0.0.1.nip.io、sslip.io 通配）→ DNS 全量解析后逐地址判定，
+ *     任一解析结果命中私网/回环 → 拦截；全部公网 → 返回首个解析 IP 供请求体改写，
+ *     把连接目标钉死在已验证地址上，消除「网关判定与插件连接两次解析」的
+ *     DNS 重绑定 TOCTOU 窗口。
+ *   - 3 秒超时防 DNS 卡死；解析失败/超时一律 fail-closed（返回 null = 拦截）：
+ *     无法验证的目标不允许经网关连接，绝不"解析失败即放行"。
+ * 返回：'private' = 拦截；IP 字符串 = 校验通过、按它改写 host；null = 解析失败拦截。
  */
-function isSshHostPrivate(host: string): Promise<boolean> {
+function resolveSshHostSafe(host: string): Promise<'private' | string | null> {
   const h = host.trim().toLowerCase();
-  if (isPrivateHost(h)) return Promise.resolve(true);
-  if (h === '') return Promise.resolve(false);
-  const lookup: Promise<dns.LookupAddress[]> = dns.promises
+  if (isPrivateHost(h)) return Promise.resolve('private');
+  const lookup = dns.promises
     .lookup(h, { all: true, verbatim: false })
-    .catch(() => []);
-  const timeout = new Promise<dns.LookupAddress[]>((resolve) =>
-    setTimeout(() => resolve([]), 3000).unref(),
-  );
-  return Promise.race([lookup, timeout]).then((addrs) =>
-    addrs.some((addr) => isPrivateHost(addr.address)),
-  );
+    .then<dns.LookupAddress[] | null>((addrs) => (addrs.length > 0 ? addrs : null))
+    .catch(() => null); // 解析失败 = 无法验证 = 拦截（fail-closed）
+  const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000).unref());
+  return Promise.race([lookup, timeout]).then((addrs) => {
+    if (addrs === null) return null;
+    if (addrs.some((addr) => isPrivateHost(addr.address))) return 'private';
+    // verbatim:false 下 Node 已按 RFC6724 排序，首个通常即首选地址
+    return addrs[0].address;
+  });
 }
 
 export function createGatewayServer(
@@ -1373,8 +1377,9 @@ export function createGatewayServer(
     const me = apiAuth(req, res, true);
     if (!me) return;
     const body = (req.body ?? {}) as Record<string, unknown>;
-    const userId = Number(body.userId);
-    if (!Number.isInteger(userId) || userId <= 0) {
+    // 严格整数解析（与 nullableInt 同口径：拒绝 1e3/十六进制/布尔/数组的宽松强转）
+    const userId = nullableInt(body.userId);
+    if (userId === null || userId < 1) {
       res.status(400).json({ ok: false, code: 'INVALID', error: 'userId 无效' });
       return;
     }
@@ -1383,9 +1388,15 @@ export function createGatewayServer(
       res.status(404).json({ ok: false, code: 'NO_SUCH_USER', error: '目标用户不存在' });
       return;
     }
-    const sessionIds = stringArray(body.sessionIds);
-    if (sessionIds.length === 0 || sessionIds.length > 200) {
-      res.status(400).json({ ok: false, code: 'INVALID', error: 'sessionIds 为空或超过 200 个' });
+    // 归属管理面向子用户：主用户本就可访问全部会话，无需（也不允许）被分配目标
+    if (target.role === 'admin') {
+      res.status(400).json({ ok: false, code: 'INVALID', error: '不能把会话分配给主用户' });
+      return;
+    }
+    // 去重（重复 id 会让结果与审计出现重复条目）；stringArray 已截断到 64
+    const sessionIds = [...new Set(stringArray(body.sessionIds))];
+    if (sessionIds.length === 0) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: 'sessionIds 为空' });
       return;
     }
     if (sessionIds.some((id) => id.length > 200)) {
@@ -1393,33 +1404,51 @@ export function createGatewayServer(
       return;
     }
     // 分配前校验：会话必须已被注册表观察到（未知 id 拒绝，防止写入垃圾归属行）；
-    // 目标子用户受工作区白名单约束时，cwd 必须命中白名单；cwd 缺失无法校验 →
-    // fail-closed 拒绝（宁可少分配，不可越权分配）。
+    // 已归属他人的会话默认拒绝（force=true 显式重分配）——防止 UI 过期/竞态窗口
+    // 把用户正在使用的会话静默改派；目标子用户受工作区白名单约束时，cwd 必须命中
+    // 白名单；cwd 缺失无法校验 → fail-closed 拒绝（宁可少分配，不可越权分配）。
     const perms = effectivePermissions(userId);
-    const restricted = target.role === 'user' && isWorkspaceRestricted(perms.allowed_folders);
+    const restricted = isWorkspaceRestricted(perms.allowed_folders);
     const results: Array<{ sessionId: string; ok: boolean; error?: string }> = [];
     for (const sessionId of sessionIds) {
-      const reg = db.getSessionRegistry(sessionId);
-      if (reg === null) {
-        results.push({ sessionId, ok: false, error: 'SESSION_UNKNOWN' });
-        continue;
-      }
-      if (reg.cwd === null) {
-        if (restricted) {
-          results.push({ sessionId, ok: false, error: 'CWD_UNKNOWN' });
+      try {
+        const reg = db.getSessionRegistry(sessionId);
+        if (reg === null) {
+          results.push({ sessionId, ok: false, error: 'SESSION_UNKNOWN' });
           continue;
         }
-      } else if (restricted && !folderAllowed(reg.cwd, perms.allowed_folders)) {
-        results.push({ sessionId, ok: false, error: 'FOLDER_NOT_ALLOWED' });
-        continue;
+        const currentOwner = db.getSessionOwner(sessionId);
+        if (currentOwner !== null && currentOwner !== userId && body.force !== true) {
+          results.push({ sessionId, ok: false, error: 'ALREADY_OWNED' });
+          continue;
+        }
+        if (reg.cwd === null) {
+          if (restricted) {
+            results.push({ sessionId, ok: false, error: 'CWD_UNKNOWN' });
+            continue;
+          }
+        } else if (restricted && !folderAllowed(reg.cwd, perms.allowed_folders)) {
+          results.push({ sessionId, ok: false, error: 'FOLDER_NOT_ALLOWED' });
+          continue;
+        }
+        db.assignSessionOwner(sessionId, userId);
+        results.push({ sessionId, ok: true });
+      } catch (error) {
+        // 单条失败不影响其余批次；无论结果如何审计都落盘（问责链不断）
+        console.warn('[dsh-passwords] 会话分配失败 session=%s:', sessionId, String(error));
+        results.push({ sessionId, ok: false, error: 'INTERNAL' });
       }
-      db.assignSessionOwner(sessionId, userId);
-      results.push({ sessionId, ok: true });
     }
-    db.audit('session_ownership_assigned', {
-      username: target.username,
-      detail: JSON.stringify(results),
-    });
+    try {
+      // 审计记操作者（me）而非被分配者：保留"谁把会话分给了谁"的问责链
+      db.audit('session_ownership_assigned', {
+        username: me.username,
+        ip: typeof req.headers['x-forwarded-for'] === 'string' ? req.headers['x-forwarded-for'] : null,
+        detail: JSON.stringify({ target: target.username, targetId: userId, results }),
+      });
+    } catch (error) {
+      console.warn('[dsh-passwords] 会话分配审计写入失败:', String(error));
+    }
     res.json({ ok: true, results });
   });
 
@@ -1509,8 +1538,15 @@ export function createGatewayServer(
     //      选择收件人或勾选广播，避免误发全员消息。
     const rawRecipient = body.recipientId;
     const wantBroadcast = body.broadcast === true;
+    // 一次取用：两个分支共用，避免两次查询间 admin 被删导致错误码口径漂移
+    const adminId = db.findAdminId();
     let recipientId: number | null = null;
     if (rawRecipient !== undefined && rawRecipient !== null) {
+      if (wantBroadcast) {
+        // 两个意图互斥：同时给出视为歧义请求（主用户本想广播却被静默降级成私信 = 坏契约）
+        res.status(400).json({ ok: false, code: 'INVALID', error: 'recipientId 与 broadcast 不能同时提供' });
+        return;
+      }
       recipientId = nullableInt(rawRecipient);
       if (recipientId === null || recipientId < 1) {
         res.status(400).json({ ok: false, code: 'INVALID', error: 'recipientId 无效' });
@@ -1526,7 +1562,6 @@ export function createGatewayServer(
         return;
       }
     } else if (me.role !== 'admin') {
-      const adminId = db.findAdminId();
       if (adminId === null) {
         res.status(500).json({ ok: false, code: 'INTERNAL', error: '平台主用户缺失' });
         return;
@@ -1537,12 +1572,9 @@ export function createGatewayServer(
       return;
     }
     // 子用户只能私信主用户（跨子用户私信在多租户场景下无业务价值，且扩大消息泄露面）
-    if (me.role !== 'admin' && recipientId !== null) {
-      const adminId = db.findAdminId();
-      if (adminId === null || recipientId !== adminId) {
-        res.status(403).json({ ok: false, code: 'FORBIDDEN_RECIPIENT', error: '子用户只能给主用户发私信' });
-        return;
-      }
+    if (me.role !== 'admin' && recipientId !== null && (adminId === null || recipientId !== adminId)) {
+      res.status(403).json({ ok: false, code: 'FORBIDDEN_RECIPIENT', error: '子用户只能给主用户发私信' });
+      return;
     }
     // tag 是展示元数据：限制数量、逐项长度并去空白，防 256KB JSON 请求把极长 tag
     // 持久化到每条消息（content 已有 4k 上限）。保留未知短 tag 兼容旧数据/扩展。
@@ -1902,6 +1934,9 @@ export function createGatewayServer(
         }
         // HTML 注入可安全退化为流式透传。必须写入先前缓冲的内容和当前越界 chunk；
         // 旧实现丢弃当前 chunk，导致响应中间断裂。
+        // ⚠ 重挂 error 监听：pipe 不会为源挂 error，缺监听时上游中断 emit 'error'
+        // 会触发 uncaughtException 击穿网关进程。
+        upstreamRes.on('error', () => res.destroy());
         const respHeaders = headersForStreaming(upstreamRes.headers);
         if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
         if (!res.writableEnded) {
@@ -2105,7 +2140,15 @@ export function createGatewayServer(
               //（工作区可能被主用户/其他子用户共享，path 命中白名单不等于会话可读）
               if (reqAs.dshpwPerms !== undefined) {
                 stripArchivedSessionIds(outBody);
-                filterOwnedSessionIds(outBody, (id) => db.getSessionOwner(id) === reqAs.dshpwUser);
+                filterOwnedSessionIds(outBody, (id) => {
+                  try {
+                    return db.getSessionOwner(id) === reqAs.dshpwUser;
+                  } catch (error) {
+                    // 单条 DB 读失败按"未授权"丢弃（fail-closed），不得让整份列表走外层透传
+                    console.warn('[dsh-passwords] 会话归属查询失败（按未授权丢弃）:', String(error));
+                    return false;
+                  }
+                });
               }
               const out = Buffer.from(JSON.stringify(outBody), 'utf8');
               const respHeaders = headersForRewrittenBody(upstreamRes.headers);
@@ -2117,7 +2160,13 @@ export function createGatewayServer(
                 if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response too large');
                 return;
               }
-              // 解析失败（非 JSON 上游响应）：原样透传，不篡改
+              // 子用户列表需要归属/白名单过滤：解析或过滤异常时无法产出已过滤响应，
+              // 绝不能把未过滤的全量列表透传（fail-open 泄露其他租户会话）；
+              // 主用户列表不涉及过滤，保持原样透传。
+              if (reqAs.dshpwPerms !== undefined) {
+                if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response unprocessable');
+                return;
+              }
               const respHeaders = headersForStreaming(upstreamRes.headers);
               if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
               if (!res.writableEnded) res.end(raw);
@@ -2138,16 +2187,24 @@ export function createGatewayServer(
               const parsed = JSON.parse(decoded.toString('utf8'));
               const sessionId = extractSessionId(parsed);
               if (sessionId !== null && reqAs.dshpwUser !== undefined) {
-                db.setSessionOwner(sessionId, reqAs.dshpwUser);
-                // 记录 sessionId → 创建时的目标 cwd（needsFolderCheck 已算出，存于 req）
-                const cwd = reqAs.dshpwSessionCwd;
-                if (typeof cwd === 'string' && cwd.length > 0) sessionCwdById.set(sessionId, cwd);
-                // Discussion #6：新会话同步进入注册表（已有归属，不会再出现在无归属清单）。
-                // 收割写库失败只丢登记，绝不影响会话创建响应。
+                // 归属登记失败只记日志：该会话随后会被 session.list 的 fail-closed
+                // 归属过滤隐藏（不会泄露给子用户），响应仍原样转发。
+                // 之前这里抛错会落到下方 catch 被误标为"上游响应非 JSON"，排障误导。
                 try {
-                  db.upsertSessionRegistry([
-                    { sessionId, cwd: typeof cwd === 'string' && cwd.length > 0 ? cwd : null, title: null },
-                  ]);
+                  db.setSessionOwner(sessionId, reqAs.dshpwUser);
+                } catch (error) {
+                  console.warn('[dsh-passwords] 会话归属登记失败 session=%s:', sessionId, String(error));
+                }
+                // 记录 sessionId → 创建时的目标 cwd（needsFolderCheck 已算出，存于 req）
+                const reqCwd = reqAs.dshpwSessionCwd;
+                const cwd = typeof reqCwd === 'string' && reqCwd.length > 0 ? reqCwd : null;
+                if (cwd !== null) sessionCwdById.set(sessionId, cwd);
+                // Discussion #6：新会话同步进入注册表（已有归属，不会再出现在无归属清单）。
+                // 优先取创建响应自带的 cwd/title（不受限用户无 needsFolderCheck，reqCwd 恒空）；
+                // 收割写库失败只丢登记，绝不影响会话创建响应。
+                const meta = collectSessionMeta(parsed).get(sessionId) ?? { cwd, title: null };
+                try {
+                  db.upsertSessionRegistry([{ sessionId, cwd: meta.cwd, title: meta.title }]);
                 } catch (error) {
                   console.warn('[dsh-passwords] 会话注册表登记失败（不影响会话创建）:', String(error));
                 }
@@ -2255,24 +2312,33 @@ export function createGatewayServer(
               const cwdAllowed = isWorkspaceRestricted(perms.allowed_folders)
                 ? (cwd: string) => folderAllowed(cwd, perms.allowed_folders)
                 : null;
-              const filtered = filterSessionItems(
-                parsed,
-                (id) => db.getSessionOwner(id) === caller,
-                cwdAllowed,
-              );
+              // 归属判定 per-item 兑底：单条 DB 读失败按"未授权"丢弃（fail-closed），
+              // 不能因一条异常让整份未过滤列表走外层 catch 透传
+              const keep = (id: string): boolean => {
+                try {
+                  return db.getSessionOwner(id) === caller;
+                } catch (error) {
+                  console.warn('[dsh-passwords] 会话归属查询失败（按未授权丢弃）:', String(error));
+                  return false;
+                }
+              };
+              const filtered = filterSessionItems(parsed, keep, cwdAllowed);
               const out = Buffer.from(JSON.stringify(filtered), 'utf8');
               const respHeaders = headersForRewrittenBody(upstreamRes.headers);
               respHeaders['content-length'] = String(out.length);
               if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
               if (!res.writableEnded) res.end(out);
             } catch (error) {
-              if (error instanceof OversizeResponseError) {
-                if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response too large');
-                return;
+              // 该分支仅处理子用户列表：任何解析/过滤异常都 fail-closed 502，
+              // 绝不把未过滤的全量列表回放给子用户（fail-open 泄露面）
+              if (!res.headersSent) {
+                const msg =
+                  error instanceof OversizeResponseError
+                    ? '502 Upstream response too large'
+                    : '502 Upstream response unprocessable';
+                res.status(502).type('text/plain').send(msg);
               }
-              const respHeaders = headersForStreaming(upstreamRes.headers);
-              if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
-              if (!res.writableEnded) res.end(raw);
+              return;
             }
           });
           return;
@@ -2459,17 +2525,27 @@ export function createGatewayServer(
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
           return;
         }
+        // 转发体默认原样；SSRF 校验或审批改写时会整体重建（重建必须同步更新 content-length）
+        let forwardBody = Buffer.concat(chunks);
 
         // dsh-ssh SSRF 封堵：创建/修改主机时 body.host 命中私网/回环 → 403。
         // 只校验 host 字段存在的情况（test 请求用 alias 引用已创建主机，无 host 字段——
         // 私网主机在创建时已被拦截，test 无从引用私网目标）。
-        // F-28：host 为 hostname（如 nip.io 通配）时做 DNS 解析逐地址判定。
+        // F-28：host 为 hostname（如 nip.io 通配）时 DNS 解析逐地址判定；校验通过后
+        // 把请求体 host 改写为已验证的 IP 字面量，钉死 DNS 重绑定 TOCTOU。
         if (needsSshHostCheck && bodyObj !== null && typeof bodyObj === 'object') {
           const host = (bodyObj as Record<string, unknown>).host;
-          if (typeof host === 'string' && (await isSshHostPrivate(host))) {
-            upstreamReq.destroy();
-            res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
-            return;
+          if (typeof host === 'string') {
+            const verdict = await resolveSshHostSafe(host);
+            if (verdict === 'private' || verdict === null) {
+              upstreamReq.destroy();
+              res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+              return;
+            }
+            (bodyObj as Record<string, unknown>).host = verdict;
+            forwardBody = Buffer.from(JSON.stringify(bodyObj), 'utf8');
+            // 重写 body 必须同步更新 content-length，否则上游按旧长度读流会挂起/错位
+            upstreamReq.setHeader('content-length', String(forwardBody.length));
           }
         }
 
@@ -2537,10 +2613,10 @@ export function createGatewayServer(
         }
 
         // 审批响应改写：受限子用户的 AI 提权审批一律强制 rejected（返回取消）
-        let forwardBody = Buffer.concat(chunks);
         if (needsApprovalCheck && bodyObj !== null && typeof bodyObj === 'object') {
           if (forceRejectApproval(bodyObj)) {
             forwardBody = Buffer.from(JSON.stringify(bodyObj), 'utf8');
+            upstreamReq.setHeader('content-length', String(forwardBody.length));
           }
         }
 
@@ -2663,6 +2739,16 @@ export function createGatewayServer(
     cap(usageReportThrottle);
     cap(setupAttempts);
     cap(msgRate);
+    // 会话路径缓存按容量裁剪（重启后由 session.list/workspace.list 重建；防长期运行无界增长）
+    cap(sessionCwdById);
+    cap(workspacePathById, 20_000);
+    // 数据库周期清理：登录失败/节流表与注册表幽灵会话（写失败只告警不致命）
+    try {
+      db.pruneStaleSecurityRows();
+      db.pruneSessionRegistry(30);
+    } catch (error) {
+      console.warn('[dsh-passwords] 周期清理失败:', String(error));
+    }
   }, 10 * 60_000);
   sweep.unref();
   server.on('close', () => clearInterval(sweep));

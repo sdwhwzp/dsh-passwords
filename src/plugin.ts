@@ -429,6 +429,7 @@ export function apply(ctx: Context): void {
         try {
           const body = await readJsonBody(req);
           const target = typeof body.target === 'string' && body.target !== '' ? body.target : caller.username;
+          assertNoSqlInjection(target, 'target'); // 与 /users/remove 同口径的纵深防御
           const password = typeof body.password === 'string' ? body.password : '';
           // F-06：自助改密（target 为自己）需携带当前密码，服务端 bcrypt 校验
           const currentPassword = typeof body.currentPassword === 'string' ? body.currentPassword : undefined;
@@ -451,6 +452,7 @@ export function apply(ctx: Context): void {
         try {
           const body = await readJsonBody(req);
           const target = typeof body.target === 'string' && body.target !== '' ? body.target : caller.username;
+          assertNoSqlInjection(target, 'target'); // 与 /users/remove 同口径的纵深防御
           const username = typeof body.username === 'string' ? body.username : '';
           assertNoSqlInjection(username, 'username');
           const targetUser = db!.getUserByUsername(target);

@@ -127,11 +127,14 @@ export function patchStatus(
   try {
     const ws = readFileSync(wsFile, 'utf8');
     // 打过 = 不再含旧行为串 + 含子补丁标记（文件缺失按未打处理）
+    // 括号显式分组：自动填充「已打 v2 标记」与「不适用（RE 无匹配）」必须
+    // 先于粘滞态子补丁成立——否则 (A&&B&&C)||D 在 D 恒真时会把
+    // 未打粘滞态的文件误报为已打。
     workspaceSearch =
       !ws.includes('if (normalizedQuery !== "") return;') &&
       ws.includes('remoteSearch.status !== "loading"') &&
       // 搜索框自动填充加固：v2 标记存在才算完成；旧 v1（仅 off+name）会自动升级
-      ws.includes(SEARCH_AUTOFILL_HARDEN_MARK) || !SEARCH_AUTOFILL_RE.test(ws);
+      (ws.includes(SEARCH_AUTOFILL_HARDEN_MARK) || !SEARCH_AUTOFILL_RE.test(ws));
   } catch { /* 同上 */ }
   return { settingsHostMode, whitelist, workspaceSearch };
 }

@@ -132,10 +132,14 @@ test('filterOwnedSessionIds：只保留 keep() 通过的 sessionId', () => {
   assert.deepEqual((input.items[0] as any).sessionIds, ['s2']);
 });
 
-test('filterOwnedSessionIds：sessionIds 含非字符串时不处理（防误改）', () => {
-  const input = { items: [{ sessionIds: ['s1', 2] }] };
+test('filterOwnedSessionIds：sessionIds 混入非字符串时丢弃异常元素（fail-closed）', () => {
+  const input = { items: [{ sessionIds: ['s1', 2, null, 's2'] }] };
   filterOwnedSessionIds(input, () => true);
-  assert.deepEqual((input.items[0] as any).sessionIds, ['s1', 2]);
+  assert.deepEqual(
+    (input.items[0] as any).sessionIds,
+    ['s1', 's2'],
+    '非字符串 id 不能绕过归属过滤：一律丢弃，不整数组跳过过滤',
+  );
 });
 
 // ── sandboxPresetRank（级别映射） ──────────────────────────────

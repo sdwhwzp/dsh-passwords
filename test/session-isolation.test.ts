@@ -12,6 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { mkdtempSync, rmSync } from 'node:fs';
 import jwt from 'jsonwebtoken';
+import zlib from 'node:zlib';
 
 import { createGatewayServer } from '../src/gateway.js';
 import { AuthService } from '../src/auth.js';
@@ -45,9 +46,26 @@ const SESSION_LIST = {
   },
 };
 
+/** gzip 收割回归用清单：多一个仅经 gzip 响应出现的会话 */
+const SESSION_LIST_GZIP = {
+  ok: true,
+  result: {
+    value: [
+      ...SESSION_LIST.result.value,
+      { sessionId: 's-gz', cwd: '/root/44', title: 'GZ' },
+    ],
+  },
+};
+
 function startMockUpstream(): Promise<http.Server> {
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
+      if ((req.url ?? '').startsWith('/api/session.list') && req.headers['x-test-mode'] === 'gzip-list') {
+        const body = zlib.gzipSync(JSON.stringify(SESSION_LIST_GZIP));
+        res.writeHead(200, { 'content-type': 'application/json', 'content-encoding': 'gzip' });
+        res.end(body);
+        return;
+      }
       if ((req.url ?? '').startsWith('/api/session.list')) {
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify(SESSION_LIST));
@@ -65,6 +83,7 @@ function gatewayReq(
   url: string,
   cookie: string,
   body?: string,
+  headers?: Record<string, string>,
 ): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const req = http.request(
@@ -78,6 +97,7 @@ function gatewayReq(
           ...(body !== undefined
             ? { 'content-type': 'application/json', 'content-length': String(Buffer.byteLength(body)) }
             : {}),
+          ...(headers ?? {}),
         },
       },
       (res) => {
@@ -368,5 +388,72 @@ test('D6-7：消息可见性——他人私信不可见，广播与发给自己�
   assert.ok(
     ba.messages.some((m) => m.content === 'to-admin-default'),
     'admin 能看到发给自己的私信',
+  );
+});
+
+test('D6-8：recipientId 与 broadcast 同时给出 → 400（歧义拒绝，不静默降级）', async () => {
+  const r = await gatewayReq(
+    'POST',
+    '/gateway/api/messages',
+    adminCookie,
+    JSON.stringify({ content: 'ambiguous', recipientId: subAId, broadcast: true }),
+  );
+  assert.equal(r.status, 400);
+  assert.equal(json<{ code: string }>(r).code, 'INVALID', '互斥参数组合必须拒绝');
+});
+
+test('D6-9：已归属会话默认拒绝重分配（ALREADY_OWNED），force 显式允许', async () => {
+  // s-a 在 D6-3 已分配给 suba；不 force 分配给别人 → ALREADY_OWNED
+  const r1 = await gatewayReq(
+    'POST',
+    '/gateway/api/session-ownership/assign',
+    adminCookie,
+    JSON.stringify({ sessionIds: ['s-a'], userId: subBId }),
+  );
+  const b1 = json<{ results: Array<{ sessionId: string; ok: boolean; error?: string }> }>(r1);
+  assert.equal(b1.results[0]?.ok, false);
+  assert.equal(b1.results[0]?.error, 'ALREADY_OWNED', '未 force 不得静默改派');
+
+  // force=true → 显式重分配成功
+  const r2 = await gatewayReq(
+    'POST',
+    '/gateway/api/session-ownership/assign',
+    adminCookie,
+    JSON.stringify({ sessionIds: ['s-a'], userId: subBId, force: true }),
+  );
+  const b2 = json<{ results: Array<{ sessionId: string; ok: boolean; error?: string }> }>(r2);
+  assert.equal(b2.results[0]?.ok, true, 'force 重分配成功');
+
+  // 主用户不可作为分配目标
+  const r3 = await gatewayReq(
+    'POST',
+    '/gateway/api/session-ownership/assign',
+    adminCookie,
+    JSON.stringify({ sessionIds: ['s-c'], userId: adminId }),
+  );
+  assert.equal(r3.status, 400, '不能把会话分配给主用户');
+});
+
+test('D6-10：重复 sessionId 去重——结果与归属各只处理一次', async () => {
+  const r = await gatewayReq(
+    'POST',
+    '/gateway/api/session-ownership/assign',
+    adminCookie,
+    JSON.stringify({ sessionIds: ['s-c', 's-c', 's-c'], userId: subAId }),
+  );
+  const b = json<{ results: Array<{ sessionId: string; ok: boolean }> }>(r);
+  assert.equal(b.results.length, 1, '重复 id 只产生一条结果');
+  assert.equal(b.results[0]?.ok, true);
+});
+
+test('D6-11：主用户 session.list gzip 响应原样回放且完成注册表收割', async () => {
+  const r = await gatewayReq('POST', '/api/session.list', adminCookie, '{}', { 'x-test-mode': 'gzip-list' });
+  assert.equal(r.status, 200);
+  // 主用户列表原样回放：响应仍是 gzip 原字节（这里按 utf8 读必然非 JSON，只验状态与头）
+  const un = await gatewayReq('GET', '/gateway/api/session-ownership/unassigned', adminCookie);
+  const body = json<{ sessions: Array<{ sessionId: string }> }>(un);
+  assert.ok(
+    body.sessions.some((s) => s.sessionId === 's-gz'),
+    'gzip 响应中的会话也被收割进注册表',
   );
 });

@@ -735,8 +735,9 @@ export function filterOwnedSessionIds(
     return;
   }
   const obj = value as Record<string, unknown>;
-  if (Array.isArray(obj.sessionIds) && obj.sessionIds.every((x) => typeof x === 'string')) {
-    obj.sessionIds = obj.sessionIds.filter((id) => keep(id as string));
+  if (Array.isArray(obj.sessionIds)) {
+    // fail-closed：非字符串 id 一律丢弃——不能因数组混入一个异常元素就整体跳过归属过滤
+    obj.sessionIds = obj.sessionIds.filter((id): id is string => typeof id === 'string' && keep(id));
   }
   for (const key of Object.keys(obj)) {
     const v = obj[key];

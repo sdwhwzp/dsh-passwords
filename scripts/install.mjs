@@ -37,7 +37,12 @@ function run(command, args = [], { quiet = false, env } = {}) {
     cwd: root,
     env: env ?? process.env,
   });
-  if (result.error !== undefined) throw result.error;
+  if (result.error !== undefined) {
+    // ENOENT（Unix 上命令不存在）等 spawn 错误：返回非零状态码，走调用方的
+    // 友好错误路径——不能 throw，否则 mustRun 的"先检测后安装"分支
+    // （缺 pnpm 时自动安装）永远不可达，安装器以未捕获异常崩溃。
+    return 1;
+  }
   return result.status ?? 1;
 }
 

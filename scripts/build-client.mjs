@@ -4,8 +4,12 @@
 // 产物：dist/client.js（dsh 通过 /plugins/dsh-passwords/client.js 分发）。
 import { build } from 'esbuild';
 import { writeFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const PACKAGE_ID = 'dsh-passwords';
+// 产物固定写到包根 dist/：不依赖进程 cwd（从任意目录运行都能正确落盘）
+const OUT_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'dist', 'client.js');
 
 const result = await build({
   entryPoints: ['src/client/index.tsx'],
@@ -41,5 +45,5 @@ ${code}
 	}
 });
 `;
-writeFileSync('dist/client.js', wrapped);
+writeFileSync(OUT_FILE, wrapped);
 console.log('dist/client.js 构建完成');

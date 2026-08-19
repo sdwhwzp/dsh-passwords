@@ -164,7 +164,7 @@ before(async () => {
 
   const sign = (id: number, username: string) =>
     jwt.sign({ sub: String(id), username, cv: 0 }, config.jwtSecret, { expiresIn: '12h' });
-  adminCookie = `dsh_gateway_token=${sign(1, 'admin')}`;
+  adminCookie = `dsh_gateway_token=${sign(adminId, 'admin')}`;
   subuserCookie = `dsh_gateway_token=${sign(subuserId, 'subuser')}`;
 });
 

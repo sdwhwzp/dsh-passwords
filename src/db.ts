@@ -179,6 +179,8 @@ CREATE TABLE IF NOT EXISTS session_registry (
   first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
   last_seen_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
+-- 无归属扫描按 last_seen_at 排序 + 修剪按它过滤，建索引避免每次全表排序
+CREATE INDEX IF NOT EXISTS idx_session_registry_seen ON session_registry(last_seen_at);
 `;
 
 /** 安全解析 JSON 字符串数组（权限目录 / 留言标签）；损坏时返回空数组 */
@@ -553,11 +555,19 @@ export class Database {
     // 权限、用量、留言（发件人/收件人）。不清理会留下孤儿数据：
     //   - session_owner 残留 → 子用户侧 keep() 命中已删 userId 不匹配 → 恰好 deny，但行永远占用空间
     //   - messages 残留 → 联表 JOIN 不出用户名，列表永远少消息
-    this.stmt('DELETE FROM session_owner WHERE user_id = ?').run(id);
-    this.stmt('DELETE FROM user_permissions WHERE user_id = ?').run(id);
-    this.stmt('DELETE FROM user_usage WHERE user_id = ?').run(id);
-    this.stmt('DELETE FROM messages WHERE sender_id = ? OR recipient_id = ?').run(id, id);
-    this.stmt('DELETE FROM users WHERE id = ?').run(id);
+    // 多语句包事务：中途失败回滚，不留半清理状态。
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.stmt('DELETE FROM session_owner WHERE user_id = ?').run(id);
+      this.stmt('DELETE FROM user_permissions WHERE user_id = ?').run(id);
+      this.stmt('DELETE FROM user_usage WHERE user_id = ?').run(id);
+      this.stmt('DELETE FROM messages WHERE sender_id = ? OR recipient_id = ?').run(id, id);
+      this.stmt('DELETE FROM users WHERE id = ?').run(id);
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   touchLogin(userId: number): void {
@@ -782,6 +792,11 @@ export class Database {
       sandboxMode: string | null;
     },
   ): void {
+    // 防御性清洗：空串/当前目录/根目录条目在 folderAllowed 里语义=全盘允许
+    // （fail-open 陷阱）——网关端点已拒绝，数据层再兑底一次。
+    const allowedFolders = perms.allowedFolders
+      .map((folder) => folder.trim())
+      .filter((folder) => folder !== '' && folder !== '.' && folder !== '/');
     this.stmt(
       `INSERT INTO user_permissions (user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, allow_upload, allow_git_download, banned, sandbox_mode)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -796,7 +811,7 @@ export class Database {
          updated_at = datetime('now')`,
     ).run(
       userId,
-      JSON.stringify(perms.allowedFolders),
+      JSON.stringify(allowedFolders),
       perms.hourlyTokenLimit,
       perms.dailyMinutesLimit,
       perms.allowUpload ? 1 : 0,
@@ -999,26 +1014,53 @@ export class Database {
   }
 
   // ── 会话注册表（Discussion #6）：元数据镜像 + 无归属扫描 ─────────
-  /** session.list 响应收割：批量 upsert 会话元数据（原子事务，不覆盖 first_seen_at） */
+  /** session.list 响应收割：批量 upsert 会话元数据（原子事务，不覆盖 first_seen_at）。
+   *  去重 + 单批上限：一次收割异常大的响应时保护事务体积；同一会话多条记录合并
+   *  （非 null 值优先：create 路径只带 cwd、list 路径补 title，后者不得擦除前者）。 */
   upsertSessionRegistry(rows: Array<{ sessionId: string; cwd: string | null; title: string | null }>): void {
     if (rows.length === 0) return;
+    const merged = new Map<string, { cwd: string | null; title: string | null }>();
+    for (const row of rows.slice(0, 500)) {
+      const prev = merged.get(row.sessionId);
+      if (!prev) {
+        merged.set(row.sessionId, { cwd: row.cwd, title: row.title });
+        continue;
+      }
+      if (prev.cwd === null && row.cwd !== null) prev.cwd = row.cwd;
+      if (prev.title === null && row.title !== null) prev.title = row.title;
+    }
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const stmt = this.stmt(
         `INSERT INTO session_registry (session_id, cwd, title) VALUES (?, ?, ?)
          ON CONFLICT(session_id) DO UPDATE SET
-           cwd = excluded.cwd,
-           title = excluded.title,
+           cwd = COALESCE(excluded.cwd, session_registry.cwd),
+           title = COALESCE(excluded.title, session_registry.title),
            last_seen_at = datetime('now')`,
       );
-      for (const row of rows) {
-        stmt.run(row.sessionId, row.cwd, row.title);
+      for (const [sessionId, row] of merged) {
+        stmt.run(sessionId, row.cwd, row.title);
       }
       this.db.exec('COMMIT');
     } catch (error) {
       this.db.exec('ROLLBACK');
       throw error;
     }
+  }
+
+  /** 注册表修剪：超过保留天数未再被 session.list 观察到的会话移出注册表（幽灵会话回收）。
+   *  仅影响"无归属扫描"镜像，不触碰 session_owner 归属。 */
+  pruneSessionRegistry(days = 30): void {
+    this.stmt("DELETE FROM session_registry WHERE last_seen_at < datetime('now', ?)").run(
+      `-${Math.max(days, 1)} days`,
+    );
+  }
+
+  /** 登录失败/节流表修剪：防随机用户名+轮换 IP 喷洒让表无界增长 */
+  pruneStaleSecurityRows(days = 7): void {
+    const cutoff = `-${Math.max(days, 1)} days`;
+    this.stmt("DELETE FROM login_attempts WHERE updated_at < datetime('now', ?)").run(cutoff);
+    this.stmt("DELETE FROM ip_throttle WHERE updated_at < datetime('now', ?)").run(cutoff);
   }
 
   getSessionRegistry(sessionId: string): SessionRegistryRow | null {
