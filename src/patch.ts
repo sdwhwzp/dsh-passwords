@@ -14,10 +14,82 @@
 // 因此不提供开关：网关每次启动自动应用（幂等），dsh 升级覆盖文件后重启
 // 网关自动重打，或在设置页点"重载补丁"。
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 
 const BAK_SUFFIX = '.bak-dshpw';
+const BAK_META_SUFFIX = '.sha256-dshpw';
+
+function contentHash(content: string | Buffer): string {
+  return createHash('sha256').update(content).digest('hex');
+}
+
+function backupMetaPath(target: string): string {
+  return target + BAK_META_SUFFIX;
+}
+
+/**
+ * 保存当前 dsh bundle 的原始版本，并写入内容哈希。
+ * 固定 .bak 文件名会跨 dsh 升级残留；每次明确识别到全新未打补丁源码时
+ * 都刷新备份，避免 rollbackPatch 把旧 rc.7 文件恢复到 rc.8。
+ */
+interface BackupMeta {
+  originalSha256: string;
+  patchedSha256: string;
+}
+
+function saveOriginalBackup(target: string, content: string, patchedContent: string): void {
+  writeFileSync(target + BAK_SUFFIX, content);
+  const meta: BackupMeta = {
+    originalSha256: contentHash(content),
+    patchedSha256: contentHash(patchedContent),
+  };
+  writeFileSync(backupMetaPath(target), `${JSON.stringify(meta)}\n`);
+}
+
+function readBackupMeta(target: string): BackupMeta | null {
+  const backup = target + BAK_SUFFIX;
+  const meta = backupMetaPath(target);
+  if (!existsSync(backup) || !existsSync(meta)) return null;
+  try {
+    const value = JSON.parse(readFileSync(meta, 'utf8')) as Partial<BackupMeta>;
+    if (
+      typeof value.originalSha256 !== 'string' ||
+      typeof value.patchedSha256 !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(value.originalSha256) ||
+      !/^[a-f0-9]{64}$/.test(value.patchedSha256)
+    ) {
+      return null;
+    }
+    const content = readFileSync(backup);
+    return contentHash(content) === value.originalSha256 ? value as BackupMeta : null;
+  } catch {
+    return null;
+  }
+}
+
+function ensureOriginalBackup(target: string, content: string, patchedContent: string): void {
+  const existing = readBackupMeta(target);
+  const originalSha256 = contentHash(content);
+  const patchedSha256 = contentHash(patchedContent);
+  if (existing?.originalSha256 === originalSha256 && existing.patchedSha256 === patchedSha256) return;
+  if (existing?.originalSha256 === originalSha256) {
+    writeFileSync(backupMetaPath(target), `${JSON.stringify({ originalSha256, patchedSha256 })}\n`);
+    return;
+  }
+  saveOriginalBackup(target, content, patchedContent);
+}
+
+function currentMatchesPatchedBackup(target: string): boolean {
+  const meta = readBackupMeta(target);
+  if (!meta || !existsSync(target)) return false;
+  try {
+    return contentHash(readFileSync(target)) === meta.patchedSha256;
+  } catch {
+    return false;
+  }
+}
 
 /** 客户端设置持久化文件（强制 host 模式） */
 const SETTINGS_TARGET = path.join(
@@ -51,6 +123,13 @@ const SEARCH_STICKY_TO =
 const SEARCH_DEPS_RE =
   /(\},\s*\[\s*)(normalizedQuery\s*,\s*wide\s*,\s*searchExpanded)/;
 const SEARCH_DEPS_TO = '$1remoteSearch, $2';
+const SEARCH_DEPS_PATCHED_RE =
+  /\},\s*\[\s*remoteSearch\s*,\s*normalizedQuery\s*,\s*wide\s*,\s*searchExpanded/;
+
+function hasSettingsNamespace(content: string, namespace: string): boolean {
+  const escaped = namespace.replace(/[.*+?^${}()|[\[\]\\]/g, '\\$&');
+  return new RegExp(`["']${escaped}["']`).test(content);
+}
 
 // dsh 上游行为：搜索输入框无 autocomplete/name 属性——浏览器密码管理器在页面出现
 // 密码框时会用启发式找用户名框（DOM 里密码框之前最近的文本框），侧栏搜索框会被
@@ -65,7 +144,7 @@ const SEARCH_AUTOFILL_RE =
 const SEARCH_AUTOFILL_TO =
   '$1\n\t\t\t\t\t\t\tautoComplete: "search",\n\t\t\t\t\t\t\tname: "dshpw-session-search",\n\t\t\t\t\t\t\treadOnly: !searchExpanded,\n\t\t\t\t\t\t\t\'data-dshpw-autofill-harden\': "v2",\n\t\t\t\t\t\t\t\'data-lpignore\': "true",\n\t\t\t\t\t\t\t\'data-1p-ignore\': "true",\n\t\t\t\t\t\t\t\'data-bwignore\': "true",';
 const SEARCH_AUTOFILL_V2_RE =
-  /(autoComplete:\s*)"off"(,\s*\n\s*name:\s*"dshpw-session-search",)/;
+  /(autoComplete:\s*)"off"(,\s*name:\s*[\"']dshpw-session-search[\"'],)/;
 const SEARCH_AUTOFILL_V2_TO =
   '$1"search"$2\n\t\t\t\t\t\t\treadOnly: !searchExpanded,\n\t\t\t\t\t\t\t\'data-dshpw-autofill-harden\': "v2",\n\t\t\t\t\t\t\t\'data-lpignore\': "true",\n\t\t\t\t\t\t\t\'data-1p-ignore\': "true",\n\t\t\t\t\t\t\t\'data-bwignore\': "true",';
 
@@ -126,7 +205,7 @@ export function patchStatus(
   try {
     const w = readFileSync(wlFile, 'utf8');
     // rc.7+ 已移除 WEB_SETTINGS_NAMESPACES 白名单 → 原生支持，视为已满足
-    whitelist = !whitelistPatchApplicable(w) || w.includes('"dsh-passwords"');
+    whitelist = !whitelistPatchApplicable(w) || hasSettingsNamespace(w, 'dsh-passwords');
   } catch { /* 同上 */ }
   try {
     const ws = readFileSync(wsFile, 'utf8');
@@ -137,6 +216,7 @@ export function patchStatus(
     workspaceSearch =
       !ws.includes('if (normalizedQuery !== "") return;') &&
       ws.includes('remoteSearch.status !== "loading"') &&
+      SEARCH_DEPS_PATCHED_RE.test(ws) &&
       // 搜索框自动填充加固：v2 标记存在才算完成；旧 v1（仅 off+name）会自动升级
       (ws.includes(SEARCH_AUTOFILL_HARDEN_MARK) || !SEARCH_AUTOFILL_RE.test(ws));
   } catch { /* 同上 */ }
@@ -150,38 +230,36 @@ export function applyRemotePatch(dshRoot: string): 'applied' | 'unchanged' | 'mi
   if (!existsSync(settingsFile) || !existsSync(wlFile)) return 'missing';
   let changed = false;
 
+  // 先完整预检白名单目标。不能先写 settings 再发现白名单结构损坏，
+  // 否则 applyRemotePatch() 返回 missing 时会留下半应用状态。
+  const w = readFileSync(wlFile, 'utf8');
+  let whitelistPatched: string | null = null;
+  if (whitelistPatchApplicable(w) && !hasSettingsNamespace(w, 'dsh-passwords')) {
+    const re = /const WEB_SETTINGS_NAMESPACES = \[([\s\S]*?)\];/;
+    const match = re.exec(w);
+    if (!match) return 'missing';
+    const currentBlock = match[1];
+    const existing = [...currentBlock.matchAll(/[\'"]([^\'"]+)[\'"]/g)].map((m) => m[1]);
+    if (!existing.includes('dsh-passwords')) {
+      const inserted = currentBlock.replace(/(\s*[\'"][^\'"]+[\'"])/, `$1,\n\t"dsh-passwords"`);
+      whitelistPatched = w.replace(re, `const WEB_SETTINGS_NAMESPACES = [${inserted}];`);
+    }
+  }
+
   // 1) 客户端 settings 强制 host 模式
   const s = readFileSync(settingsFile, 'utf8');
   if (s.includes(SETTINGS_FROM)) {
-    if (!existsSync(settingsFile + BAK_SUFFIX)) writeFileSync(settingsFile + BAK_SUFFIX, s);
-    writeFileSync(settingsFile, s.replace(SETTINGS_FROM, SETTINGS_TO));
+    const patched = s.replace(SETTINGS_FROM, SETTINGS_TO);
+    ensureOriginalBackup(settingsFile, s, patched);
+    writeFileSync(settingsFile, patched);
     changed = true;
   }
 
-  // 2) 白名单补齐（仅 rc.6 及以下适用）：追加 "dsh-passwords"，不重写整块数组。
-  //    之前整块替换会抹掉其他插件/已声明的命名空间（如 dsh 升级新增、其他插件
-  //    补进去的条目），仅靠 '"dsh-passwords"' 字符串检测是否已打过而无法重打。
-  //    rc.7+ 移除了该白名单机制 → 无对象可打，直接跳过（不是 missing：
-  //    dsh 原生支持动态枚举命名空间，插件设置页正常可用）。
-  const w = readFileSync(wlFile, 'utf8');
-  if (!whitelistPatchApplicable(w)) {
-    // 机制已移除，跳过白名单子补丁
-  } else if (!w.includes('"dsh-passwords"')) {
-    const re = /const WEB_SETTINGS_NAMESPACES = \[([\s\S]*?)\];/;
-    if (!re.test(w)) return 'missing';
-    const currentBlock = w.match(re)![1];
-    // 解析现有条目（容错处理单引号/双引号/空白）
-    const existing = [...currentBlock.matchAll(/['"]([^'"]+)['"]/g)].map((m) => m[1]);
-    if (existing.includes('dsh-passwords')) {
-      // 已在白名单中（检测串缺失可能是引号差异），无需重打
-    } else {
-      if (!existsSync(wlFile + BAK_SUFFIX)) writeFileSync(wlFile + BAK_SUFFIX, w);
-      // 在第一个条目后插入 "dsh-passwords"（保留其他插件/dsh 默认命名空间）
-      const inserted =
-        currentBlock.replace(/(\s*['"][^'"]+['"])/, `$1,\n\t"dsh-passwords"`);
-      writeFileSync(wlFile, w.replace(re, `const WEB_SETTINGS_NAMESPACES = [${inserted}];`));
-      changed = true;
-    }
+  // 2) 白名单补齐（仅 rc.6 及以下适用）。rc.7+ 已移除该机制，预检结果为 null。
+  if (whitelistPatched !== null) {
+    ensureOriginalBackup(wlFile, w, whitelistPatched);
+    writeFileSync(wlFile, whitelistPatched);
+    changed = true;
   }
 
   // 3) 工作区侧栏搜索两个子补丁（可选：目标文件不存在则跳过，不影响 1/2）
@@ -206,7 +284,7 @@ export function applyRemotePatch(dshRoot: string): 'applied' | 'unchanged' | 'mi
         wsChanged = true;
       } else if (wsNext.includes(SEARCH_AUTOFILL_MARK)) {
         // 容错：dsh bundle 格式变化但保留 v1 name，补齐 v2 属性
-        const nameRe = /(name:\s*"dshpw-session-search",)/;
+        const nameRe = /(name:\s*[\"']dshpw-session-search[\"'],)/;
         if (nameRe.test(wsNext)) {
           wsNext = wsNext.replace(
             nameRe,
@@ -217,7 +295,7 @@ export function applyRemotePatch(dshRoot: string): 'applied' | 'unchanged' | 'mi
       }
     }
     if (wsChanged) {
-      if (!existsSync(wsFile + BAK_SUFFIX)) writeFileSync(wsFile + BAK_SUFFIX, ws);
+      ensureOriginalBackup(wsFile, ws, wsNext);
       writeFileSync(wsFile, wsNext);
       changed = true;
     }
@@ -236,9 +314,10 @@ export function rollbackPatch(dshRoot: string): 'rolled-back' | 'no-backup' | 'm
   if (!existsSync(settingsFile) || !existsSync(wlFile)) return 'missing';
   let changed = false;
   for (const target of [settingsFile, wlFile, path.join(dshRoot, WORKSPACE_TARGET)]) {
-    const bak = target + BAK_SUFFIX;
-    if (existsSync(bak)) {
-      writeFileSync(target, readFileSync(bak));
+    // 只恢复带哈希元数据且内容未被篡改的当前版本原始备份；历史遗留的
+    // .bak-dshpw 没有元数据时拒绝恢复，避免跨 dsh 版本回滚污染。
+    if (currentMatchesPatchedBackup(target)) {
+      writeFileSync(target, readFileSync(target + BAK_SUFFIX));
       changed = true;
     }
   }
