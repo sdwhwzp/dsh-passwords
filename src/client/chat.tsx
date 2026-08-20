@@ -56,7 +56,7 @@ function chatErrText(
   if (d.code) {
     const key = `err.${d.code}`;
     const localized = tr(key);
-    if (localized !== key) return localized;
+    if (localized !== key && !localized.includes('{')) return localized;
   }
   return d.error ?? fallback;
 }

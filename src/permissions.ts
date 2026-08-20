@@ -375,7 +375,7 @@ export function collectSessionCwd(value: unknown, out: Map<string, string> = new
 }
 
 
-/** 从 workspace.list 响应收集会话归属工作区：工作区 path → 其 sessionIds 的每个会话的 cwd（无则覆盖）。 */
+/** 从 workspace.list 响应收集会话 cwd：工作区 path → 其 sessionIds 对应会话的 cwd（无则覆盖）。 */
 export function collectSessionCwdFromWorkspaces(value: unknown, out: Map<string, string> = new Map(), depth = 0): Map<string, string> {
   if (depth > 8 || value === null) return out;
   if (Array.isArray(value)) {
@@ -651,7 +651,7 @@ export function isWorkspaceWrite(pathname: string): boolean {
 // ── 工作区/会话文件夹限制：需要读 JSON 请求体 ──────────────────────────
 
 /** 涉及创建工作区的 dsh typert RPC（斜杠风格：/api/session/create 等；兼容点号风格）
- *  只含 create——fork 继承源会话的 cwd，目标目录由源会话决定（其归属已由
+ *  只含 create——fork 继承源会话的 cwd，目标目录由源会话决定（其工作区授权已由
  *  SESSION_SCOPED_RE/needsOwnershipCheck 校验），无需也不应再做文件夹白名单。 */
 export const WORKSPACE_ENDPOINT_RE = /^\/api\/session[.\/](create)([.\/]|$)/;
 
@@ -736,9 +736,9 @@ export function stripArchivedSessionIds(value: unknown, depth = 0): boolean {
 }
 
 /**
- * 递归把 JSON 里所有 string[] 的 sessionIds 字段按 keep(id) 过滤（F-25 扩展）：
- * workspace.list 的 items[].sessionIds 会泄露该工作区全部会话 ID（含主用户/其他
- * 子用户共享时）——即使 allowedFolders=[] 全部允许，子用户也只能看自己拥有的会话。
+ * 递归把 JSON 里所有 string[] 的 sessionIds 字段按 keep(id) 过滤：
+ * workspace.list 的 items[].sessionIds 会枚举出该工作区全部会话 ID，受限子用户
+ * 也只应保留被授权（未禁用/未归档）的会话——这里用 keep 谓词统一过滤。
  * 原地修改，不返回新对象。
  */
 export function filterOwnedSessionIds(
@@ -765,7 +765,7 @@ export function filterOwnedSessionIds(
   }
   const obj = value as Record<string, unknown>;
   if (Array.isArray(obj.sessionIds)) {
-    // fail-closed：非字符串 id 一律丢弃——不能因数组混入一个异常元素就整体跳过归属过滤
+    // fail-closed：非字符串 id 一律丢弃——不能因数组混入一个异常元素就整体跳过会话过滤
     obj.sessionIds = obj.sessionIds.filter((id): id is string => typeof id === 'string' && keep(id));
   }
   for (const key of Object.keys(obj)) {
@@ -776,13 +776,14 @@ export function filterOwnedSessionIds(
 
 /**
  * 递归过滤会话条目（带 sessionId 字符串字段的对象，session.list 响应）：
- * - keep(id) 返回 false 时从所在数组移除。用于子用户只看得到自己拥有的会话。
+ * - keep(id) 返回 false 时从所在数组移除。用于子用户只看到被授权（未禁用/未归档）
+ *   的会话。
  * - cwdAllowed 非 null 时（授权目录受限的子用户），额外要求条目 cwd 在白名单内：
  *   权限撤销前在老目录创建的旧会话，其工作区已被 workspace.list 白名单隐藏，
  *   若不按 cwd 丢弃，前端会把这条孤会话归入「未分组」并在侧栏显示幽灵「新会话」。
  *   cwd 缺失/非字符串 = 无法确认在白名单内 → fail-closed 丢弃。
- * 只要 sessionId 是字符串就执行归属判定（不再要求 cwd 必填——
- *  无工作区的会话也要归属校验，否则侧栏泄露他人会话标题）。
+ * 只要 sessionId 是字符串就执行过滤（不再要求 cwd 必填——
+ *  无工作区的会话也要过滤，否则侧栏泄露未被授权的会话标题）。
  * 注意：typert 线上格式的会话条目是 { sessionId, cwd, ... }（不是 id）。
  */
 export function filterSessionItems(
@@ -791,7 +792,7 @@ export function filterSessionItems(
   cwdAllowed: ((cwd: string) => boolean) | null = null,
   depth = 0,
 ): unknown {
-  // 深度超限时丢弃子树；保留原对象会让深层 sessionId/cwd 绕过归属和目录检查。
+  // 深度超限时丢弃子树；保留原对象会让深层 sessionId/cwd 绕过会话过滤和目录检查。
   if (depth > 8) return null;
   if (value === null) return value;
   if (Array.isArray(value)) {
@@ -800,7 +801,7 @@ export function filterSessionItems(
       const obj = item as Record<string, unknown> | null;
       const sidRaw = obj === null || typeof obj === 'object' ? obj?.sessionId : undefined;
       const hasSessionId = typeof sidRaw === 'string' && sidRaw.length > 0;
-      // 只要 sessionId 是字符串就走归属判定（fail-closed：归属不在本人 → 整条丢弃）
+      // 只要 sessionId 是字符串就走过滤判定（fail-closed：keep 不通过 → 整条丢弃）
       if (hasSessionId && !keep(sidRaw as string)) {
         continue;
       }

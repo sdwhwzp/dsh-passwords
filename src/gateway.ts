@@ -1692,7 +1692,8 @@ export function createGatewayServer(
           return;
         }
       }
-      // F-25：会话归属记录需要所有登录用户（含主用户）的用户 id；权限行仍只挂子用户
+      // 记录所有登录用户（含主用户）的用户 id：供 session.create/fork 响应回调
+      // 登记 sessionId→cwd 缓存与 dsh-ssh 主机 SSRF 校验使用；权限行仍只挂子用户
       (req as Req).dshpwUser = user.userId;
       if (row.role !== 'admin') {
         const perms = effectivePermissions(user.userId);
@@ -2051,15 +2052,15 @@ export function createGatewayServer(
               const parsed = JSON.parse(body.toString('utf8'));
               // 先缓存全量 id→path（供 session.create 用 workspaceId 时解析路径）
               collectIdPathPairs(parsed, workspacePathById);
-              // 缓存会话归属工作区：工作区 path → 其 sessionIds（供会话作用域 RPC 的 cwd 校验）
+              // 缓存会话 cwd：工作区 path → 其 sessionIds（供会话作用域 RPC 的 cwd 校验）
               collectSessionCwdFromWorkspaces(parsed, sessionCwdById);
               const restricted =
                 reqAs.dshpwPerms !== undefined && isWorkspaceRestricted(reqAs.dshpwPerms.allowed_folders);
               const outBody = restricted
                 ? filterByPathField(parsed, reqAs.dshpwPerms!.allowed_folders, 'path')
                 : parsed;
-              // F-25：子用户（含 allowedFolders=[] 全部允许）只能看到自己拥有的会话——
-              // 清空 archivedSessionIds 枚举源，并把活动 sessionIds 按用户例外关闭过滤
+              // F-25：子用户（含 allowedFolders=[] 全部允许）只能看到被授权的会话——
+              // 清空 archivedSessionIds 枚举源，并把活动 sessionIds 按逐会话禁用过滤
               if (reqAs.dshpwPerms !== undefined) {
                 stripArchivedSessionIds(outBody);
                 const disabled = new Set(reqAs.dshpwPerms.disabled_sessions);
@@ -2076,7 +2077,7 @@ export function createGatewayServer(
                 if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response too large');
                 return;
               }
-              // 子用户列表需要归属/白名单过滤：解析或过滤异常时无法产出已过滤响应，
+              // 子用户列表需要会话/白名单过滤：解析或过滤异常时无法产出已过滤响应，
               // 绝不能把未过滤的全量列表透传（fail-open 泄露其他租户会话）；
               // 主用户列表不涉及过滤，保持原样透传。
               if (reqAs.dshpwPerms !== undefined) {
@@ -2315,7 +2316,7 @@ export function createGatewayServer(
       // aionui-panel 写文件（/write）可能携带大 JSON，单独放宽上限并完整检查；
       // 其余需要检查的端点 body 天然很小（session.create/settings.mutate/respond），
       // 超限即 fail-closed，防止“超限透传”绕过权限检查。
-      // 会话归属检查的端点（session.prompt 等）可能携带较长提示词，单独放宽到 1MB，
+      // 会话作用域检查的端点（session.prompt 等）可能携带较长提示词，单独放宽到 1MB，
       // 避免误伤正常长输入（仍远小于 aionui 的 4MB，内存面可控）。
       const ownershipOnly =
         needsOwnershipCheck && !needsFolderCheck && !needsSandboxCheck && !needsCommandCheck && !needsApprovalCheck;

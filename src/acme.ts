@@ -439,7 +439,7 @@ export async function ensureCertificate(opts: {
   // 与当前配置不一致时重新签发，而不是复用——也不删旧证书：新签发失败时
   // 旧证书仍在原位可继续服务（删旧证书会让失败窗口裸奔无证书可加载）。
   const existing = certExpiryMs(certPath);
-  if (existing !== null && existing - Date.now() > RENEW_BEFORE_MS) {
+  if (existing !== null && existsSync(keyPath) && existing - Date.now() > RENEW_BEFORE_MS) {
     const meta = readCertMeta(metaPath);
     if (meta !== null && meta.domain === opts.domain && meta.staging === (opts.staging === true)) {
       return { certPath, keyPath, expiresAt: existing };

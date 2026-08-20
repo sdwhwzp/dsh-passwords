@@ -561,9 +561,8 @@ export class Database {
   }
 
   deleteUser(id: number): void {
-    // 无外键约束（SQLite 未开 FK），关联行需手动级联清理：会话归属、
+    // 无外键约束（SQLite 未开 FK），关联行需手动级联清理：
     // 权限、用量、留言（发件人/收件人）以及登录失败记录。
-    // 注册表是会话维度，不带 user_id，故保留：删用户后会话回到无归属扫描。
     const user = this.getUserById(id);
     this.db.exec('BEGIN IMMEDIATE');
     try {

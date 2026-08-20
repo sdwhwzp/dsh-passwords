@@ -150,8 +150,19 @@ if (prebuilt) {
     ? ['ci', '--no-audit', '--no-fund']
     : ['install', '--no-audit', '--no-fund'];
   mustRun('npm', installArgs, '依赖安装失败，请修复 npm 输出后重试');
-  say('编译…');
-  mustRun('npm', ['run', 'build'], '编译失败，请修复错误后重试');
+  // 发布到 npm 的包不含 tsconfig.json/src，无法编译；依赖装好后应直接用预构建产物。
+  // 仅源码 clone（含 tsconfig.json）才执行编译。
+  if (existsSync(path.join(root, 'tsconfig.json'))) {
+    say('编译…');
+    mustRun('npm', ['run', 'build'], '编译失败，请修复错误后重试');
+  } else {
+    // registry 安装：依赖刚装完，再校验一次预构建产物完整性，避免带病继续
+    if (!hasPrebuiltRuntime(root, ['bcryptjs', 'dotenv', 'express', 'jsonwebtoken'])) {
+      err('预构建产物不完整，请重新安装 dsh-passwords');
+      process.exit(1);
+    }
+    say('检测到 registry 安装（无源码），跳过编译');
+  }
 }
 
 // ── 5. 生成 .env（已存在则不覆盖，重跑安全） ──
