@@ -16,7 +16,7 @@ dsh's built-in web UI has no login, no permissions, and no usage controls — pu
 
 - Login page + first-time setup page (on first visit you create the owner account; afterwards everyone goes through the login page)
 - One login lasts 12 hours (cookie session, survives browser restarts)
-- **Automatic HTTPS**: a browser-trusted Let's Encrypt certificate is issued automatically at install — zero config, auto-renewing; port 80 redirects to 443
+- **Automatic HTTPS**: when dsh starts for the first time, a browser-trusted Let's Encrypt certificate is issued automatically — zero config, auto-renewing; port 80 redirects to 443
 - The login page follows dsh's theme automatically (dark when dsh is dark)
 - Remote browsers can use every dsh settings feature (dsh by default only lets local browsers edit settings; dsh-passwords handles this automatically — and if the settings page breaks after a dsh upgrade, the in-settings card has a one-click "Reload patch" fix)
 
@@ -40,7 +40,7 @@ The owner can configure, per subuser, from the settings page:
 
 ### 4️⃣ Collaboration
 
-- A chat button in the bottom-left corner: owner ↔ subuser messages with tags (issue / pull request / discussion / announcement / question)
+- A chat button in the bottom-left corner: owner ↔ subuser messages with tags (issue / pull request / discussion / announcement / question); every account can hide its own chat entry from Settings
 
 ## Screenshots
 
@@ -86,7 +86,7 @@ dsh-passwords install     # generates a random SETUP_KEY, registers the plugin a
 
 (`dsh-passwords --version` prints the version; `dsh-passwords serve-gateway` runs the gateway manually.)
 
-The script handles everything: install dependencies → build → **generate a random SETUP_KEY** → register as a dsh plugin → apply the remote-settings patch.
+The script handles everything: detect prebuilt output → install dependencies and build only when needed → **generate a random SETUP_KEY** → register as a dsh plugin → apply the remote-settings patch.
 
 At the end the script prints your **setup key (SETUP_KEY)** on screen; it is also saved to `setup-key.txt` in the install directory. **It is deleted automatically right after the first-time setup succeeds**, and the derived keys in `.env` are frozen to independent variables and the SETUP_KEY rotated — nothing to do manually.
 
@@ -132,9 +132,9 @@ Automatic HTTPS uses Let's Encrypt's http-01 validation, which requires **LE to 
 |---|---|---|---|
 | ✅ Public server, can open 80/443 | Nothing — the default | HTTPS (auto certificate) | 80 + 443 |
 | ✅ You already have a domain certificate | Set `MCP_GATEWAY_TLS_CERT/KEY` in `.env` (any port) | HTTPS (your certificate) | Only your gateway port — 80 not needed at all |
-| ✅ nginx/caddy reverse proxy already on the machine | The proxy terminates TLS on 80/443 with a real certificate and forwards to the gate; set `MCP_GATEWAY_AUTO_TLS=0` + a high port in `.env`, gate listens on loopback only | HTTPS (the proxy's certificate) | The proxy owns 80/443; the gate has zero public exposure |
-| ✅ Domain on Cloudflare | Cloudflare terminates TLS at the edge and forwards to any origin port (same `.env` settings as the reverse-proxy case) | HTTPS (Cloudflare's certificate) | Origin open to Cloudflare only |
-| ⚠ No public IP / LAN only | `scripts/start-http.mjs` or `AUTO_TLS=0` in `.env` | Plain HTTP | Any port |
+| ✅ nginx/caddy reverse proxy already on the machine | The proxy terminates TLS on 80/443 with a real certificate and forwards to the gate; set `MCP_GATEWAY_AUTO_TLS=0` + a high port + `MCP_GATEWAY_HOST=127.0.0.1` in `.env` | HTTPS (the proxy's certificate) | The proxy owns 80/443; the gate listens on loopback only |
+| ✅ Domain on Cloudflare | Cloudflare terminates TLS at the edge; keep automatic HTTPS at the origin or use a Cloudflare Origin Certificate, then use Full (strict) for the CF origin connection | HTTPS (Cloudflare's certificate) | Origin open to Cloudflare only |
+| ⚠ No public IP / LAN only | `scripts/start-http.mjs` or `MCP_GATEWAY_AUTO_TLS=0` in `.env` | Plain HTTP | Any port |
 | ⚠ Bare IP only, port 80 blocked | HTTP is the only option (protocol limit: http-01 always uses port 80, and a bare IP has no DNS to validate) | Plain HTTP | Any port |
 
 > Note: http-01 only touches port 80 during issuance and renewal (a few seconds, roughly every 60 days). `MCP_GATEWAY_REDIRECT_PORT` defaults to 80 — it handles both the challenge answers and the 301 redirect.
@@ -162,7 +162,7 @@ After logging in to dsh, open **Settings → Plugins** to find the "dsh-password
 | **Change username** | Yourself; the owner can change anyone's | Sign in with the new username afterwards |
 | **Subuser management** | Owner only | Create/delete subusers (subusers can sign in but have no admin rights) |
 | **Subuser permissions** | Owner only | Workspace switches, per-session checkboxes, hourly token limit, daily time limit, sandbox level, upload/git-download toggles, ban |
-| **Chat / messages** | All signed-in users | Chat button in the bottom-left corner, with tags (issue/pull request/discussion/announcement/question); subusers DM the owner by default, broadcasting is owner-only |
+| **Chat / messages** | All signed-in users | Chat button in the bottom-left corner, with tags (issue/pull request/discussion/announcement/question); subusers DM the owner by default, broadcasting is owner-only; every account can hide its own chat entry in Settings |
 
 - **Owner** = the account created at first-time setup; everything added later is a **subuser**.
 - Passwords follow the same rule as the login page: at least 12 characters with uppercase, lowercase, digits and symbols.
@@ -171,12 +171,12 @@ After logging in to dsh, open **Settings → Plugins** to find the "dsh-password
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `SETUP_KEY` | auto-generated by the installer | First-time setup key; the JWT session key is derived from it — **keep it after install** |
-| `MCP_JWT_SECRET` | empty (derived from SETUP_KEY) | Session signing key. For production, set it independently (`openssl rand -hex 32`) so a leaked SETUP_KEY can't forge sessions |
+| `SETUP_KEY` | auto-generated by the installer | First-time setup key. After setup succeeds, it is rotated and the JWT/internal/database keys are frozen independently. Keep `.env`; `setup-key.txt` is deleted automatically |
+| `MCP_JWT_SECRET` | derived from SETUP_KEY before first-time setup | Session signing key. It is frozen as an independent value after setup; changing it invalidates existing sign-ins |
 | `MCP_DB_PATH` | `./data/platform.db` | Database file (SQLite, created automatically — no MySQL needed) |
-| `MCP_DB_ENC_KEY` | empty | Data-at-rest encryption key. Generate with `openssl rand -hex 32`. **Once set it must never change**, or old data becomes unreadable |
+| `MCP_DB_ENC_KEY` | auto-generated by the installer | Data-at-rest encryption key, frozen after setup. **Never change it for an existing database**; back up `.env` with the database |
 | `MCP_GATEWAY_HOST` | `0.0.0.0` | Gateway listen address |
-| `MCP_GATEWAY_PORT` | `443` | Gateway port |
+| `MCP_GATEWAY_PORT` | `443` on first installer setup; `8080` when unset | Gateway port |
 | `MCP_GATEWAY_UPSTREAM` | `http://127.0.0.1:3080` | dsh web address (the plugin points it at dsh's actual port automatically — usually leave as-is) |
 | `MCP_GATEWAY_REDIRECT_PORT` | `80` | Port 80: ACME challenge answers + 301 redirect to 443 |
 | `MCP_GATEWAY_DOMAIN` | empty | Your own domain; when empty, `<public-IP>.sslip.io` is used |
@@ -207,6 +207,7 @@ node scripts/start-http.mjs 8080              # plaintext HTTP mode (dangerous, 
 - **Port 443 fails to bind (non-root user)?** On Linux, ports below 1024 need root: start dsh as root/sudo, or set `MCP_GATEWAY_PORT` to a high port (e.g. 8443) and forward traffic yourself.
 - **dsh fails to start with `duplicate loader entry id`?** You used `dsh plugin add` in the profile. It reconciles ALL dependencies declaring `dsh.bundle` into the bundles layer, which crashes dsh when they overlap with already-installed plugins. Uninstall dsh-passwords and register precisely with `node scripts/register-plugin.mjs` (it appends only this plugin).
 - **npm fails installing dsh (allow-scripts / node-pty)?** Newer npm blocks install scripts. Allow them first, then reinstall: `npm config set allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user` followed by `npm install -g @deepseek-ai/dsh` again (this project itself has no such issue — it's dsh's dependencies that run native builds).
+- **`dsh-passwords install` reports TS5058 after an npm `--prefix` install?** Upgrade to `dsh-passwords@2.5.4`. It correctly detects runtime dependencies hoisted to `<prefix>/node_modules` and no longer falls back to a source build.
 - **dsh reports `crypto.randomUUID is not a function`?** An older gateway build lacks the HTML injection compat layer — update the code and **hard-refresh the browser** (Ctrl+Shift+R).
 - **Is it a problem if the database file is stolen?** No. Sensitive fields are encrypted or hashed; without the keys in `.env` they can't be read, and passwords only exist as bcrypt hashes anyway.
 - **Can I change `MCP_DB_ENC_KEY` later?** No. Once enabled it must never change, or all historical data becomes unreadable. Back up `.env` together with the database.
@@ -230,14 +231,14 @@ Then as usual: start dsh → the gate starts automatically → open `https://<yo
 Passwords are stored only as bcrypt hashes; usernames, IPs and audit records are encrypted at rest; every login and failure is audited; certificate-issuance failure stops the service instead of downgrading to plaintext. All keys live in your own `.env` and database — open source code does not weaken security.
 
 - **Brute-force protection**: failed logins lock the account, and the lock duration backs off per round (1 → 5 → 15 → 60 minutes, capped). Owner accounts can't be globally locked out by IP-rotation (per-IP locking still applies) — prevents account-level DoS.
-- **Password-spray protection (per-IP throttle)**: 30 failed logins from the same IP within 15 minutes → that IP is globally throttled for 30 minutes (accumulated across usernames — aimed at the "one IP rotating many usernames" spraying technique; bcrypt is not consumed while throttled, and a successful login lifts the throttle). If a large NAT/shared egress trips it by accident, it auto-recovers after 30 minutes with no manual action.
+- **Password-spray protection (per-IP throttle)**: 50 failed logins from the same IP within 15 minutes → that IP is globally throttled for 15 minutes (accumulated across usernames — aimed at the "one IP rotating many usernames" spraying technique; bcrypt is not consumed while throttled, and a successful login lifts the throttle). If a large NAT/shared egress trips it by accident, it auto-recovers after 15 minutes with no manual action.
 - **Session revocation**: logging out revokes the token server-side immediately; changing the password/username invalidates all old sessions.
 - **Subuser isolation (third-party plugin surface)**: ops endpoints such as dsh-ssh (SSH hosts/tunnels), skin-center, modlens, and the dsh-uploads list/delete are owner-only; upload/download stay gated by `allow_upload` / `allowGitDownload`, and **new subusers default to git download off** (including dsh-uploads download and other exfiltration channels) — the owner enables it per-user, so subusers can't enumerate or exfiltrate files from the shared upload storage.
 - **Slow-connection protection**: explicit request timeouts (half-open headers cut off at 20s) plus a concurrent-connection cap (512 gateway / 256 redirect) to resist slowloris-style resource exhaustion.
 - **Path normalization**: the gate resolves the prefix from the raw URL with iterative decoding (blocks double-encoding), slash collapsing and WHATWG normalization — `%2f..%2f` / `%252f..` SPA-shell bypass variants are all rejected.
 - **Hardening tips**:
   1. **After the first-time setup the system automatically deletes `setup-key.txt`, freezes the JWT/internal/field-encryption keys into independent `.env` variables, and rotates SETUP_KEY** — no manual steps needed; only if you deploy against an already-initialized instance (never visiting the setup page) should you delete `setup-key.txt` manually;
-  2. For stronger isolation you can set an **independent `MCP_JWT_SECRET`** and `MCP_DB_ENC_KEY` in `.env` (both via `openssl rand -hex 32`) — after first-time setup these are already frozen automatically; setting them manually just swaps in new keys;
+  2. `MCP_JWT_SECRET`, `MCP_INTERNAL_SECRET`, and `MCP_DB_ENC_KEY` are frozen automatically after first-time setup. **Do not change `MCP_DB_ENC_KEY` for an existing database**; rotating JWT/internal secrets invalidates current sessions, so plan a maintenance window;
   3. Point `MCP_DSH_RESTART_SERVICE` at the correct systemd service name.
 
 ## Language
@@ -247,6 +248,14 @@ The UI is bilingual (Chinese/English) and follows dsh's language setting:
 - **Login / setup pages**: follow dsh's language (Settings → General → Language), then the browser language; a 中文/English toggle at the top-right persists your choice.
 - **Settings card**: follows dsh's language setting, switches instantly.
 - **CLI**: follows the `LANG` / `LC_ALL` environment variables (`en` prefix = English).
+
+## Release notes
+
+### v2.5.4 (2026-08-20)
+
+- Fixes `TS5058` after `npm install --prefix <dir>` followed by `dsh-passwords install`; thanks to the Issue #7 report.
+- Supports dsh `0.1.0-rc.8` workspace bundle layout and hardens patch preflight, rollback validation, and legacy backup migration.
+- Final review hardening: completes the `198.18.0.0/15` public-IP check, validates ACME private-key reuse, fixes HTTP-mode piped input and chat error fallback, and adds regression coverage.
 
 ## License
 

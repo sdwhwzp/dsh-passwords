@@ -16,7 +16,7 @@ dsh 自带的网页界面没有登录、没有权限、没有用量控制——�
 
 - 登录页 + 首次配置页（第一次访问先设主账号，之后谁访问都先过登录页）
 - 登录一次管 12 小时（Cookie 会话，关浏览器也不丢）
-- **自动 HTTPS**：装完自动向 Let's Encrypt 申请浏览器信任的证书，零配置、自动续期；80 端口自动跳转 443
+- **自动 HTTPS**：首次启动 dsh 时自动向 Let's Encrypt 申请浏览器信任的证书，零配置、自动续期；80 端口自动跳转 443
 - 登录页自动跟着 dsh 的主题走（dsh 用深色它就深色）
 - 远程浏览器可正常使用 dsh 的全部设置功能（dsh 默认只允许本机浏览器编辑设置，dsh-passwords 自动处理这件事；dsh 升级后若设置页出现异常，设置页卡片里有"重载补丁"一键修复）
 
@@ -40,7 +40,7 @@ dsh 自带的网页界面没有登录、没有权限、没有用量控制——�
 
 ### 4️⃣ 协作
 
-- 界面左下角的聊天按钮：主用户和子用户之间留言，可打标签（议题 / 拉取请求 / 讨论 / 公告 / 问题）
+- 界面左下角的聊天按钮：主用户和子用户之间留言，可打标签（议题 / 拉取请求 / 讨论 / 公告 / 问题）；每个账号都可在设置中单独隐藏聊天入口
 
 ## 界面截图
 
@@ -86,7 +86,7 @@ dsh-passwords install     # 生成随机 SETUP_KEY + 注册插件 + 应用补丁
 
 （`dsh-passwords --version` 看版本；`dsh-passwords serve-gateway` 手动启动网关。）
 
-脚本自动完成：装依赖 → 编译 → **生成随机 SETUP_KEY** → 注册为 dsh 插件 → 应用远程设置补丁。
+脚本自动完成：检测预构建产物 → 必要时安装依赖并编译 → **生成随机 SETUP_KEY** → 注册为 dsh 插件 → 应用远程设置补丁。
 
 装完屏幕最后会显示**首次配置密钥（SETUP_KEY）**，同时也写进了安装目录的 `setup-key.txt`。**首次配置成功后该文件会被自动删除**，`.env` 里的密钥也会自动固化成独立变量并轮换——你不需要手动处理。
 
@@ -132,9 +132,9 @@ dsh 退出 → 密码门跟着停（不会留僵尸进程占端口）
 |---|---|---|---|
 | ✅ 公网服务器，80/443 都能开 | 什么都不用做（默认） | HTTPS（自动证书） | 80 + 443 |
 | ✅ 有自己的域名证书 | `.env` 填 `MCP_GATEWAY_TLS_CERT/KEY`，端口随便改 | HTTPS（你的证书） | 只有你的网关端口，80 完全不用 |
-| ✅ 机器上已有 nginx/caddy 反代 | 反代在 80/443 用真实证书终结 TLS 并转发到密码门；`.env` 设 `MCP_GATEWAY_AUTO_TLS=0` + 高位端口，密码门只监听回环 | HTTPS（反代的证书） | 反代管 80/443，密码门零公网暴露 |
-| ✅ 域名挂在 Cloudflare | CF 边缘终结 TLS 转发到源站任意端口（配置同反代思路） | HTTPS（CF 证书） | 源站只对 CF 开放 |
-| ⚠ 无公网 IP / 纯内网 | `scripts/start-http.mjs` 或 `.env` 设 `AUTO_TLS=0` | HTTP 明文 | 任意端口 |
+| ✅ 机器上已有 nginx/caddy 反代 | 反代在 80/443 用真实证书终结 TLS 并转发到密码门；`.env` 设 `MCP_GATEWAY_AUTO_TLS=0` + 高位端口 + `MCP_GATEWAY_HOST=127.0.0.1` | HTTPS（反代的证书） | 反代管 80/443，密码门只监听回环 |
+| ✅ 域名挂在 Cloudflare | CF 边缘终结 TLS；源站仍应保留自动 HTTPS 或配置 Cloudflare Origin Certificate，CF 用 Full (strict) 回源 | HTTPS（CF 证书） | 源站只对 CF 开放 |
+| ⚠ 无公网 IP / 纯内网 | `scripts/start-http.mjs` 或 `.env` 设 `MCP_GATEWAY_AUTO_TLS=0` | HTTP 明文 | 任意端口 |
 | ⚠ 只有裸 IP 且 80 开不了 | 只能 HTTP（协议限制：http-01 固定走 80，裸 IP 又没有 DNS 可验证） | HTTP 明文 | 任意端口 |
 
 > 补充：http-01 验证只在**签发和续期**时访问 80 端口（每次几秒钟，约每 60 天一次）；`MCP_GATEWAY_REDIRECT_PORT` 默认就是 80，同时承担证书应答和 301 跳转两件事。
@@ -162,7 +162,7 @@ node scripts/start-http.mjs [端口]    # 默认 8080，会弹 y/N 确认
 | **修改用户名** | 本人改自己；主用户可改任何人 | 改名后需用新用户名重新登录 |
 | **子用户管理** | 仅主用户 | 创建/删除子用户（子用户可用登录页进入，但没有管理权限） |
 | **子用户权限** | 仅主用户 | 工作区滑动开关、逐会话勾选、每小时 token 上限、每日时长上限、沙盒级别、上传/git 下载开关、封禁 |
-| **聊天 / 留言** | 所有登录用户 | 左下角聊天按钮，支持标签（议题/拉取请求/讨论/公告/问题）；子用户默认私信主用户，广播仅主用户可发 |
+| **聊天 / 留言** | 所有登录用户 | 左下角聊天按钮，支持标签（议题/拉取请求/讨论/公告/问题）；子用户默认私信主用户，广播仅主用户可发；每个账号均可在设置中隐藏自己的聊天入口 |
 
 - **主用户** = 首次配置时创建的那个账号；之后添加的都是**子用户**。
 - 密码要求与登录页一致：至少 12 位，且大写、小写、数字、符号各至少一位。
@@ -171,12 +171,12 @@ node scripts/start-http.mjs [端口]    # 默认 8080，会弹 y/N 确认
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `SETUP_KEY` | 安装脚本自动生成 | 首次配置密钥；JWT 会话密钥也从它派生，**安装后别删** |
-| `MCP_JWT_SECRET` | 空（从 SETUP_KEY 派生） | 会话签名密钥。生产环境建议独立设置（`openssl rand -hex 32`），SETUP_KEY 泄露时不连带会话伪造 |
+| `SETUP_KEY` | 安装脚本自动生成 | 首次配置密钥；首次配置成功后系统会轮换它，并自动固化 JWT/内部/数据库密钥。保留 `.env`，`setup-key.txt` 会自动删除 |
+| `MCP_JWT_SECRET` | 首次配置前从 SETUP_KEY 派生 | 会话签名密钥；首次配置后自动固化为独立值。手动更换会让现有登录会话失效 |
 | `MCP_DB_PATH` | `./data/platform.db` | 数据库文件（SQLite 自动建库，不需要 MySQL） |
-| `MCP_DB_ENC_KEY` | 空 | 数据加密密钥。`openssl rand -hex 32` 生成。**设了就不能换，换钥匙旧数据全废** |
+| `MCP_DB_ENC_KEY` | 安装脚本自动生成 | 数据加密密钥；首次配置后自动固化。**已使用的数据库绝不能换此值**，备份数据库必须同时备份 `.env` |
 | `MCP_GATEWAY_HOST` | `0.0.0.0` | 网关监听地址 |
-| `MCP_GATEWAY_PORT` | `443` | 网关端口 |
+| `MCP_GATEWAY_PORT` | 安装器首次安装为 `443`；未设置时为 `8080` | 网关端口 |
 | `MCP_GATEWAY_UPSTREAM` | `http://127.0.0.1:3080` | dsh 网页地址（插件自动指向 dsh 实际端口，一般不用改） |
 | `MCP_GATEWAY_REDIRECT_PORT` | `80` | 80 端口：ACME 证书验证 + 301 跳转 443 |
 | `MCP_GATEWAY_DOMAIN` | 空 | 自己的域名；留空自动用 `<公网IP>.sslip.io` |
@@ -207,6 +207,7 @@ node scripts/start-http.mjs 8080         # 明文 HTTP 模式（危险，y/N 确
 - **443 端口绑定失败（非 root 用户）？** Linux 上 1024 以下端口需要 root：用 root/sudo 启动 dsh，或把 `MCP_GATEWAY_PORT` 改成高位端口（如 8443）并自行做端口转发。
 - **dsh 启动报 `duplicate loader entry id`？** 你在 profile 里用过 `dsh plugin add`。它会把 profile 里**所有**声明 `dsh.bundle` 的依赖全部加进 bundles 层，与已装的其它插件重复时 dsh 直接启动失败。卸载 dsh-passwords 后改用 `node scripts/register-plugin.mjs` 精确注册（只追加本插件一个条目）。
 - **npm 装 dsh 报 allow-scripts / node-pty 错？** npm 新版会拦截安装脚本，先放行再重装：`npm config set allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user`，然后重新 `npm install -g @deepseek-ai/dsh`（本项目自身没这个问题，是 dsh 的依赖要跑原生构建）。
+- **npm 用 `--prefix` 安装后运行 `dsh-passwords install` 报 TS5058？** 升级到 `dsh-passwords@2.5.4`。新版能正确识别被 npm 提升到 `<prefix>/node_modules` 的运行时依赖，不会再误触发源码编译。
 - **dsh 报 `crypto.randomUUID is not a function`？** 旧版网关没有 HTML 注入兼容层，更新代码后**强刷浏览器**（Ctrl+Shift+R）。
 - **数据库文件被偷了要紧吗？** 不要紧。敏感字段全是密文或散列，没有 `.env` 里的密钥解不开；密码本身只有 bcrypt 哈希，本来就没有明文。
 - **想换 `MCP_DB_ENC_KEY`？** 不行。这个密钥一旦启用就不能换，换了一切历史数据都解不开。备份数据库时必须连 `.env` 一起备份。
@@ -230,14 +231,14 @@ node scripts/start-http.mjs 8080         # 明文 HTTP 模式（危险，y/N 确
 账号密码只存 bcrypt 哈希；用户名、IP、审计记录加密落盘；登录/失败全程审计；证书签发失败拒绝启动（不降级明文）。所有密钥都在你自己的 `.env` 和数据库里，源码公开不影响安全。
 
 - **防暴力破解**：连续输错密码锁定，锁定时长随失败轮次退避（1 → 5 → 15 → 60 分钟封顶）；主用户不会被多 IP 轮换全局锁死（仅单 IP 锁定，防账号级 DoS）。
-- **防密码喷洒（IP 级节流）**：同一 IP 在 15 分钟内累计 30 次登录失败 → 该 IP 全局节流 30 分钟（跨用户名累计，专门对付“单 IP 轮换多个用户名”的喷洒手法；节流期间不消耗 bcrypt，登录成功自动解除）。NAT/共享出口的大团队若误触发，等 30 分钟自动恢复，无需人工干预。
+- **防密码喷洒（IP 级节流）**：同一 IP 在 15 分钟内累计 50 次登录失败 → 该 IP 全局节流 15 分钟（跨用户名累计，专门对付“单 IP 轮换多个用户名”的喷洒手法；节流期间不消耗 bcrypt，登录成功自动解除）。NAT/共享出口的大团队若误触发，等 15 分钟自动恢复，无需人工干预。
 - **会话吊销**：登出即服务端吊销（该 token 立即失效）；改密/改名后所有旧会话失效。
 - **子用户隔离（第三方插件面）**：dsh-ssh（SSH 主机/隧道）、skin-center、modlens、dsh-uploads 列表/删除等运维面端点仅主用户可用；上传/下载按 `allow_upload` / `allowGitDownload` 权限门控，**新子用户默认禁 git 下载**（含 dsh-uploads 下载等外带通道），主用户按需开启，子用户无法枚举或外带共享存储中的文件。
 - **慢速连接防护**：显式请求超时（半开头部 20s 切断）+ 并发连接上限（网关 512 / 跳转端 256），抵御 slowloris 类慢连接耗尽。
 - **路径归一化**：门卫从原始 URL 迭代解码（防双重编码）+ 压平斜杠 + WHATWG 归一化做前缀判定，`%2f..%2f` / `%252f..` 等 SPA 壳绕过变体全部拦截。
 - **生产加固建议**：
   1. **首次配置成功后系统会自动删掉 `setup-key.txt`、把 JWT/内部/字段加密密钥固化成独立 `.env` 变量、并轮换 SETUP_KEY**——无需手动处理；如果你在已初始化的实例上部署（没走首次配置页），才需要手动删一次 `setup-key.txt`；
-  2. 需要更强隔离时，可在 `.env` 里**显式设置独立的 `MCP_JWT_SECRET`**（`openssl rand -hex 32`）与 `MCP_DB_ENC_KEY`——首次配置后这些值已自动固化，手动设置只是换一把新的；
+  2. 首次配置后 `MCP_JWT_SECRET`、`MCP_INTERNAL_SECRET`、`MCP_DB_ENC_KEY` 已自动固化。**不要修改已使用数据库的 `MCP_DB_ENC_KEY`**；轮换 JWT/内部密钥会使现有会话失效，应先安排维护窗口；
   3. 建议配 `MCP_DSH_RESTART_SERVICE` 指向正确的 systemd 服务名。
 
 ## 语言
@@ -250,9 +251,15 @@ node scripts/start-http.mjs 8080         # 明文 HTTP 模式（危险，y/N 确
 
 ## 更新日志
 
-### 2026-08-18 — 兼容 DeepSeek Harness 最新版 keyed slot 变更
+### v2.5.4（2026-08-20）
 
-**问题**：dsh 最新版（0.1.0-rc.6+）将 `settings.plugin.item` 等 UI 槽位升级为 keyed slot（键控槽位），注册时必须提供 `options.key` 属性。旧版 dsh-passwords 的客户端注册代码缺少 `key` 字段，导致插件加载时报错：
+- 修复 `npm install --prefix <目录>` 后执行 `dsh-passwords install` 误触发编译、报 `TS5058` 的问题；感谢 Issue #7 的反馈。
+- 兼容 dsh `0.1.0-rc.8` 的 workspace 打包布局，并加固远程补丁预检、回滚校验和旧备份迁移。
+- 发布前全量复核：补全 `198.18.0.0/15` 公网 IP 判定、证书复用私钥校验、HTTP 模式管道输入、聊天错误文案和相关回归测试。
+
+### 历史兼容说明：keyed slot
+
+**问题**：dsh `0.1.0-rc.6+` 将 `settings.plugin.item` 等 UI 槽位升级为 keyed slot（键控槽位），注册时必须提供 `options.key` 属性。旧版 dsh-passwords 的客户端注册代码缺少 `key` 字段，导致插件加载时报错：
 
 ```
 Failed to load plugins dsh-passwords
