@@ -2,13 +2,13 @@
 
 [简体中文](README.md) | English
 
-A **server-grade gateway** for DeepSeek Harness (dsh): it turns dsh from a local, single-user tool into a **multi-tenant platform** people can use remotely.
+Adds login, account management, and access controls to the DeepSeek Harness (dsh) web entry point. Use it when dsh is running on a server for a team or for customers.
 
-dsh's built-in web UI has no login, no permissions, and no usage controls — put it on a server and anyone with the URL can use it and burn your model credits. dsh-passwords puts a gateway in front of dsh: unauthenticated visitors see the login page first; after sign-in, every account is subject to **per-account permission and quota enforcement**. Installation takes a single command — **no extra configuration required**, works out of the box.
+dsh's web UI is designed for local use by default. Once a server address is shared, anyone with the URL can enter and consume the same model quota. dsh-passwords sits in front of dsh: users sign in first, then workspace, session, sandbox, and usage limits are applied per account.
 
-> **One-liner: dsh-passwords is the layer that turns dsh into a real server product.** Enterprise distribution, API relay/reseller stations issuing sub-accounts to customers, and teams sharing one box are its target use cases. You don't need it for purely local use; but if the access URL isn't localhost, install it first.
+You do not need it for a local-only dsh setup. Install it when you need remote access, shared use, or managed subuser accounts.
 
-🏅 Listed in the [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek-harness) ecosystem index (Infrastructure & Development) and the [Awesome DSH Plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) list (Development & Runtime).
+Listed in [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek-harness) (Infrastructure & Development) and [Awesome DSH Plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) (Development & Runtime).
 
 ## Features
 
@@ -16,9 +16,9 @@ dsh's built-in web UI has no login, no permissions, and no usage controls — pu
 
 - Login page + first-time setup page (on first visit you create the owner account; afterwards everyone goes through the login page)
 - One login lasts 12 hours (cookie session, survives browser restarts)
-- **Automatic HTTPS**: when dsh starts for the first time, a browser-trusted Let's Encrypt certificate is issued automatically — zero config, auto-renewing; port 80 redirects to 443
+- **Automatic HTTPS**: a Let's Encrypt certificate is requested on the first dsh start and renewed automatically; port 80 redirects to 443
 - The login page follows dsh's theme automatically (dark when dsh is dark)
-- Remote browsers can use every dsh settings feature (dsh by default only lets local browsers edit settings; dsh-passwords handles this automatically — and if the settings page breaks after a dsh upgrade, the in-settings card has a one-click "Reload patch" fix)
+- dsh settings are available from remote browsers; if a dsh upgrade affects the settings page, use “Reload patch” in the plugin card
 
 ### 2️⃣ Multi-user
 
@@ -86,9 +86,9 @@ dsh-passwords install     # generates a random SETUP_KEY, registers the plugin a
 
 (`dsh-passwords --version` prints the version; `dsh-passwords serve-gateway` runs the gateway manually.)
 
-The script handles everything: detect prebuilt output → install dependencies and build only when needed → **generate a random SETUP_KEY** → register as a dsh plugin → apply the remote-settings patch.
+The installer checks for prebuilt files, installing dependencies and building only when they are missing. It then generates `SETUP_KEY`, registers the plugin, and applies the remote-settings patch.
 
-At the end the script prints your **setup key (SETUP_KEY)** on screen; it is also saved to `setup-key.txt` in the install directory. **It is deleted automatically right after the first-time setup succeeds**, and the derived keys in `.env` are frozen to independent variables and the SETUP_KEY rotated — nothing to do manually.
+At the end it prints the `SETUP_KEY` for first-time setup and writes it to `setup-key.txt` in the install directory. The file is deleted after setup succeeds; the active keys are kept as independent values in `.env`.
 
 ### 2. Finish setup in three steps
 
@@ -110,11 +110,11 @@ dsh exits  → the gate stops with it (no orphan process holding ports)
 - Advanced: to run the gateway standalone, use `node dist/cli.js serve-gateway` or set up your own systemd unit.
 - Temporarily disable the auto-start (debugging): start dsh with `DSH_PASSWORDS_NO_AUTOSTART=1`.
 
-## Automatic HTTPS (no certs to buy, nothing to configure)
+## Automatic HTTPS
 
-- By default the server's public IP is detected and a 90-day Let's Encrypt certificate is issued for `<IP>.sslip.io`; it renews automatically 30 days before expiry (hot-loaded, no restart) — zero ongoing effort
-- Own a domain? Add `MCP_GATEWAY_DOMAIN=your.domain` to `.env` and point an A record at the server; the certificate is re-issued for your domain
-- **If issuance fails the gate refuses to start** (with an error code) — it never silently downgrades to plaintext HTTP. If a renewal fails while the old certificate is still valid, it keeps serving it and retries in the background.
+- By default, the server's public IP is detected and a 90-day Let's Encrypt certificate is requested for `<IP>.sslip.io`. It renews 30 days before expiry; new certificates are used without restarting.
+- For your own domain, add `MCP_GATEWAY_DOMAIN=your.domain` to `.env` and point its A record at the server.
+- If the first issuance fails, the gate does not fall back to plaintext HTTP. If renewal fails while the old certificate remains valid, it keeps serving the old certificate and retries.
 
 | Error code | Meaning | What to do |
 |---|---|---|
@@ -124,9 +124,9 @@ dsh exits  → the gate stops with it (no orphan process holding ports)
 
 > Why the `.sslip.io` in the URL? Browsers require the certificate name to match the URL, and Let's Encrypt does not issue certificates for bare IPs — `<IP>.sslip.io` is a free name-borrowing service. Opening the bare IP over `https://` directly will still warn about a hostname mismatch; that's expected. Entering via port 80 redirects to the correct address automatically.
 
-## Deployment matrix (all about port 80)
+## Deployment scenarios
 
-Automatic HTTPS uses Let's Encrypt's http-01 validation, which requires **LE to connect directly to port 80 of your server's public IP** — the security group, the OS firewall and any NAT forwarding must all allow it. Can't open port 80? Pick your scenario:
+Let's Encrypt http-01 validation needs to reach port 80 on the server's public IP. Allow it through the security group, OS firewall, and any NAT forwarding. If port 80 cannot be opened, choose the matching setup below:
 
 | Scenario | What to do | What users see | Ports to open |
 |---|---|---|---|
@@ -139,9 +139,9 @@ Automatic HTTPS uses Let's Encrypt's http-01 validation, which requires **LE to 
 
 > Note: http-01 only touches port 80 during issuance and renewal (a few seconds, roughly every 60 days). `MCP_GATEWAY_REDIRECT_PORT` defaults to 80 — it handles both the challenge answers and the 301 redirect.
 
-## HTTP mode (plaintext — avoid when possible)
+## HTTP mode
 
-The gate **refuses** to run in plaintext HTTP by default. If you really must (LAN-only, and you accept the risk):
+The gate does not start in plaintext HTTP by default. Use this mode only for a LAN-only setup where you explicitly accept the risk:
 
 ```bash
 node scripts/start-http.mjs [port]    # default 8080, asks for y/N confirmation
@@ -228,7 +228,7 @@ Then as usual: start dsh → the gate starts automatically → open `https://<yo
 
 ## Security & privacy
 
-Passwords are stored only as bcrypt hashes; usernames, IPs and audit records are encrypted at rest; every login and failure is audited; certificate-issuance failure stops the service instead of downgrading to plaintext. All keys live in your own `.env` and database — open source code does not weaken security.
+Passwords are stored as bcrypt hashes only. Usernames, IPs, and audit records are encrypted in the database; successful and failed logins are recorded. Keys live in the deployment `.env` and database, so back them up together and restrict file access.
 
 - **Brute-force protection**: failed logins lock the account, and the lock duration backs off per round (1 → 5 → 15 → 60 minutes, capped). Owner accounts can't be globally locked out by IP-rotation (per-IP locking still applies) — prevents account-level DoS.
 - **Password-spray protection (per-IP throttle)**: 50 failed logins from the same IP within 15 minutes → that IP is globally throttled for 15 minutes (accumulated across usernames — aimed at the "one IP rotating many usernames" spraying technique; bcrypt is not consumed while throttled, and a successful login lifts the throttle). If a large NAT/shared egress trips it by accident, it auto-recovers after 15 minutes with no manual action.
