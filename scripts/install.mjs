@@ -10,6 +10,7 @@ import { existsSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { hasPrebuiltRuntime } from './prebuilt-check.mjs';
 
 const isWin = process.platform === 'win32';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -136,13 +137,9 @@ if (isFirstInstall && !isWin && typeof process.getuid === 'function' && process.
 
 // ── 4. 依赖 + 编译（npm 包已预构建时自动跳过） ──
 // 不能只看 node_modules 目录：中断安装会留下半残目录，之后直到首次运行才暴露 MODULE_NOT_FOUND。
-const runtimeDepsReady = ['bcryptjs', 'dotenv', 'express', 'jsonwebtoken'].every((name) =>
-  existsSync(path.join(root, 'node_modules', name)),
-);
-const prebuilt =
-  runtimeDepsReady &&
-  existsSync(path.join(root, 'dist', 'cli.js')) &&
-  existsSync(path.join(root, 'dist', 'client.js'));
+// 运行时依赖用 Node 模块解析检测（兼容 npm --prefix 安装时依赖被提升到上层
+// node_modules 的情况）；dist/cli.js 与 dist/client.js 均存在才视为已构建。
+const prebuilt = hasPrebuiltRuntime(root, ['bcryptjs', 'dotenv', 'express', 'jsonwebtoken']);
 if (prebuilt) {
   say('检测到已构建产物，跳过依赖安装与编译');
 } else {
