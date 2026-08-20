@@ -23,7 +23,7 @@ import { Database, type UserListRow } from './db.js';
 import { createFieldCrypto } from './encrypt.js';
 import { AuthService, AuthError, assertNoSqlInjection, type AuthedUser, type RequestMeta } from './auth.js';
 import { findDshRoot, patchStatus } from './patch.js';
-import { isDisplayableDshSession } from './permissions.js';
+import { isDisplayableDshSession, isDisplayableDshSurface } from './permissions.js';
 
 /** 稳定 cordis 插件名（insert 进 cordis.yml 时用同一个名字） */
 export const name = 'dsh-passwords';
@@ -601,7 +601,7 @@ export function apply(ctx: Context): void {
     {
       kind: 'exact',
       path: '/api/dsh-passwords/workspaces',
-      handler: (req, res) => {
+      handler: async (req, res) => {
         const caller = guard(req, res);
         if (!caller) return;
         if (!requireMethod(req, res, 'GET')) return;
@@ -625,22 +625,49 @@ export function apply(ctx: Context): void {
           const sessionTitle = ctx.get('sessionTitle') as unknown as
             | { get(session: unknown): { title?: string } | undefined }
             | undefined;
+          const sessionQuery = ctx.get('sessionQuery') as unknown as
+            | {
+                readSurface(id: string): Promise<{ events: readonly unknown[] }>;
+                readTitle?(id: string): Promise<{ title?: string } | undefined>;
+              }
+            | undefined;
           // Workspace.sessionIds 保留用于恢复排序的空白槽位。设置页只展示真实会话，
           // 否则无标题空白会话会回退显示为 session-* UUID，误导管理员配置一个不存在的会话。
           const archived = new Set((reg?.archivedSessionIds ?? []).map((id) => String(id)));
-          const workspaces = (reg?.list() ?? []).map((workspace) => ({
-            path: workspace.path,
-            title: workspace.title,
-            sessions: workspace.sessionIds
-              .map((sessionId) => String(sessionId))
-              .filter((sessionId) => !archived.has(sessionId))
-              .map((sessionId) => ({ id: sessionId, session: sessions?.get(sessionId) }))
-              .filter(({ session }) => isDisplayableDshSession(session))
-              .map(({ id, session }) => {
-                const title = session === undefined ? undefined : sessionTitle?.get(session)?.title;
-                return { id, title: title || id };
-              }),
-          }));
+          const workspaces = await Promise.all(
+            (reg?.list() ?? []).map(async (workspace) => {
+              const sessionEntries = await Promise.all(
+                workspace.sessionIds
+                  .map((sessionId) => String(sessionId))
+                  .filter((sessionId) => !archived.has(sessionId))
+                  .map(async (id) => {
+                    const liveSession = sessions?.get(id);
+                    if (liveSession !== undefined) {
+                      if (!isDisplayableDshSession(liveSession)) return null;
+                      const title = sessionTitle?.get(liveSession)?.title;
+                      return { id, title: title || id };
+                    }
+                    // sessions.get() 只覆盖 live session；sessionQuery 会补上持久化会话，
+                    // 否则旧的空白持久化槽位会被错误地按 UUID 展示。
+                    if (sessionQuery === undefined) return { id, title: id };
+                    try {
+                      const surface = await sessionQuery.readSurface(id);
+                      if (!isDisplayableDshSurface(surface.events)) return null;
+                      const title = await sessionQuery.readTitle?.(id);
+                      return { id, title: title?.title || id };
+                    } catch {
+                      // 存储短暂不可用时保留配置项，不能把正常会话静默隐藏。
+                      return { id, title: id };
+                    }
+                  }),
+              );
+              return {
+                path: workspace.path,
+                title: workspace.title,
+                sessions: sessionEntries.filter((session): session is { id: string; title: string } => session !== null),
+              };
+            }),
+          );
           writeJson(res, 200, { ok: true, workspaces });
         } catch {
           writeJson(res, 200, { ok: true, workspaces: [] });

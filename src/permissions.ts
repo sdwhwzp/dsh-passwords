@@ -694,6 +694,11 @@ export function isDisplayableDshSession(session: unknown): boolean {
   }
 }
 
+/** sessionQuery.readSurface() 的 current surface 为空时表示空白恢复槽位。 */
+export function isDisplayableDshSurface(events: unknown): boolean {
+  return !Array.isArray(events) || events.length > 0;
+}
+
 /** 收集全局/工作区 archivedSessionIds，供 workspace.list 同时过滤 sessionIds。 */
 export function collectArchivedSessionIds(value: unknown, out: Set<string> = new Set(), depth = 0): Set<string> {
   if (depth > 8 || value === null || typeof value !== 'object') return out;

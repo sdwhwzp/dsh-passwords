@@ -5,6 +5,7 @@ import {
   SESSION_SCOPED_RE,
   extractSessionId,
   isDisplayableDshSession,
+  isDisplayableDshSurface,
   stripArchivedSessionIds,
   filterSessionItems,
   collectSessionCwd,
@@ -33,6 +34,9 @@ test('设置页会话投影：dsh 空白槽位不展示，但无标题的真实�
   assert.equal(isDisplayableDshSession(realWithoutTitle), true);
   assert.equal(isDisplayableDshSession(legacySession), true);
   assert.equal(isDisplayableDshSession(undefined), true);
+  assert.equal(isDisplayableDshSurface([]), false);
+  assert.equal(isDisplayableDshSurface([{ type: 'user/message' }]), true);
+  assert.equal(isDisplayableDshSurface(undefined), true);
 });
 
 test('归档枚举源清理：archivedSessionIds 被清空', () => {
