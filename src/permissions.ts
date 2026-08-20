@@ -674,6 +674,26 @@ export function extractSessionId(value: unknown, depth = 0): string | null {
   return null;
 }
 
+/**
+ * 判断 dsh 会话是否有可展示内容。
+ *
+ * Workspace.sessionIds 保留空白会话槽位，供 dsh 侧恢复工作区排序；这些槽位
+ * 不是可配置的历史会话。只有运行时明确提供 deriveMessages() 且结果为空时才
+ * 判定为空白。旧版本/持久化会话没有该方法时保守保留，避免兼容性升级误删正常会话。
+ */
+export function isDisplayableDshSession(session: unknown): boolean {
+  if (session === null || typeof session !== 'object') return true;
+  const deriveMessages = (session as { deriveMessages?: unknown }).deriveMessages;
+  if (typeof deriveMessages !== 'function') return true;
+  try {
+    const messages = deriveMessages.call(session);
+    return !Array.isArray(messages) || messages.length > 0;
+  } catch {
+    // 会话投影异常不应让设置页静默丢失可配置项。
+    return true;
+  }
+}
+
 /** 收集全局/工作区 archivedSessionIds，供 workspace.list 同时过滤 sessionIds。 */
 export function collectArchivedSessionIds(value: unknown, out: Set<string> = new Set(), depth = 0): Set<string> {
   if (depth > 8 || value === null || typeof value !== 'object') return out;

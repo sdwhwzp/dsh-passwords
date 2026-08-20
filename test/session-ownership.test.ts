@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   SESSION_SCOPED_RE,
   extractSessionId,
+  isDisplayableDshSession,
   stripArchivedSessionIds,
   filterSessionItems,
   collectSessionCwd,
@@ -22,6 +23,16 @@ test('extractSessionId：提取顶层与嵌套 sessionId', () => {
   assert.equal(extractSessionId({ sessionId: 's-1' }), 's-1');
   assert.equal(extractSessionId({ args: { request: { sessionId: 's-2' } } }), 's-2');
   assert.equal(extractSessionId({ id: 'x' }), null);
+});
+
+test('设置页会话投影：dsh 空白槽位不展示，但无标题的真实会话保留', () => {
+  const blank = { deriveMessages: () => [] };
+  const realWithoutTitle = { deriveMessages: () => [{ role: 'user', content: 'hello' }] };
+  const legacySession = {};
+  assert.equal(isDisplayableDshSession(blank), false);
+  assert.equal(isDisplayableDshSession(realWithoutTitle), true);
+  assert.equal(isDisplayableDshSession(legacySession), true);
+  assert.equal(isDisplayableDshSession(undefined), true);
 });
 
 test('归档枚举源清理：archivedSessionIds 被清空', () => {

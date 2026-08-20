@@ -23,6 +23,7 @@ import { Database, type UserListRow } from './db.js';
 import { createFieldCrypto } from './encrypt.js';
 import { AuthService, AuthError, assertNoSqlInjection, type AuthedUser, type RequestMeta } from './auth.js';
 import { findDshRoot, patchStatus } from './patch.js';
+import { isDisplayableDshSession } from './permissions.js';
 
 /** 稳定 cordis 插件名（insert 进 cordis.yml 时用同一个名字） */
 export const name = 'dsh-passwords';
@@ -624,16 +625,20 @@ export function apply(ctx: Context): void {
           const sessionTitle = ctx.get('sessionTitle') as unknown as
             | { get(session: unknown): { title?: string } | undefined }
             | undefined;
-          const archived = new Set(reg?.archivedSessionIds ?? []);
+          // Workspace.sessionIds 保留用于恢复排序的空白槽位。设置页只展示真实会话，
+          // 否则无标题空白会话会回退显示为 session-* UUID，误导管理员配置一个不存在的会话。
+          const archived = new Set((reg?.archivedSessionIds ?? []).map((id) => String(id)));
           const workspaces = (reg?.list() ?? []).map((workspace) => ({
             path: workspace.path,
             title: workspace.title,
             sessions: workspace.sessionIds
+              .map((sessionId) => String(sessionId))
               .filter((sessionId) => !archived.has(sessionId))
-              .map((sessionId) => {
-                const session = sessions?.get(sessionId);
+              .map((sessionId) => ({ id: sessionId, session: sessions?.get(sessionId) }))
+              .filter(({ session }) => isDisplayableDshSession(session))
+              .map(({ id, session }) => {
                 const title = session === undefined ? undefined : sessionTitle?.get(session)?.title;
-                return { id: sessionId, title: title || sessionId };
+                return { id, title: title || id };
               }),
           }));
           writeJson(res, 200, { ok: true, workspaces });
