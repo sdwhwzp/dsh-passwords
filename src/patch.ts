@@ -91,6 +91,28 @@ function currentMatchesPatchedBackup(target: string): boolean {
   }
 }
 
+/**
+ * 将旧版本留下的无元数据备份安全迁移到哈希格式。
+ * 只有“旧备份经当前补丁算法转换后精确等于当前文件”才允许迁移；
+ * rc.7 备份与 rc.8 当前 bundle 不一致时不会被误认，也不会覆盖任何文件。
+ */
+function migrateLegacyBackup(
+  target: string,
+  currentContent: string,
+  patch: (original: string) => string | null,
+): void {
+  if (readBackupMeta(target) !== null || !existsSync(target + BAK_SUFFIX)) return;
+  try {
+    const original = readFileSync(target + BAK_SUFFIX, 'utf8');
+    const patched = patch(original);
+    if (patched !== null && patched !== original && patched === currentContent) {
+      saveOriginalBackup(target, original, currentContent);
+    }
+  } catch {
+    // 迁移是兼容性加固，失败时保留旧备份但不把它当作可回滚备份。
+  }
+}
+
 /** 客户端设置持久化文件（强制 host 模式） */
 const SETTINGS_TARGET = path.join(
   'node_modules', '@deepseek-ai', 'dsh-client-ui-settings', 'lib', 'client.js',
@@ -233,6 +255,14 @@ export function applyRemotePatch(dshRoot: string): 'applied' | 'unchanged' | 'mi
   // 先完整预检白名单目标。不能先写 settings 再发现白名单结构损坏，
   // 否则 applyRemotePatch() 返回 missing 时会留下半应用状态。
   const w = readFileSync(wlFile, 'utf8');
+  migrateLegacyBackup(wlFile, w, (original) => {
+    if (!whitelistPatchApplicable(original) || hasSettingsNamespace(original, 'dsh-passwords')) return null;
+    const re = /const WEB_SETTINGS_NAMESPACES = \[([\s\S]*?)\];/;
+    const match = re.exec(original);
+    if (!match) return null;
+    const inserted = match[1].replace(/(\s*[\'"][^\'"]+[\'"])/, `$1,\n\t"dsh-passwords"`);
+    return original.replace(re, `const WEB_SETTINGS_NAMESPACES = [${inserted}];`);
+  });
   let whitelistPatched: string | null = null;
   if (whitelistPatchApplicable(w) && !hasSettingsNamespace(w, 'dsh-passwords')) {
     const re = /const WEB_SETTINGS_NAMESPACES = \[([\s\S]*?)\];/;
@@ -248,6 +278,9 @@ export function applyRemotePatch(dshRoot: string): 'applied' | 'unchanged' | 'mi
 
   // 1) 客户端 settings 强制 host 模式
   const s = readFileSync(settingsFile, 'utf8');
+  migrateLegacyBackup(settingsFile, s, (original) =>
+    original.includes(SETTINGS_FROM) ? original.replace(SETTINGS_FROM, SETTINGS_TO) : null,
+  );
   if (s.includes(SETTINGS_FROM)) {
     const patched = s.replace(SETTINGS_FROM, SETTINGS_TO);
     ensureOriginalBackup(settingsFile, s, patched);
@@ -268,6 +301,25 @@ export function applyRemotePatch(dshRoot: string): 'applied' | 'unchanged' | 'mi
   const wsFile = path.join(dshRoot, WORKSPACE_TARGET);
   if (existsSync(wsFile)) {
     const ws = readFileSync(wsFile, 'utf8');
+    migrateLegacyBackup(wsFile, ws, (original) => {
+      let next = original;
+      if (SEARCH_STICKY_RE.test(next) && SEARCH_DEPS_RE.test(next)) {
+        next = next.replace(SEARCH_STICKY_RE, SEARCH_STICKY_TO).replace(SEARCH_DEPS_RE, SEARCH_DEPS_TO);
+      }
+      if (!next.includes(SEARCH_AUTOFILL_HARDEN_MARK)) {
+        if (SEARCH_AUTOFILL_RE.test(next) && !next.includes(SEARCH_AUTOFILL_MARK)) {
+          next = next.replace(SEARCH_AUTOFILL_RE, SEARCH_AUTOFILL_TO);
+        } else if (SEARCH_AUTOFILL_V2_RE.test(next)) {
+          next = next.replace(SEARCH_AUTOFILL_V2_RE, SEARCH_AUTOFILL_V2_TO);
+        } else if (next.includes(SEARCH_AUTOFILL_MARK)) {
+          const nameRe = /(name:\s*[\"']dshpw-session-search[\"'],)/;
+          if (nameRe.test(next)) {
+            next = next.replace(nameRe, '$1\n\t\t\t\t\t\t\treadOnly: !searchExpanded,\n\t\t\t\t\t\t\t\'data-dshpw-autofill-harden\': "v2",\n\t\t\t\t\t\t\t\'data-lpignore\': "true",\n\t\t\t\t\t\t\t\'data-1p-ignore\': "true",\n\t\t\t\t\t\t\t\'data-bwignore\': "true",');
+          }
+        }
+      }
+      return next === original ? null : next;
+    });
     let wsNext = ws;
     let wsChanged = false;
     if (SEARCH_STICKY_RE.test(wsNext) && SEARCH_DEPS_RE.test(wsNext)) {
