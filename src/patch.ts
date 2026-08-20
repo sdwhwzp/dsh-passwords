@@ -38,15 +38,19 @@ const SETTINGS_TO = '"host"';
 // dsh 上游行为：搜索 query 非空时点击侧栏外只 blur 不收起——无结果时
 // 「无匹配会话」死状态会永久滞留侧栏（打开设置/卡片等任何点击都无法消除，
 // 只能手动按 Esc/X）。子补丁：无结果（ready/error 且 0 条）时点击别处自动清空并收起。
+// rc.7/rc.8 都保留同一行为契约，但 rc.8 的 bundle 压缩了换行并给 effect
+// 依赖增加 searchOnExpand。按语义片段匹配，不能依赖具体格式，否则补丁会静默跳过。
 const SEARCH_STICKY_RE =
-  /(searchInput\.current\?\.blur\(\);)[\t ]*\n[\t ]*(if \(normalizedQuery !== ""\) return;)[\t ]*\n[\t ]*(setSearchExpanded\(false\);)/;
+  /(searchInput\.current\?\.\s*blur\(\);\s*)if\s*\(normalizedQuery\s*!==\s*""\)\s*return;\s*(setSearchExpanded\(false\);)/;
 const SEARCH_STICKY_TO =
-  '$1\n\t\t\t\t\tif (normalizedQuery === "") {\n\t\t\t\t\t\tsetSearchExpanded(false);\n\t\t\t\t\t} else if (remoteSearch.status !== "loading" && remoteSearch.items.length === 0) {\n\t\t\t\t\t\t// dsh-passwords 补丁：无结果的搜索点击别处自动收起并清空，避免“无匹配会话”滞留在侧栏\n\t\t\t\t\t\tsetQuery("");\n\t\t\t\t\t\tsetSearchExpanded(false);\n\t\t\t\t\t}';
+  '$1if (normalizedQuery === "") { $2 } else if (remoteSearch.status !== "loading" && remoteSearch.items.length === 0) { setQuery(""); $2 }';
 // 上面新增了 remoteSearch 读取：click-outside effect 的依赖数组必须补上，否则闭包里的
 // remoteSearch 是注册时的旧值（结果到达后不重新注册）→ 永远看到 loading，补丁失效。
+// 只匹配同时含 normalizedQuery/wide/searchExpanded 的该 effect 依赖数组，兼容 rc.8
+// 新增的 searchOnExpand 和不同的换行/缩进。
 const SEARCH_DEPS_RE =
-  /(\}, \[)[\t ]*\n[\t ]*normalizedQuery,[\t ]*\n[\t ]*wide,[\t ]*\n[\t ]*searchExpanded([\t ]*\n[\t ]*\]\);)/;
-const SEARCH_DEPS_TO = '$1\n\t\t\t\tremoteSearch,\n\t\t\t\tnormalizedQuery,\n\t\t\t\twide,\n\t\t\t\tsearchExpanded$2';
+  /(\},\s*\[\s*)(normalizedQuery\s*,\s*wide\s*,\s*searchExpanded)/;
+const SEARCH_DEPS_TO = '$1remoteSearch, $2';
 
 // dsh 上游行为：搜索输入框无 autocomplete/name 属性——浏览器密码管理器在页面出现
 // 密码框时会用启发式找用户名框（DOM 里密码框之前最近的文本框），侧栏搜索框会被
@@ -55,7 +59,7 @@ const SEARCH_DEPS_TO = '$1\n\t\t\t\tremoteSearch,\n\t\t\t\tnormalizedQuery,\n\t\
 const SEARCH_AUTOFILL_MARK = 'dshpw-session-search';
 const SEARCH_AUTOFILL_HARDEN_MARK = 'data-dshpw-autofill-harden';
 const SEARCH_AUTOFILL_RE =
-  /(className: WorkspaceBrowser_module_css_default\.searchInput,[\t ]*\n[\t ]*type: "text",)/;
+  /(className:\s*WorkspaceBrowser_module_css_default\.searchInput,\s*type:\s*"text",)/;
 // v2：autocomplete=off 会被部分密码管理器忽略；search + 折叠态 readOnly + 厂商忽略
 // 标记组合更稳。readOnly 只在搜索框折叠时生效，用户主动展开后仍可正常输入。
 const SEARCH_AUTOFILL_TO =
