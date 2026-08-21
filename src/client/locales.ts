@@ -11,6 +11,8 @@ export const zh = {
   identity: '当前身份：',
   owner: '主用户',
   subuser: '子用户',
+  logout: '退出登录',
+  logoutHint: '退出后需重新输入用户名密码登录；会话在服务端立即吊销。',
   // 聊天入口显示偏好（按当前账号跨设备同步）
   chatToggle: '聊天入口',
   chatToggleDesc: '显示可拖动的聊天气泡',
@@ -137,6 +139,8 @@ export const en: Record<keyof typeof zh, string> = {
   identity: 'Signed in as:',
   owner: 'Owner',
   subuser: 'Subuser',
+  logout: 'Sign out',
+  logoutHint: 'You will be asked to sign in again; the session is revoked server-side immediately.',
   chatToggle: 'Chat entry',
   chatToggleDesc: 'Show the draggable chat bubble',
   chatToggleHint: 'The bubble hides immediately when off. Messages are kept and can be restored anytime.',
