@@ -2,283 +2,272 @@
 
 [English](README_en.md) | 简体中文
 
-为 DeepSeek Harness（dsh）的网页入口加上登录、账号管理和访问控制，适合把 dsh 放到服务器上给团队或客户使用。
+`dsh-passwords` 是 DeepSeek Harness（dsh）的认证和访问控制层，提供登录、账号管理、工作区与会话授权、沙盒限制以及用量控制。
 
-dsh 的网页界面默认面向本机使用。服务器地址一旦暴露，拿到链接的人就可以进入，也会共用模型额度。dsh-passwords 放在 dsh 前面：先登录，再按账号应用工作区、会话、沙盒和用量限制。
+支持两种部署方式：
 
-纯本机使用 dsh 不需要安装它；需要远程访问、多人共用或管理子账号时再使用即可。
+- 已有 dsh 环境：使用 npm 安装插件。
+- 没有 dsh 环境：使用 Docker 镜像，镜像内包含 dsh `0.1.0-rc.8` 和 dsh-passwords。
 
-收录于 [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek-harness)（Infrastructure & Development）和 [Awesome DSH Plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)（Development & Runtime）。
+纯本机使用 dsh 时不需要安装本项目。
 
-## 功能一览
+## 功能
 
-### 1️⃣ 远程连接
+### 远程访问
 
-- 登录页 + 首次配置页（第一次访问先设主账号，之后谁访问都先过登录页）
-- 登录一次管 12 小时（Cookie 会话，关浏览器也不丢）
-- **自动 HTTPS**：首次启动 dsh 时申请 Let's Encrypt 证书，之后自动续期；80 端口会跳转到 443
-- 登录页自动跟着 dsh 的主题走（dsh 用深色它就深色）
-- 可从远程浏览器使用 dsh 设置；若 dsh 升级后设置页异常，可在插件卡片中点“重载补丁”修复
+- 登录页和首次配置页
+- Cookie 会话默认保持 12 小时
+- npm 部署支持自动 HTTPS、证书申请和续期
+- 登录界面跟随 dsh 的主题和语言设置
+- 登录后可以远程使用 dsh 设置
+- dsh 升级后可以从设置页重新加载远程设置补丁
 
-### 2️⃣ 多用户
+### 账号管理
 
-- 一个**主用户**（首次配置创建）+ 任意多个**子用户**，各自独立账号密码登录
-- 所有账号管理都在 dsh 设置页的卡片里完成，不用 SSH：改密码、改用户名、创建/删除子用户
-- 主用户可管理所有子用户；子用户只能改自己
-- 改密后旧会话全部立即失效；每次登录/失败都有记录，一条命令就能查谁在什么时候登录过
+- 第一个创建的账号是主用户，之后创建的账号是子用户
+- 主用户可以创建、删除和管理子用户
+- 用户可以修改自己的用户名和密码，主用户可以管理所有账号
+- 改密和改名后，相关旧会话立即失效
+- 登录成功、登录失败和管理操作写入审计日志
 
-### 3️⃣ 权限与配额
+### 权限与配额
 
-主用户可以在设置页给每个子用户单独配置：
+主用户可以为每个子用户配置：
 
-- **工作区与会话权限**：主用户在每个子用户权限面板中用滑动开关开启工作区；开启后其中的活动会话默认全部可用，也可逐条取消勾选。归档会话不会出现在设置里
-- **会话与消息隔离**：子用户只能看到已授权工作区和启用会话；留言只显示广播、发给自己或自己发出的内容
-- **消息默认私信**：子用户留言默认只发给主用户；广播仅主用户可发且需显式勾选
-- **每小时 token 上限**、**每日使用时长上限**：到量自动拒绝
-- **沙盒权限**：只读 / 可写工作区 / 完全访问，三档可选；子用户的 AI 想越权提权时，网关直接把审批改成「拒绝」
-- **上传 / git 下载开关**、**封禁子用户**
+- 工作区和活动会话访问权限
+- 会话与消息可见范围
+- 每小时 token 上限
+- 每日使用时长上限
+- 沙盒级别
+- 上传和 git 下载权限
+- 账号封禁状态
 
-### 4️⃣ 协作
+子用户只能访问已授权的工作区和会话。子用户消息默认发送给主用户，广播消息由主用户显式启用。
 
-- 界面左下角的聊天按钮：主用户和子用户之间留言，可打标签（议题 / 拉取请求 / 讨论 / 公告 / 问题）；每个账号都可在设置中单独隐藏聊天入口
+### 协作
 
-## 界面截图
+设置页和 dsh 界面提供账号间的聊天与留言功能，支持议题、拉取请求、讨论、公告和问题等标签。每个账号都可以单独隐藏聊天入口。
 
-| 登录页 · 浅色 | 登录页 · 深色 | 登录页 · English |
-|:---:|:---:|:---:|
-| <img src="docs/screenshots/white-login.png" width="360"> | <img src="docs/screenshots/black-login.png" width="360"> | <img src="docs/screenshots/white-login-en.png" width="360"> |
-
-| dsh 主界面（登录后） | 聊天 / 留言 | 设置页卡片 · 账号管理 |
-|:---:|:---:|:---:|
-| <img src="docs/screenshots/main-ui.png" width="360"> | <img src="docs/screenshots/chat.png" width="360"> | <img src="docs/screenshots/card-front.png" width="360"> |
-
-| | 设置页卡片 · 权限与配额 | |
-|:---:|:---:|:---:|
-| | <img src="docs/screenshots/card-back.png" width="360"> | |
 ## 快速开始
 
-### 0. 前置条件（三样）
+### 前置条件
 
-1. **Node.js 22.5+**：`node -v` 查看（Linux：`curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs`；Windows：nodejs.org 下载安装包）
-2. **dsh 已装好**：`npm install -g @deepseek-ai/dsh`，并已能正常对话（dsh 自身的模型连接配置好即可；本插件不需要任何额外配置）
-3. **git**：Linux 没装就 `apt-get install -y git`；Windows 去 git-scm.com 下载（pnpm 缺了脚本会自动装）
+根据部署方式准备环境：
 
-### 1. 安装（按平台）
+- npm 部署：Node.js 22.5+、npm，以及已经安装并能正常运行的 dsh。
+- Docker 部署：Docker Engine 或 Docker Desktop，以及一个可用的 DeepSeek API key。宿主机不需要安装 Node.js 或 dsh。
+- 生产环境：一个自己的域名，或 `<公网IP>.sslip.io`。如果使用 nginx 或 Caddy 反向代理，需要让公网 80/443 到达反代服务。
 
-```bash
-# Linux / macOS —— 方式 A：直接下载安装
-curl -fsSL https://raw.githubusercontent.com/slywalker2006/dsh-passwords/main/install.sh | bash
+### npm 安装
 
-# Linux / macOS —— 方式 B：先 clone 再装
-git clone https://github.com/slywalker2006/dsh-passwords
-cd dsh-passwords
-bash install.sh
-```
-
-**Windows**：下载仓库里的 `install.bat` 双击运行（或 clone 后运行）。它会自动把项目装到 `%USERPROFILE%\dsh-passwords` 并完成全部配置。Windows 上绑 80/443 **不需要管理员权限**；端口被占用时网关会以错误码 32 提示。
-
-**npm 用户**：
+适用于已经安装 dsh 的宿主机：
 
 ```bash
 npm install -g dsh-passwords
-dsh-passwords install     # 生成随机 SETUP_KEY + 注册插件 + 应用补丁（等价一键安装）
+dsh-passwords install
 ```
 
-（`dsh-passwords --version` 看版本；`dsh-passwords serve-gateway` 手动启动网关。）
+安装器会检查 dsh、pnpm 和预构建产物，生成配置，注册 `dsh-passwords` 到 dsh web profile，并应用远程设置补丁。npm 包已经包含 `dist/`，正常安装不需要本地编译。
 
-安装脚本会检查预构建文件，缺失时再安装依赖和编译；随后生成 `SETUP_KEY`、注册插件并应用远程设置补丁。
+查看版本或手动启动网关：
 
-结束时会显示首次配置用的 `SETUP_KEY`，并在安装目录写入 `setup-key.txt`。首次配置完成后，这个文件会自动删除；`.env` 中实际使用的密钥会被保留为独立值。
-
-### 2. 三步完成首次配置
-
-1. 用平时的方式启动 dsh（dsh 的模型密钥已配好即可，直接运行 `dsh web`；密码门本身无需任何额外配置）——**密码门会被自动拉起，不需要任何额外启动命令**
-2. 浏览器直接打开 `https://<服务器IP>.sslip.io`——第一次访问会**自动进入「首次配置」页**，输入 SETUP_KEY，创建主用户（不用手动输入 `/gateway/setup`）
-3. 之后所有人访问 `https://<服务器IP>.sslip.io` 都会先过登录页
-
-别忘了在防火墙**和云服务商安全组**里放行 **80 和 443** 端口（开不了 80 的机器见下面的「部署场景矩阵」）。
-
-## 密码门跟着 dsh 走
-
-不需要 systemd，不需要手动启动网关进程，不需要给 dsh 加任何启动参数：
-
-```
-dsh 启动 → 插件被加载 → 插件自动拉起密码门（日志就在 dsh 控制台里）
-dsh 退出 → 密码门跟着停（不会留僵尸进程占端口）
+```bash
+dsh-passwords --version
+dsh-passwords serve-gateway
 ```
 
-- 高级用法：想单独托管网关进程？`node dist/cli.js serve-gateway` 手动跑，或自己配 systemd 也行。
-- 临时禁止自动拉起（调试用）：启动 dsh 时加环境变量 `DSH_PASSWORDS_NO_AUTOSTART=1`。
+正常使用时，安装完成后启动 dsh web 即可。
+
+### Docker 安装
+
+Docker 镜像名为 `skywalker237234/dsh-passwords`，省略标签时默认使用 `latest`。先创建 `.env`：
+
+```env
+DEEPSEEK_API_KEY=your-deepseek-api-key
+```
+
+启动容器：
+
+```bash
+docker run -d \
+  --name dsh-passwords \
+  --restart unless-stopped \
+  --env-file .env \
+  -p 127.0.0.1:3088:3088 \
+  -v dsh-home:/data/dsh \
+  -v dsh-passwords-state:/data/dsh-passwords \
+  skywalker237234/dsh-passwords
+```
+
+容器内的 dsh web 服务监听 `3080`，密码门监听 `3088`。宿主机只暴露 `127.0.0.1:3088`，公网访问应由 nginx 或 Caddy 终结 TLS 后反代到该地址。
+
+持久化目录说明：
+
+- `dsh-home` 保存 dsh profile、依赖和插件配置。
+- `dsh-passwords-state` 保存 `.env`、SQLite 数据库、证书和初始化状态。
+
+不要删除这两个卷，否则会丢失 dsh 配置、账号、数据库或密钥。
+
+### 首次配置
+
+Docker 部署读取一次性配置密钥：
+
+```bash
+docker exec dsh-passwords cat /data/dsh-passwords/setup-key.txt
+```
+
+npm 部署的密钥位于安装目录的 `setup-key.txt`。打开反代后的 HTTPS 地址，输入 `SETUP_KEY` 创建主用户。初始化成功后，`setup-key.txt` 会自动删除。
+
+## 反向代理
+
+Docker 部署默认由 nginx 或 Caddy 处理 80/443，网关只监听宿主机回环地址：
+
+```text
+HTTPS 443 -> nginx/Caddy -> http://127.0.0.1:3088 -> http://127.0.0.1:3080
+```
+
+nginx 配置至少需要支持 WebSocket、SSE 和长连接：
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:3088;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+    proxy_buffering off;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+}
+```
+
+同时在 nginx 或 Caddy 中配置 HTTP 到 HTTPS 的跳转，并在系统防火墙和云安全组中放行 80、443。不要把 Docker 管理端口、dsh RPC 或网关管理端口暴露到公网。
 
 ## 自动 HTTPS
 
-- 默认会探测服务器公网 IP，并为 `<IP>.sslip.io` 申请 90 天的 Let's Encrypt 证书；到期前 30 天自动续期，新证书无需重启即可生效
-- 有自己的域名时，在 `.env` 中设置 `MCP_GATEWAY_DOMAIN=你的域名`，并把域名 A 记录指向服务器
-- 首次签发失败时网关不会改用明文 HTTP。续期失败但旧证书仍有效时，会继续使用旧证书并重试
+npm 部署默认由网关管理 HTTPS：
 
-| 错误码 | 含义 | 怎么办 |
+- 自动探测公网 IP，并为 `<IP>.sslip.io` 申请 Let's Encrypt 证书。
+- 证书有效期为 90 天，到期前自动续期。
+- 使用自有域名时，在 `.env` 中设置 `MCP_GATEWAY_DOMAIN`，并将域名解析到服务器。
+- 首次签发失败时不会自动降级为明文 HTTP。
+
+Docker 部署使用 nginx 或 Caddy 终结 TLS，容器内保持 HTTP 模式，不要同时启用两套 HTTPS 终结逻辑。
+
+| 错误码 | 含义 | 处理方式 |
 |---|---|---|
-| **30** | 证书签发失败 | 检查 80/443 是否放行（防火墙 + 云安全组都要开）、80 是否被占用、能否连通 Let's Encrypt |
-| **31** | 拿不到公网 IP/域名 | 服务器没有公网 IP，或探测失败。有域名就设 `MCP_GATEWAY_DOMAIN`；纯内网用走 HTTP 模式 |
-| **32** | 端口被占用 | 换端口（`.env` 的 `MCP_GATEWAY_PORT`）或释放被占端口 |
+| `30` | 证书签发失败 | 检查 80/443、防火墙、安全组、DNS 和 Let's Encrypt 连通性 |
+| `31` | 无法确定公网 IP 或域名 | 配置 `MCP_GATEWAY_DOMAIN`，或改用反向代理 |
+| `32` | 端口被占用 | 释放端口或修改 `MCP_GATEWAY_PORT` |
 
-> 为什么地址里有个 `.sslip.io`？浏览器要求证书上的名字和网址一致，而 Let's Encrypt 不给纯 IP 签发证书，`<IP>.sslip.io` 是免费借名服务。直接输裸 IP 的 `https://` 仍会提示主机名不匹配，属正常现象——从 80 端口入口进会自动跳到正确地址。
-
-## 部署场景
-
-Let's Encrypt 的 http-01 验证需要其服务器能访问你的公网 80 端口。因此安全组、系统防火墙和 NAT 转发都要放行。不能开放 80 时，按下表选择部署方式：
-
-| 场景 | 做法 | 用户看到的 | 需要放行 |
-|---|---|---|---|
-| ✅ 公网服务器，80/443 都能开 | 什么都不用做（默认） | HTTPS（自动证书） | 80 + 443 |
-| ✅ 有自己的域名证书 | `.env` 填 `MCP_GATEWAY_TLS_CERT/KEY`，端口随便改 | HTTPS（你的证书） | 只有你的网关端口，80 完全不用 |
-| ✅ 机器上已有 nginx/caddy 反代 | 反代在 80/443 用真实证书终结 TLS 并转发到密码门；`.env` 设 `MCP_GATEWAY_AUTO_TLS=0` + 高位端口 + `MCP_GATEWAY_HOST=127.0.0.1` | HTTPS（反代的证书） | 反代管 80/443，密码门只监听回环 |
-| ✅ 域名挂在 Cloudflare | CF 边缘终结 TLS；源站仍应保留自动 HTTPS 或配置 Cloudflare Origin Certificate，CF 用 Full (strict) 回源 | HTTPS（CF 证书） | 源站只对 CF 开放 |
-| ⚠ 无公网 IP / 纯内网 | `scripts/start-http.mjs` 或 `.env` 设 `MCP_GATEWAY_AUTO_TLS=0` | HTTP 明文 | 任意端口 |
-| ⚠ 只有裸 IP 且 80 开不了 | 只能 HTTP（协议限制：http-01 固定走 80，裸 IP 又没有 DNS 可验证） | HTTP 明文 | 任意端口 |
-
-> 补充：http-01 验证只在**签发和续期**时访问 80 端口（每次几秒钟，约每 60 天一次）；`MCP_GATEWAY_REDIRECT_PORT` 默认就是 80，同时承担证书应答和 301 跳转两件事。
+`sslip.io` 用于让证书域名与访问地址匹配。直接使用裸 IP 访问 HTTPS 可能出现主机名不匹配，应使用 `<公网IP>.sslip.io` 或自有域名。
 
 ## HTTP 模式
 
-网关默认不以明文 HTTP 启动。只有内网场景且明确接受风险时，才使用这一模式：
+HTTP 只适用于明确接受明文传输风险的内网环境：
 
 ```bash
-node scripts/start-http.mjs [端口]    # 默认 8080，会弹 y/N 确认
+node scripts/start-http.mjs 8080
 ```
 
-脚本会先显示明文风险警告，输入 `y` 才启动。明文 HTTP 下密码与会话 Cookie 可能被网络中间人嗅探——公网部署请优先使用自动 HTTPS（默认模式，无需配置，只有证书实在签不出来时才用 HTTP 模式）。
+公网部署不要使用 HTTP。明文模式下密码和会话 Cookie 可能被网络中间人读取。
 
-更彻底的做法：`.env` 里写 `MCP_GATEWAY_AUTO_TLS=0` 和 `MCP_GATEWAY_PORT=8080`，之后 dsh 启动时插件会直接以 HTTP 模式拉起密码门。
+## 设置页
 
-## 设置页里的密码门卡片
+登录 dsh 后打开 **设置 → 插件**，可以使用 `dsh-passwords` 卡片：
 
-登录 dsh 后，打开 **设置 → 插件**，能看到"dsh-passwords · 密码门"卡片。里面可以：
-
-| 功能 | 谁可用 | 说明 |
+| 功能 | 权限 | 说明 |
 |---|---|---|
-| **远程设置 + 重载补丁** | 所有登录用户 | 远程设置已应用（强制启用）；dsh 升级后若设置页出现异常，点"重载补丁"一键修复（自动重启网页服务并刷新页面，不用 SSH） |
-| **修改密码** | 本人改自己；主用户可改任何人 | 改密后旧会话全部立即失效，需重新登录 |
-| **修改用户名** | 本人改自己；主用户可改任何人 | 改名后需用新用户名重新登录 |
-| **子用户管理** | 仅主用户 | 创建/删除子用户（子用户可用登录页进入，但没有管理权限） |
-| **子用户权限** | 仅主用户 | 工作区滑动开关、逐会话勾选、每小时 token 上限、每日时长上限、沙盒级别、上传/git 下载开关、封禁 |
-| **聊天 / 留言** | 所有登录用户 | 左下角聊天按钮，支持标签（议题/拉取请求/讨论/公告/问题）；子用户默认私信主用户，广播仅主用户可发；每个账号均可在设置中隐藏自己的聊天入口 |
+| 远程设置与补丁重载 | 所有登录用户 | dsh 升级后重新应用设置补丁 |
+| 修改密码 | 本人；主用户可管理所有人 | 修改后旧会话失效 |
+| 修改用户名 | 本人；主用户可管理所有人 | 修改后使用新用户名登录 |
+| 子用户管理 | 主用户 | 创建和删除子用户 |
+| 子用户权限 | 主用户 | 配置工作区、会话、配额、沙盒、上传、git 下载和封禁 |
+| 聊天与留言 | 所有登录用户 | 支持标签和账号级显示开关 |
 
-- **主用户** = 首次配置时创建的那个账号；之后添加的都是**子用户**。
-- 密码要求与登录页一致：至少 12 位，且大写、小写、数字、符号各至少一位。
+密码至少 12 位，并同时包含大写字母、小写字母、数字和符号。
 
-## 配置（.env 速查表）
+## 配置
 
-| 变量 | 默认 | 说明 |
+| 变量 | 默认值 | 说明 |
 |---|---|---|
-| `SETUP_KEY` | 安装脚本自动生成 | 首次配置密钥；首次配置成功后系统会轮换它，并自动固化 JWT/内部/数据库密钥。保留 `.env`，`setup-key.txt` 会自动删除 |
-| `MCP_JWT_SECRET` | 首次配置前从 SETUP_KEY 派生 | 会话签名密钥；首次配置后自动固化为独立值。手动更换会让现有登录会话失效 |
-| `MCP_DB_PATH` | `./data/platform.db` | 数据库文件（SQLite 自动建库，不需要 MySQL） |
-| `MCP_DB_ENC_KEY` | 安装脚本自动生成 | 数据加密密钥；首次配置后自动固化。**已使用的数据库绝不能换此值**，备份数据库必须同时备份 `.env` |
+| `SETUP_KEY` | 安装器生成 | 首次创建主用户的密钥；初始化成功后自动轮换 |
+| `MCP_JWT_SECRET` | 首次配置前由 `SETUP_KEY` 派生 | 会话签名密钥；手动更换会使现有会话失效 |
+| `MCP_INTERNAL_SECRET` | 首次配置时生成 | 内部请求认证密钥 |
+| `MCP_DB_ENC_KEY` | 安装器生成 | SQLite 敏感字段加密密钥，不能更换 |
+| `MCP_DB_PATH` | `./data/platform.db` | SQLite 数据库路径 |
 | `MCP_GATEWAY_HOST` | `0.0.0.0` | 网关监听地址 |
-| `MCP_GATEWAY_PORT` | 安装器首次安装为 `443`；未设置时为 `8080` | 网关端口 |
-| `MCP_GATEWAY_UPSTREAM` | `http://127.0.0.1:3080` | dsh 网页地址（插件自动指向 dsh 实际端口，一般不用改） |
-| `MCP_GATEWAY_REDIRECT_PORT` | `80` | 80 端口：ACME 证书验证 + 301 跳转 443 |
-| `MCP_GATEWAY_DOMAIN` | 空 | 自己的域名；留空自动用 `<公网IP>.sslip.io` |
-| `MCP_GATEWAY_AUTO_TLS` | 开 | 留空=自动；`0` 关闭（明文 HTTP，危险） |
-| `MCP_GATEWAY_ACME_EMAIL` | 空 | 证书到期提醒邮箱（可选） |
-| `MCP_GATEWAY_ACME_STAGING` | 关 | `1`=用 LE 测试环境签发（调试用，浏览器不信任） |
-| `MCP_GATEWAY_TLS_CERT` / `MCP_GATEWAY_TLS_KEY` | 空 | 两个都填 = 用你自己的证书（优先于自动 HTTPS） |
-| `MCP_GATEWAY_PUBLIC_HOST` | 空 | 跳转固定用的公网 IP/域名（防 Host 伪造反射） |
-| `MCP_DSH_ROOT` | 自动探测 | dsh 安装目录（`@deepseek-ai/dsh` 所在处），探测不到时手动指定 |
-| `MCP_DSH_RESTART_SERVICE` | `dsh-web` | 重载补丁后自动重启的 dsh systemd 服务名；显式留空不自动重启 |
-| `DSH_PASSWORDS_ENV_FILE` | 空 | 手动指定 `.env` 路径（插件自动传，一般不用填） |
+| `MCP_GATEWAY_PORT` | `8080` | 网关监听端口 |
+| `MCP_GATEWAY_UPSTREAM` | `http://127.0.0.1:3080` | dsh web 上游地址 |
+| `MCP_GATEWAY_DOMAIN` | 空 | 自有域名；npm 自动 HTTPS 使用此域名 |
+| `MCP_GATEWAY_AUTO_TLS` | 开启 | Docker 反代模式设为 `0` |
+| `MCP_GATEWAY_REDIRECT_PORT` | `80` | ACME 验证和 HTTP 跳转端口 |
+| `MCP_GATEWAY_PUBLIC_HOST` | 空 | 固定公网主机名，防止 Host 头反射 |
+| `MCP_DSH_ROOT` | 自动探测 | dsh 安装目录 |
+| `MCP_DSH_RESTART_SERVICE` | `dsh-web` | 补丁重载后的 systemd 服务名；留空表示不自动重启 |
+| `DSH_PASSWORDS_ENV_FILE` | 空 | 指定 `.env` 文件路径 |
+
+Docker 镜像会自动设置 Docker 运行所需的内部路径和端口。除 `DEEPSEEK_API_KEY`、公网主机名或反代场景外，通常不需要额外环境变量。
 
 ## 常用命令
 
+宿主机 npm 部署：
+
 ```bash
-node dist/cli.js audit --limit 20        # 看最近 20 条审计日志（自动解密）
-node dist/cli.js patch status            # 看远程设置补丁状态
-node dist/cli.js patch                   # 重载补丁（重新应用 + 重启 dsh-web）
-node dist/cli.js serve-gateway --port 9000   # 手动启动网关并换端口
-node scripts/start-http.mjs 8080         # 明文 HTTP 模式（危险，y/N 确认）
+dsh-passwords audit --limit 20
+dsh-passwords patch status
+dsh-passwords patch
+dsh-passwords serve-gateway --port 9000
+```
+
+Docker 部署：
+
+```bash
+docker ps --filter name=dsh-passwords
+docker logs dsh-passwords --tail 100
+docker restart dsh-passwords
+docker exec dsh-passwords cat /data/dsh-passwords/setup-key.txt
 ```
 
 ## 常见问题
 
-- **登录页一直显示"首次配置"？** 说明用户表是空的（新库或数据库被清过）。按页面提示输入 `SETUP_KEY` 重新创建主用户即可。
-- **忘记主用户密码？** 停服后跑 `node -e "const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync('data/platform.db');db.exec('DELETE FROM users;')"`，重启后重新走首次配置。
-- **dsh 控制台报错误码 30 / 31，密码门没起来？** 见上面「自动 HTTPS」的错误码表。修好后重启 dsh 会自动再拉起。
-- **443 端口绑定失败（非 root 用户）？** Linux 上 1024 以下端口需要 root：用 root/sudo 启动 dsh，或把 `MCP_GATEWAY_PORT` 改成高位端口（如 8443）并自行做端口转发。
-- **dsh 启动报 `duplicate loader entry id`？** 你在 profile 里用过 `dsh plugin add`。它会把 profile 里**所有**声明 `dsh.bundle` 的依赖全部加进 bundles 层，与已装的其它插件重复时 dsh 直接启动失败。卸载 dsh-passwords 后改用 `node scripts/register-plugin.mjs` 精确注册（只追加本插件一个条目）。
-- **npm 装 dsh 报 allow-scripts / node-pty 错？** npm 新版会拦截安装脚本，先放行再重装：`npm config set allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user`，然后重新 `npm install -g @deepseek-ai/dsh`（本项目自身没这个问题，是 dsh 的依赖要跑原生构建）。
-- **npm 用 `--prefix` 安装后运行 `dsh-passwords install` 报 TS5058？** 升级到 `dsh-passwords@2.5.4`。新版能正确识别被 npm 提升到 `<prefix>/node_modules` 的运行时依赖，不会再误触发源码编译。
-- **dsh 报 `crypto.randomUUID is not a function`？** 旧版网关没有 HTML 注入兼容层，更新代码后**强刷浏览器**（Ctrl+Shift+R）。
-- **数据库文件被偷了要紧吗？** 不要紧。敏感字段全是密文或散列，没有 `.env` 里的密钥解不开；密码本身只有 bcrypt 哈希，本来就没有明文。
-- **想换 `MCP_DB_ENC_KEY`？** 不行。这个密钥一旦启用就不能换，换了一切历史数据都解不开。备份数据库时必须连 `.env` 一起备份。
-- **每次进去都卡在 "Loading plugins…"？** 这是 dsh 在加载它的 ~30 个插件脚本，而 dsh 对插件/静态资源返回的是 `no-cache`，浏览器每次都要全部重新下载。网关已对 `/assets/*` 和带 `rev=` 的 `/plugins/*` 强制一年期 immutable 缓存（文件名/rev 都是内容哈希，dsh 更新会自动换新地址）。升级后**第一次访问仍会完整下载一次，之后刷新秒进**；如果还慢，强刷一次浏览器（Ctrl+Shift+R）让新响应头生效。
-- **访问有点慢？** 密码门每次请求只花约 1-2ms。先查 TLS 握手：`curl -s -o /dev/null -w "TCP:%{time_connect}s TLS:%{time_appconnect}s\n" https://你的地址/gateway/login`——TLS 那项正常是几十毫秒。TCP 快、TLS 也快但还是慢的话，就是你的网络到服务器的链路延迟，代码解决不了。
-
-## 手动安装（想自己一步步来）
-
-> Windows 用户建议直接用 `install.bat`；本节以 Linux 为例，步骤等价。
-
-1. `git clone https://github.com/slywalker2006/dsh-passwords && cd dsh-passwords`
-2. `npm install && npm run build`
-3. `cp .env.example .env`，把 `SETUP_KEY` 改成随机串（`openssl rand -hex 24`）
-4. 注册插件：`node scripts/register-plugin.mjs`（等价于把 `link:$(pwd)` 加进 `~/.dsh/profiles/web/package.json` 的 dependencies 和 `dsh.profile.bundles` 再 pnpm install。**不要用 `dsh plugin add`**，原因见常见问题）
-5. 应用补丁：`node dist/cli.js patch`（找不到 dsh 目录就用 `MCP_DSH_ROOT=/path/to/@deepseek-ai/dsh` 指定）
-
-之后同样：启动 dsh → 密码门自动拉起 → 打开 `https://<你的地址>` 完成首次配置。
+- **登录页仍显示首次配置**：数据库中没有主用户，按页面提示重新输入 `SETUP_KEY`。
+- **忘记主用户密码**：停止服务并备份数据库与 `.env` 后清空用户表，再重新进行首次配置。不要直接删除持久化卷。
+- **Docker 容器启动后无法访问**：先检查 `docker logs dsh-passwords`，再检查 `127.0.0.1:3088`、nginx/Caddy 配置以及 80/443 防火墙规则。
+- **反代后页面加载不完整或聊天断开**：确认反代已启用 HTTP/1.1、WebSocket、SSE，并关闭响应缓冲。
+- **dsh 报 `duplicate loader entry id`**：不要用 `dsh plugin add` 重排整个 profile。重新运行 `dsh-passwords install`，让注册脚本只追加 dsh-passwords 条目。
+- **npm 安装 dsh 时出现 `allow-scripts` 或 `node-pty` 错误**：这是 dsh 依赖的原生构建限制，不是 dsh-passwords 的依赖。按 dsh 的安装说明放行对应脚本后重新安装。
+- **设置页异常**：在设置卡片中执行补丁重载；如果仍然异常，运行 `dsh-passwords patch` 后重启 dsh web。
+- **想修改 `MCP_DB_ENC_KEY`**：不要修改。该密钥一旦用于数据库，替换后历史数据无法解密，备份数据库时必须同时备份 `.env`。
 
 ## 安全与隐私
 
-密码仅以 bcrypt 哈希保存。用户名、IP 和审计记录会加密写入数据库；登录成功和失败都会记录。密钥保存在部署目录的 `.env` 和数据库中，请一并备份并限制文件访问权限。
+密码只以 bcrypt 哈希保存。用户名、IP 和审计详情中的敏感字段使用数据库密钥加密。密钥保存在 `.env` 或 Docker 持久化卷中，请限制文件访问权限。
 
-- **防暴力破解**：连续输错密码锁定，锁定时长随失败轮次退避（1 → 5 → 15 → 60 分钟封顶）；主用户不会被多 IP 轮换全局锁死（仅单 IP 锁定，防账号级 DoS）。
-- **防密码喷洒（IP 级节流）**：同一 IP 在 15 分钟内累计 50 次登录失败 → 该 IP 全局节流 15 分钟（跨用户名累计，专门对付“单 IP 轮换多个用户名”的喷洒手法；节流期间不消耗 bcrypt，登录成功自动解除）。NAT/共享出口的大团队若误触发，等 15 分钟自动恢复，无需人工干预。
-- **会话吊销**：登出即服务端吊销（该 token 立即失效）；改密/改名后所有旧会话失效。
-- **子用户隔离（第三方插件面）**：dsh-ssh（SSH 主机/隧道）、skin-center、modlens、dsh-uploads 列表/删除等运维面端点仅主用户可用；上传/下载按 `allow_upload` / `allowGitDownload` 权限门控，**新子用户默认禁 git 下载**（含 dsh-uploads 下载等外带通道），主用户按需开启，子用户无法枚举或外带共享存储中的文件。
-- **慢速连接防护**：显式请求超时（半开头部 20s 切断）+ 并发连接上限（网关 512 / 跳转端 256），抵御 slowloris 类慢连接耗尽。
-- **路径归一化**：门卫从原始 URL 迭代解码（防双重编码）+ 压平斜杠 + WHATWG 归一化做前缀判定，`%2f..%2f` / `%252f..` 等 SPA 壳绕过变体全部拦截。
-- **生产加固建议**：
-  1. **首次配置成功后系统会自动删掉 `setup-key.txt`、把 JWT/内部/字段加密密钥固化成独立 `.env` 变量、并轮换 SETUP_KEY**——无需手动处理；如果你在已初始化的实例上部署（没走首次配置页），才需要手动删一次 `setup-key.txt`；
-  2. 首次配置后 `MCP_JWT_SECRET`、`MCP_INTERNAL_SECRET`、`MCP_DB_ENC_KEY` 已自动固化。**不要修改已使用数据库的 `MCP_DB_ENC_KEY`**；轮换 JWT/内部密钥会使现有会话失效，应先安排维护窗口；
-  3. 建议配 `MCP_DSH_RESTART_SERVICE` 指向正确的 systemd 服务名。
+- 连续登录失败会触发按账号和 IP 的退避与节流。
+- 登出、改密和改名会吊销相关会话。
+- 子用户不能访问未授权的工作区和会话。
+- dsh-ssh、skin-center、modlens、dsh-uploads 等运维端点按账号权限隔离；新子用户默认禁用 git 下载。
+- 网关对慢连接、并发连接和路径归一化进行防护。
+- 不要提交 `.env`、数据库文件、DeepSeek API key、Docker 凭据或 `setup-key.txt`。
 
 ## 语言
 
-界面为中英双语，跟随 dsh 的语言设置：
+- 登录页和首次配置页跟随 dsh 语言或浏览器语言，也可以在页面中切换中文和 English。
+- 设置页卡片跟随 dsh 的语言设置。
+- CLI 根据 `LANG`、`LC_ALL` 或 `LC_MESSAGES` 环境变量选择语言。
 
-- **登录页 / 首次配置页**：跟随 dsh 的语言（设置 → 通用 → 语言），其次跟随浏览器语言；页面右上角有 中文/English 切换，点一下即持久生效。
-- **设置页卡片**：跟随 dsh 的语言设置，切换语言即时生效。
-- **命令行（CLI）**：跟随 `LANG` / `LC_ALL` 环境变量（`en` 开头即英文）。
+## 版本兼容
 
-## 更新日志
+当前发布版本为 `dsh-passwords 2.6.0`，目标 dsh 版本为 `0.1.0-rc.8`。客户端槽位注册包含 keyed slot 所需的 `options.key`，可兼容 dsh `0.1.0-rc.6` 及更高版本，但建议使用 rc.8 以保持依赖和 profile 布局一致。
 
-### v2.5.4（2026-08-20）
-
-- 修复 `npm install --prefix <目录>` 后执行 `dsh-passwords install` 误触发编译、报 `TS5058` 的问题；感谢 Issue #7 的反馈。
-- 兼容 dsh `0.1.0-rc.8` 的 workspace 打包布局，并加固远程补丁预检、回滚校验和旧备份迁移。
-- 发布前全量复核：补全 `198.18.0.0/15` 公网 IP 判定、证书复用私钥校验、HTTP 模式管道输入、聊天错误文案和相关回归测试。
-
-### 历史兼容说明：keyed slot
-
-**问题**：dsh `0.1.0-rc.6+` 将 `settings.plugin.item` 等 UI 槽位升级为 keyed slot（键控槽位），注册时必须提供 `options.key` 属性。旧版 dsh-passwords 的客户端注册代码缺少 `key` 字段，导致插件加载时报错：
-
-```
-Failed to load plugins dsh-passwords
-failed to apply loader entry 007bd0cb (dsh-passwords):
-keyed slot "settings.plugin.item" requires options.key
-```
-
-**修复**：在 `src/client/index.tsx` 的三处 `ctx.slots.register()` 调用中均添加了 `key` 属性：
-
-| 槽位 | 注册 key |
-|---|---|
-| `settings.plugin.item` | `dsh-passwords` |
-| `shell.overlay` | `dsh-passwords-chat` |
-| `conversation.composer.dock` | `dsh-passwords-token` |
-
-**操作**：更新代码后重新编译（`npm run build`）并重启 dsh 即可。
+npm 包包含预构建的 `dist/`、TypeScript 源码、安装与注册脚本、Docker 文件、`cordis.yml`、README 和许可证。Docker 镜像使用与 npm `2.6.0` 一致的 `src/`、`dist/` 和 `scripts/`。
 
 ## License
 
-[BSD 3-Clause](./LICENSE) © 2026 slywalker2006——自由使用、修改、分发，保留版权声明即可。
+本项目采用 GPLv3，详见 [LICENSE](LICENSE)。
 
-本项目是 dsh 的独立扩展，与 DeepSeek 无隶属关系。dsh 本身按它自己的许可证（MIT）授权。
+本项目是 dsh 的独立扩展，与 DeepSeek 没有隶属关系。dsh 本身按其项目许可证授权。

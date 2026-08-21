@@ -1,6 +1,6 @@
 {
   "name": "dsh-passwords",
-  "version": "2.5.4",
+  "version": "2.6.0",
   "description": "dsh-passwords: a server-grade gateway that turns DeepSeek Harness into a multi-tenant platform — remote access + automatic HTTPS, per-subuser permissions & quotas, sandbox enforcement, first-run setup, SQLite auth with at-rest encryption, rate-limit and audit log (bilingual zh/en UI)",
   "type": "module",
   "main": "dist/index.js",
@@ -24,7 +24,7 @@
       "platform": "web"
     }
   },
-  "license": "BSD-3-Clause",
+  "license": "GPL-3.0-only",
   "engines": {
     "node": ">=22.5"
   },
@@ -42,6 +42,9 @@
   "files": [
     "dist/",
     "scripts/",
+    "docker/",
+    "src/",
+    "tsconfig.json",
     "install.sh",
     "install.bat",
     "cordis.yml",
@@ -73,9 +76,9 @@
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-client-locale": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-client-runtime": "^0.1.0-rc.7",
-    "@deepseek-ai/dsh-host-webserver": "^0.1.0-rc.7",
+    "@deepseek-ai/dsh-client-locale": "^0.1.0-rc.8",
+    "@deepseek-ai/dsh-client-runtime": "^0.1.0-rc.8",
+    "@deepseek-ai/dsh-host-webserver": "^0.1.0-rc.8",
     "@types/express": "^4.17.21",
     "@types/jsonwebtoken": "^9.0.7",
     "@types/node": "^22.0.0",

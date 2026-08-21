@@ -227,6 +227,13 @@ export class Database {
     this.crypto = crypto;
     // 网关进程与 dsh 插件进程共享同一个库文件：写锁竞争时等待而不是立刻报错
     this.db.exec('PRAGMA busy_timeout = 5000');
+    // WAL 允许网关读请求与插件写入并行，降低双进程共享 SQLite 时的锁竞争。
+    // 运行时检测结果由 health/启动日志暴露，若文件系统不支持则保留 SQLite 默认模式。
+    try {
+      this.db.exec('PRAGMA journal_mode = WAL');
+    } catch {
+      // 某些只读/特殊挂载环境不支持 WAL，不阻断启动。
+    }
   }
 
   private stmt(sql: string): StatementSync {

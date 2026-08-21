@@ -62,6 +62,7 @@ import {
 } from './permissions.js';
 import { findDshRoot, applyRemotePatch, restartDshWeb } from './patch.js';
 import { t, resolveGatewayLang, type Lang } from './i18n.js';
+import type { UpdateEngine } from './update.js';
 
 /** 网关内部扩展请求：权限执行时把用户/权限附在 req 上，供后续中间件与代理读取 */
 type Req = Request & {
@@ -668,6 +669,7 @@ export function createGatewayServer(
   config: PlatformConfig,
   auth: AuthService,
   db: Database,
+  updateEngine?: UpdateEngine,
 ): http.Server {
   const app = express();
   // 不泄露框架信息
@@ -688,6 +690,15 @@ export function createGatewayServer(
       next();
     });
   }
+
+  // 受反代/编排器调用的最小健康端点：不返回密钥、用户或上游详情。
+  app.get('/gateway/healthz', (_req, res) => {
+    res.status(200).json({ ok: true, service: 'dsh-passwords' });
+  });
+  app.get('/gateway/readyz', async (_req, res) => {
+    const healthy = await db.health().catch(() => false);
+    res.status(healthy ? 200 : 503).json({ ok: healthy, database: healthy });
+  });
 
   // 登录/配置页安全响应头（仅 /gateway/* 自有页面；代理的 dsh 响应不强制
   // CSP，避免破坏 dsh 前端）：禁嗅探、禁嵌入、无 Referrer、禁缓存、禁索引
@@ -1102,6 +1113,57 @@ export function createGatewayServer(
     }
     res.status(200).json({ ok: true });
   });
+
+  // ── 内部接口：自动更新引擎（插件经内部通道调用） ───────
+  // 仅限本机 dsh 插件调用（回环 + 恒定时间比对内部密钥）。action：
+  //   status — 查询引擎状态（当前/最新版本、下载进度、空闲窗剩余、手动命令）
+  //   check  — 立即检查 GitHub 并（环境支持时）开始限速下载
+  //   apply  — 立即安装重启（主用户按钮触发；引擎自带冷却）
+  //   set-auto — 持久化自动更新开关（仅主用户通过插件调用）
+  if (updateEngine !== undefined) {
+    app.post('/gateway/internal/update', express.json({ limit: '4kb' }), async (req, res) => {
+      const remoteIp = req.socket.remoteAddress ?? '';
+      if (remoteIp !== '127.0.0.1' && remoteIp !== '::1' && remoteIp !== '::ffff:127.0.0.1') {
+        res.status(403).json({ ok: false, error: 'forbidden' });
+        return;
+      }
+      const secret = typeof req.headers['x-internal-secret'] === 'string' ? req.headers['x-internal-secret'] : '';
+      const expected = config.internalSecret;
+      const a = Buffer.from(secret);
+      const b = Buffer.from(expected);
+      if (a.length !== b.length || !timingSafeEqual(a, b)) {
+        res.status(403).json({ ok: false, error: 'forbidden' });
+        return;
+      }
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const action = typeof body.action === 'string' ? body.action : '';
+      if (action === 'status') {
+        res.json({ ok: true, status: updateEngine.status() });
+        return;
+      }
+      if (action === 'check') {
+        // 检查本身异步；先立即返回「已触发」，结果由设置页轮询状态可见
+        void updateEngine.checkNow().catch(() => undefined);
+        res.json({ ok: true, started: true });
+        return;
+      }
+      if (action === 'apply') {
+        // applyNow 自带 ok/code/message（含冷却与未就绪分支）
+        res.json(await updateEngine.applyNow());
+        return;
+      }
+      if (action === 'set-auto') {
+        if (typeof body.enabled !== 'boolean') {
+          res.status(400).json({ ok: false, code: 'INVALID', error: 'enabled 必须为布尔值' });
+          return;
+        }
+        const effective = updateEngine.setAutoUpdateEnabled(body.enabled);
+        res.json({ ok: true, requested: body.enabled, enabled: effective, status: updateEngine.status() });
+        return;
+      }
+      res.status(400).json({ ok: false, code: 'INVALID', error: 'action 无效' });
+    });
+  }
 
   // ── 内部辅助：API 路由的输入清洗 ───────────────────────────
   // 严格非负整数：拒绝 1e3/0x10/小数/负数/超大值（之前 Number() 静默接受科学
@@ -1605,6 +1667,11 @@ export function createGatewayServer(
       // F-03：从【原始 req.url】迭代解码 + 压平斜杠 + 归一化后做前缀判定
       // （不能先用 new URL(parsed.pathname)——第一次归一化会把 //../ 的空段吞掉）
       const gatePath = gatePathOf(req.url ?? '/');
+      // 自动更新引擎的用户活动刷新：任何非内部通道请求都算用户活动（登录/API/页面/SSE），
+      // 内部通道（/gateway/internal/*）是引擎/插件自己的调用，不算使用。
+      if (updateEngine !== undefined && !gatePath.startsWith('/gateway/internal/')) {
+        updateEngine.bumpActivity();
+      }
       // /gateway 精确路径与 /gateway/* 都视为网关自有前缀——但只放行已知路由，
       // 未知子路径（如 /gateway/api/dsh-ssh/hosts 误拼接）直接 404，
       // 不透传到上游 dsh（否则未登录也返回 SPA 壳，泄露 window.__DSH_BOOT__ 插件清单）

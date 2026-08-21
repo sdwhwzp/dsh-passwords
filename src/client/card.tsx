@@ -33,6 +33,24 @@ export interface PatchState {
   workspaceSearch: boolean;
 }
 
+/** /api/dsh-passwords/update/status 的返回（与网关 UpdateStatus 镜像） */
+export interface UpdateInfo {
+  env: 'docker' | 'git' | 'npm-global' | 'npm-prefix' | 'unknown';
+  currentVersion: string;
+  latestVersion: string | null;
+  updateAvailable: boolean;
+  phase: 'idle' | 'downloading' | 'ready' | 'error';
+  downloadPercent: number | null;
+  pendingVersion: string | null;
+  idleRemainingMs: number | null;
+  autoUpdateEnabled: boolean;
+  autoInstallSupported: boolean;
+  manualCommand: string;
+  lastCheckedAt: string | null;
+  lastError: string | null;
+  applyCooldownRemainingMs: number;
+}
+
 export interface PermOverview {
   me: { id: number; username: string; role: 'admin' | 'user' };
   users: Array<{
@@ -102,7 +120,20 @@ function fmtTime(iso: string): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+type StatusTone = 'neutral' | 'success' | 'warning' | 'danger';
 
+function StatusPill(props: { tone?: StatusTone; children?: React.ReactNode }) {
+  return h('span', { className: `dshpw-status dshpw-status-${props.tone ?? 'neutral'}` }, props.children);
+}
+
+function SectionHeader(props: { label: React.ReactNode; status?: React.ReactNode; tone?: StatusTone }) {
+  return h(
+    'div',
+    { className: 'dshpw-section-head' },
+    h('div', { className: 'dshpw-section-title' }, h('span', { className: 'dshpw-label' }, props.label)),
+    props.status === undefined ? null : h(StatusPill, { tone: props.tone, children: props.status }),
+  );
+}
 
 type ApiError = { error?: string; code?: string };
 
@@ -146,9 +177,13 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
 
   const [data, setData] = useState<StateData | null>(null);
   const [patchState, setPatchState] = useState<PatchState | null>(null);
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [updateChecking, setUpdateChecking] = useState(false);
+  const [signOutBusy, setSignOutBusy] = useState(false);
 
   // 改密表单
   const [pwTarget, setPwTarget] = useState('');
@@ -239,6 +274,10 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
     api<{ status: PatchState | null }>('/api/dsh-passwords/patch/status')
       .then((r) => setPatchState(r.status))
       .catch(() => setPatchState(null));
+    // 更新状态独立拉取（失败只降级为状态未知，不阻塞主链）
+    api<{ ok?: boolean; status?: UpdateInfo }>('/api/dsh-passwords/update/status')
+      .then((r) => setUpdateInfo(r.status ?? null))
+      .catch(() => setUpdateInfo(null));
   };
 
   // 密码门已是独立设置分区页（settings.section），无需折叠：
@@ -311,6 +350,89 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
         throw new Error(t('patchReloadTimeout'));
       },
     );
+  };
+
+  /** 立即检查更新（仅主用户）：检查期间只锁定更新区，并轮询真实状态。 */
+  const checkUpdate = async () => {
+    if (updateBusy) return;
+    setUpdateBusy(true);
+    setUpdateChecking(true);
+    setError('');
+    setNotice('');
+    const previousCheckedAt = updateInfo?.lastCheckedAt ?? null;
+    try {
+      await api('/api/dsh-passwords/update/check', {});
+      const deadline = Date.now() + 30_000;
+      while (Date.now() < deadline) {
+        const response = await api<{ status?: UpdateInfo }>('/api/dsh-passwords/update/status');
+        const status = response.status;
+        if (status) {
+          setUpdateInfo(status);
+          // checkNow 在发起 GitHub 请求前写入 lastCheckedAt；下载阶段由状态行单独展示。
+          if (status.lastCheckedAt !== previousCheckedAt || status.phase === 'error' || status.phase === 'ready' || status.phase === 'downloading') {
+            break;
+          }
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 700));
+      }
+      setNotice(t('updateCheckStarted'));
+    } catch (e) {
+      setError(errText(e, trErr));
+    } finally {
+      setUpdateChecking(false);
+      setUpdateBusy(false);
+    }
+  };
+
+  /** 立即安装重启（仅主用户，引擎自带 10 分钟冷却）：只锁定更新区。 */
+  const applyUpdate = async () => {
+    if (updateBusy) return;
+    setUpdateBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const result = await api<{ ok?: boolean; message?: string; error?: string }>('/api/dsh-passwords/update/apply', {});
+      if (result.ok === false) throw new Error(result.message || result.error || t('updateApplyFailed'));
+      setNotice(t('updateApplyStarted'));
+      refresh();
+    } catch (e) {
+      setError(errText(e, trErr));
+    } finally {
+      setUpdateBusy(false);
+    }
+  };
+
+  /** 持久化自动更新开关；部署级强制关闭时以后端返回的实际状态为准。 */
+  const toggleAutoUpdate = async () => {
+    if (updateBusy) return;
+    const enabled = !(updateInfo?.autoUpdateEnabled ?? true);
+    setUpdateBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const response = await api<{ status?: UpdateInfo }>('/api/dsh-passwords/update/auto', { enabled });
+      setNotice(t('updateToggleSaved'));
+      if (response.status) setUpdateInfo(response.status);
+    } catch (e) {
+      setError(errText(e, trErr));
+    } finally {
+      setUpdateBusy(false);
+    }
+  };
+
+  /** 登出成功/失败都回到登录页；失败通常意味着会话已经失效。 */
+  const signOut = () => {
+    if (signOutBusy) return;
+    setSignOutBusy(true);
+    fetch('/gateway/logout', { method: 'POST', credentials: 'same-origin' })
+      .catch(() => undefined)
+      .finally(() => window.location.assign('/gateway/login'));
+  };
+
+  /** 空闲窗剩余毫秒 → 可读文案 */
+  const fmtIdle = (ms: number): string => {
+    const minutes = Math.max(1, Math.ceil(ms / 60000));
+    return t('updateIdleMinutes', { minutes: String(minutes) });
   };
 
   /** 聊天入口按账号跨设备同步；保存成功后立即通知 overlay，无需刷新页面。 */
@@ -476,6 +598,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
     patchState.workspaceSearch;
   const patchText =
     patchState === null ? t('patchUnknown') : patchOk ? t('patchOk') : t('patchBad');
+  const managedUsers = overview?.users.filter((u) => u.role === 'user') ?? [];
 
   const body = h(
     'div',
@@ -483,12 +606,27 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
     // ── 当前身份（原折叠头里的账号信息，独立分区后直接展示） ──
     h(
       'div',
-      { className: 'dshpw-row' },
-      h('span', null, t('identity')),
-      h('strong', null, me || '—'),
+      { className: 'dshpw-profile' },
+      h('span', { className: 'dshpw-avatar', 'aria-hidden': 'true' }, (me || '?').slice(0, 1).toUpperCase()),
+      h(
+        'div',
+        { className: 'dshpw-profile-copy' },
+        h('span', { className: 'dshpw-profile-label' }, t('identity')),
+        h('strong', null, me || '—'),
+      ),
       isAdmin
         ? h('span', { className: 'dshpw-badge admin' }, t('owner'))
         : h('span', { className: 'dshpw-badge' }, t('subuser')),
+      h(
+        'button',
+        {
+          className: 'dshpw-btn danger dshpw-signout',
+          disabled: signOutBusy || data === null,
+          onClick: signOut,
+          title: t('logoutHint'),
+        },
+        signOutBusy ? t('loggingOut') : t('logout'),
+      ),
     ),
     // ── 聊天入口：按当前账号跨设备同步的显示偏好 ──
     h(
@@ -522,28 +660,115 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
     h(
       'div',
       { className: 'dshpw-section' },
+      h(SectionHeader, { label: t('patch'), status: patchText, tone: patchOk ? 'success' : 'danger' }),
       h(
         'div',
-        { className: 'dshpw-section-head' },
-        h('span', { className: 'dshpw-label' }, t('patch')),
-        h('span', { className: patchOk ? 'dshpw-ok' : 'dshpw-error' }, patchText),
+        { className: 'dshpw-patch-actions' },
+        isAdmin &&
+          h(
+            'div',
+            { className: 'dshpw-patch-command' },
+            h('span', { className: 'dshpw-hint' }, t('patchHint2')),
+            h('button', { className: 'dshpw-btn', disabled: busy, onClick: reloadPatch }, t('reloadPatch')),
+          ),
       ),
+    ),
+
+    // ── 软件更新（自动/手动检查 + 空闲窗自动安装；状态所有用户可见，操作仅主用户） ──
+    h(
+      'div',
+      { className: 'dshpw-section' },
+      h(SectionHeader, {
+        label: t('update'),
+        status: updateChecking
+          ? h('span', { className: 'dshpw-update-status', role: 'status', 'aria-live': 'polite' }, h('span', { className: 'dshpw-spinner', 'aria-hidden': 'true' }), t('updateChecking'))
+          : updateInfo === null
+            ? t('updateUnknown')
+            : updateInfo.updateAvailable
+              ? t('updateAvailable')
+              : t('updateUpToDate'),
+        tone: updateChecking ? 'neutral' : updateInfo?.updateAvailable ? 'warning' : updateInfo === null ? 'neutral' : 'success',
+      }),
+      h(
+        'div',
+        { className: 'dshpw-row' },
+        h('span', null, t('updateCurrentVersion')),
+        h('strong', null, updateInfo?.currentVersion ?? '—'),
+        updateInfo?.latestVersion
+          ? h('span', { className: 'dshpw-hint' }, `${t('updateLatest')} ${updateInfo.latestVersion}`)
+          : null,
+      ),
+      updateInfo !== null
+        ? h(
+            'label',
+            { className: 'dshpw-switch' },
+            h(
+              'span',
+              { className: 'dshpw-switch-copy' },
+              h('strong', null, t('updateAutoToggle')),
+              h('small', null, updateInfo.autoUpdateEnabled ? t('updateEnabled') : t('updateDisabled')),
+            ),
+            h(
+              'span',
+              { className: 'dshpw-switch-control' },
+              h('input', {
+                type: 'checkbox',
+                checked: updateInfo.autoUpdateEnabled,
+                disabled: updateBusy || data === null || !isAdmin,
+                onChange: toggleAutoUpdate,
+                'aria-label': t('updateAutoToggle'),
+              }),
+              h('span', { className: 'dshpw-switch-track', 'aria-hidden': 'true' }, h('span', { className: 'dshpw-switch-thumb' })),
+            ),
+          )
+        : null,
+      updateInfo?.phase === 'downloading' && updateInfo.downloadPercent !== null
+        ? h(
+            'div',
+            { className: 'dshpw-row' },
+            h('span', null, t('updateDownloading')),
+            h('span', { className: 'dshpw-hint' }, `${Math.floor(updateInfo.downloadPercent)}%`),
+          )
+        : null,
+      updateInfo?.phase === 'ready' && updateInfo.idleRemainingMs !== null
+        ? h(
+            'div',
+            { className: 'dshpw-row' },
+            h('span', null, t('updateReadyWaitIdle')),
+            h('span', { className: 'dshpw-hint' }, fmtIdle(updateInfo.idleRemainingMs)),
+          )
+        : null,
+      updateInfo?.lastError
+        ? h('div', { className: 'dshpw-error' }, updateInfo.lastError)
+        : null,
+      updateInfo !== null && !updateInfo.autoInstallSupported
+        ? h(
+            'div',
+            { className: 'dshpw-row' },
+            h('span', null, t('updateManualCmd')),
+            h('code', { className: 'dshpw-hint' }, updateInfo.manualCommand || '—'),
+          )
+        : null,
       h(
         'div',
         { className: 'dshpw-action-row' },
-        h('span', { className: 'dshpw-hint dshpw-action-copy' }, t('patchHint1')),
-        // F-02：重载补丁会重启 dsh 网页服务，仅主用户可触发；子用户只读状态
         isAdmin &&
-          h('button', { className: 'dshpw-btn', disabled: busy, onClick: reloadPatch }, t('reloadPatch')),
+          h(
+            'button',
+            { className: 'dshpw-btn', disabled: updateBusy, onClick: checkUpdate },
+            updateChecking ? t('updateChecking') : t('updateCheck'),
+          ),
+        isAdmin &&
+          updateInfo?.phase === 'ready' &&
+          h('button', { className: 'dshpw-btn', disabled: updateBusy, onClick: applyUpdate }, t('updateApplyNow')),
       ),
-      h('div', { className: 'dshpw-hint' }, t('patchHint2')),
     ),
 
     // ── 修改密码 ──
     h(
       'div',
       { className: 'dshpw-section' },
-      h('span', { className: 'dshpw-label' }, t('chgPw')),
+      h(SectionHeader, { label: t('chgPw') }),
       isAdmin && h('span', { className: 'dshpw-hint' }, t('targetUser')),
       targetSelect(pwTarget, setPwTarget),
       // F-06：改自己需先验证当前密码（管理员改他人无需）
@@ -588,7 +813,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
     h(
       'div',
       { className: 'dshpw-section' },
-      h('span', { className: 'dshpw-label' }, t('chgName')),
+      h(SectionHeader, { label: t('chgName') }),
       isAdmin && h('span', { className: 'dshpw-hint' }, t('targetUser')),
       targetSelect(nameTarget, setNameTarget),
       h('input', {
@@ -612,7 +837,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
       h(
         'div',
         { className: 'dshpw-section' },
-        h('span', { className: 'dshpw-label' }, t('subusers')),
+        h(SectionHeader, { label: t('subusers') }),
         ...(data?.users ?? []).map((u) =>
           h(
             'div',
@@ -660,11 +885,14 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
       h(
         'div',
         { className: 'dshpw-section' },
-        h('span', { className: 'dshpw-label' }, t('perms')),
-        h('div', { className: 'dshpw-hint' }, t('permsHint')),
-        ...overview.users
-          .filter((u) => u.role === 'user')
-          .map((u) => {
+        h(SectionHeader, { label: t('perms'), status: managedUsers.length === 0 ? t('permsNoUsers') : undefined }),
+        managedUsers.length === 0
+          ? h('div', { className: 'dshpw-empty-state' }, h('strong', null, t('permsNoUsers')))
+          : h(
+              'div',
+              { className: 'dshpw-perms-content' },
+              h('div', { className: 'dshpw-hint' }, t('permsHint')),
+              ...managedUsers.map((u) => {
             const d = permDrafts[u.id];
             if (!d) return null;
             return h(
@@ -828,6 +1056,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
               ),
             );
           }),
+            ),
       ),
 
 

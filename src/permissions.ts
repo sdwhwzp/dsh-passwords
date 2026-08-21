@@ -792,8 +792,9 @@ export function filterSessionItems(
   cwdAllowed: ((cwd: string) => boolean) | null = null,
   depth = 0,
 ): unknown {
-  // 深度超限时丢弃子树；保留原对象会让深层 sessionId/cwd 绕过会话过滤和目录检查。
-  if (depth > 8) return null;
+  // 真实 session.list 的 permissions.options 投影可到深度 9；深度 16
+  // 仍保持有界递归，同时避免把合法权限选项截断为 null。
+  if (depth > 16) return null;
   if (value === null) return value;
   if (Array.isArray(value)) {
     const out: unknown[] = [];

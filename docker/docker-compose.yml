@@ -1,0 +1,20 @@
+services:
+  dsh-passwords:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+
+    restart: unless-stopped
+    environment:
+      MCP_GATEWAY_PUBLIC_HOST: ${MCP_GATEWAY_PUBLIC_HOST:-}
+      MCP_GATEWAY_UPSTREAM: ${MCP_GATEWAY_UPSTREAM:?set MCP_GATEWAY_UPSTREAM in docker/.env}
+      MCP_DSH_ROOT: /mnt/dsh
+    ports:
+      - "127.0.0.1:3088:3088"
+    volumes:
+      - dsh-passwords-state:/data/dsh-passwords
+      # Must be the same dsh installation/profile used by the dsh web service.
+      - ${DSH_ROOT_HOST:?set DSH_ROOT_HOST in docker/.env}:/mnt/dsh
+
+volumes:
+  dsh-passwords-state:

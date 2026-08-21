@@ -5,6 +5,11 @@
 //      - GET  /patch/status → 补丁当前状态（任何登录用户可看）
 //      - POST /patch/reload → 通知网关重载补丁并重启 dsh 网页服务
 //        （仅主用户可触发，10 分钟冷却；补丁强制启用，无开关）
+//   3. /api/dsh-passwords/update/* 自动更新路由：
+//      - GET  /update/status → 更新状态（当前/最新版本、下载进度、空闲窗、手动命令；任何登录用户可看）
+//      - POST /update/check   → 立即检查 GitHub 并（环境支持时）开始限速下载（仅主用户）
+//      - POST /update/apply   → 立即安装重启（仅主用户，引擎自带 10 分钟冷却；
+//        自动模式为平台连续空闲满 1 小时后网关自动安装重启，无需人工干预）
 //      dsh 升级覆盖补丁后，主用户在设置页点"重载补丁"即可，无需登录服务器。
 import type { Context } from '@deepseek-ai/cordis';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -132,6 +137,55 @@ function notifyGateway(cfg: PlatformConfig): void {
     // 网关没起来时静默：下次网关启动会自动应用补丁
   });
   req.end(body);
+}
+
+/** 通知网关自动更新引擎（内部通道带响应）：返回 {statusCode, body}；
+ *  网关不在线/超时（8s 上限）/非 JSON → null。status 是同步响应，
+ *  check/apply 为后台受理（立即返回 started/结果，下载与安装异步推进）。 */
+function callGatewayUpdate(
+  cfg: PlatformConfig,
+  action: 'status' | 'check' | 'apply' | 'set-auto',
+  extra: Record<string, unknown> = {},
+): Promise<{ statusCode: number; body: Record<string, unknown> } | null> {
+  return new Promise((resolve) => {
+    const mod = cfg.gateway.tls !== null ? https : http;
+    const url = `${cfg.gateway.tls !== null ? 'https' : 'http'}://127.0.0.1:${String(cfg.gateway.port)}/gateway/internal/update`;
+    const bodyJson = JSON.stringify({ action, ...extra });
+    const req = mod.request(
+      url,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-internal-secret': cfg.internalSecret,
+          'content-length': String(Buffer.byteLength(bodyJson)),
+        },
+        // 网关可能用自签证书，内部回环调用豁免校验
+        rejectUnauthorized: false,
+        timeout: 8000,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (c: Buffer) => chunks.push(c));
+        res.on('end', () => {
+          let body: Record<string, unknown> = {};
+          try {
+            const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
+            if (typeof parsed === 'object' && parsed !== null) body = parsed as Record<string, unknown>;
+          } catch {
+            /* 非 JSON 按空处理 */
+          }
+          resolve({ statusCode: res.statusCode ?? 500, body });
+        });
+      },
+    );
+    req.on('error', () => resolve(null));
+    req.on('timeout', () => {
+      req.destroy();
+      resolve(null);
+    });
+    req.end(bodyJson);
+  });
 }
 
 /** 通知网关进程：某用户会话缓存立即失效（改密/改名/删除后，消除 30 秒撤销窗口）。
@@ -596,6 +650,88 @@ export function apply(ctx: Context): void {
         // 补丁强制启用，重载只是重新应用 + 重启 dsh 网页服务
         notifyGateway(cfg);
         writeJson(res, 202, { ok: true, message: '补丁重载中：dsh 网页服务即将重启（约 3-5 秒）' });
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/api/dsh-passwords/update/status',
+      handler: async (req, res) => {
+        const caller = guard(req, res);
+        if (!caller) return;
+        if (!requireMethod(req, res, 'GET')) return;
+        const result = await callGatewayUpdate(cfg, 'status');
+        if (result === null) {
+          writeJson(res, 502, { ok: false, code: 'BAD_GATEWAY', error: '更新服务不可用（网关未就绪）' });
+          return;
+        }
+        writeJson(res, 200, result.body);
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/api/dsh-passwords/update/check',
+      handler: async (req, res) => {
+        const caller = guard(req, res);
+        if (!caller) return;
+        if (!requireMethod(req, res, 'POST')) return;
+        // 检查会触发 GitHub 请求并可能开始下载：仅主用户可触发（补丁重载同口径）
+        if (caller.role !== 'admin') {
+          writeJson(res, 403, { ok: false, code: 'FORBIDDEN', error: '仅主用户可操作' });
+          return;
+        }
+        const result = await callGatewayUpdate(cfg, 'check');
+        if (result === null) {
+          writeJson(res, 502, { ok: false, code: 'BAD_GATEWAY', error: '更新服务不可用（网关未就绪）' });
+          return;
+        }
+        writeJson(res, 202, result.body);
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/api/dsh-passwords/update/auto',
+      handler: async (req, res) => {
+        const caller = guard(req, res);
+        if (!caller) return;
+        if (!requireMethod(req, res, 'POST')) return;
+        if (caller.role !== 'admin') {
+          writeJson(res, 403, { ok: false, code: 'FORBIDDEN', error: '仅主用户可操作' });
+          return;
+        }
+        try {
+          const body = await readJsonBody(req);
+          if (typeof body.enabled !== 'boolean') {
+            writeJson(res, 400, { ok: false, code: 'INVALID', error: 'enabled 必须为布尔值' });
+            return;
+          }
+          const result = await callGatewayUpdate(cfg, 'set-auto', { enabled: body.enabled });
+          if (result === null) {
+            writeJson(res, 502, { ok: false, code: 'BAD_GATEWAY', error: '更新服务不可用（网关未就绪）' });
+            return;
+          }
+          writeJson(res, result.statusCode >= 200 && result.statusCode < 300 ? 200 : result.statusCode, result.body);
+        } catch (error) {
+          writeJson(res, 400, { ok: false, code: 'INVALID', error: error instanceof Error ? error.message : String(error) });
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/api/dsh-passwords/update/apply',
+      handler: async (req, res) => {
+        const caller = guard(req, res);
+        if (!caller) return;
+        if (!requireMethod(req, res, 'POST')) return;
+        if (caller.role !== 'admin') {
+          writeJson(res, 403, { ok: false, code: 'FORBIDDEN', error: '仅主用户可操作' });
+          return;
+        }
+        const result = await callGatewayUpdate(cfg, 'apply');
+        if (result === null) {
+          writeJson(res, 502, { ok: false, code: 'BAD_GATEWAY', error: '更新服务不可用（网关未就绪）' });
+          return;
+        }
+        writeJson(res, 200, result.body);
       },
     },
     {

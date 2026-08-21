@@ -52,15 +52,33 @@ if (existsSync(manifestPath)) {
 }
 
 // 2) 依赖 + bundles（只动 dsh-passwords 一个条目）
-manifest.dependencies = manifest.dependencies ?? {};
-manifest.dependencies['dsh-passwords'] = `link:${installRoot}`;
-manifest.dsh = manifest.dsh ?? {};
-manifest.dsh.profile = manifest.dsh.profile ?? {};
-manifest.dsh.profile.bundles = manifest.dsh.profile.bundles ?? [...WEB_BUNDLES];
+let manifestChanged = false;
+if (!manifest.dependencies) {
+  manifest.dependencies = {};
+  manifestChanged = true;
+}
+if (!manifest.dsh) {
+  manifest.dsh = {};
+  manifestChanged = true;
+}
+if (!manifest.dsh.profile) {
+  manifest.dsh.profile = {};
+  manifestChanged = true;
+}
+if (!manifest.dsh.profile.bundles) {
+  manifest.dsh.profile.bundles = [...WEB_BUNDLES];
+  manifestChanged = true;
+}
+const desiredLink = `link:${installRoot}`;
+manifestChanged ||= manifest.dependencies['dsh-passwords'] !== desiredLink;
+manifest.dependencies['dsh-passwords'] = desiredLink;
 if (!manifest.dsh.profile.bundles.includes('dsh-passwords')) {
   manifest.dsh.profile.bundles.push('dsh-passwords');
+  manifestChanged = true;
 }
-writeFileSync(manifestPath, JSON.stringify(manifest, undefined, 2) + '\n');
+if (manifestChanged || !existsSync(manifestPath)) {
+  writeFileSync(manifestPath, JSON.stringify(manifest, undefined, 2) + '\n');
+}
 
 // 3) 缺失的配套文件按 dsh 模板补齐（已存在的不动）
 const patchPath = path.join(profileDir, 'cordis.patch.yml');
@@ -68,8 +86,13 @@ if (!existsSync(patchPath)) writeFileSync(patchPath, PATCH_TEMPLATE);
 const workspacePath = path.join(profileDir, 'pnpm-workspace.yaml');
 if (!existsSync(workspacePath)) writeFileSync(workspacePath, WORKSPACE);
 
-// 4) pnpm 物化 link（Windows 需经 shell 调 .cmd shim）
+// 4) pnpm 物化 link（Windows 需经 shell 调 .cmd shim）。重复 Docker 启动时，
+// manifest 未变化且已物化的 link 仍在，就不再触发网络安装。
 console.log(`[dsh-passwords] profile: ${profileDir}`);
+if (!manifestChanged && existsSync(path.join(profileDir, 'node_modules', 'dsh-passwords'))) {
+  console.log('[dsh-passwords] profile dependencies already ready');
+  process.exit(0);
+}
 const result = spawnSync('pnpm', ['install'], {
   cwd: profileDir,
   stdio: 'inherit',

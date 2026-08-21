@@ -28,6 +28,7 @@ import {
   patchStatus,
 } from './patch.js';
 import { t, resolveCliLang } from './i18n.js';
+import { UpdateEngine } from './update.js';
 
 /** CLI 输出语言：LANG / LC_ALL / LC_MESSAGES 以 en 开头则英文，否则中文 */
 const lang = resolveCliLang();
@@ -128,9 +129,15 @@ function runPatch(argv: string[]): void {
     console.error(`[dsh-passwords] ${tr('cli.warnInvalidService', { service: config.patch.restartService })}`);
     process.exit(1);
   }
-  console.log(`${tr('cli.dshDir')}: ${root}`);
   if (action === 'status') {
     const status = patchStatus(root);
+    // Docker 初始化需要据此 fail-closed：文本输出面向人，JSON 输出面向脚本，
+    // 避免解析本地化文案后误把未打补丁的容器带到线上。
+    if (argv.includes('--json')) {
+      console.log(JSON.stringify({ dshRoot: root, ...status }));
+      return;
+    }
+    console.log(`${tr('cli.dshDir')}: ${root}`);
     console.log(
       `  ${tr('cli.hostMode')}: ${status.settingsHostMode ? tr('cli.patched') : tr('cli.notPatched')}`,
     );
@@ -140,8 +147,12 @@ function runPatch(argv: string[]): void {
     console.log(
       `  ${tr('cli.workspaceSearch')}: ${status.workspaceSearch ? tr('cli.patched') : tr('cli.notPatched')}`,
     );
+    console.log(
+      `  ${tr('cli.bindAll')}: ${status.bindAll ? tr('cli.patched') : tr('cli.notPatched')}`,
+    );
     return;
   }
+  console.log(`${tr('cli.dshDir')}: ${root}`);
   if (action === undefined || action === 'on' || action === 'reload') {
     const result = applyRemotePatch(root);
     console.log(`  ${tr('cli.result')}: ${result}`);
@@ -314,7 +325,9 @@ async function boot() {
   }
 
   const tlsOn = config.gateway.tls !== null;
-  const gateway = createGatewayServer(config, auth, db);
+  // 自动更新引擎（空闲窗安装 + 限速下载）；由网关中间件刷新活动时间
+  const updateEngine = new UpdateEngine(config, db);
+  const gateway = createGatewayServer(config, auth, db, updateEngine);
 
   // 端口被占用等监听失败：给出错误码退出（不崩溃在未处理的 error 事件上）
   gateway.on('error', (error) => {
@@ -336,6 +349,8 @@ async function boot() {
         `[dsh-passwords] ${tr('cli.publicUrl')}: https://${config.gateway.domain}${config.gateway.port === 443 ? '' : `:${config.gateway.port}`}`,
       );
     }
+    // 网关就绪后启动更新引擎：启动即查一次 + 每 24h 重检 + 空闲窗自动安装
+    updateEngine.start();
   });
 
   // ── 父进程看门狗：由 dsh 插件拉起时（DSH_GATEWAY_PARENT_PID），
@@ -378,11 +393,13 @@ async function boot() {
   }
 
   process.on('SIGINT', () => {
+    updateEngine.dispose();
     gateway.close();
     redirect?.close();
     process.exit(0);
   });
   process.on('SIGTERM', () => {
+    updateEngine.dispose();
     gateway.close();
     redirect?.close();
     process.exit(0);
@@ -406,7 +423,21 @@ function runInstall(): void {
   process.exit(result.status ?? 1);
 }
 
-// CLI 分发：install | audit | patch | serve-gateway（--version/-v 打印版本）
+/** Docker 专用初始化：状态卷、profile、反代 HTTP 配置与补丁校验。 */
+function runDockerInit(): void {
+  const script = path.join(PACKAGE_ROOT, 'scripts', 'docker-init.mjs');
+  if (!existsSync(script)) {
+    console.error(`[dsh-passwords] ${tr('cli.dockerInitScriptMissing', { path: script })}`);
+    process.exit(1);
+  }
+  const result = spawnSync(process.execPath, [script], {
+    cwd: PACKAGE_ROOT,
+    stdio: 'inherit',
+  });
+  process.exit(result.status ?? 1);
+}
+
+// CLI 分发：install | docker-init | audit | patch | serve-gateway（--version/-v 打印版本）
 if (process.argv[2] === '--version' || process.argv[2] === '-v' || process.argv[2] === 'version') {
   try {
     const pkg = JSON.parse(readFileSync(path.join(PACKAGE_ROOT, 'package.json'), 'utf8')) as {
@@ -418,6 +449,8 @@ if (process.argv[2] === '--version' || process.argv[2] === '-v' || process.argv[
   }
 } else if (process.argv[2] === 'install') {
   runInstall();
+} else if (process.argv[2] === 'docker-init') {
+  runDockerInit();
 } else if (process.argv[2] === 'audit') {
   runAudit(process.argv.slice(3));
 } else if (process.argv[2] === 'patch') {

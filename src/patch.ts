@@ -148,6 +148,25 @@ const WHITELIST_PACKAGE = '@deepseek-ai/dsh-host-apiproxy';
 const WHITELIST_FILE = path.join('lib', 'index.js');
 const WORKSPACE_PACKAGE = '@deepseek-ai/dsh-client-ui-workspace';
 const WORKSPACE_FILE = path.join('lib', 'client.js');
+const STARTUP_PACKAGE = '@deepseek-ai/dsh-web-app';
+const STARTUP_FILE = path.join('lib', 'startup.js');
+// dsh 上游安全闸：拒绑 0.0.0.0（防把可执行 RPC 暴露到网络）。分容器拓扑中网关容器
+// 要跨容器访问 dsh web，但 dsh 只允许回环——本子补丁默认关闭（MCP_DSH_PATCH_ALLOW_BIND_ALL=1
+// 开启），开启后允许 dsh 绑所有网卡，使另一容器的网关能访问到 dsh web。
+const BIND_ALL_MARK = 'dshpw-bindall';
+const BIND_ALL_FROM =
+  'if (options.host === "0.0.0.0") program.error("error: --host 0.0.0.0 is intentionally not supported yet for safety: it would expose remote code execution to the network; use 127.0.0.1 instead");';
+const BIND_ALL_TO =
+  `/* ${BIND_ALL_MARK} */ if (options.host === "0.0.0.0") console.warn("[dshpw] --host 0.0.0.0 enabled for gateway reachability");`;
+// 结构化闸签名：不依赖完整报错文案——上游改措辞仍能识别「拒绑闸还在」，
+// 真正移除拒绑（原生支持 0.0.0.0）才不匹配。用于 fail-closed 状态判定。
+const BIND_ALL_GUARD_RE = /program\.error\(\s*['"][^'"]*0\.0\.0\.0[^'"]*['"]/;;
+
+/** 分容器拓扑开关：MCP_DSH_PATCH_ALLOW_BIND_ALL=1/true/yes 时允许 dsh web 绑 0.0.0.0 */
+function bindAllEnabled(): boolean {
+  const raw = (process.env.MCP_DSH_PATCH_ALLOW_BIND_ALL ?? '').trim().toLowerCase();
+  return ['1', 'true', 'yes'].includes(raw);
+}
 
 const SETTINGS_FROM = 'connection.isLoopback ? "host" : "memory"';
 const SETTINGS_TO = '"host"';
@@ -236,7 +255,12 @@ export function findDshRoot(explicit: string): string | null {
 /** 补丁当前状态（用于 status 展示） */
 export function patchStatus(
   dshRoot: string,
-): { settingsHostMode: boolean; whitelist: boolean; workspaceSearch: boolean } {
+): {
+  settingsHostMode: boolean;
+  whitelist: boolean;
+  workspaceSearch: boolean;
+  bindAll: boolean;
+} {
   const settingsFile = findDshBundleFile(dshRoot, SETTINGS_PACKAGE, SETTINGS_FILE);
   const wlFile = findDshBundleFile(dshRoot, WHITELIST_PACKAGE, WHITELIST_FILE);
   const wsFile = findDshBundleFile(dshRoot, WORKSPACE_PACKAGE, WORKSPACE_FILE);
@@ -268,7 +292,20 @@ export function patchStatus(
       // 搜索框自动填充加固：v2 标记存在才算完成；旧 v1（仅 off+name）会自动升级
       (ws.includes(SEARCH_AUTOFILL_HARDEN_MARK) || !SEARCH_AUTOFILL_RE.test(ws));
   } catch { /* 同上 */ }
-  return { settingsHostMode, whitelist, workspaceSearch };
+  let bindAll = true;
+  try {
+    if (bindAllEnabled()) {
+      const stFile = findDshBundleFile(dshRoot, STARTUP_PACKAGE, STARTUP_FILE);
+      // fail-closed：已打（标记存在）或上游原生移除拒绑闸才算满足；精确串
+      // 失配 + 无标记（上游改了报错文案）必须报未打，否则 Docker 校验会
+      // 静默放行实际未打补丁的容器。
+      const st = stFile === null ? null : readFileSync(stFile, 'utf8');
+      bindAll = st !== null && (st.includes(BIND_ALL_MARK) || !BIND_ALL_GUARD_RE.test(st));
+    }
+  } catch {
+    bindAll = false;
+  }
+  return { settingsHostMode, whitelist, workspaceSearch, bindAll };
 }
 
 /** 应用补丁（幂等）：返回 'applied'（本次有改动）或 'unchanged' 或 'missing'（目标文件不在） */
@@ -383,6 +420,34 @@ export function applyRemotePatch(dshRoot: string): 'applied' | 'unchanged' | 'mi
     }
   }
 
+  // 4) 允许 dsh web 绑 0.0.0.0（默认关闭：MCP_DSH_PATCH_ALLOW_BIND_ALL=1 才打；
+  //    分容器拓扑需要网关容器跨容器访问 dsh web）。目标文件缺失则跳过，不影响 1-3。
+  //    开关关闭时反向自愈：恢复曾打过的 startup.js（见下）。
+  if (bindAllEnabled()) {
+    const stFile = findDshBundleFile(dshRoot, STARTUP_PACKAGE, STARTUP_FILE);
+    if (stFile !== null) {
+      const st = readFileSync(stFile, 'utf8');
+      migrateLegacyBackup(stFile, st, (original) =>
+        original.includes(BIND_ALL_FROM) ? original.replace(BIND_ALL_FROM, BIND_ALL_TO) : null,
+      );
+      if (st.includes(BIND_ALL_FROM)) {
+        const patched = st.replace(BIND_ALL_FROM, BIND_ALL_TO);
+        ensureOriginalBackup(stFile, st, patched);
+        writeFileSync(stFile, patched);
+        changed = true;
+      }
+    }
+  } else {
+    // 开关关闭时自愈：曾开启过的部署（共享卷/复用状态卷）会残留已移除闸的
+    // startup.js，静默保留等于关闭开关后安全闸仍未恢复。仅在当前内容与备份
+    // 元数据完全吻合时恢复（与 rollbackPatch 同口径，防跨版本污染）。
+    const stFile = findDshBundleFile(dshRoot, STARTUP_PACKAGE, STARTUP_FILE);
+    if (stFile !== null && currentMatchesPatchedBackup(stFile)) {
+      writeFileSync(stFile, readFileSync(stFile + BAK_SUFFIX));
+      changed = true;
+    }
+  }
+
   return changed ? 'applied' : 'unchanged';
 }
 
@@ -395,8 +460,9 @@ export function rollbackPatch(dshRoot: string): 'rolled-back' | 'no-backup' | 'm
   const wlFile = findDshBundleFile(dshRoot, WHITELIST_PACKAGE, WHITELIST_FILE);
   if (settingsFile === null || wlFile === null) return 'missing';
   const wsFile = findDshBundleFile(dshRoot, WORKSPACE_PACKAGE, WORKSPACE_FILE);
+  const stFile = findDshBundleFile(dshRoot, STARTUP_PACKAGE, STARTUP_FILE);
   let changed = false;
-  for (const target of [settingsFile, wlFile, wsFile]) {
+  for (const target of [settingsFile, wlFile, wsFile, stFile]) {
     if (target === null) continue;
     // 只恢复带哈希元数据且内容未被篡改的当前版本原始备份；历史遗留的
     // .bak-dshpw 没有元数据时拒绝恢复，避免跨 dsh 版本回滚污染。
