@@ -95,9 +95,49 @@ test('collectSessionCwdFromWorkspaces：活动 sessionIds 映射到工作区路�
 
 test('深度超限：不可验证会话子树不原样透传', () => {
   let value: Record<string, unknown> = { sessionId: 'secret', cwd: '/secret' };
-  for (let i = 0; i < 10; i++) value = { nested: value };
+  for (let i = 0; i < 20; i++) value = { nested: value };
   const out = filterSessionItems(value, () => true) as Record<string, unknown>;
   let cursor: unknown = out;
-  for (let i = 0; i < 10; i++) cursor = (cursor as Record<string, unknown>)?.nested;
+  for (let i = 0; i < 20; i++) cursor = (cursor as Record<string, unknown>)?.nested;
   assert.ok(cursor === null || cursor === undefined);
+});
+
+test('深度上限内：permissions.options 深层投影不被截断', () => {
+  // 回归：真实 session.list 的 permissions.options 选项对象位于深度 9
+  // （result→value→items→[i]→projections→values→permissions→options→[o]），
+  // 旧上限 8 会把它置 null，前端 PermissionSelect 遍历 null 崩溃。
+  const value = {
+    result: {
+      value: {
+        items: [
+          {
+            sessionId: 's-1',
+            cwd: '/allowed',
+            projections: {
+              values: {
+                permissions: {
+                  options: [
+                    { value: 'read-only', name: 'read-only' },
+                    { value: 'workspace-write', name: 'workspace-write' },
+                    { value: 'danger-full-access', name: 'danger-full-access' },
+                  ],
+                  currentValue: 'workspace-write',
+                },
+              },
+            },
+          },
+        ],
+      },
+    },
+  };
+  const out = filterSessionItems(value, () => true, (cwd) => cwd === '/allowed') as typeof value;
+  const options = out.result.value.items[0].projections.values.permissions.options;
+  assert.deepEqual(
+    options,
+    [
+      { value: 'read-only', name: 'read-only' },
+      { value: 'workspace-write', name: 'workspace-write' },
+      { value: 'danger-full-access', name: 'danger-full-access' },
+    ],
+  );
 });

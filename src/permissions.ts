@@ -793,7 +793,12 @@ export function filterSessionItems(
   depth = 0,
 ): unknown {
   // 深度超限时丢弃子树；保留原对象会让深层 sessionId/cwd 绕过会话过滤和目录检查。
-  if (depth > 8) return null;
+  // 上限 16 而非 8：真实 session.list 的 typert 信封是
+  //   result → value → items → [i] → projections → values → permissions → options → [o]
+  // 选项对象正好位于深度 9，旧上限 8 会把 permissions.options 元素置 null，
+  // 前端 PermissionSelect 遍历 null 直接崩溃（整条 composer 槽被卸载，子用户
+  // 看不到输入框）。16 仍是有界递归（防上游投毒深嵌套 JSON 栈溢出 DoS）。
+  if (depth > 16) return null;
   if (value === null) return value;
   if (Array.isArray(value)) {
     const out: unknown[] = [];
