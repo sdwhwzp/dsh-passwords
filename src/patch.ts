@@ -124,18 +124,30 @@ function migrateLegacyBackup(
   }
 }
 
-/** 客户端设置持久化文件（强制 host 模式） */
-const SETTINGS_TARGET = path.join(
-  'node_modules', '@deepseek-ai', 'dsh-client-ui-settings', 'lib', 'client.js',
-);
-/** 主机侧 settings 白名单文件（补插件命名空间） */
-const WHITELIST_TARGET = path.join(
-  'node_modules', '@deepseek-ai', 'dsh-host-apiproxy', 'lib', 'index.js',
-);
-/** 工作区侧栏搜索文件（无结果搜索自动收起子补丁） */
-const WORKSPACE_TARGET = path.join(
-  'node_modules', '@deepseek-ai', 'dsh-client-ui-workspace', 'lib', 'client.js',
-);
+/**
+ * 查找 dsh 运行时实际会解析到的 bundle 文件。
+ *
+ * 常规全局安装把依赖嵌套在 `dsh/node_modules`；`npm install --prefix` 则可能把
+ * 它们提升到 prefix 的 `node_modules`。补丁必须跟随 Node 从 dsh 包目录逐级向上
+ * 查找 node_modules 的规则，不能假设依赖永远嵌套在 dsh 包内（Issue #8 Docker）。
+ */
+function findDshBundleFile(dshRoot: string, packageName: string, relativePath: string): string | null {
+  let dir = dshRoot;
+  for (;;) {
+    const candidate = path.join(dir, 'node_modules', packageName, relativePath);
+    if (existsSync(candidate)) return candidate;
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+const SETTINGS_PACKAGE = '@deepseek-ai/dsh-client-ui-settings';
+const SETTINGS_FILE = path.join('lib', 'client.js');
+const WHITELIST_PACKAGE = '@deepseek-ai/dsh-host-apiproxy';
+const WHITELIST_FILE = path.join('lib', 'index.js');
+const WORKSPACE_PACKAGE = '@deepseek-ai/dsh-client-ui-workspace';
+const WORKSPACE_FILE = path.join('lib', 'client.js');
 
 const SETTINGS_FROM = 'connection.isLoopback ? "host" : "memory"';
 const SETTINGS_TO = '"host"';
@@ -225,22 +237,25 @@ export function findDshRoot(explicit: string): string | null {
 export function patchStatus(
   dshRoot: string,
 ): { settingsHostMode: boolean; whitelist: boolean; workspaceSearch: boolean } {
-  const settingsFile = path.join(dshRoot, SETTINGS_TARGET);
-  const wlFile = path.join(dshRoot, WHITELIST_TARGET);
-  const wsFile = path.join(dshRoot, WORKSPACE_TARGET);
+  const settingsFile = findDshBundleFile(dshRoot, SETTINGS_PACKAGE, SETTINGS_FILE);
+  const wlFile = findDshBundleFile(dshRoot, WHITELIST_PACKAGE, WHITELIST_FILE);
+  const wsFile = findDshBundleFile(dshRoot, WORKSPACE_PACKAGE, WORKSPACE_FILE);
   let settingsHostMode = false;
   let whitelist = false;
   let workspaceSearch = false;
   try {
+    if (settingsFile === null) throw new Error('settings bundle not found');
     const s = readFileSync(settingsFile, 'utf8');
     settingsHostMode = !s.includes(SETTINGS_FROM) && s.includes(SETTINGS_TO);
   } catch { /* 文件缺失按未打处理 */ }
   try {
+    if (wlFile === null) throw new Error('apiproxy bundle not found');
     const w = readFileSync(wlFile, 'utf8');
     // rc.7+ 已移除 WEB_SETTINGS_NAMESPACES 白名单 → 原生支持，视为已满足
     whitelist = !whitelistPatchApplicable(w) || hasSettingsNamespace(w, 'dsh-passwords');
   } catch { /* 同上 */ }
   try {
+    if (wsFile === null) throw new Error('workspace bundle not found');
     const ws = readFileSync(wsFile, 'utf8');
     // 打过 = 不再含旧行为串 + 含子补丁标记（文件缺失按未打处理）
     // 括号显式分组：自动填充「已打 v2 标记」与「不适用（RE 无匹配）」必须
@@ -258,9 +273,9 @@ export function patchStatus(
 
 /** 应用补丁（幂等）：返回 'applied'（本次有改动）或 'unchanged' 或 'missing'（目标文件不在） */
 export function applyRemotePatch(dshRoot: string): 'applied' | 'unchanged' | 'missing' {
-  const settingsFile = path.join(dshRoot, SETTINGS_TARGET);
-  const wlFile = path.join(dshRoot, WHITELIST_TARGET);
-  if (!existsSync(settingsFile) || !existsSync(wlFile)) return 'missing';
+  const settingsFile = findDshBundleFile(dshRoot, SETTINGS_PACKAGE, SETTINGS_FILE);
+  const wlFile = findDshBundleFile(dshRoot, WHITELIST_PACKAGE, WHITELIST_FILE);
+  if (settingsFile === null || wlFile === null) return 'missing';
   let changed = false;
 
   // 先完整预检白名单目标。不能先写 settings 再发现白名单结构损坏，
@@ -313,8 +328,8 @@ export function applyRemotePatch(dshRoot: string): 'applied' | 'unchanged' | 'mi
   // 3) 工作区侧栏搜索两个子补丁（可选：目标文件不存在则跳过，不影响 1/2）
   //    ① 无结果搜索点击别处自动收起并清空（消除「无匹配会话」死状态滞留）
   //    ② 搜索框 autocomplete="off" + 中性 name（阻断密码管理器把搜索框当用户名框自动填充）
-  const wsFile = path.join(dshRoot, WORKSPACE_TARGET);
-  if (existsSync(wsFile)) {
+  const wsFile = findDshBundleFile(dshRoot, WORKSPACE_PACKAGE, WORKSPACE_FILE);
+  if (wsFile !== null) {
     const ws = readFileSync(wsFile, 'utf8');
     migrateLegacyBackup(wsFile, ws, (original) => {
       let next = original;
@@ -376,11 +391,13 @@ export function applyRemotePatch(dshRoot: string): 'applied' | 'unchanged' | 'mi
  * 备份不存在（从未打过补丁）时返回 'no-backup'。
  */
 export function rollbackPatch(dshRoot: string): 'rolled-back' | 'no-backup' | 'missing' {
-  const settingsFile = path.join(dshRoot, SETTINGS_TARGET);
-  const wlFile = path.join(dshRoot, WHITELIST_TARGET);
-  if (!existsSync(settingsFile) || !existsSync(wlFile)) return 'missing';
+  const settingsFile = findDshBundleFile(dshRoot, SETTINGS_PACKAGE, SETTINGS_FILE);
+  const wlFile = findDshBundleFile(dshRoot, WHITELIST_PACKAGE, WHITELIST_FILE);
+  if (settingsFile === null || wlFile === null) return 'missing';
+  const wsFile = findDshBundleFile(dshRoot, WORKSPACE_PACKAGE, WORKSPACE_FILE);
   let changed = false;
-  for (const target of [settingsFile, wlFile, path.join(dshRoot, WORKSPACE_TARGET)]) {
+  for (const target of [settingsFile, wlFile, wsFile]) {
+    if (target === null) continue;
     // 只恢复带哈希元数据且内容未被篡改的当前版本原始备份；历史遗留的
     // .bak-dshpw 没有元数据时拒绝恢复，避免跨 dsh 版本回滚污染。
     if (currentMatchesPatchedBackup(target)) {

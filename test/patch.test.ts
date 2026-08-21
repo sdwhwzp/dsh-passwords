@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { applyRemotePatch, patchStatus, rollbackPatch } from '../src/patch.js';
@@ -26,6 +26,31 @@ function makeDshRoot(
     writeFileSync(path.join(wsDir, 'client.js'), workspaceContent);
   }
   return { root, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+}
+
+/**
+ * 模拟 npm install --prefix：dsh 位于 prefix/node_modules/@deepseek-ai/dsh，
+ * 其依赖被 npm 提升到 prefix/node_modules/@deepseek-ai/*，而非 dsh/node_modules。
+ */
+function makeHoistedDshRoot(
+  apiproxyContent: string,
+  settingsContent: string,
+  workspaceContent: string,
+): { dshRoot: string; prefix: string; cleanup: () => void } {
+  const prefix = mkdtempSync(path.join(tmpdir(), 'dshpw-hoisted-'));
+  const dshRoot = path.join(prefix, 'node_modules', '@deepseek-ai', 'dsh');
+  const packagesRoot = path.join(prefix, 'node_modules', '@deepseek-ai');
+  mkdirSync(dshRoot, { recursive: true });
+  const settingsDir = path.join(packagesRoot, 'dsh-client-ui-settings', 'lib');
+  const apiproxyDir = path.join(packagesRoot, 'dsh-host-apiproxy', 'lib');
+  const workspaceDir = path.join(packagesRoot, 'dsh-client-ui-workspace', 'lib');
+  mkdirSync(settingsDir, { recursive: true });
+  mkdirSync(apiproxyDir, { recursive: true });
+  mkdirSync(workspaceDir, { recursive: true });
+  writeFileSync(path.join(settingsDir, 'client.js'), settingsContent);
+  writeFileSync(path.join(apiproxyDir, 'index.js'), apiproxyContent);
+  writeFileSync(path.join(workspaceDir, 'client.js'), workspaceContent);
+  return { dshRoot, prefix, cleanup: () => rmSync(prefix, { recursive: true, force: true }) };
 }
 
 const RC6_APIPROXY = 'const WEB_SETTINGS_NAMESPACES = [\n\t"dsh-web-ui",\n\t"dsh-ssh"\n];\n';
@@ -164,6 +189,23 @@ test('补丁：工作区搜索粘滞态 → 无结果时点击别处自动收起
     // 幂等：再跑一次必须 unchanged
     const again = applyRemotePatch(root);
     assert.equal(again, 'unchanged', '幂等：二次应用不再改动');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Issue #8 Docker：npm --prefix 提升的 dsh 依赖可被定位、打补丁与回滚', () => {
+  const { dshRoot, prefix, cleanup } = makeHoistedDshRoot(RC7_APIPROXY, RC7_SETTINGS_UNPATCHED, WORKSPACE_STICKY);
+  try {
+    const settingsFile = path.join(prefix, 'node_modules', '@deepseek-ai', 'dsh-client-ui-settings', 'lib', 'client.js');
+    const nestedSettings = path.join(dshRoot, 'node_modules', '@deepseek-ai', 'dsh-client-ui-settings', 'lib', 'client.js');
+    assert.equal(readFileSync(settingsFile, 'utf8').includes('connection.isLoopback'), true, '提升布局的真实目标未打');
+    assert.equal(applyRemotePatch(dshRoot), 'applied', '应按 Node 上级 node_modules 规则命中提升依赖');
+    assert.equal(patchStatus(dshRoot).settingsHostMode, true, '状态应读取提升后的目标文件');
+    assert.equal(readFileSync(settingsFile, 'utf8').includes('connection.isLoopback'), false, '提升的 settings bundle 已强制 host 模式');
+    assert.equal(existsSync(nestedSettings), false, '不得创建或误修改 dsh/node_modules 下不存在的副本');
+    assert.equal(rollbackPatch(dshRoot), 'rolled-back', '提升布局也应可回滚');
+    assert.equal(readFileSync(settingsFile, 'utf8'), RC7_SETTINGS_UNPATCHED, '回滚应恢复提升位置的原始 bundle');
   } finally {
     cleanup();
   }
