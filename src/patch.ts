@@ -78,6 +78,17 @@ function ensureOriginalBackup(target: string, content: string, patchedContent: s
     writeFileSync(backupMetaPath(target), `${JSON.stringify({ originalSha256, patchedSha256 })}\n`);
     return;
   }
+  // 补丁算法升级时，当前文件可能正好是上一版记录的 patched 内容（例如
+  // rc.8 Issue #8 的旧实现只替换首个三元，新实现接着补全余下位置）。此时
+  // 仍应保留已有的真正原始 bundle；把当前内容当新“原始文件”会让 rollback
+  // 只能恢复半补丁，无法恢复 dsh 原文件。
+  if (existing?.patchedSha256 === originalSha256) {
+    writeFileSync(
+      backupMetaPath(target),
+      `${JSON.stringify({ originalSha256: existing.originalSha256, patchedSha256 })}\n`,
+    );
+    return;
+  }
   saveOriginalBackup(target, content, patchedContent);
 }
 

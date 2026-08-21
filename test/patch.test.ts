@@ -1,10 +1,11 @@
 // 补丁机制回归测试：兼容 rc.6（WEB_SETTINGS_NAMESPACES 白名单）与 rc.7（机制移除）
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { applyRemotePatch, patchStatus } from '../src/patch.js';
+import { applyRemotePatch, patchStatus, rollbackPatch } from '../src/patch.js';
 
 /** 构建一个模拟 dsh 根目录（含两个必选补丁目标文件 + 可选 workspace 文件），返回 root 与清理函数 */
 function makeDshRoot(
@@ -163,6 +164,33 @@ test('补丁：工作区搜索粘滞态 → 无结果时点击别处自动收起
     // 幂等：再跑一次必须 unchanged
     const again = applyRemotePatch(root);
     assert.equal(again, 'unchanged', '幂等：二次应用不再改动');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Issue #8 升级兼容：旧半补丁补全后 patch off 仍恢复原始 rc.8 bundle', () => {
+  const { root, cleanup } = makeDshRoot(RC7_APIPROXY, RC8_SETTINGS_UNPATCHED);
+  try {
+    const settingsFile = path.join(root, 'node_modules', '@deepseek-ai', 'dsh-client-ui-settings', 'lib', 'client.js');
+    const halfPatched = RC8_SETTINGS_UNPATCHED.replace(
+      'connection.isLoopback ? "host" : "memory"',
+      '"host"',
+    );
+    const sha256 = (content: string) => createHash('sha256').update(content).digest('hex');
+
+    // 模拟旧代码的首轮 String.replace：原始备份正确，但 patched 元数据指向半补丁。
+    writeFileSync(settingsFile + '.bak-dshpw', RC8_SETTINGS_UNPATCHED);
+    writeFileSync(
+      settingsFile + '.sha256-dshpw',
+      `${JSON.stringify({ originalSha256: sha256(RC8_SETTINGS_UNPATCHED), patchedSha256: sha256(halfPatched) })}\n`,
+    );
+    writeFileSync(settingsFile, halfPatched);
+
+    assert.equal(applyRemotePatch(root), 'applied', '新版本应补全第二处三元');
+    assert.equal(readFileSync(settingsFile, 'utf8').includes('connection.isLoopback ? "host" : "memory"'), false);
+    assert.equal(rollbackPatch(root), 'rolled-back', '补全后的文件仍可回滚');
+    assert.equal(readFileSync(settingsFile, 'utf8'), RC8_SETTINGS_UNPATCHED, '必须恢复原始 bundle，而非旧半补丁');
   } finally {
     cleanup();
   }
