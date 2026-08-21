@@ -267,7 +267,7 @@ The npm package contains the prebuilt `dist/`, TypeScript source, installation a
 
 ## License
 
-This project is licensed under the GNU General Public License v3.0 only. See [LICENSE](LICENSE).
+This project is licensed under the [GNU General Public License v3.0 only](https://www.gnu.org/licenses/gpl-3.0.html). See the repository copy in [LICENSE](LICENSE).
 
 Copyright (C) 2026 slywalker2006. You may use, study, modify, commercially use, distribute, and redistribute the project under the GPLv3 terms. Modified or redistributed versions must preserve the applicable copyright and license notices and provide the corresponding source as required by GPLv3.
 

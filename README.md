@@ -268,6 +268,6 @@ npm 包包含预构建的 `dist/`、TypeScript 源码、安装与注册脚本、
 
 ## License
 
-本项目采用 GPLv3，详见 [LICENSE](LICENSE)。
+本项目采用 [GNU General Public License v3.0 only](https://www.gnu.org/licenses/gpl-3.0.html)，完整文本见 [LICENSE](LICENSE)。
 
 本项目是 dsh 的独立扩展，与 DeepSeek 没有隶属关系。dsh 本身按其项目许可证授权。
