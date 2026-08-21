@@ -88,6 +88,10 @@ export function loadConfig(): PlatformConfig {
     // 会各自开一个新库，表现为“配置改了不生效/数据丢了”）
     path.resolve(moduleDir, '..', 'data', 'platform.db'),
   );
+  // 显式配置的相对路径同样按模块目录解析（而非 cwd）：网关（cwd=插件目录）
+  // 与 dsh 进程内插件（cwd=上游工作目录）必须指向同一数据库文件，否则
+  // 出现"网关能登录、插件侧鉴权 401"的分库脑裂。绝对路径保持原样。
+  const dbPathResolved = path.isAbsolute(dbPath) ? dbPath : path.resolve(moduleDir, dbPath);
 
   // MCP_DSH_RESTART_SERVICE 语义：未设置→默认 'dsh-web'；显式空值→不自动重启。
   // （不能用 readEnv：它会把空值当未设置回退到默认，导致 Windows 上
@@ -114,7 +118,7 @@ export function loadConfig(): PlatformConfig {
   // 留空 = 自动判断：未自备证书且未显式关闭即启用（域名由 cli 启动时补全，
   // 零配置路径会探测公网 IP 推导 <IP>.sslip.io）
   const autoTls = !userCerts && !autoOff && (autoOn || autoTlsRaw === '');
-  const acmeDir = path.join(path.dirname(dbPath), 'acme');
+  const acmeDir = path.join(path.dirname(dbPathResolved), 'acme');
 
   const gatewayPortRaw = readEnv('MCP_GATEWAY_PORT', '8080').trim();
   const gatewayPortNum = Number(gatewayPortRaw);
@@ -126,7 +130,7 @@ export function loadConfig(): PlatformConfig {
 
   return {
     setupKey,
-    dbPath,
+    dbPath: dbPathResolved,
     dbEncKey: readEnv('MCP_DB_ENC_KEY', ''),
     gateway: {
       host: readEnv('MCP_GATEWAY_HOST', '0.0.0.0'),
