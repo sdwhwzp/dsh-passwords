@@ -11,6 +11,7 @@
 import { createElement as h, useEffect, useRef, useState } from 'react';
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots';
 import { publishChatEntryChanged } from './events';
+import { LocalWorkspacePanel } from './local-workspace';
 
 export interface UserInfo {
   id: number;
@@ -43,6 +44,7 @@ export interface PermOverview {
       allowedFolders: string[];
       hourlyTokenLimit: number | null;
       dailyMinutesLimit: number | null;
+      monthlyBudgetMicros: number | null;
       allowUpload: boolean;
       allowGitDownload: boolean;
       banned: boolean;
@@ -63,11 +65,23 @@ interface PermDraft {
   folders: string[];
   token: string;
   minutes: string;
+  monthlyBudget: string;
   upload: boolean;
   git: boolean;
   banned: boolean;
   sandbox: string;
   disabledSessions: string[];
+}
+
+interface BudgetStatus {
+  userId: number;
+  month: string;
+  usedMicros: number;
+  budgetMicros: number | null;
+  remainingMicros: number | null;
+  ratio: number;
+  warning: boolean;
+  exhausted: boolean;
 }
 
 interface WorkspaceInfo {
@@ -165,6 +179,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
   // 权限管理（仅主用户）
   const [overview, setOverview] = useState<PermOverview | null>(null);
   const [permDrafts, setPermDrafts] = useState<Record<number, PermDraft>>({});
+  const [budgets, setBudgets] = useState<Record<number, BudgetStatus>>({});
   const [workspaces, setWorkspaces] = useState<WorkspaceInfo[]>([]);
   // 正在编辑中的子用户草稿：dirty 时 30s 自动刷新不覆盖本地未保存的修改
   const dirtyUsersRef = useRef<Set<number>>(new Set());
@@ -189,6 +204,9 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
         return api<PermOverview>('/gateway/api/overview')
           .then((o) => {
             setOverview(o);
+            void api<{ budgets: BudgetStatus[] }>('/api/dsh-passwords/budgets')
+              .then((result) => setBudgets(Object.fromEntries(result.budgets.map((row) => [row.userId, row]))))
+              .catch(() => setBudgets({}));
             // 草稿同步：新用户初始化；未在编辑（dirty）中的草稿用服务端最新值覆盖
             // （注释承诺的“主用户在别处修改后页面自动同步最新状态”真正生效）；
             // 已删除的用户清草稿；正在编辑的用户保留本地未保存修改。
@@ -202,6 +220,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
                   folders: [...(u.permissions.allowedFolders ?? [])],
                   token: u.permissions.hourlyTokenLimit === null ? '' : String(u.permissions.hourlyTokenLimit),
                   minutes: u.permissions.dailyMinutesLimit === null ? '' : String(u.permissions.dailyMinutesLimit),
+                  monthlyBudget: ((u.permissions.monthlyBudgetMicros ?? 0) / 1_000_000).toFixed(2),
                   upload: u.permissions.allowUpload,
                   git: u.permissions.allowGitDownload,
                   banned: u.permissions.banned,
@@ -326,6 +345,26 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
     );
   };
 
+  /**
+   * 退出不能使用原生 form：设置卡片可能挂在宿主已有的 form 内，嵌套 form
+   * 会被浏览器重新关联到外层空 action，导致退出后跳到空白地址。先用同源
+   * POST 完成服务端吊销与 Cookie 清除，再显式替换为绝对登录地址。
+   */
+  const logout = () => {
+    if (!window.confirm(t('logoutConfirm'))) return;
+    setBusy(true);
+    setError('');
+    void fetch('/gateway/logout', { method: 'POST', credentials: 'same-origin' })
+      .then((response) => {
+        if (!response.ok) throw new Error(t('logoutFailed'));
+        window.location.replace(new URL('/gateway/login', window.location.origin).href);
+      })
+      .catch((logoutError: unknown) => {
+        setBusy(false);
+        setError(errText(logoutError, trErr));
+      });
+  };
+
   const changePassword = () => {
     if (pwNew !== pwConfirm) return setError(t('pwMismatch'));
     if (!PASSWORD_RE.test(pwNew)) return setError(t('pwPolicy'));
@@ -414,6 +453,10 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
     // 非法输入不能静默转 null（=不限）：parseLimit 拒绝小数/负数/科学计数/十六进制/超大值
     const tokenNum = parseLimit(d.token);
     const minutesNum = parseLimit(d.minutes);
+    if (!/^(?:0|[1-9][0-9]{0,8})(?:\.[0-9]{1,2})?$/.test(d.monthlyBudget.trim())) {
+      setError(t('err.INVALID'));
+      return;
+    }
     if (tokenNum !== null && !Number.isInteger(tokenNum)) {
       setError(t('err.INVALID'));
       return;
@@ -435,6 +478,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
           allowedFolders: d.folders,
           hourlyTokenLimit: tokenNum,
           dailyMinutesLimit: minutesNum,
+          monthlyBudgetYuan: d.monthlyBudget.trim(),
           allowUpload: d.upload,
           allowGitDownload: d.git,
           banned: d.banned,
@@ -489,6 +533,17 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
       isAdmin
         ? h('span', { className: 'dshpw-badge admin' }, t('owner'))
         : h('span', { className: 'dshpw-badge' }, t('subuser')),
+      h(
+        'button',
+        {
+          className: 'dshpw-btn danger dshpw-logout',
+          type: 'button',
+          disabled: busy,
+          onClick: logout,
+          'aria-label': t('logout'),
+        },
+        t('logout'),
+      ),
     ),
     // ── 聊天入口：按当前账号跨设备同步的显示偏好 ──
     h(
@@ -518,6 +573,13 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
         ),
       ),
     ),
+    h(LocalWorkspacePanel, {
+      t: trErr,
+      busy,
+      setBusy,
+      setError,
+      setNotice,
+    }),
     // ── 远程设置：状态 + 重载 ──
     h(
       'div',
@@ -667,6 +729,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
           .map((u) => {
             const d = permDrafts[u.id];
             if (!d) return null;
+            const budget = budgets[u.id];
             return h(
               'div',
               { className: 'dshpw-perm', key: u.id },
@@ -679,6 +742,13 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
                       'span',
                       { className: 'dshpw-hint' },
                       `${t('usageTime')} ${Math.round(u.usage.activeSeconds / 60)}m · ${t('usageTokens')} ${u.usage.hourlyTokens}`,
+                    )
+                  : null,
+                budget !== undefined
+                  ? h(
+                      'span',
+                      { className: budget.exhausted || budget.warning ? 'dshpw-badge' : 'dshpw-hint' },
+                      `${t('budgetUsed')} ¥${(budget.usedMicros / 1_000_000).toFixed(2)} · ${t('budgetRemaining')} ¥${((budget.remainingMicros ?? 0) / 1_000_000).toFixed(2)}${budget.warning ? ` · ${t('budgetWarning')}` : ''}`,
                     )
                   : null,
                 u.permissions.banned ? h('span', { className: 'dshpw-badge' }, t('banned')) : null,
@@ -781,6 +851,17 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
                   placeholder: t('permsMinutes'),
                   value: d.minutes,
                   onChange: (e: { target: { value: string } }) => setDraft(u.id, { minutes: e.target.value }),
+                }),
+                h('input', {
+                  className: 'dshpw-input',
+                  type: 'text',
+                  inputMode: 'decimal',
+                  pattern: '[0-9]+([.][0-9]{1,2})?',
+                  autoComplete: 'off',
+                  name: 'dshpw-monthly-budget',
+                  placeholder: t('permsMonthlyBudget'),
+                  value: d.monthlyBudget,
+                  onChange: (e: { target: { value: string } }) => setDraft(u.id, { monthlyBudget: e.target.value }),
                 }),
               ),
               h(

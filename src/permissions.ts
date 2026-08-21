@@ -306,10 +306,16 @@ export function folderAllowed(path: string, allowedFolders: string[]): boolean {
 
 /**
  * 递归过滤 JSON 里路径字段不在白名单的对象（session.list 用 field='cwd'，workspace.list 用 field='path'）：
- * 只对数组元素中带该路径字段的对象做白名单判定，白名单外的直接丢弃；其余字段原样递归保留。
+ * 只对数组元素中带该路径字段的对象做路径判定，不允许的直接丢弃；其余字段原样递归保留。
  * depth 上限 8：防上游投毒深嵌套 JSON 导致栈溢出 DoS（与同文件其他递归函数口径一致）。
  */
-export function filterByPathField(value: unknown, allowedFolders: string[], field: string, depth = 0): unknown {
+export function filterByPathField(
+  value: unknown,
+  allowedFolders: string[],
+  field: string,
+  depth = 0,
+  pathAllowed: (path: string) => boolean = (candidate) => folderAllowed(candidate, allowedFolders),
+): unknown {
   // 深度超限时无法可靠检查路径字段，丢弃该子树而不是原样返回（fail-closed）。
   if (depth > 8) return null;
   if (value === null) return value;
@@ -321,11 +327,11 @@ export function filterByPathField(value: unknown, allowedFolders: string[], fiel
         typeof item === 'object' &&
         typeof (item as Record<string, unknown>)[field] === 'string' &&
         (item as Record<string, unknown>)[field] !== '' &&
-        !folderAllowed((item as Record<string, unknown>)[field] as string, allowedFolders)
+        !pathAllowed((item as Record<string, unknown>)[field] as string)
       ) {
         continue;
       }
-      out.push(filterByPathField(item, allowedFolders, field, depth + 1));
+      out.push(filterByPathField(item, allowedFolders, field, depth + 1, pathAllowed));
     }
     return out;
   }
@@ -333,7 +339,7 @@ export function filterByPathField(value: unknown, allowedFolders: string[], fiel
     const obj = value as Record<string, unknown>;
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(obj)) {
-      out[k] = filterByPathField(v, allowedFolders, field, depth + 1);
+      out[k] = filterByPathField(v, allowedFolders, field, depth + 1, pathAllowed);
     }
     return out;
   }

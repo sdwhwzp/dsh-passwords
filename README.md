@@ -24,6 +24,7 @@ dsh 的网页界面默认面向本机使用。服务器地址一旦暴露，拿�
 
 - 一个**主用户**（首次配置创建）+ 任意多个**子用户**，各自独立账号密码登录
 - 所有账号管理都在 dsh 设置页的卡片里完成，不用 SSH：改密码、改用户名、创建/删除子用户
+- 当前身份旁提供“退出登录”按钮；确认后服务端立即吊销会话并清除 Cookie
 - 主用户可管理所有子用户；子用户只能改自己
 - 改密后旧会话全部立即失效；每次登录/失败都有记录，一条命令就能查谁在什么时候登录过
 
@@ -35,12 +36,48 @@ dsh 的网页界面默认面向本机使用。服务器地址一旦暴露，拿�
 - **会话与消息隔离**：子用户只能看到已授权工作区和启用会话；留言只显示广播、发给自己或自己发出的内容
 - **消息默认私信**：子用户留言默认只发给主用户；广播仅主用户可发且需显式勾选
 - **每小时 token 上限**、**每日使用时长上限**：到量自动拒绝
+- **每月模型金额额度**：以人民币微元整数保存，精确到 ¥0.01；显示本月已用、剩余和 80% 预警，达到 100% 后拒绝下一模型步骤
 - **沙盒权限**：只读 / 可写工作区 / 完全访问，三档可选；子用户的 AI 想越权提权时，网关直接把审批改成「拒绝」
 - **上传 / git 下载开关**、**封禁子用户**
 
 ### 4️⃣ 协作
 
 - 界面左下角的聊天按钮：主用户和子用户之间留言，可打标签（议题 / 拉取请求 / 讨论 / 公告 / 问题）；每个账号都可在设置中单独隐藏聊天入口
+
+### 5️⃣ 本机工作区
+
+- 每个用户可把自己电脑上的一个或多个目录配对为独立工作区，无需把文件上传到 dsh 服务器
+- dsh 的 `read`、`write`、`edit`、`glob`、`grep` 会通过本机助手直接操作授权目录中的原文件
+- Shell 默认关闭；用户明确添加 `--allow-shell` 后，`bash` 才会在该用户电脑执行
+
+## 群晖 WebDAV 登录与消费同步
+
+本分支使用 SQLite 作为用户、权限、额度和审计的唯一配置源，同时把普通用户认证委托给群晖 WebDAV：
+
+1. 本地管理员仍使用 dsh-passwords 的 bcrypt 密码，是群晖或 MySQL 故障时的恢复入口。
+2. 普通用户登录时向 `https://192.168.10.47:4006` 发送 `PROPFIND Depth: 0`。成功后按用户名即时创建或关联本地用户；新用户默认工作区全拒绝、月额度 ¥0。
+3. 登录成功后才把 WebDAV 密码以 AES-256-GCM 加密写入 MySQL，再签发 dsh 会话。密码不写入 SQLite、日志、模型上下文或工具结果。
+4. 网关移除浏览器提交的身份头，为每个上游请求生成 30 秒有效的 HMAC 身份断言。Harness 验证后把 principal 固化到每条消息、步骤和工具执行；插件不读取 JWT 密钥。
+5. 每个模型步骤开始前同时检查封禁、小时 token、每日时长和个人月额度；任一失败即拒绝。已开始的模型调用允许完成，因此最终金额可能小幅超过额度。
+
+金额由 `dsh-spend` 按 `(sessionId, turn, step)` 幂等归集。自然月固定使用 `Asia/Shanghai`；修改额度不会删除或清零历史账。管理员默认不限金额，旧匿名会话仍能兼容运行，但个人消费查询和 NAS 工具拒绝匿名调用。
+
+### MySQL 与 systemd credentials
+
+先创建数据库和最小权限 MySQL 用户；表 `webdav_credentials` 会幂等创建。服务必须通过 systemd `LoadCredential=` 提供 MySQL 密码与 32 字节 WebDAV 主密钥：
+
+```ini
+[Service]
+Environment=NODE_ENV=production
+LoadCredential=mysql-password:/etc/dsh-secrets/mysql-password
+LoadCredential=webdav-master-key:/etc/dsh-secrets/webdav-master-key
+```
+
+`.env` 只保存 MySQL 地址、用户名、credential 文件名和密钥版本，示例见 [.env.example](.env.example)。启动会在 SQLite 迁移前按上海自然日生成 `data/backups/platform-YYYY-MM-DD.db`；MySQL 与 SQLite 迁移均可重复执行。
+
+### 群晖 TLS 前置条件
+
+当前 4006 端口的证书已过期且证书名称不是 IP。生产环境必须先更新证书、信任内部 CA，或实现证书固定。`MCP_WEBDAV_INSECURE_SKIP_VERIFY=1` 仅用于非生产联调：它会让中间人看到所有登录用户的 WebDAV 密码，且 `NODE_ENV=production` 时进程会拒绝启动。
 
 ## 界面截图
 
@@ -97,6 +134,29 @@ dsh-passwords install     # 生成随机 SETUP_KEY + 注册插件 + 应用补丁
 3. 之后所有人访问 `https://<服务器IP>.sslip.io` 都会先过登录页
 
 别忘了在防火墙**和云服务商安全组**里放行 **80 和 443** 端口（开不了 80 的机器见下面的「部署场景矩阵」）。
+
+## 本机工作区助手
+
+本机助手适合“dsh 在服务器、文件在每个使用者电脑”的场景。助手从用户电脑主动连接服务器，不要求用户电脑开放入站端口；配对后，该目录会作为工作区出现在 dsh 侧栏中。
+
+Windows 使用者不需要安装 Node.js：
+
+1. 登录 dsh，打开 **设置 → 插件 → 本机工作区**，下载“Windows 一键助手”并点击“生成配对命令”
+2. 双击 `山东梯智物联AI本机助手.exe`，把网页生成的完整配对命令粘贴到中文向导中
+3. 输入或拖入要授权的本机文件夹；Shell 默认选择否
+4. 保持助手窗口运行；首次成功后会保存设备令牌和目录，以后双击同一个 EXE 即可自动连接
+
+当前生成的 EXE 未使用代码签名证书，Windows 可能显示 SmartScreen 提示。向客户批量分发前，应使用山东梯智物联有限公司的有效代码签名证书签名并发布 SHA-256 校验值，避免用户无法确认发布者。
+
+macOS / Linux 使用者先安装 Node.js 22.5+，再安装助手：`npm install -g github:sdwhwzp/dsh-passwords#dev`。生成配对命令后，把“替换为本机目录”改成真实目录并运行，例如：`dsh-local-workspace --server ws://192.168.1.10:3082 --pair <配对码> --folder "/home/user/projects/demo"`。
+
+默认配置文件是 `~/.dsh-local-workspace/config.json`；Windows 一键助手和命令行助手共用该配置。要授权多个目录，为每个目录使用独立配置，例如 `dsh-local-workspace --config ~/.dsh-local-workspace/project-b.json --server ... --pair ... --folder ...`；恢复时继续传同一个 `--config`。
+
+本机助手默认监听网关端口加一。例如 dsh 网页是 `3081`，助手端口就是 `3082`。局域网防火墙需放行该端口；NAT、反向代理或地址推导不正确时，设置 `MCP_LOCAL_WORKSPACE_PUBLIC_URL=wss://你的域名:端口`。
+
+文件操作只能使用授权目录内的相对路径，并会解析符号链接后再次检查；设备令牌只在用户电脑保存，服务器数据库只保存不可逆散列。`--allow-shell` 是更高权限的显式开关：Shell 以当前系统用户身份运行，可能访问授权目录之外的文件。明文 `ws://` 只能用于可信局域网，跨不可信网络必须使用 HTTPS/WSS。
+
+维护者使用 `npm run build:windows-assistant` 生成 `release/山东梯智物联AI本机助手.exe`。仓库的 `Build Windows Local Workspace Assistant` 工作流也会在 Windows runner 上构建并上传同名 artifact。
 
 ## 密码门跟着 dsh 走
 
@@ -185,6 +245,9 @@ node scripts/start-http.mjs [端口]    # 默认 8080，会弹 y/N 确认
 | `MCP_GATEWAY_ACME_STAGING` | 关 | `1`=用 LE 测试环境签发（调试用，浏览器不信任） |
 | `MCP_GATEWAY_TLS_CERT` / `MCP_GATEWAY_TLS_KEY` | 空 | 两个都填 = 用你自己的证书（优先于自动 HTTPS） |
 | `MCP_GATEWAY_PUBLIC_HOST` | 空 | 跳转固定用的公网 IP/域名（防 Host 伪造反射） |
+| `MCP_LOCAL_WORKSPACE_HOST` | `0.0.0.0` | 本机助手 WebSocket 监听地址 |
+| `MCP_LOCAL_WORKSPACE_PORT` | 网关端口 + 1 | 本机助手连接端口；局域网防火墙需放行 |
+| `MCP_LOCAL_WORKSPACE_PUBLIC_URL` | 空 | 配对命令使用的完整 `ws://` 或 `wss://` 地址；反向代理/NAT 下显式设置 |
 | `MCP_DSH_ROOT` | 自动探测 | dsh 安装目录（`@deepseek-ai/dsh` 所在处），探测不到时手动指定 |
 | `MCP_DSH_RESTART_SERVICE` | `dsh-web` | 重载补丁后自动重启的 dsh systemd 服务名；显式留空不自动重启 |
 | `DSH_PASSWORDS_ENV_FILE` | 空 | 手动指定 `.env` 路径（插件自动传，一般不用填） |
@@ -197,6 +260,7 @@ node dist/cli.js patch status            # 看远程设置补丁状态
 node dist/cli.js patch                   # 重载补丁（重新应用 + 重启 dsh-web）
 node dist/cli.js serve-gateway --port 9000   # 手动启动网关并换端口
 node scripts/start-http.mjs 8080         # 明文 HTTP 模式（危险，y/N 确认）
+dsh-local-workspace                      # 使用已保存令牌恢复本机工作区连接
 ```
 
 ## 常见问题
@@ -205,6 +269,7 @@ node scripts/start-http.mjs 8080         # 明文 HTTP 模式（危险，y/N 确
 - **忘记主用户密码？** 停服后跑 `node -e "const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync('data/platform.db');db.exec('DELETE FROM users;')"`，重启后重新走首次配置。
 - **dsh 控制台报错误码 30 / 31，密码门没起来？** 见上面「自动 HTTPS」的错误码表。修好后重启 dsh 会自动再拉起。
 - **443 端口绑定失败（非 root 用户）？** Linux 上 1024 以下端口需要 root：用 root/sudo 启动 dsh，或把 `MCP_GATEWAY_PORT` 改成高位端口（如 8443）并自行做端口转发。
+- **本机助手连不上？** 确认 dsh 控制台已显示“本机助手接入”，并在服务器防火墙放行 `MCP_LOCAL_WORKSPACE_PORT`。网页走 `3081` 时默认助手端口是 `3082`；跨 NAT 时设置 `MCP_LOCAL_WORKSPACE_PUBLIC_URL`。
 - **dsh 启动报 `duplicate loader entry id`？** 你在 profile 里用过 `dsh plugin add`。它会把 profile 里**所有**声明 `dsh.bundle` 的依赖全部加进 bundles 层，与已装的其它插件重复时 dsh 直接启动失败。卸载 dsh-passwords 后改用 `node scripts/register-plugin.mjs` 精确注册（只追加本插件一个条目）。
 - **npm 装 dsh 报 allow-scripts / node-pty 错？** npm 新版会拦截安装脚本，先放行再重装：`npm config set allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user`，然后重新 `npm install -g @deepseek-ai/dsh`（本项目自身没这个问题，是 dsh 的依赖要跑原生构建）。
 - **npm 用 `--prefix` 安装后运行 `dsh-passwords install` 报 TS5058？** 升级到 `dsh-passwords@2.5.4`。新版能正确识别被 npm 提升到 `<prefix>/node_modules` 的运行时依赖，不会再误触发源码编译。

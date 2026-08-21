@@ -8,9 +8,12 @@
 // （网关页面按页面语言、dsh 设置卡片按 dsh 语言本地化）。
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import { randomUUID } from 'node:crypto';
 import type { PlatformConfig } from './config.js';
 import { Database } from './db.js';
 import { t, type Lang } from './i18n.js';
+import { verifyWebDavLogin, WebDavAuthenticationError } from './webdav-auth.js';
+import type { WebDavCredentialStore } from './webdav-credentials.js';
 
 const BCRYPT_ROUNDS = 10;
 const TOKEN_TTL = '12h';
@@ -104,6 +107,8 @@ export class AuthService {
   constructor(
     private config: PlatformConfig,
     private db: Database,
+    private webdavCredentials?: WebDavCredentialStore,
+    private verifyWebDav: typeof verifyWebDavLogin = verifyWebDavLogin,
   ) {}
 
   /** 平台是否已初始化（存在至少一个用户） */
@@ -192,12 +197,55 @@ export class AuthService {
     }
 
     // 2) 凭据校验（统一错误信息，避免用户名枚举；时序上用户不存在也空跑 bcrypt）
-    const user = await this.db.getUserByUsername(username);
+    let user = await this.db.getUserByUsername(username);
     let valid = false;
-    if (user) {
-      valid = await bcrypt.compare(password, user.password_hash);
+    if (user?.role === 'admin' || this.webdavCredentials === undefined) {
+      // Local administrators are the emergency recovery entrance. The
+      // optional fallback keeps offline database/unit-test tooling usable.
+      if (user) valid = await bcrypt.compare(password, user.password_hash);
+      else await bcrypt.compare(password, DUMMY_HASH);
     } else {
-      await bcrypt.compare(password, DUMMY_HASH); // 空跑一次，抹平时序差异
+      let webdavVerified = false;
+      try {
+        const normalized = assertUsername(username);
+        await this.verifyWebDav(this.config, normalized, password);
+        webdavVerified = true;
+        if (user === null) {
+          // The placeholder is deliberately unrelated to the WebDAV password:
+          // ordinary users can never authenticate through the local hash.
+          const placeholder = await bcrypt.hash(`webdav-only:${randomUUID()}`, BCRYPT_ROUNDS);
+          try {
+            user = this.db.createUser(normalized, placeholder, 'user');
+            this.db.setPermissions(user.id, {
+              allowedFolders: ['__deny__'],
+              hourlyTokenLimit: null,
+              dailyMinutesLimit: null,
+              monthlyBudgetMicros: 0,
+              allowUpload: true,
+              allowGitDownload: false,
+              banned: false,
+              sandboxMode: null,
+              disabledSessions: [],
+            });
+          } catch (error) {
+            // Concurrent successful first logins may race on username_hash.
+            user = this.db.getUserByUsername(normalized);
+            if (user === null) throw error;
+          }
+        }
+        const permissions = this.db.getPermissions(user.id);
+        if (permissions?.banned === true) throw new WebDavAuthenticationError('invalid');
+        await this.webdavCredentials.save(user.id, user.username, password);
+        valid = true;
+      } catch (error) {
+        if ((error instanceof WebDavAuthenticationError && error.kind === 'unavailable') || webdavVerified) {
+          await this.db.audit(webdavVerified ? 'credential_store_unavailable' : 'webdav_unavailable', {
+            username, ip, userAgent: meta.userAgent,
+          });
+          throw new AuthError('WEBDAV_UNAVAILABLE', {}, 503);
+        }
+        valid = false;
+      }
     }
     if (!user || !valid) {
       // 0.5) 记录 IP 级失败（跨用户名累计，防密码喷洒）；达阈值 → 该 IP 全局节流
@@ -367,6 +415,7 @@ export class AuthService {
       allowedFolders: ['__deny__'],
       hourlyTokenLimit: null,
       dailyMinutesLimit: null,
+      monthlyBudgetMicros: 0,
       allowUpload: true,
       allowGitDownload: false,
       banned: false,
@@ -397,6 +446,7 @@ export class AuthService {
     if (targetUser.role === 'admin') {
       throw new AuthError('CANNOT_REMOVE_ADMIN', {}, 400);
     }
+    await this.webdavCredentials?.delete?.(targetUser.id);
     await this.db.deleteUser(targetUser.id);
     this.db.clearLoginAttemptsOf(targetUser.username);
     await this.db.audit('subuser_removed', {

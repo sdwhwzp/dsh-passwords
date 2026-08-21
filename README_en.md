@@ -24,6 +24,7 @@ Listed in [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek
 
 - One **owner** (created at first-time setup) + any number of **subusers**, each with their own login
 - All account management happens in a card on dsh's settings page — no SSH needed: change passwords, change usernames, create/delete subusers
+- A **Sign out** button beside the current identity immediately revokes the server-side session and clears the cookie after confirmation
 - The owner manages all subusers; subusers can only change themselves
 - Changing a password immediately invalidates all old sessions; every login and failure is logged — one command shows who signed in when
 
@@ -35,12 +36,48 @@ The owner can configure, per subuser, from the settings page:
 - **Session and message isolation**: subusers only see enabled workspaces and enabled sessions; messages are limited to broadcasts, messages addressed to them, and messages they sent
 - **DM-by-default messages**: subuser messages go to the owner by default; broadcasting is owner-only and must be explicitly chosen
 - **Hourly token limit** and **daily usage-time limit**: requests are rejected once the cap is hit
+- **Monthly model-spend allowance**: stored as integer CNY micros with ¥0.01 admin precision; shows used, remaining and an 80% warning, and rejects the next model step at 100%
 - **Sandbox level**: read-only / workspace-write / full access; when a subuser's AI tries to escalate beyond its level, the gateway forces the approval to "reject"
 - **Upload / git-download toggles** and **ban subusers**
 
 ### 4️⃣ Collaboration
 
 - A chat button in the bottom-left corner: owner ↔ subuser messages with tags (issue / pull request / discussion / announcement / question); every account can hide its own chat entry from Settings
+
+### 5️⃣ Local workspaces
+
+- Each user can pair one or more folders from their own computer as independent workspaces without uploading files to the dsh server
+- dsh `read`, `write`, `edit`, `glob`, and `grep` operations run through the companion against the original files in the authorized folder
+- Shell is off by default; `bash` runs on the user's computer only after that user explicitly adds `--allow-shell`
+
+## Synology WebDAV login and spend synchronization
+
+This branch keeps SQLite as the sole configuration source for users, permissions, allowances and audit data, while delegating ordinary-user authentication to Synology WebDAV:
+
+1. The local administrator continues to use the dsh-passwords bcrypt credential and remains the recovery entrance when Synology or MySQL is unavailable.
+2. An ordinary login sends `PROPFIND Depth: 0` to `https://192.168.10.47:4006`. Success creates or links the local user by username; a new user starts with no workspace access and a ¥0 monthly allowance.
+3. Only a successful login writes the WebDAV password to MySQL under AES-256-GCM and then issues the dsh session. The password never enters SQLite, logs, model context or tool output.
+4. The gateway removes browser-supplied identity headers and creates a 30-second HMAC assertion for each upstream request. Harness verifies it and durably attaches the principal to each message, step and tool execution; other plugins do not read the JWT key.
+5. Every model step checks bans, hourly tokens, daily time and the personal monthly allowance together; any failure rejects the step. A model call already in flight may finish, so the final amount can exceed the allowance slightly.
+
+`dsh-spend` accounts by `(sessionId, turn, step)` idempotently. Natural months always use `Asia/Shanghai`; changing an allowance never removes or resets history. Administrators have no personal amount cap by default. Legacy anonymous sessions remain compatible, but personal-spend queries and NAS tools reject anonymous calls.
+
+### MySQL and systemd credentials
+
+Create the database and a least-privilege MySQL user first; `webdav_credentials` is migrated idempotently. The service must provide the MySQL password and a 32-byte WebDAV master key with systemd `LoadCredential=`:
+
+```ini
+[Service]
+Environment=NODE_ENV=production
+LoadCredential=mysql-password:/etc/dsh-secrets/mysql-password
+LoadCredential=webdav-master-key:/etc/dsh-secrets/webdav-master-key
+```
+
+The `.env` file stores only the MySQL address, username, credential filenames and key version; see [.env.example](.env.example). Before SQLite migration, startup creates one `data/backups/platform-YYYY-MM-DD.db` snapshot per Shanghai calendar day. MySQL and SQLite migrations are repeatable.
+
+### Synology TLS prerequisite
+
+The certificate currently served on port 4006 is expired and its name does not match the IP address. Production must replace it, trust an internal CA, or implement certificate pinning first. `MCP_WEBDAV_INSECURE_SKIP_VERIFY=1` is for non-production integration only: it exposes every logging-in user's WebDAV password to a network attacker, and the process refuses it when `NODE_ENV=production`.
 
 ## Screenshots
 
@@ -97,6 +134,29 @@ At the end it prints the `SETUP_KEY` for first-time setup and writes it to `setu
 3. From now on, everyone visiting `https://<server-IP>.sslip.io` must pass the login page first
 
 Remember to open ports **80 and 443** in both the server firewall **and** your cloud provider's security group (can't open port 80? See the deployment matrix below).
+
+## Local workspace companion
+
+Use the companion when dsh runs on a server while source files stay on each user's computer. The companion makes an outbound connection, so user computers do not need an inbound port. Once paired, the folder appears as a workspace in the dsh sidebar.
+
+Windows users do not need to install Node.js:
+
+1. Sign in to dsh, open **Settings → Plugins → Local workspace**, download the Windows one-click companion, and generate a pairing command
+2. Double-click `山东梯智物联AI本机助手.exe`, then paste the full command from the web page into the Chinese setup wizard
+3. Enter or drag in the folder to authorize; leave Shell disabled by default
+4. Keep the companion window open. After the first successful connection, it saves the device token and folder; later, double-click the same EXE to reconnect automatically
+
+The generated EXE is currently unsigned, so Windows may show a SmartScreen warning. Before distributing it to customers, sign it with a valid Shandong Tizhi IoT Co., Ltd. code-signing certificate and publish its SHA-256 checksum so users can verify the publisher and file.
+
+On macOS / Linux, install Node.js 22.5+ and then run `npm install -g github:sdwhwzp/dsh-passwords#dev`. Generate a pairing command, replace the folder placeholder, and run it, for example: `dsh-local-workspace --server ws://192.168.1.10:3082 --pair <pairing-code> --folder "/home/user/projects/demo"`.
+
+The Windows and command-line companions share the default config at `~/.dsh-local-workspace/config.json`. For multiple folders, use a separate config per folder, such as `dsh-local-workspace --config ~/.dsh-local-workspace/project-b.json --server ... --pair ... --folder ...`, and pass the same `--config` when reconnecting.
+
+The companion port defaults to the gateway port plus one. If the dsh web gateway uses `3081`, the companion uses `3082`. Allow that port through the LAN firewall. For NAT, reverse proxies, or incorrect browser-derived addresses, set `MCP_LOCAL_WORKSPACE_PUBLIC_URL=wss://your-domain:port`.
+
+File operations accept only paths inside the authorized folder and re-check resolved symlinks. The device token is stored only on the user computer; the server database stores a one-way hash. `--allow-shell` is an explicit higher-privilege option: the shell runs as the current OS user and may access files outside the authorized folder. Plain `ws://` is for trusted LANs only; use HTTPS/WSS across untrusted networks.
+
+Maintainers can run `npm run build:windows-assistant` to create `release/山东梯智物联AI本机助手.exe`. The repository's `Build Windows Local Workspace Assistant` workflow also builds and uploads the same artifact on a Windows runner.
 
 ## The gate follows dsh
 
@@ -185,6 +245,9 @@ After logging in to dsh, open **Settings → Plugins** to find the "dsh-password
 | `MCP_GATEWAY_ACME_STAGING` | off | `1` = issue from the LE staging environment (for testing; browsers won't trust it) |
 | `MCP_GATEWAY_TLS_CERT` / `MCP_GATEWAY_TLS_KEY` | empty | When both are set, your own certificate is used (takes priority over auto HTTPS) |
 | `MCP_GATEWAY_PUBLIC_HOST` | empty | Public IP/domain used for redirects (prevents Host-header reflection) |
+| `MCP_LOCAL_WORKSPACE_HOST` | `0.0.0.0` | Local companion WebSocket listen address |
+| `MCP_LOCAL_WORKSPACE_PORT` | gateway port + 1 | Local companion port; allow it through the LAN firewall |
+| `MCP_LOCAL_WORKSPACE_PUBLIC_URL` | empty | Full `ws://` or `wss://` URL used in pairing commands; set it explicitly behind NAT/reverse proxies |
 | `MCP_DSH_ROOT` | auto-detected | dsh install directory (where `@deepseek-ai/dsh` lives); set manually if detection fails |
 | `MCP_DSH_RESTART_SERVICE` | `dsh-web` | systemd service to restart after a patch reload; an explicit empty value disables auto-restart |
 | `DSH_PASSWORDS_ENV_FILE` | empty | Explicit path to `.env` (the plugin passes it automatically — usually not needed) |
@@ -197,6 +260,7 @@ node dist/cli.js patch status                 # remote-settings patch status
 node dist/cli.js patch                        # reload the patch (re-applies + restarts dsh-web)
 node dist/cli.js serve-gateway --port 9000    # run the gateway manually on another port
 node scripts/start-http.mjs 8080              # plaintext HTTP mode (dangerous, y/N confirmation)
+dsh-local-workspace                           # reconnect with the saved local device token
 ```
 
 ## FAQ
@@ -205,6 +269,7 @@ node scripts/start-http.mjs 8080              # plaintext HTTP mode (dangerous, 
 - **Forgot the owner password?** Stop the service and run `node -e "const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync('data/platform.db');db.exec('DELETE FROM users;')"`, then restart and redo first-time setup.
 - **dsh's console shows error code 30 / 31 and the gate didn't start?** See the error-code table under "Automatic HTTPS" above. After fixing, restarting dsh pulls the gate up again.
 - **Port 443 fails to bind (non-root user)?** On Linux, ports below 1024 need root: start dsh as root/sudo, or set `MCP_GATEWAY_PORT` to a high port (e.g. 8443) and forward traffic yourself.
+- **The local companion cannot connect?** Confirm the dsh console shows the local-companion listener and allow `MCP_LOCAL_WORKSPACE_PORT` through the server firewall. A web gateway on `3081` defaults the companion to `3082`; set `MCP_LOCAL_WORKSPACE_PUBLIC_URL` across NAT.
 - **dsh fails to start with `duplicate loader entry id`?** You used `dsh plugin add` in the profile. It reconciles ALL dependencies declaring `dsh.bundle` into the bundles layer, which crashes dsh when they overlap with already-installed plugins. Uninstall dsh-passwords and register precisely with `node scripts/register-plugin.mjs` (it appends only this plugin).
 - **npm fails installing dsh (allow-scripts / node-pty)?** Newer npm blocks install scripts. Allow them first, then reinstall: `npm config set allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user` followed by `npm install -g @deepseek-ai/dsh` again (this project itself has no such issue — it's dsh's dependencies that run native builds).
 - **`dsh-passwords install` reports TS5058 after an npm `--prefix` install?** Upgrade to `dsh-passwords@2.5.4`. It correctly detects runtime dependencies hoisted to `<prefix>/node_modules` and no longer falls back to a source build.

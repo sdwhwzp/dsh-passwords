@@ -125,6 +125,18 @@ test('filterByPathField：空白名单 = 全部允许；__deny__ 哨兵 = 全部
   assert.equal((filterByPathField(input, ['__deny__'], 'path') as any).items.length, 0);
 });
 
+test('filterByPathField：自定义路径判定可允许用户自己的本机工作区', () => {
+  const input = { items: [{ path: '/host/blocked' }, { path: '/remote/user-7' }] };
+  const out = filterByPathField(
+    input,
+    ['__deny__'],
+    'path',
+    0,
+    (candidate) => candidate === '/remote/user-7',
+  ) as typeof input;
+  assert.deepEqual(out.items, [{ path: '/remote/user-7' }]);
+});
+
 test('normalizePath：根目录等价值统一识别，禁止权限写入层放行', () => {
   assert.equal(normalizePath('/..'), '/');
   assert.equal(normalizePath('//'), '/');

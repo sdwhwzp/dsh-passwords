@@ -50,6 +50,28 @@ export interface PlatformConfig {
   jwtSecret: string;
   /** 网关内部管理接口密钥（dsh 插件通知网关用；留空则从 SETUP_KEY 派生） */
   internalSecret: string;
+  /** 用户本机助手的出站 WebSocket 接入点。 */
+  localWorkspace: {
+    host: string;
+    port: number;
+    /** 对浏览器展示的完整 ws(s) 地址；留空时按当前访问主机与端口生成。 */
+    publicUrl: string;
+  };
+  /** Synology WebDAV authentication endpoint. TLS verification is mandatory in production. */
+  webdav: {
+    url: string;
+    insecureSkipVerify: boolean;
+  };
+  /** MySQL credential ledger. Secret values are read from systemd credentials at use time. */
+  mysql: {
+    host: string;
+    port: number;
+    database: string;
+    user: string;
+    passwordCredential: string;
+    masterKeyCredential: string;
+    keyVersion: string;
+  };
   /** 远程设置补丁（settings host 模式 + 白名单）管理配置；补丁强制启用，无开关 */
   patch: {
     /** dsh 安装根目录（@deepseek-ai/dsh 所在位置）；留空自动探测 npm root -g */
@@ -123,6 +145,19 @@ export function loadConfig(): PlatformConfig {
     gatewayPortRaw !== '' && Number.isInteger(gatewayPortNum) && gatewayPortNum > 0 && gatewayPortNum <= 65535
       ? gatewayPortNum
       : 8080;
+  const localWorkspacePortRaw = readEnv('MCP_LOCAL_WORKSPACE_PORT', String(Math.min(gatewayPort + 1, 65535)));
+  const localWorkspacePortNum = Number(localWorkspacePortRaw);
+  const localWorkspacePort =
+    Number.isInteger(localWorkspacePortNum) && localWorkspacePortNum > 0 && localWorkspacePortNum <= 65535
+      ? localWorkspacePortNum
+      : Math.min(gatewayPort + 1, 65535);
+
+  const insecureSkipVerify = ['1', 'true', 'yes'].includes(
+    readEnv('MCP_WEBDAV_INSECURE_SKIP_VERIFY', '').toLowerCase(),
+  );
+  if (insecureSkipVerify && process.env.NODE_ENV === 'production') {
+    throw new Error('生产环境禁止 MCP_WEBDAV_INSECURE_SKIP_VERIFY：请先修复群晖证书或配置受信内部 CA');
+  }
 
   return {
     setupKey,
@@ -156,6 +191,24 @@ export function loadConfig(): PlatformConfig {
     },
     jwtSecret,
     internalSecret,
+    localWorkspace: {
+      host: readEnv('MCP_LOCAL_WORKSPACE_HOST', '0.0.0.0'),
+      port: localWorkspacePort,
+      publicUrl: readEnv('MCP_LOCAL_WORKSPACE_PUBLIC_URL', ''),
+    },
+    webdav: {
+      url: readEnv('MCP_WEBDAV_URL', 'https://192.168.10.47:4006'),
+      insecureSkipVerify,
+    },
+    mysql: {
+      host: readEnv('MCP_MYSQL_HOST', '127.0.0.1'),
+      port: Number(readEnv('MCP_MYSQL_PORT', '3306')) || 3306,
+      database: readEnv('MCP_MYSQL_DATABASE', 'dsh_passwords'),
+      user: readEnv('MCP_MYSQL_USER', 'dsh_passwords'),
+      passwordCredential: readEnv('MCP_MYSQL_PASSWORD_CREDENTIAL', 'mysql-password'),
+      masterKeyCredential: readEnv('MCP_WEBDAV_MASTER_KEY_CREDENTIAL', 'webdav-master-key'),
+      keyVersion: readEnv('MCP_WEBDAV_KEY_VERSION', 'v1'),
+    },
     patch: {
       dshRoot: readEnv('MCP_DSH_ROOT', ''),
       restartService,

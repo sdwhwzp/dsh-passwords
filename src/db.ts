@@ -53,6 +53,8 @@ export interface UserPermissionsRow {
   allowed_folders: string[];
   hourly_token_limit: number | null;
   daily_minutes_limit: number | null;
+  /** Monthly model-spend allowance in integer CNY micros; null means unlimited. */
+  monthly_budget_micros: number | null;
   allow_upload: boolean;
   allow_git_download: boolean;
   banned: boolean;
@@ -81,6 +83,21 @@ export interface MessageRow {
   content: string;
   tags: string[];
   created_at: string;
+}
+
+/** 已配对的用户本机工作区。敏感展示字段从数据库读取时已解密。 */
+export interface LocalWorkspaceRow {
+  id: string;
+  user_id: number;
+  device_name: string;
+  workspace_name: string;
+  remote_root: string;
+  placeholder_path: string;
+  platform: string;
+  shell_enabled: boolean;
+  created_at: string;
+  last_seen_at: string;
+  revoked_at: string | null;
 }
 
 
@@ -130,6 +147,7 @@ CREATE TABLE IF NOT EXISTS user_permissions (
   allowed_folders    TEXT,                          -- JSON 字符串数组（绝对路径）
   hourly_token_limit INTEGER,                       -- NULL = 不限
   daily_minutes_limit INTEGER,                      -- NULL = 不限
+  monthly_budget_micros INTEGER NOT NULL DEFAULT 0, -- 人民币微元；NULL = 不限（仅管理员）
   allow_upload       INTEGER NOT NULL DEFAULT 1,
   allow_git_download INTEGER NOT NULL DEFAULT 0,
   banned             INTEGER NOT NULL DEFAULT 0,
@@ -156,6 +174,21 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(id DESC);
+CREATE TABLE IF NOT EXISTS local_workspaces (
+  id               TEXT PRIMARY KEY,
+  user_id          INTEGER NOT NULL,
+  token_hash       TEXT NOT NULL UNIQUE,
+  device_name      TEXT NOT NULL,
+  workspace_name   TEXT NOT NULL,
+  remote_root      TEXT NOT NULL,
+  placeholder_path TEXT NOT NULL UNIQUE,
+  platform         TEXT NOT NULL,
+  shell_enabled    INTEGER NOT NULL DEFAULT 0,
+  created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+  last_seen_at     TEXT NOT NULL DEFAULT (datetime('now')),
+  revoked_at       TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_local_workspaces_user ON local_workspaces(user_id, revoked_at);
 
 `;
 
@@ -283,7 +316,7 @@ export class Database {
     }
   }
 
-  // ── 迁移：user_permissions 补 sandbox_mode / disabled_sessions 列 ─────────────────
+  // ── 迁移：user_permissions 补后续版本列（均可重复执行） ─────────────────
   private migratePermissions(): void {
     const cols = this.stmt('PRAGMA table_info(user_permissions)').all() as { name: string }[];
     if (!cols.some((c) => c.name === 'sandbox_mode')) {
@@ -291,6 +324,9 @@ export class Database {
     }
     if (!cols.some((c) => c.name === 'disabled_sessions')) {
       this.db.exec("ALTER TABLE user_permissions ADD COLUMN disabled_sessions TEXT NOT NULL DEFAULT '[]'");
+    }
+    if (!cols.some((c) => c.name === 'monthly_budget_micros')) {
+      this.db.exec('ALTER TABLE user_permissions ADD COLUMN monthly_budget_micros INTEGER NOT NULL DEFAULT 0');
     }
   }
 
@@ -573,6 +609,7 @@ export class Database {
       this.stmt('DELETE FROM user_permissions WHERE user_id = ?').run(id);
       this.stmt('DELETE FROM user_usage WHERE user_id = ?').run(id);
       this.stmt('DELETE FROM messages WHERE sender_id = ? OR recipient_id = ?').run(id, id);
+      this.stmt('DELETE FROM local_workspaces WHERE user_id = ?').run(id);
       this.stmt('DELETE FROM users WHERE id = ?').run(id);
       this.db.exec('COMMIT');
     } catch (error) {
@@ -767,13 +804,14 @@ export class Database {
   // ── 子用户权限（网关强制执行） ────────────────────────────
   getPermissions(userId: number): UserPermissionsRow | null {
     const row = this.stmt(
-      'SELECT user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, allow_upload, allow_git_download, banned, sandbox_mode, disabled_sessions, updated_at FROM user_permissions WHERE user_id = ?',
+      'SELECT user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, monthly_budget_micros, allow_upload, allow_git_download, banned, sandbox_mode, disabled_sessions, updated_at FROM user_permissions WHERE user_id = ?',
     ).get(userId) as
       | {
           user_id: number;
           allowed_folders: string | null;
           hourly_token_limit: number | null;
           daily_minutes_limit: number | null;
+          monthly_budget_micros: number | null;
           allow_upload: number;
           allow_git_download: number;
           banned: number;
@@ -788,6 +826,7 @@ export class Database {
       allowed_folders: parseAllowedFolders(row.allowed_folders),
       hourly_token_limit: row.hourly_token_limit,
       daily_minutes_limit: row.daily_minutes_limit,
+      monthly_budget_micros: row.monthly_budget_micros,
       allow_upload: row.allow_upload === 1,
       allow_git_download: row.allow_git_download === 1,
       banned: row.banned === 1,
@@ -803,6 +842,7 @@ export class Database {
       allowedFolders: string[];
       hourlyTokenLimit: number | null;
       dailyMinutesLimit: number | null;
+      monthlyBudgetMicros: number | null;
       allowUpload: boolean;
       allowGitDownload: boolean;
       banned: boolean;
@@ -815,12 +855,13 @@ export class Database {
     const allowedFolders = sanitizeAllowedFolders(perms.allowedFolders);
     const disabledSessions = [...new Set((perms.disabledSessions ?? []).filter((id) => typeof id === 'string' && id.length > 0 && id.length <= 200))].slice(0, 2000);
     this.stmt(
-      `INSERT INTO user_permissions (user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, allow_upload, allow_git_download, banned, sandbox_mode, disabled_sessions)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO user_permissions (user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, monthly_budget_micros, allow_upload, allow_git_download, banned, sandbox_mode, disabled_sessions)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(user_id) DO UPDATE SET
          allowed_folders = excluded.allowed_folders,
          hourly_token_limit = excluded.hourly_token_limit,
          daily_minutes_limit = excluded.daily_minutes_limit,
+         monthly_budget_micros = excluded.monthly_budget_micros,
          allow_upload = excluded.allow_upload,
          allow_git_download = excluded.allow_git_download,
          banned = excluded.banned,
@@ -832,6 +873,7 @@ export class Database {
       JSON.stringify(allowedFolders),
       perms.hourlyTokenLimit,
       perms.dailyMinutesLimit,
+      perms.monthlyBudgetMicros,
       perms.allowUpload ? 1 : 0,
       perms.allowGitDownload ? 1 : 0,
       perms.banned ? 1 : 0,
@@ -906,6 +948,154 @@ export class Database {
    */
   resetUsage(userId: number): void {
     this.stmt('DELETE FROM user_usage WHERE user_id = ?').run(userId);
+  }
+
+  // ── 用户本机工作区 ────────────────────────────────────────
+
+  /** 持久化一次成功配对；令牌只保存不可逆等值散列。 */
+  createLocalWorkspace(input: {
+    id: string;
+    userId: number;
+    token: string;
+    deviceName: string;
+    workspaceName: string;
+    remoteRoot: string;
+    placeholderPath: string;
+    platform: string;
+    shellEnabled: boolean;
+  }): LocalWorkspaceRow {
+    this.stmt(
+      `INSERT INTO local_workspaces
+       (id, user_id, token_hash, device_name, workspace_name, remote_root, placeholder_path, platform, shell_enabled)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      input.id,
+      input.userId,
+      this.localWorkspaceTokenHash(input.token),
+      this.crypto.encrypt(input.deviceName),
+      this.crypto.encrypt(input.workspaceName),
+      this.crypto.encrypt(input.remoteRoot),
+      input.placeholderPath,
+      input.platform,
+      input.shellEnabled ? 1 : 0,
+    );
+    const row = this.getLocalWorkspace(input.id);
+    if (row === null) throw new Error('本机工作区配对写入后无法读取');
+    return row;
+  }
+
+  /** 用长期设备令牌恢复一个未撤销的配对。 */
+  authenticateLocalWorkspace(token: string): LocalWorkspaceRow | null {
+    const row = this.stmt(
+      'SELECT * FROM local_workspaces WHERE token_hash = ? AND revoked_at IS NULL',
+    ).get(this.localWorkspaceTokenHash(token));
+    return row === undefined ? null : this.mapLocalWorkspace(row);
+  }
+
+  /** 按稳定 id 读取一个配对，包括已撤销记录。 */
+  getLocalWorkspace(id: string): LocalWorkspaceRow | null {
+    const row = this.stmt('SELECT * FROM local_workspaces WHERE id = ?').get(id);
+    return row === undefined ? null : this.mapLocalWorkspace(row);
+  }
+
+  /** 当前用户可管理的未撤销本机工作区。 */
+  listLocalWorkspacesForUser(userId: number): LocalWorkspaceRow[] {
+    return this.mapLocalWorkspaces(
+      this.stmt(
+        'SELECT * FROM local_workspaces WHERE user_id = ? AND revoked_at IS NULL ORDER BY created_at DESC',
+      ).all(userId),
+    );
+  }
+
+  /** 启动恢复使用的全部未撤销配对。 */
+  listLocalWorkspaces(): LocalWorkspaceRow[] {
+    return this.mapLocalWorkspaces(
+      this.stmt('SELECT * FROM local_workspaces WHERE revoked_at IS NULL ORDER BY created_at ASC').all(),
+    );
+  }
+
+  /** 刷新伴随连接上报的展示事实，并记录最近在线时间。 */
+  touchLocalWorkspace(
+    id: string,
+    input: { deviceName: string; workspaceName: string; remoteRoot: string; platform: string; shellEnabled: boolean },
+  ): void {
+    this.stmt(
+      `UPDATE local_workspaces
+       SET device_name = ?, workspace_name = ?, remote_root = ?, platform = ?, shell_enabled = ?,
+           last_seen_at = datetime('now')
+       WHERE id = ? AND revoked_at IS NULL`,
+    ).run(
+      this.crypto.encrypt(input.deviceName),
+      this.crypto.encrypt(input.workspaceName),
+      this.crypto.encrypt(input.remoteRoot),
+      input.platform,
+      input.shellEnabled ? 1 : 0,
+      id,
+    );
+  }
+
+  /** 撤销当前用户拥有的配对；重复撤销是幂等的。 */
+  revokeLocalWorkspace(userId: number, id: string): boolean {
+    const result = this.stmt(
+      "UPDATE local_workspaces SET revoked_at = datetime('now') WHERE id = ? AND user_id = ? AND revoked_at IS NULL",
+    ).run(id, userId);
+    return Number(result.changes) > 0;
+  }
+
+  /** 子用户只能访问自己配对的远程占位目录；普通宿主目录不受此规则影响。 */
+  localWorkspacePathAllowed(userId: number, candidate: string): boolean {
+    const owner = this.localWorkspaceOwnerForPath(candidate);
+    return owner === null || owner === userId;
+  }
+
+  /** 返回包含目标路径的未撤销本机工作区所有者；普通宿主路径返回 null。 */
+  localWorkspaceOwnerForPath(candidate: string): number | null {
+    const resolved = path.resolve(candidate);
+    for (const workspace of this.listLocalWorkspaces()) {
+      const root = path.resolve(workspace.placeholder_path);
+      const relative = path.relative(root, resolved);
+      if (relative === '' || (!relative.startsWith('..' + path.sep) && relative !== '..' && !path.isAbsolute(relative))) {
+        return workspace.user_id;
+      }
+    }
+    return null;
+  }
+
+  private localWorkspaceTokenHash(token: string): string {
+    return this.crypto.lookupHash(`local-workspace:${token}`);
+  }
+
+  private mapLocalWorkspaces(rows: unknown): LocalWorkspaceRow[] {
+    return (rows as Record<string, unknown>[]).map((row) => this.mapLocalWorkspace(row));
+  }
+
+  private mapLocalWorkspace(value: unknown): LocalWorkspaceRow {
+    const row = value as {
+      id: string;
+      user_id: number;
+      device_name: string;
+      workspace_name: string;
+      remote_root: string;
+      placeholder_path: string;
+      platform: string;
+      shell_enabled: number;
+      created_at: string;
+      last_seen_at: string;
+      revoked_at: string | null;
+    };
+    return {
+      id: row.id,
+      user_id: Number(row.user_id),
+      device_name: this.crypto.decrypt(row.device_name) ?? '',
+      workspace_name: this.crypto.decrypt(row.workspace_name) ?? '',
+      remote_root: this.crypto.decrypt(row.remote_root) ?? '',
+      placeholder_path: row.placeholder_path,
+      platform: row.platform,
+      shell_enabled: row.shell_enabled === 1,
+      created_at: row.created_at,
+      last_seen_at: row.last_seen_at,
+      revoked_at: row.revoked_at,
+    };
   }
 
   // ── 留言 / 聊天 ───────────────────────────────────────────

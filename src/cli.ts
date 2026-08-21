@@ -28,6 +28,8 @@ import {
   patchStatus,
 } from './patch.js';
 import { t, resolveCliLang } from './i18n.js';
+import { LazyMySqlWebDavCredentialStore } from './webdav-credentials.js';
+import { backupSqliteBeforeMigration } from './db-backup.js';
 
 /** CLI 输出语言：LANG / LC_ALL / LC_MESSAGES 以 en 开头则英文，否则中文 */
 const lang = resolveCliLang();
@@ -230,10 +232,11 @@ async function boot() {
     console.error(`[dsh-passwords] ${tr('cli.patchSyncFailed')}:`, error);
   }
 
+  backupSqliteBeforeMigration(config.dbPath);
   const db = new Database(config.dbPath, createFieldCrypto(config.dbEncKey, config.setupKey));
   db.init();
-
-  const auth = new AuthService(config, db);
+  const webdavCredentials = new LazyMySqlWebDavCredentialStore(config);
+  const auth = new AuthService(config, db, webdavCredentials);
 
   // ── 80 端口：301 跳转 + ACME HTTP-01 挑战应答 ──
   // 自动 HTTPS 需要先监听 80（Let's Encrypt 从 80 校验挑战），再签发证书
@@ -380,11 +383,13 @@ async function boot() {
   process.on('SIGINT', () => {
     gateway.close();
     redirect?.close();
+    void webdavCredentials.close();
     process.exit(0);
   });
   process.on('SIGTERM', () => {
     gateway.close();
     redirect?.close();
+    void webdavCredentials.close();
     process.exit(0);
   });
 }

@@ -62,6 +62,7 @@ import {
 } from './permissions.js';
 import { findDshRoot, applyRemotePatch, restartDshWeb } from './patch.js';
 import { t, resolveGatewayLang, type Lang } from './i18n.js';
+import { signedPrincipalHeaders } from './principal.js';
 
 /** 网关内部扩展请求：权限执行时把用户/权限附在 req 上，供后续中间件与代理读取 */
 type Req = Request & {
@@ -797,6 +798,7 @@ export function createGatewayServer(
         allowed_folders: ['__deny__'],
         hourly_token_limit: null,
         daily_minutes_limit: null,
+        monthly_budget_micros: 0,
         allow_upload: true,
         // F-12 残余：新子用户默认禁 git 下载（含 dsh-uploads/download 等外带通道），
         // 主用户需要时按需开启；已有权限行的子用户不受影响
@@ -807,6 +809,14 @@ export function createGatewayServer(
         updated_at: '',
       }
     );
+  }
+
+  /** 文件夹白名单与本机工作区所有权的统一判定。 */
+  function pathAllowedFor(userId: number, candidate: string, allowedFolders: string[]): boolean {
+    const localWorkspaceOwner = db.localWorkspaceOwnerForPath(candidate);
+    return localWorkspaceOwner === null
+      ? folderAllowed(candidate, allowedFolders)
+      : localWorkspaceOwner === userId;
   }
 
   /** 从会话 cookie 解析完整用户（含角色）；无会话/失效返回 null */
@@ -1163,6 +1173,7 @@ export function createGatewayServer(
           allowedFolders: perms.allowed_folders,
           hourlyTokenLimit: perms.hourly_token_limit,
           dailyMinutesLimit: perms.daily_minutes_limit,
+          monthlyBudgetMicros: perms.monthly_budget_micros,
           allowUpload: perms.allow_upload,
           allowGitDownload: perms.allow_git_download,
           banned: perms.banned,
@@ -1215,7 +1226,7 @@ export function createGatewayServer(
 
     // 3) 目录白名单（子用户受限时）
     const perms = effectivePermissions(me.userId);
-    if (!folderAllowed(real, perms.allowed_folders)) {
+    if (!pathAllowedFor(me.userId, real, perms.allowed_folders)) {
       res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '目录越权' });
       return;
     }
@@ -1328,6 +1339,20 @@ export function createGatewayServer(
     const rawMinutes = nullableInt(body.dailyMinutesLimit);
     const hourlyTokenLimit = rawToken === 0 ? null : rawToken;
     const dailyMinutesLimit = rawMinutes === 0 ? null : rawMinutes;
+    const existingMonthlyBudgetMicros = db.getPermissions(userId)?.monthly_budget_micros ?? 0;
+    const rawMonthlyBudget = typeof body.monthlyBudgetYuan === 'number'
+      ? String(body.monthlyBudgetYuan)
+      : typeof body.monthlyBudgetYuan === 'string' ? body.monthlyBudgetYuan.trim() : '';
+    if (rawMonthlyBudget !== '' && !/^(?:0|[1-9][0-9]{0,8})(?:\.[0-9]{1,2})?$/.test(rawMonthlyBudget)) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: '月额度必须是非负人民币金额，最多两位小数' });
+      return;
+    }
+    const monthlyBudgetMicros = rawMonthlyBudget === ''
+      ? existingMonthlyBudgetMicros
+      : (() => {
+          const [whole, fraction = ''] = rawMonthlyBudget.split('.');
+          return Number(whole) * 1_000_000 + Number(fraction.padEnd(2, '0')) * 10_000;
+        })();
     const allowUpload = body.allowUpload !== false;
     const allowGitDownload = body.allowGitDownload !== false;
     const banned = body.banned === true;
@@ -1348,6 +1373,7 @@ export function createGatewayServer(
       allowedFolders,
       hourlyTokenLimit,
       dailyMinutesLimit,
+      monthlyBudgetMicros,
       allowUpload,
       allowGitDownload,
       banned,
@@ -1366,6 +1392,7 @@ export function createGatewayServer(
         allowedFolders,
         hourlyTokenLimit,
         dailyMinutesLimit,
+        monthlyBudgetMicros,
         allowUpload,
         allowGitDownload,
         banned,
@@ -1728,13 +1755,12 @@ export function createGatewayServer(
         // ⚠ 只对 aionui-panel 路径做此检查——aionuiRootFrom 对非 aionui-panel 路径返回 null，
         //  若用 null 判 fail-closed 会把普通 GET/HEAD（state/messages/页面资源等）全部 403
         if (
-          isWorkspaceRestricted(perms.allowed_folders) &&
           (req.method === 'GET' || req.method === 'HEAD') &&
           isAionuiPanel(requestPath)
         ) {
           const aionuiRoot = aionuiRootFrom(req.method, requestPath, parsed.searchParams, null);
           // 提取不到 root 时也 fail-closed（之前直接放行→白名单外的目录可被下载）
-          if (aionuiRoot === null || !folderAllowed(aionuiRoot, perms.allowed_folders)) {
+          if (aionuiRoot === null || !pathAllowedFor(user.userId, aionuiRoot, perms.allowed_folders)) {
             res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
             return;
           }
@@ -1939,6 +1965,21 @@ export function createGatewayServer(
     // 缓冲/改写路径用 end(body) 重写 content-length，chunked 的 transfer-encoding
     // 若保留会造成 Node 的 ERR_HTTP_CONTENT_LENGTH_MISMATCH
     delete headers['transfer-encoding'];
+    // Only this trusted gateway may assert identity to the Host. Strip every
+    // browser-supplied value before adding a fresh, 30-second HMAC assertion.
+    delete headers['x-dsh-principal'];
+    delete headers['x-dsh-principal-signature'];
+    const principalUserId = (req as Req).dshpwUser;
+    if (principalUserId !== undefined) {
+      const principalUser = db.getUserById(principalUserId);
+      if (principalUser !== null) {
+        Object.assign(headers, signedPrincipalHeaders({
+          userId: principalUser.id,
+          username: principalUser.username,
+          role: principalUser.role,
+        }, config.internalSecret));
+      }
+    }
     // F-15：剥离网关会话 Cookie（dsh_gateway_token JWT）——上游 dsh 是无认证
     // 应用，本不需要令牌；不剥离则上游或其第三方插件被入侵/投毒时可收割全部
     // 活动会话 JWT 并回放。白盒确认 dsh-host-webserver / dsh-anonymous-user-id
@@ -2054,10 +2095,14 @@ export function createGatewayServer(
               collectIdPathPairs(parsed, workspacePathById);
               // 缓存会话 cwd：工作区 path → 其 sessionIds（供会话作用域 RPC 的 cwd 校验）
               collectSessionCwdFromWorkspaces(parsed, sessionCwdById);
-              const restricted =
-                reqAs.dshpwPerms !== undefined && isWorkspaceRestricted(reqAs.dshpwPerms.allowed_folders);
-              const outBody = restricted
-                ? filterByPathField(parsed, reqAs.dshpwPerms!.allowed_folders, 'path')
+              const outBody = reqAs.dshpwPerms !== undefined
+                ? filterByPathField(
+                    parsed,
+                    reqAs.dshpwPerms.allowed_folders,
+                    'path',
+                    0,
+                    (candidate) => pathAllowedFor(reqAs.dshpwUser!, candidate, reqAs.dshpwPerms!.allowed_folders),
+                  )
                 : parsed;
               // F-25：子用户（含 allowedFolders=[] 全部允许）只能看到被授权的会话——
               // 清空 archivedSessionIds 枚举源，并把活动 sessionIds 按逐会话禁用过滤
@@ -2150,9 +2195,7 @@ export function createGatewayServer(
               // 子用户按工作区开关过滤：关闭工作区后，其会话一并从侧栏消失，
               // 不产生「未分组」孤儿项。
               const perms = reqAs.dshpwPerms!;
-              const cwdAllowed = isWorkspaceRestricted(perms.allowed_folders)
-                ? (cwd: string) => folderAllowed(cwd, perms.allowed_folders)
-                : null;
+              const cwdAllowed = (cwd: string) => pathAllowedFor(reqAs.dshpwUser!, cwd, perms.allowed_folders);
               const disabled = new Set(perms.disabled_sessions);
               const archived = collectArchivedSessionIds(parsed);
               const filtered = filterSessionItems(parsed, (id) => !disabled.has(id) && !archived.has(id), cwdAllowed);
@@ -2268,7 +2311,6 @@ export function createGatewayServer(
     //   2) 沙盒权限：settings.mutate 试图把 defaultPreset 切到高于授权级别 → 403
     const needsFolderCheck =
       reqAs.dshpwPerms !== undefined &&
-      isWorkspaceRestricted(reqAs.dshpwPerms.allowed_folders) &&
       (req.method === 'POST' || req.method === 'PUT' || (req.method === 'DELETE' && isAionuiPanel(proxyPath))) &&
       (WORKSPACE_ENDPOINT_RE.test(proxyPath) || isAionuiPanel(proxyPath));
     const needsSandboxCheck =
@@ -2409,7 +2451,10 @@ export function createGatewayServer(
               }
             }
           }
-          if (targetPath !== null && !folderAllowed(targetPath, reqAs.dshpwPerms!.allowed_folders)) {
+          if (
+            targetPath !== null &&
+            !pathAllowedFor(reqAs.dshpwUser!, targetPath, reqAs.dshpwPerms!.allowed_folders)
+          ) {
             upstreamReq.destroy();
             res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
             return;
@@ -2462,7 +2507,7 @@ export function createGatewayServer(
             sessionId === null ||
             perms.disabled_sessions.includes(sessionId) ||
             cwd === undefined ||
-            !folderAllowed(cwd, perms.allowed_folders)
+            !pathAllowedFor(reqAs.dshpwUser!, cwd, perms.allowed_folders)
           ) {
             upstreamReq.destroy();
             res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));

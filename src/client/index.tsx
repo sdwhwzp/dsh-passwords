@@ -47,6 +47,7 @@ const CSS = `
 .dshpw-btn.danger{background:none;border:1px solid var(--dsw-alias-state-error-primary,#ef4444);color:var(--dsw-alias-state-error-primary,#ef4444)}
 .dshpw-btn.danger:hover:not(:disabled){filter:none;background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#ef4444) 10%,transparent)}
 .dshpw-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.dshpw-logout{margin-left:auto}
 .dshpw-user{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--dsw-alias-border-l2)}
 .dshpw-user:last-child{border-bottom:none}
 .dshpw-perm{border:1px solid var(--dsw-alias-border-l2);border-radius:10px;padding:10px;display:flex;flex-direction:column;gap:8px}
@@ -68,6 +69,12 @@ select.dshpw-input{height:auto;min-height:36px}
 .dshpw-error{color:var(--dsw-alias-state-error-primary,#ef4444);font-size:12px}
 .dshpw-ok{color:var(--dsw-alias-state-success-primary,#22c55e);font-size:12px}
 .dshpw-hint{font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}
+.dshpw-local-command{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;padding:10px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-2)}
+.dshpw-local-command code{min-width:0;overflow:auto;white-space:nowrap;font-size:11px;color:var(--dsw-alias-label-secondary)}
+.dshpw-local-command small{grid-column:1/-1}
+.dshpw-local-download{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-2)}
+.dshpw-download-btn{display:inline-flex;align-items:center;text-decoration:none}
+.dshpw-local-workspace{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:10px;align-items:center;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-2)}
 `;
 
 export const inject = ['slots', 'locale'] as const;

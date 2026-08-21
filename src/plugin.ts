@@ -7,6 +7,7 @@
 //        （仅主用户可触发，10 分钟冷却；补丁强制启用，无开关）
 //      dsh 升级覆盖补丁后，主用户在设置页点"重载补丁"即可，无需登录服务器。
 import type { Context } from '@deepseek-ai/cordis';
+import type {} from '@deepseek-ai/dsh-agent';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver';
 import http from 'node:http';
@@ -15,7 +16,8 @@ import net from 'node:net';
 import jwt from 'jsonwebtoken';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { timingSafeEqual } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { createReadStream, existsSync } from 'node:fs';
+import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, type PlatformConfig } from './config.js';
@@ -23,7 +25,28 @@ import { Database, type UserListRow } from './db.js';
 import { createFieldCrypto } from './encrypt.js';
 import { AuthService, AuthError, assertNoSqlInjection, type AuthedUser, type RequestMeta } from './auth.js';
 import { findDshRoot, patchStatus } from './patch.js';
-import { isDisplayableDshSession, isDisplayableDshSurface } from './permissions.js';
+import { isDisplayableDshSession, isDisplayableDshSurface, todayLocal } from './permissions.js';
+import { LocalWorkspaceHub } from './local-workspace-hub.js';
+import { RequestPrincipalService } from './principal.js';
+import { WebDavCredentialService } from './webdav-credentials.js';
+import type { AuthenticatedPrincipal } from './principal.js';
+import { backupSqliteBeforeMigration } from './db-backup.js';
+
+interface SpendAccounting {
+  reconcile(): Promise<void>;
+  budgetStatus(
+    principal: AuthenticatedPrincipal,
+    monthlyBudgetMicros: number | null,
+    month?: string,
+  ): { exhausted: boolean; warning: boolean; usedMicros: number; remainingMicros: number | null };
+  monthlyUsedMicros(principal: AuthenticatedPrincipal, month?: string): number;
+}
+
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    spendAccounting: SpendAccounting;
+  }
+}
 
 /** 稳定 cordis 插件名（insert 进 cordis.yml 时用同一个名字） */
 export const name = 'dsh-passwords';
@@ -35,6 +58,8 @@ export const inject = ['webServer'];
 const COOKIE_NAME = 'dsh_gateway_token';
 /** 请求体上限（用户管理 JSON 都很小） */
 const MAX_BODY = 4096;
+const INSTALL_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const WINDOWS_ASSISTANT_FILENAME = '山东梯智物联AI本机助手.exe';
 
 /** 请求体超限专用错误：读完后回 413，而不是销毁 socket 造成代理 502 */
 class BodyTooLargeError extends Error {}
@@ -206,8 +231,7 @@ function gatewayAlreadyRunning(port: number): Promise<boolean> {
  * 网关侧另有父进程看门狗兜底（宿主被强杀时自己退出）。
  */
 function startGateway(ctx: Context, cfg: PlatformConfig): void {
-  const installRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-  const cliPath = path.join(installRoot, 'dist', 'cli.js');
+  const cliPath = path.join(INSTALL_ROOT, 'dist', 'cli.js');
   const gatewayPort = cfg.gateway.port;
 
   ctx.effect(
@@ -242,11 +266,11 @@ function startGateway(ctx: Context, cfg: PlatformConfig): void {
             ? [cliPath, 'serve-gateway']
             : [cliPath, 'serve-gateway', '--upstream', `http://127.0.0.1:${String(upstreamPort)}`];
         child = spawn(process.execPath, gatewayArgs, {
-          cwd: installRoot,
+          cwd: INSTALL_ROOT,
           env: {
             ...process.env,
             DSH_GATEWAY_PARENT_PID: String(process.pid),
-            DSH_PASSWORDS_ENV_FILE: path.join(installRoot, '.env'),
+            DSH_PASSWORDS_ENV_FILE: path.join(INSTALL_ROOT, '.env'),
           },
           stdio: ['ignore', 'inherit', 'inherit'],
         });
@@ -300,6 +324,10 @@ export function apply(ctx: Context): void {
   // 未配置 .env（SETUP_KEY 为空）时不初始化数据库，用户管理路由返回 503 提示
   const configured =
     cfg.setupKey !== '' && cfg.setupKey !== 'change-me-to-a-strong-random-key';
+  if (configured) {
+    new RequestPrincipalService(ctx, cfg);
+    new WebDavCredentialService(ctx, cfg);
+  }
   /** patch/reload 冷却（10 分钟一次，防认证后横向 DoS） */
   const PATCH_RELOAD_COOLDOWN_MS = 10 * 60 * 1000;
   let lastPatchReload = 0;
@@ -307,6 +335,7 @@ export function apply(ctx: Context): void {
   let auth: AuthService | null = null;
   if (configured) {
     try {
+      backupSqliteBeforeMigration(cfg.dbPath);
       db = new Database(cfg.dbPath, createFieldCrypto(cfg.dbEncKey, cfg.setupKey));
       db.init();
       auth = new AuthService(cfg, db);
@@ -315,6 +344,98 @@ export function apply(ctx: Context): void {
       db = null;
       auth = null;
     }
+  }
+  const localWorkspaceHub = db === null ? null : new LocalWorkspaceHub(ctx, db, cfg);
+  const localWorkspaceReady = localWorkspaceHub === null
+    ? Promise.reject(new Error('本机助手服务不可用：数据库未初始化'))
+    : localWorkspaceHub.start();
+  void localWorkspaceReady.catch((error: unknown) => {
+    console.error('[dsh-passwords] 本机助手服务启动失败:', error);
+  });
+  if (localWorkspaceHub !== null) {
+    ctx.effect(
+      () => async () => {
+        await localWorkspaceReady.catch(() => undefined);
+        await localWorkspaceHub.dispose();
+      },
+      'dsh-passwords: local workspace hub',
+    );
+    ctx.inject(['workspaceRegistry'], (scope) => {
+      let active = true;
+      void localWorkspaceReady
+        .then(async () => {
+          if (active) await localWorkspaceHub.restoreWorkspaces(scope.workspaceRegistry);
+        })
+        .catch((error: unknown) => {
+          console.error('[dsh-passwords] 恢复本机工作区失败:', error);
+        });
+      return () => {
+        active = false;
+      };
+    });
+  }
+
+  // Every model step is authorized against the durable message owner. Legacy
+  // anonymous sessions remain usable, but authenticated users fail closed if
+  // accounting is unavailable; local administrators are intentionally unlimited.
+  if (db !== null) {
+    ctx.on('agent/pre-step', async (payload, next) => {
+      // The released dsh-agent typings predate the optional principal field;
+      // the local harness carries it on this same durable event contract.
+      const principal = (payload as typeof payload & { principal?: AuthenticatedPrincipal }).principal;
+      if (principal === undefined) return next();
+      if (principal.source !== 'dsh-passwords' || !/^[1-9][0-9]*$/.test(principal.id)) return { kind: 'reject' } as const;
+      const user = db!.getUserById(Number(principal.id));
+      if (user === null || user.username !== principal.username || user.role !== principal.role) return { kind: 'reject' } as const;
+      if (user.role === 'admin') return next();
+      const permissions = db!.getPermissions(user.id) ?? {
+        user_id: user.id,
+        allowed_folders: ['__deny__'],
+        hourly_token_limit: null,
+        daily_minutes_limit: null,
+        monthly_budget_micros: 0,
+        allow_upload: true,
+        allow_git_download: false,
+        banned: false,
+        sandbox_mode: null,
+        disabled_sessions: [],
+        updated_at: '',
+      };
+      if (permissions.banned) return { kind: 'reject' } as const;
+      const usage = db!.getUsage(user.id, todayLocal());
+      if (usage !== null) {
+        if (permissions.daily_minutes_limit !== null && usage.active_seconds >= permissions.daily_minutes_limit * 60) {
+          db!.audit('daily_time_exhausted', { username: user.username });
+          return { kind: 'reject' } as const;
+        }
+        const windowStart = usage.hourly_window_start === null ? NaN : new Date(usage.hourly_window_start).getTime();
+        const inCurrentWindow = Number.isFinite(windowStart) && Date.now() - windowStart < 3_600_000;
+        if (permissions.hourly_token_limit !== null && inCurrentWindow && usage.hourly_tokens >= permissions.hourly_token_limit) {
+          db!.audit('hourly_tokens_exhausted', { username: user.username });
+          return { kind: 'reject' } as const;
+        }
+      }
+      const accounting = ctx.get('spendAccounting');
+      if (accounting === undefined) {
+        db!.audit('budget_check_unavailable', { username: user.username });
+        return { kind: 'reject' } as const;
+      }
+      try {
+        await accounting.reconcile();
+        const status = accounting.budgetStatus(principal, permissions.monthly_budget_micros);
+        if (status.exhausted) {
+          db!.audit('monthly_budget_exhausted', {
+            username: user.username,
+            detail: JSON.stringify({ usedMicros: status.usedMicros, budgetMicros: permissions.monthly_budget_micros }),
+          });
+          return { kind: 'reject' } as const;
+        }
+      } catch {
+        db!.audit('budget_check_unavailable', { username: user.username });
+        return { kind: 'reject' } as const;
+      }
+      return next();
+    });
   }
 
   /** 从网关 JWT cookie 解析调用方身份（含凭据版本校验） */
@@ -441,6 +562,36 @@ export function apply(ctx: Context): void {
     },
     {
       kind: 'exact',
+      path: '/api/dsh-passwords/budgets',
+      handler: async (req, res) => {
+        const caller = guard(req, res);
+        if (!caller) return;
+        if (!requireMethod(req, res, 'GET')) return;
+        const accounting = ctx.get('spendAccounting');
+        if (accounting === undefined) {
+          writeJson(res, 503, { ok: false, code: 'ACCOUNTING_UNAVAILABLE', error: '消费账本不可用' });
+          return;
+        }
+        try {
+          await accounting.reconcile();
+          const users = caller.role === 'admin'
+            ? db!.listUsers()
+            : [db!.getUserListRowById(caller.userId)].filter((row): row is UserListRow => row !== null);
+          const budgets = users.map((user) => {
+            const principal: AuthenticatedPrincipal = {
+              source: 'dsh-passwords', id: String(user.id), username: user.username, role: user.role,
+            };
+            const budget = user.role === 'admin' ? null : db!.getPermissions(user.id)?.monthly_budget_micros ?? 0;
+            return { userId: user.id, ...accounting.budgetStatus(principal, budget) };
+          });
+          writeJson(res, 200, { ok: true, budgets });
+        } catch {
+          writeJson(res, 503, { ok: false, code: 'ACCOUNTING_UNAVAILABLE', error: '消费账本不可用' });
+        }
+      },
+    },
+    {
+      kind: 'exact',
       path: '/api/dsh-passwords/password',
       handler: async (req, res) => {
         const caller = guard(req, res);
@@ -528,7 +679,10 @@ export function apply(ctx: Context): void {
           assertNoSqlInjection(target, 'target');
           const targetUser = db!.getUserByUsername(target);
           await auth!.removeUser(caller, target, metaOf(req));
-          if (targetUser) await invalidateGatewaySessions(cfg, targetUser.id);
+          if (targetUser) {
+            localWorkspaceHub?.disconnectUser(targetUser.id);
+            await invalidateGatewaySessions(cfg, targetUser.id);
+          }
           writeJson(res, 200, { ok: true });
         } catch (error) {
           failJson(res, error);
@@ -551,6 +705,93 @@ export function apply(ctx: Context): void {
           // 显示偏好按用户持久化，而非全局开关：任意账号只能控制自己的聊天入口。
           db!.setSetting(`chat_enabled:${String(caller.userId)}`, body.enabled ? '1' : '0');
           writeJson(res, 200, { ok: true, chatEnabled: body.enabled });
+        } catch (error) {
+          failJson(res, error);
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/api/dsh-passwords/local-workspace/windows',
+      handler: async (req, res) => {
+        const caller = guard(req, res);
+        if (!caller) return;
+        if (!requireMethod(req, res, 'GET')) return;
+        const assistantPath = path.join(INSTALL_ROOT, 'release', WINDOWS_ASSISTANT_FILENAME);
+        try {
+          const file = await stat(assistantPath);
+          if (!file.isFile()) throw new Error('Windows 本机助手产物不是普通文件');
+          res.writeHead(200, {
+            'content-type': 'application/vnd.microsoft.portable-executable',
+            'content-length': String(file.size),
+            'content-disposition': `attachment; filename="dsh-local-workspace-windows-x64.exe"; filename*=UTF-8''${encodeURIComponent(WINDOWS_ASSISTANT_FILENAME)}`,
+            'cache-control': 'private, no-store',
+            'x-content-type-options': 'nosniff',
+          });
+          const stream = createReadStream(assistantPath);
+          stream.on('error', (error) => res.destroy(error));
+          stream.pipe(res);
+        } catch (error) {
+          if (!res.headersSent) {
+            const missing = error instanceof Error && 'code' in error && error.code === 'ENOENT';
+            writeJson(res, missing ? 404 : 500, {
+              ok: false,
+              code: missing ? 'NOT_FOUND' : 'INTERNAL',
+              error: missing ? 'Windows 本机助手尚未构建' : 'Windows 本机助手下载失败',
+            });
+          }
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/api/dsh-passwords/local-workspace/pair',
+      handler: async (req, res) => {
+        const caller = guard(req, res);
+        if (!caller) return;
+        if (!requireMethod(req, res, 'POST')) return;
+        try {
+          await localWorkspaceReady;
+          writeJson(res, 200, { ok: true, pairing: localWorkspaceHub!.createPairing(caller.userId) });
+        } catch (error) {
+          failJson(res, error);
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/api/dsh-passwords/local-workspace/list',
+      handler: async (req, res) => {
+        const caller = guard(req, res);
+        if (!caller) return;
+        if (!requireMethod(req, res, 'GET')) return;
+        try {
+          await localWorkspaceReady;
+          writeJson(res, 200, { ok: true, workspaces: localWorkspaceHub!.list(caller.userId) });
+        } catch (error) {
+          failJson(res, error);
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/api/dsh-passwords/local-workspace/revoke',
+      handler: async (req, res) => {
+        const caller = guard(req, res);
+        if (!caller) return;
+        if (!requireMethod(req, res, 'POST')) return;
+        try {
+          await localWorkspaceReady;
+          const body = await readJsonBody(req);
+          const id = typeof body.id === 'string' ? body.id : '';
+          if (id === '') {
+            writeJson(res, 400, { ok: false, code: 'INVALID', error: 'id 无效' });
+            return;
+          }
+          const revoked = await localWorkspaceHub!.revoke(caller.userId, id);
+          writeJson(res, revoked ? 200 : 404, revoked
+            ? { ok: true }
+            : { ok: false, code: 'NOT_FOUND', error: '本机工作区不存在' });
         } catch (error) {
           failJson(res, error);
         }
