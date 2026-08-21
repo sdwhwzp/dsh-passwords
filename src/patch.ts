@@ -277,12 +277,16 @@ export function applyRemotePatch(dshRoot: string): 'applied' | 'unchanged' | 'mi
   }
 
   // 1) 客户端 settings 强制 host 模式
+  // rc.8 起文件中有两处该三元（SettingsScopeController + SettingsDescribeMirror）：
+  // String.replace(string, string) 只替换第一处，首轮补丁会让 DescribeMirror 漏打，
+  // 远程浏览器设置页报 "settings are unavailable in this browser"（Issue #8）。
+  // split/join 全量替换，一轮打完。
   const s = readFileSync(settingsFile, 'utf8');
   migrateLegacyBackup(settingsFile, s, (original) =>
-    original.includes(SETTINGS_FROM) ? original.replace(SETTINGS_FROM, SETTINGS_TO) : null,
+    original.includes(SETTINGS_FROM) ? original.split(SETTINGS_FROM).join(SETTINGS_TO) : null,
   );
   if (s.includes(SETTINGS_FROM)) {
-    const patched = s.replace(SETTINGS_FROM, SETTINGS_TO);
+    const patched = s.split(SETTINGS_FROM).join(SETTINGS_TO);
     ensureOriginalBackup(settingsFile, s, patched);
     writeFileSync(settingsFile, patched);
     changed = true;

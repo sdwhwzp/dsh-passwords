@@ -33,6 +33,26 @@ const RC7_SETTINGS_UNPATCHED =
   'const mode = connection.isLoopback ? "host" : "memory";\nexport default mode;\n';
 const RC7_SETTINGS_PATCHED = 'const mode = "host";\nexport default mode;\n';
 
+/** 真实 rc.8 布局：同一文件里有两处 isLoopback 三元（ScopeController + DescribeMirror）。
+ * 旧实现用 String.replace 只替换第一处，首轮补丁后 DescribeMirror 漏打，
+ * 远程浏览器设置页报 "settings are unavailable in this browser"（Issue #8）。 */
+const RC8_SETTINGS_UNPATCHED = [
+  '\t\t\t\tconst controller = new SettingsScopeController(connection.api, spec, this.mirror, connection.isLoopback ? "host" : "memory", this.schema);',
+  '\t\t\tctx.effect(() => {',
+  '\t\t\t\tthis.mirror.ensure();',
+  '\t\t\t}, `ui-settings: ${spec.namespace}`);',
+  '\t\t\tfunction apply(ctx) {',
+  '\t\t\t\tconst schema = new SettingsSchemaService(ctx);',
+  '\t\t\t\tconst connection = ctx.get("connection");',
+  '\t\t\t\tconst mirror = new SettingsDescribeMirror(connection.api, connection.isLoopback ? "host" : "memory");',
+  '\t\t\t\tctx.effect(() => {',
+  '\t\t\t\t\tconst disposers = [ctx.get("remote").$on("settings/document-updated", () => {',
+  '\t\t\t\t\t\tmirror.load();',
+  '\t\t\t\t\t})];',
+  '\t\t\t\t}, "describe-mirror");',
+  '',
+].join('\n');
+
 /** 与真实 dsh-client-ui-workspace client.js 相同的 click-outside 粘滞搜索块（制表符缩进） */
 const WORKSPACE_STICKY = [
   '\t\t\t(0, react.useEffect)(() => {',
@@ -159,6 +179,33 @@ test('补丁：workspace 目标文件缺失时不失败（可选子补丁，1/2 
     const st = patchStatus(root);
     assert.equal(st.workspaceSearch, false, '缺失按未打处理');
     assert.equal(st.settingsHostMode, true, 'settings host 模式已打');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Issue #8 回归：rc.8 双处 isLoopback 三元一轮全量替换（DescribeMirror 不得漏打）', () => {
+  const { root, cleanup } = makeDshRoot(RC7_APIPROXY, RC8_SETTINGS_UNPATCHED);
+  try {
+    const settingsFile = path.join(root, 'node_modules', '@deepseek-ai', 'dsh-client-ui-settings', 'lib', 'client.js');
+    const before = readFileSync(settingsFile, 'utf8');
+    assert.equal(before.split('connection.isLoopback ? "host" : "memory"').length - 1, 2, '夹具应含两处待替换三元');
+
+    // 只跑一轮：旧实现 String.replace 只改第一处，第二轮才补全；
+    // 用户环境若 restart 链断裂（非 systemd / 服务名不同）就永远停在半补丁状态。
+    const result = applyRemotePatch(root);
+    assert.equal(result, 'applied', '一轮即应完成全部替换');
+
+    const after = readFileSync(settingsFile, 'utf8');
+    assert.equal(after.includes('connection.isLoopback ? "host" : "memory"'), false, '两处三元必须全部替换（不得残留）');
+    assert.ok(after.includes('SettingsScopeController(connection.api, spec, this.mirror, "host", this.schema)'), 'ScopeController 已强制 host');
+    assert.ok(after.includes('SettingsDescribeMirror(connection.api, "host")'), 'DescribeMirror 已强制 host（Issue #8 报错点）');
+
+    const st = patchStatus(root);
+    assert.equal(st.settingsHostMode, true, '状态检测为已打');
+
+    // 幂等：再跑一次 unchanged
+    assert.equal(applyRemotePatch(root), 'unchanged', '幂等：二次应用不再改动');
   } finally {
     cleanup();
   }
