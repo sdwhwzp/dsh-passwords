@@ -313,6 +313,18 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
     );
   };
 
+  /** 退出登录：POST /gateway/logout（服务端吊销会话 + 清 Cookie），随后跳回登录页。
+   *  登出成功/失败都以跳转收尾：失败多半是会话已失效，同样应回到登录页。 */
+  const signOut = () => {
+    setBusy(true);
+    fetch('/gateway/logout', { method: 'POST', credentials: 'same-origin' })
+      .catch(() => undefined)
+      .finally(() => {
+        // 登出后任何后续 API 都会 401/302，直接整页跳转到登录页最干净
+        window.location.assign('/gateway/login');
+      });
+  };
+
   /** 聊天入口按账号跨设备同步；保存成功后立即通知 overlay，无需刷新页面。 */
   const toggleChatEntry = () => {
     const enabled = !chatEnabled;
@@ -489,6 +501,17 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
       isAdmin
         ? h('span', { className: 'dshpw-badge admin' }, t('owner'))
         : h('span', { className: 'dshpw-badge' }, t('subuser')),
+      h(
+        'button',
+        {
+          className: 'dshpw-btn danger',
+          style: { marginLeft: 'auto' },
+          disabled: busy || data === null,
+          onClick: signOut,
+          title: t('logoutHint'),
+        },
+        t('logout'),
+      ),
     ),
     // ── 聊天入口：按当前账号跨设备同步的显示偏好 ──
     h(
