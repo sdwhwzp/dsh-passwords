@@ -78,6 +78,20 @@ dsh-passwords serve-gateway
 
 Under normal operation, start dsh web after installation and let the plugin start the gateway.
 
+### Git source installation
+
+Use this path when you need to inspect or modify the source code:
+
+```bash
+git clone https://github.com/slywalker2006/dsh-passwords.git
+cd dsh-passwords
+npm ci
+npm run build
+node dist/cli.js install
+```
+
+Source installation uses the same dsh profile registration and remote-settings patch flow as npm installation. After changing the source, run `npm run build` again and restart dsh web.
+
 ### Docker installation
 
 The Docker image is `skywalker237234/dsh-passwords`. Omitting the tag uses `latest`. Create `.env`:

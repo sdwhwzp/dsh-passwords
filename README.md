@@ -78,6 +78,20 @@ dsh-passwords serve-gateway
 
 正常使用时，安装完成后启动 dsh web 即可。
 
+### Git 源码安装
+
+需要查看或修改源码时，从 GitHub 克隆仓库并使用锁定的依赖构建：
+
+```bash
+git clone https://github.com/slywalker2006/dsh-passwords.git
+cd dsh-passwords
+npm ci
+npm run build
+node dist/cli.js install
+```
+
+源码安装与 npm 安装使用相同的 dsh profile 注册和远程设置补丁流程。后续更新源码后重新运行 `npm run build`，再重启 dsh web。
+
 ### Docker 安装
 
 Docker 镜像名为 `skywalker237234/dsh-passwords`，省略标签时默认使用 `latest`。先创建 `.env`：
