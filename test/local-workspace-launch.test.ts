@@ -249,7 +249,7 @@ function launchHello(ticket: string, workspaceId: string) {
   return {
     type: 'launch' as const,
     ticket,
-    protocol: 1 as const,
+    protocol: 2 as const,
     deviceName: 'launch-laptop',
     workspaceName: 'launch-project',
     workspaceId,

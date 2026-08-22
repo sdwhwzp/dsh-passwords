@@ -49,7 +49,8 @@ dsh 的网页界面默认面向本机使用。服务器地址一旦暴露，拿�
 
 - 每个登录用户可把自己电脑上的一个或多个目录配对为独立工作区，无需把文件上传到 dsh 服务器
 - dsh 的 `read`、`write`、`edit`、`glob`、`grep` 会通过本机助手直接操作授权目录中的原文件
-- Windows 一键助手自动追加 `--allow-shell`；命令行模式默认关闭，显式添加后 `bash` 才会在该用户电脑上执行
+- Windows EXE 自动启用 `--allow-shell`，包括恢复已有工作区；非 Windows EXE 命令行模式默认关闭，显式添加后 Shell 才会在该用户电脑上执行
+- Windows 工作区自动注册 `word_native_status`、`word_native_read`、`word_native_edit`：优先调用客户电脑已经安装的 Microsoft Word，不可用时回退 WPS 文字，不依赖 `@univerjs-pro/*`
 
 ## 身份与消费额度同步
 
@@ -98,12 +99,20 @@ bash install.sh
 
 ```bash
 npm install -g dsh-passwords
-dsh-passwords install     # 生成随机 SETUP_KEY + 注册插件 + 应用补丁（等价一键安装）
+dsh-passwords install     # 生成随机 SETUP_KEY + 恢复插件栈 + 应用补丁（等价一键安装）
 ```
 
 （`dsh-passwords --version` 看版本；`dsh-passwords serve-gateway` 手动启动网关。）
 
-安装脚本会检查预构建文件，缺失时再安装依赖和编译；随后生成 `SETUP_KEY`、注册插件并应用远程设置补丁。
+安装脚本会检查预构建文件，缺失时再安装依赖和编译；随后生成 `SETUP_KEY`、恢复已记录的 web profile 插件栈并应用远程设置补丁。
+
+### 自动恢复已安装插件
+
+`scripts/profile-plugins.json` 是跨机器部署的版本化插件清单。运行 `dsh-passwords install` 会把清单中的 NPM/Git 来源、bundle 顺序、Git 构建授权和必要的 profile patch 幂等合并到 `~/.dsh/profiles/web`，然后统一执行 `pnpm install`。已有本地 `link:` 开发源和未纳入清单的自定义插件不会被覆盖或删除。
+
+清单默认自动安装 `dshmarket@1.16.2`、`@linxin666/dsh-web-ui-all@0.2.4`、`dsh-spend` 的 `dev` 分支、`dsh-plugin-subscriptions` 的 `dev` 分支以及当前 `dsh-passwords`。`dsh-plugin-subscriptions` 始终使用记录的 `github:sdwhwzp/dsh-plugin-subscriptions#dev`，避免新机器误装 NPM 稳定版。
+
+`dsh-shandong-tizhi-brand` 和 `dsh-nas-webdav` 也在清单中，但目前只有本机源码，没有可公开拉取的远程分支。新机器部署前分别设置 `DSH_PLUGIN_BRAND_SPEC` 和 `DSH_PLUGIN_NAS_SPEC` 为可访问的 NPM、Git 或 `link:` 来源；未设置时安装器会明确提示并跳过，其他插件继续安装。
 
 结束时会显示首次配置用的 `SETUP_KEY`，并在安装目录写入 `setup-key.txt`。首次配置完成后，这个文件会自动删除；`.env` 中实际使用的密钥会被保留为独立值。
 
@@ -128,21 +137,17 @@ Windows 使用者不需要安装 Node.js：
 
 当前 EXE 未使用代码签名证书，Windows 可能显示 SmartScreen 提示。正式分发前应使用有效的公司代码签名证书签名，并同时发布 SHA-256 校验值。
 
-Windows 一键选择会自动追加 `--allow-shell` 并启用 PowerShell；Shell 以当前 Windows 用户身份运行，可能访问授权目录之外的文件。`山东梯智物联AI本机助手.exe --setup` 和 macOS/Linux 命令行模式仍默认关闭 Shell，可按需显式启用；网页设置页也保留了服务器地址、6 位确认码和旧版长配对码作为兼容入口。
+Windows EXE 会自动启用 `--allow-shell`，网页一键选择和恢复已有工作区均会启用 PowerShell；Shell 以当前 Windows 用户身份运行，可能访问授权目录之外的文件。客户界面只提供 Windows 一键选择流程，不显示服务器地址、确认码或旧版配对命令。
 
-macOS / Linux 使用者先安装 Node.js 22.5+，再运行 `npm install -g github:sdwhwzp/dsh-passwords#dev` 安装命令行助手。首次运行只需提供页面显示的服务器地址和真实目录，例如：
+Windows 本机工作区还提供原生 Word 自动化。`word_native_read` 可读取正文、段落和表格；`word_native_edit` 可创建文档或批量执行查找替换、段落插入/删除/格式设置、表格、页眉页脚、图片、分页和 PDF 导出。助手首先尝试 `Word.Application`，失败后尝试 WPS 的 `kwps.Application`。操作参数通过 JSON 标准输入传给固定 PowerShell 脚本，不会拼接为命令；所有文档、图片和导出路径都必须位于用户授权目录。文档只在整批操作成功后保存，打开文档时禁用宏自动执行。
 
-```bash
-dsh-local-workspace --server ws://192.168.1.10:3082 --folder "/home/user/projects/demo"
-```
-
-命令行同样会显示 6 位确认码，登录网页批准后即可完成配对。旧版助手仍可从网页折叠的“旧版命令行助手”入口生成长 `--pair` 命令，但新设备不再需要手工处理长配对令牌。
+Office RPC 使用本机助手协议 v2。升级服务器端插件后必须重新下载并运行新版 EXE；旧版助手会收到协议版本不支持提示。
 
 默认配置文件是 `~/.dsh-local-workspace/config.json`；Windows 网页一键选择的每个目录会另存为 `~/.dsh-local-workspace/profiles/<工作区ID>.json`，双击助手时会一起恢复。命令行要授权多个目录时，请为每个目录使用不同配置文件，例如 `--config ~/.dsh-local-workspace/project-b.json`。
 
 本机助手端口默认是网关端口加一。例如 dsh 网页网关是 `3081`，助手端口就是 `3082`。服务器防火墙需放行该端口；经过 NAT、反向代理或网页推导地址不正确时，设置 `MCP_LOCAL_WORKSPACE_PUBLIC_URL=wss://你的域名:端口`。
 
-网页一键入口签发 256 位随机启动票据：绑定当前登录用户、两分钟失效、只能消费一次，且不会写入助手配置或日志。备用的 6 位确认码也不是设备凭据：它由助手先发起、十分钟失效、只能由已登录用户确认一次，并受错误尝试与待连接数量限制。真正的高强度设备令牌通过原 WebSocket 自动下发，只保存在用户电脑，服务器仅保存不可逆散列。文件操作只接受授权目录内的路径，并会解析符号链接后再次检查。`--allow-shell` 是高权限开关；Windows 网页一键协议处理器会自动追加该参数，其他命令行模式需显式添加。Shell 以当前系统用户身份运行，可能访问授权目录之外的文件。明文 `ws://` 仅限可信局域网；跨不可信网络必须使用 HTTPS/WSS。
+网页一键入口签发 256 位随机启动票据：绑定当前登录用户、两分钟失效、只能消费一次，且不会写入助手配置或日志。真正的高强度设备令牌通过 WebSocket 自动下发，只保存在用户电脑，服务器仅保存不可逆散列。文件操作只接受授权目录内的路径，并会解析符号链接后再次检查。`--allow-shell` 是高权限开关；Windows 打包 EXE 会为新连接和已有配置自动启用。Shell 以当前系统用户身份运行，可能访问授权目录之外的文件。明文 `ws://` 仅限可信局域网；跨不可信网络必须使用 HTTPS/WSS。
 
 维护者可运行 `npm run build:windows-assistant` 生成 `release/山东梯智物联AI本机助手.exe`。仓库中的 `Build Windows Local Workspace Assistant` 工作流也会在 Windows runner 上构建并上传同名 artifact。
 
@@ -210,7 +215,7 @@ node scripts/start-http.mjs [端口]    # 默认 8080，会弹 y/N 确认
 | **修改用户名** | 本人改自己；主用户可改任何人 | 改名后需用新用户名重新登录 |
 | **子用户管理** | 仅主用户 | 创建/删除子用户（子用户可用登录页进入，但没有管理权限） |
 | **子用户权限** | 仅主用户 | 工作区滑动开关、逐会话勾选、每小时 token 上限、每日时长上限、沙盒级别、上传/git 下载开关、封禁 |
-| **本机工作区** | 所有登录用户 | 下载 Windows 助手、生成一次性配对命令、查看在线状态和撤销自己配对的设备 |
+| **本机工作区** | 所有登录用户 | 下载 Windows 助手、查看在线状态和撤销自己的本机工作区 |
 | **聊天 / 留言** | 所有登录用户 | 左下角聊天按钮，支持标签（议题/拉取请求/讨论/公告/问题）；子用户默认私信主用户，广播仅主用户可发；每个账号均可在设置中隐藏自己的聊天入口 |
 
 - **主用户** = 首次配置时创建的那个账号；之后添加的都是**子用户**。
@@ -263,8 +268,7 @@ dsh-local-workspace                      # 使用已保存的设备令牌恢复�
 - **本机助手连不上？** 确认 dsh 控制台已显示“本机助手接入”，并在服务器防火墙放行 `MCP_LOCAL_WORKSPACE_PORT`。网页网关为 `3081` 时默认助手端口是 `3082`；跨 NAT 时设置 `MCP_LOCAL_WORKSPACE_PUBLIC_URL`。
 - **本机工作区已连接但没有输入框？** 展开页面左下角的“一键选择本机文件夹”，在在线目录旁点击“打开对话”。`¥0` 表示禁止模型调用；客户提问后会在会话中直接看到额度已用完的说明。
 - **点“一键选择本机文件夹”没有弹出窗口？** 先展开按钮下方的“助手没有打开？”，下载 EXE 并双击一次完成协议注册，然后回到原网页重试。不要移动或删除已注册的 EXE；如已移动，在新位置再双击一次即可更新注册。网页不会打开 `about:blank`，原对话会一直保留。
-- **6 位确认码无效？** 只输入助手窗口当前显示的六位数字。号码十分钟后失效且只能确认一次；过期后保持助手运行，它会重新连接并显示新号码。
-- **dsh 启动报 `duplicate loader entry id`？** 你在 profile 里用过 `dsh plugin add`。它会把 profile 里**所有**声明 `dsh.bundle` 的依赖全部加进 bundles 层，与已装的其它插件重复时 dsh 直接启动失败。卸载 dsh-passwords 后改用 `node scripts/register-plugin.mjs` 精确注册（只追加本插件一个条目）。
+- **dsh 启动报 `duplicate loader entry id`？** 你在 profile 里用过 `dsh plugin add`。它会把 profile 里**所有**声明 `dsh.bundle` 的依赖全部加进 bundles 层，与已装的其它插件重复时 dsh 直接启动失败。改用 `node scripts/register-plugin.mjs` 按 `scripts/profile-plugins.json` 精确同步；它只追加清单明确声明的 bundle，并保留其它配置。
 - **npm 装 dsh 报 allow-scripts / node-pty 错？** npm 新版会拦截安装脚本，先放行再重装：`npm config set allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user`，然后重新 `npm install -g @deepseek-ai/dsh`（本项目自身没这个问题，是 dsh 的依赖要跑原生构建）。
 - **npm 用 `--prefix` 安装后运行 `dsh-passwords install` 报 TS5058？** 升级到 `dsh-passwords@2.5.4`。新版能正确识别被 npm 提升到 `<prefix>/node_modules` 的运行时依赖，不会再误触发源码编译。
 - **dsh 报 `crypto.randomUUID is not a function`？** 旧版网关没有 HTML 注入兼容层，更新代码后**强刷浏览器**（Ctrl+Shift+R）。
@@ -280,7 +284,7 @@ dsh-local-workspace                      # 使用已保存的设备令牌恢复�
 1. `git clone https://github.com/sdwhwzp/dsh-passwords && cd dsh-passwords`
 2. `npm install && npm run build`
 3. `cp .env.example .env`，把 `SETUP_KEY` 改成随机串（`openssl rand -hex 24`）
-4. 注册插件：`node scripts/register-plugin.mjs`（等价于把 `link:$(pwd)` 加进 `~/.dsh/profiles/web/package.json` 的 dependencies 和 `dsh.profile.bundles` 再 pnpm install。**不要用 `dsh plugin add`**，原因见常见问题）
+4. 恢复插件栈：`node scripts/register-plugin.mjs`（按 `scripts/profile-plugins.json` 合并依赖、bundle、构建授权与 profile patch，再执行 `pnpm install`。**不要用 `dsh plugin add`**，原因见常见问题）
 5. 应用补丁：`node dist/cli.js patch`（找不到 dsh 目录就用 `MCP_DSH_ROOT=/path/to/@deepseek-ai/dsh` 指定）
 
 之后同样：启动 dsh → 密码门自动拉起 → 打开 `https://<你的地址>` 完成首次配置。

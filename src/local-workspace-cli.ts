@@ -35,6 +35,9 @@ const MAX_SEARCH_RESULTS = 1_000;
 const MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024;
 const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
 const MAX_COMMAND_TIMEOUT_MS = 600_000;
+const DEFAULT_OFFICE_TIMEOUT_MS = 180_000;
+const MAX_OFFICE_OPERATIONS = 100;
+const MAX_OFFICE_TEXT_CHARS = 200_000;
 const WINDOWS_PROTOCOL = 'dsh-local-workspace';
 const WINDOWS_PROTOCOL_PREFIXES = [
   `${WINDOWS_PROTOCOL}://connect?`,
@@ -77,6 +80,333 @@ class CompanionError extends Error {
     this.name = 'CompanionError';
   }
 }
+
+const WINDOWS_WORD_AUTOMATION_SCRIPT = String.raw`
+$ErrorActionPreference = 'Stop'
+[Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false)
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+
+function Write-Success($Value) {
+  [Console]::Out.Write((@{ ok = $true; value = $Value } | ConvertTo-Json -Depth 16 -Compress))
+}
+
+function Write-Failure([string]$Code, [string]$Message) {
+  [Console]::Out.Write((@{ ok = $false; code = $Code; error = $Message } | ConvertTo-Json -Depth 8 -Compress))
+}
+
+function Throw-Coded([string]$Code, [string]$Message) {
+  throw [System.InvalidOperationException]::new($Code + '|' + $Message)
+}
+
+function Has-Property($Value, [string]$Name) {
+  return $null -ne $Value.PSObject.Properties[$Name]
+}
+
+function Test-ProgId([string]$ProgId) {
+  try {
+    return $null -ne [type]::GetTypeFromProgID($ProgId)
+  } catch {
+    return $false
+  }
+}
+
+function New-WordApplication([string]$Provider) {
+  $candidates = @()
+  if ($Provider -eq 'auto' -or $Provider -eq 'office') {
+    $candidates += [PSCustomObject]@{ provider = 'office'; progId = 'Word.Application' }
+  }
+  if ($Provider -eq 'auto' -or $Provider -eq 'wps') {
+    $candidates += [PSCustomObject]@{ provider = 'wps'; progId = 'kwps.Application' }
+  }
+  foreach ($candidate in $candidates) {
+    try {
+      $application = New-Object -ComObject $candidate.progId
+      return [PSCustomObject]@{
+        application = $application
+        provider = $candidate.provider
+        progId = $candidate.progId
+      }
+    } catch {
+      continue
+    }
+  }
+  Throw-Coded 'NO_OFFICE_PROVIDER' '未检测到可用的 Microsoft Word 或 WPS 文字 COM 自动化接口'
+}
+
+function Get-Paragraph($Document, [int]$Index) {
+  if ($Index -lt 1 -or $Index -gt $Document.Paragraphs.Count) {
+    Throw-Coded 'PARAGRAPH_OUT_OF_RANGE' ('段落索引超出范围：' + $Index)
+  }
+  return $Document.Paragraphs.Item($Index)
+}
+
+function Convert-Color([string]$Color) {
+  $rgb = [Convert]::ToInt32($Color.Substring(1), 16)
+  $red = ($rgb -shr 16) -band 255
+  $green = ($rgb -shr 8) -band 255
+  $blue = $rgb -band 255
+  return ($blue -shl 16) -bor ($green -shl 8) -bor $red
+}
+
+function Set-ParagraphFormat($Paragraph, $Operation) {
+  if (Has-Property $Operation 'style') { $Paragraph.Range.Style = [string]$Operation.style }
+  if (Has-Property $Operation 'alignment') {
+    $alignments = @{ left = 0; center = 1; right = 2; justify = 3 }
+    $Paragraph.Range.ParagraphFormat.Alignment = $alignments[[string]$Operation.alignment]
+  }
+  if (Has-Property $Operation 'bold') { $Paragraph.Range.Font.Bold = $(if ([bool]$Operation.bold) { 1 } else { 0 }) }
+  if (Has-Property $Operation 'italic') { $Paragraph.Range.Font.Italic = $(if ([bool]$Operation.italic) { 1 } else { 0 }) }
+  if (Has-Property $Operation 'fontName') { $Paragraph.Range.Font.Name = [string]$Operation.fontName }
+  if (Has-Property $Operation 'fontSize') { $Paragraph.Range.Font.Size = [double]$Operation.fontSize }
+  if (Has-Property $Operation 'color') { $Paragraph.Range.Font.Color = Convert-Color ([string]$Operation.color) }
+}
+
+function Open-WordDocument($Application, [string]$Path) {
+  try {
+    return $Application.Documents.Open($Path, $false, $false, $false)
+  } catch {
+    return $Application.Documents.Open($Path)
+  }
+}
+
+function Save-NewWordDocument($Document, [string]$Path) {
+  try {
+    $Document.SaveAs2($Path)
+  } catch {
+    $Document.SaveAs($Path)
+  }
+}
+
+function Read-WordDocument($Document, [int]$MaxChars, [string]$Provider, [string]$ProgId) {
+  $text = [string]$Document.Content.Text
+  $truncated = $text.Length -gt $MaxChars
+  if ($truncated) { $text = $text.Substring(0, $MaxChars) }
+  $paragraphs = @()
+  $paragraphLimit = [Math]::Min([int]$Document.Paragraphs.Count, 500)
+  for ($index = 1; $index -le $paragraphLimit; $index++) {
+    $paragraph = $Document.Paragraphs.Item($index)
+    $paragraphText = ([string]$paragraph.Range.Text) -replace '[\r\a]+$', ''
+    if ($paragraphText.Length -gt 2000) { $paragraphText = $paragraphText.Substring(0, 2000) }
+    $paragraphs += [PSCustomObject]@{ index = $index; text = $paragraphText }
+  }
+  $tables = @()
+  $tableLimit = [Math]::Min([int]$Document.Tables.Count, 20)
+  $remainingCells = 1000
+  for ($tableIndex = 1; $tableIndex -le $tableLimit; $tableIndex++) {
+    if ($remainingCells -le 0) { break }
+    $table = $Document.Tables.Item($tableIndex)
+    $rows = @()
+    $rowLimit = [Math]::Min([int]$table.Rows.Count, 200)
+    $columnLimit = [Math]::Min([int]$table.Columns.Count, 50)
+    for ($rowIndex = 1; $rowIndex -le $rowLimit; $rowIndex++) {
+      if ($remainingCells -le 0) { break }
+      $cells = @()
+      for ($columnIndex = 1; $columnIndex -le $columnLimit; $columnIndex++) {
+        if ($remainingCells -le 0) { break }
+        try {
+          $cellText = ([string]$table.Cell($rowIndex, $columnIndex).Range.Text) -replace '[\r\a]+$', ''
+        } catch {
+          $cellText = ''
+        }
+        if ($cellText.Length -gt 1000) { $cellText = $cellText.Substring(0, 1000) }
+        $cells += $cellText
+        $remainingCells--
+      }
+      $rows += ,$cells
+    }
+    $tables += [PSCustomObject]@{ index = $tableIndex; rows = $rows }
+  }
+  return [PSCustomObject]@{
+    provider = $Provider
+    progId = $ProgId
+    text = $text
+    truncated = $truncated
+    paragraphCount = [int]$Document.Paragraphs.Count
+    tableCount = [int]$Document.Tables.Count
+    paragraphs = $paragraphs
+    tables = $tables
+  }
+}
+
+function Apply-WordOperation($Document, $Operation, [System.Collections.ArrayList]$Exports) {
+  switch ([string]$Operation.type) {
+    'replace_text' {
+      $range = $Document.Content
+      $find = $range.Find
+      $replaceMode = $(if ([bool]$Operation.replaceAll) { 2 } else { 1 })
+      $null = $find.Execute(
+        [string]$Operation.find,
+        [bool]$Operation.matchCase,
+        [bool]$Operation.wholeWord,
+        $false,
+        $false,
+        $false,
+        $true,
+        1,
+        $false,
+        [string]$Operation.replace,
+        $replaceMode
+      )
+    }
+    'append_paragraph' {
+      $paragraph = $Document.Paragraphs.Add()
+      $paragraph.Range.Text = [string]$Operation.text + [char]13
+      Set-ParagraphFormat $paragraph $Operation
+    }
+    'insert_paragraph' {
+      $index = [int]$Operation.paragraph
+      if ($index -eq $Document.Paragraphs.Count + 1) {
+        $paragraph = $Document.Paragraphs.Add()
+        $paragraph.Range.Text = [string]$Operation.text + [char]13
+      } else {
+        $paragraph = Get-Paragraph $Document $index
+        $paragraph.Range.InsertBefore([string]$Operation.text + [char]13)
+        $paragraph = $Document.Paragraphs.Item($index)
+      }
+      Set-ParagraphFormat $paragraph $Operation
+    }
+    'set_paragraph' {
+      $paragraph = Get-Paragraph $Document ([int]$Operation.paragraph)
+      if (Has-Property $Operation 'text') {
+        $paragraph.Range.Text = [string]$Operation.text + [char]13
+        $paragraph = Get-Paragraph $Document ([int]$Operation.paragraph)
+      }
+      Set-ParagraphFormat $paragraph $Operation
+    }
+    'delete_paragraph' {
+      $paragraph = Get-Paragraph $Document ([int]$Operation.paragraph)
+      $null = $paragraph.Range.Delete()
+    }
+    'add_table' {
+      if (Has-Property $Operation 'afterParagraph') {
+        $range = (Get-Paragraph $Document ([int]$Operation.afterParagraph)).Range
+      } else {
+        $range = $Document.Content
+      }
+      $range.Collapse(0)
+      $rows = @($Operation.rows)
+      $columns = @($rows[0]).Count
+      $table = $Document.Tables.Add($range, $rows.Count, $columns)
+      for ($rowIndex = 0; $rowIndex -lt $rows.Count; $rowIndex++) {
+        $cells = @($rows[$rowIndex])
+        for ($columnIndex = 0; $columnIndex -lt $columns; $columnIndex++) {
+          $table.Cell($rowIndex + 1, $columnIndex + 1).Range.Text = [string]$cells[$columnIndex]
+        }
+      }
+      if ([bool]$Operation.header) { $table.Rows.Item(1).Range.Font.Bold = 1 }
+      if (Has-Property $Operation 'style') { $table.Style = [string]$Operation.style }
+    }
+    'set_header' {
+      for ($index = 1; $index -le $Document.Sections.Count; $index++) {
+        $Document.Sections.Item($index).Headers.Item(1).Range.Text = [string]$Operation.text
+      }
+    }
+    'set_footer' {
+      for ($index = 1; $index -le $Document.Sections.Count; $index++) {
+        $Document.Sections.Item($index).Footers.Item(1).Range.Text = [string]$Operation.text
+      }
+    }
+    'insert_image' {
+      if (Has-Property $Operation 'paragraph') {
+        $range = (Get-Paragraph $Document ([int]$Operation.paragraph)).Range
+      } else {
+        $range = $Document.Content
+      }
+      $range.Collapse(0)
+      $image = $Document.InlineShapes.AddPicture([string]$Operation.imagePath, $false, $true, $range)
+      if (Has-Property $Operation 'widthPoints') { $image.Width = [double]$Operation.widthPoints }
+      if (Has-Property $Operation 'heightPoints') { $image.Height = [double]$Operation.heightPoints }
+    }
+    'page_break' {
+      if (Has-Property $Operation 'paragraph') {
+        $range = (Get-Paragraph $Document ([int]$Operation.paragraph)).Range
+      } else {
+        $range = $Document.Content
+      }
+      $range.Collapse(0)
+      $range.InsertBreak(7)
+    }
+    'export_pdf' {
+      $null = $Exports.Add([string]$Operation.outputPath)
+    }
+    default {
+      Throw-Coded 'INVALID_ARGUMENT' ('不支持的 Word 操作：' + [string]$Operation.type)
+    }
+  }
+}
+
+try {
+  $request = [Console]::In.ReadToEnd() | ConvertFrom-Json
+  if ([string]$request.action -eq 'status') {
+    Write-Success ([PSCustomObject]@{
+      platform = 'win32'
+      office = Test-ProgId 'Word.Application'
+      wps = Test-ProgId 'kwps.Application'
+      preferred = $(if (Test-ProgId 'Word.Application') { 'office' } elseif (Test-ProgId 'kwps.Application') { 'wps' } else { $null })
+    })
+    exit 0
+  }
+
+  $resolved = New-WordApplication ([string]$request.provider)
+  $application = $resolved.application
+  $document = $null
+  try {
+    try { $application.Visible = $false } catch { }
+    try { $application.DisplayAlerts = 0 } catch { }
+    $application.AutomationSecurity = 3
+    if ([string]$request.action -eq 'read_word') {
+      $document = Open-WordDocument $application ([string]$request.path)
+      Write-Success (Read-WordDocument $document ([int]$request.maxChars) $resolved.provider $resolved.progId)
+    } else {
+      if ([bool]$request.create) {
+        $document = $application.Documents.Add()
+      } else {
+        $document = Open-WordDocument $application ([string]$request.path)
+      }
+      $exports = New-Object System.Collections.ArrayList
+      $applied = 0
+      foreach ($operation in @($request.operations)) {
+        Apply-WordOperation $document $operation $exports
+        $applied++
+      }
+      if ([bool]$request.create) {
+        Save-NewWordDocument $document ([string]$request.workPath)
+      } else {
+        $document.Save()
+      }
+      foreach ($outputPath in $exports) {
+        $document.ExportAsFixedFormat([string]$outputPath, 17)
+      }
+      Write-Success ([PSCustomObject]@{
+        provider = $resolved.provider
+        progId = $resolved.progId
+        created = [bool]$request.create
+        operationsApplied = $applied
+      })
+    }
+  } finally {
+    if ($null -ne $document) {
+      try { $document.Close(0) } catch { }
+      try { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($document) } catch { }
+    }
+    if ($null -ne $application) {
+      try { $application.Quit() } catch { }
+      try { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($application) } catch { }
+    }
+    [GC]::Collect()
+    [GC]::WaitForPendingFinalizers()
+  }
+} catch {
+  $message = [string]$_.Exception.Message
+  $code = 'OFFICE_AUTOMATION_FAILED'
+  $separator = $message.IndexOf('|')
+  if ($separator -gt 0) {
+    $code = $message.Substring(0, $separator)
+    $message = $message.Substring($separator + 1)
+  }
+  Write-Failure $code $message
+}
+`;
 
 void main().catch(async (error: unknown) => {
   console.error(`[山东梯智物联AI 本机助手] ${error instanceof Error ? error.message : String(error)}`);
@@ -217,7 +547,7 @@ function runConnection(
         workspaceName: config.workspaceName,
         workspaceId: config.workspaceId,
         root: config.root,
-        platform: process.platform,
+        platform: isWindowsRuntime() ? 'win32' : process.platform,
         shellEnabled: config.shellEnabled,
       } as const;
       if (launchTicket !== undefined) {
@@ -358,6 +688,8 @@ async function executeOperation(
     case 'bash':
       if (!config.shellEnabled) throw new CompanionError('本机助手未启用 Shell；重新配对时添加 --allow-shell', 'SHELL_DISABLED');
       return await runShell(config.root, args, signal);
+    case 'office':
+      return await runOfficeOperation(config.root, args, signal);
   }
 }
 
@@ -477,6 +809,296 @@ async function runShell(root: string, args: Record<string, unknown>, signal: Abo
   if (!(await stat(workdir)).isDirectory()) throw new CompanionError('workdir 不是目录', 'NOT_DIRECTORY');
   const timeoutMs = Math.min(optionalPositiveInteger(args.timeoutMs, 'timeoutMs') ?? DEFAULT_COMMAND_TIMEOUT_MS, MAX_COMMAND_TIMEOUT_MS);
   return await spawnCommand(command, workdir, timeoutMs, signal);
+}
+
+type OfficeProvider = 'auto' | 'office' | 'wps';
+
+interface PowerShellEnvelope {
+  ok: boolean;
+  value?: unknown;
+  code?: string;
+  error?: string;
+}
+
+async function runOfficeOperation(root: string, args: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
+  const action = requireEnum(args.action, 'action', ['status', 'read_word', 'edit_word'] as const);
+  const provider = args.provider === undefined
+    ? 'auto'
+    : requireEnum(args.provider, 'provider', ['auto', 'office', 'wps'] as const);
+  if (!isWindowsRuntime()) throw new CompanionError('原生 Office/WPS 自动化只支持 Windows 本机助手', 'WINDOWS_ONLY');
+  if (action === 'status') {
+    return await runOfficePowerShell({ action, provider }, root, DEFAULT_OFFICE_TIMEOUT_MS, signal);
+  }
+
+  const relative = requireRelativePath(args.path, 'path');
+  assertWordExtension(relative);
+  if (action === 'read_word') {
+    const target = await existingPathWithin(root, relative);
+    if (!(await stat(target)).isFile()) throw new CompanionError('Word 路径不是普通文件', 'NOT_FILE');
+    const maxChars = Math.min(optionalPositiveInteger(args.maxChars, 'maxChars') ?? 50_000, MAX_OFFICE_TEXT_CHARS);
+    const result = await runOfficePowerShell({ action, provider, path: target, maxChars }, path.dirname(target), DEFAULT_OFFICE_TIMEOUT_MS, signal);
+    return { ...(requireObject(result, 'Office 返回值无效')), path: displayPath(relative) };
+  }
+
+  const create = args.create === true;
+  const overwrite = args.overwrite === true;
+  const target = create ? await writablePathWithin(root, relative) : await existingPathWithin(root, relative);
+  if (!create && !(await stat(target)).isFile()) throw new CompanionError('Word 路径不是普通文件', 'NOT_FILE');
+  if (create) {
+    await mkdir(path.dirname(target), { recursive: true });
+    try {
+      const info = await stat(target);
+      if (!info.isFile()) throw new CompanionError('Word 路径不是普通文件', 'NOT_FILE');
+      if (!overwrite) throw new CompanionError('目标 Word 文档已存在；如需覆盖请设置 overwrite', 'FILE_EXISTS');
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+    }
+  }
+  const operations = await normalizeWordOperations(root, args.operations);
+  const timeoutMs = Math.min(optionalPositiveInteger(args.timeoutMs, 'timeoutMs') ?? DEFAULT_OFFICE_TIMEOUT_MS, MAX_COMMAND_TIMEOUT_MS);
+  const temporary = create ? temporaryOfficePath(target) : undefined;
+  try {
+    const result = await runOfficePowerShell({
+      action,
+      provider,
+      path: target,
+      workPath: temporary ?? target,
+      create,
+      operations,
+    }, path.dirname(target), timeoutMs, signal);
+    if (temporary !== undefined) await rename(temporary, target);
+    const value = requireObject(result, 'Office 返回值无效');
+    return {
+      ...value,
+      path: displayPath(relative),
+      pdfPaths: operations
+        .filter((operation) => operation.type === 'export_pdf')
+        .map((operation) => displayPath(path.relative(root, String(operation.outputPath)))),
+    };
+  } finally {
+    if (temporary !== undefined) {
+      try {
+        await unlink(temporary);
+      } catch (error) {
+        if (!isMissing(error)) console.warn(`[dsh-local-workspace] Word 临时文件清理失败：${String(error)}`);
+      }
+    }
+  }
+}
+
+async function normalizeWordOperations(root: string, value: unknown): Promise<Array<Record<string, unknown>>> {
+  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_OFFICE_OPERATIONS) {
+    throw new CompanionError(`operations 必须包含 1-${String(MAX_OFFICE_OPERATIONS)} 项`, 'INVALID_ARGUMENT');
+  }
+  const normalized: Array<Record<string, unknown>> = [];
+  for (const raw of value) {
+    const operation = requireObject(raw, 'Word 操作必须是对象');
+    const type = requireEnum(operation.type, 'operation.type', [
+      'replace_text',
+      'append_paragraph',
+      'insert_paragraph',
+      'set_paragraph',
+      'delete_paragraph',
+      'add_table',
+      'set_header',
+      'set_footer',
+      'insert_image',
+      'page_break',
+      'export_pdf',
+    ] as const);
+    switch (type) {
+      case 'replace_text':
+        normalized.push({
+          type,
+          find: requireString(operation.find, 'find', 1, MAX_OFFICE_TEXT_CHARS),
+          replace: requireString(operation.replace, 'replace', 0, MAX_OFFICE_TEXT_CHARS),
+          replaceAll: operation.replaceAll !== false,
+          matchCase: operation.matchCase === true,
+          wholeWord: operation.wholeWord === true,
+        });
+        break;
+      case 'append_paragraph':
+        normalized.push({ type, text: requireString(operation.text, 'text', 0, MAX_OFFICE_TEXT_CHARS), ...wordFormat(operation) });
+        break;
+      case 'insert_paragraph':
+        normalized.push({
+          type,
+          paragraph: requiredPositiveInteger(operation.paragraph, 'paragraph'),
+          text: requireString(operation.text, 'text', 0, MAX_OFFICE_TEXT_CHARS),
+          ...wordFormat(operation),
+        });
+        break;
+      case 'set_paragraph': {
+        const format = wordFormat(operation);
+        if (operation.text === undefined && Object.keys(format).length === 0) {
+          throw new CompanionError('set_paragraph 至少需要 text 或一个格式字段', 'INVALID_ARGUMENT');
+        }
+        normalized.push({
+          type,
+          paragraph: requiredPositiveInteger(operation.paragraph, 'paragraph'),
+          ...(operation.text === undefined ? {} : { text: requireString(operation.text, 'text', 0, MAX_OFFICE_TEXT_CHARS) }),
+          ...format,
+        });
+        break;
+      }
+      case 'delete_paragraph':
+        normalized.push({ type, paragraph: requiredPositiveInteger(operation.paragraph, 'paragraph') });
+        break;
+      case 'add_table':
+        normalized.push({
+          type,
+          rows: wordTableRows(operation.rows),
+          ...(operation.afterParagraph === undefined ? {} : { afterParagraph: requiredPositiveInteger(operation.afterParagraph, 'afterParagraph') }),
+          header: operation.header === true,
+          ...(operation.style === undefined ? {} : { style: requireString(operation.style, 'style', 1, 120) }),
+        });
+        break;
+      case 'set_header':
+      case 'set_footer':
+        normalized.push({ type, text: requireString(operation.text, 'text', 0, MAX_OFFICE_TEXT_CHARS) });
+        break;
+      case 'insert_image': {
+        const imageRelative = requireRelativePath(operation.imagePath, 'imagePath');
+        const imagePath = await existingPathWithin(root, imageRelative);
+        if (!(await stat(imagePath)).isFile()) throw new CompanionError('图片路径不是普通文件', 'NOT_FILE');
+        normalized.push({
+          type,
+          imagePath,
+          ...(operation.paragraph === undefined ? {} : { paragraph: requiredPositiveInteger(operation.paragraph, 'paragraph') }),
+          ...(operation.widthPoints === undefined ? {} : { widthPoints: boundedNumber(operation.widthPoints, 'widthPoints', 1, 2_000) }),
+          ...(operation.heightPoints === undefined ? {} : { heightPoints: boundedNumber(operation.heightPoints, 'heightPoints', 1, 2_000) }),
+        });
+        break;
+      }
+      case 'page_break':
+        normalized.push({
+          type,
+          ...(operation.paragraph === undefined ? {} : { paragraph: requiredPositiveInteger(operation.paragraph, 'paragraph') }),
+        });
+        break;
+      case 'export_pdf': {
+        const outputRelative = requireRelativePath(operation.outputPath, 'outputPath');
+        if (path.extname(outputRelative).toLowerCase() !== '.pdf') {
+          throw new CompanionError('outputPath 必须以 .pdf 结尾', 'INVALID_ARGUMENT');
+        }
+        const outputPath = await writablePathWithin(root, outputRelative);
+        await mkdir(path.dirname(outputPath), { recursive: true });
+        normalized.push({ type, outputPath });
+        break;
+      }
+    }
+  }
+  if (Buffer.byteLength(JSON.stringify(normalized), 'utf8') > 2 * 1024 * 1024) {
+    throw new CompanionError('Word 批量操作超过 2 MiB 上限', 'REQUEST_TOO_LARGE');
+  }
+  return normalized;
+}
+
+function wordFormat(operation: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...(operation.style === undefined ? {} : { style: requireString(operation.style, 'style', 1, 120) }),
+    ...(operation.alignment === undefined ? {} : {
+      alignment: requireEnum(operation.alignment, 'alignment', ['left', 'center', 'right', 'justify'] as const),
+    }),
+    ...(operation.bold === undefined ? {} : { bold: requireBoolean(operation.bold, 'bold') }),
+    ...(operation.italic === undefined ? {} : { italic: requireBoolean(operation.italic, 'italic') }),
+    ...(operation.fontName === undefined ? {} : { fontName: requireString(operation.fontName, 'fontName', 1, 120) }),
+    ...(operation.fontSize === undefined ? {} : { fontSize: boundedNumber(operation.fontSize, 'fontSize', 1, 200) }),
+    ...(operation.color === undefined ? {} : { color: requireHexColor(operation.color) }),
+  };
+}
+
+function wordTableRows(value: unknown): string[][] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 200) {
+    throw new CompanionError('rows 必须包含 1-200 行', 'INVALID_ARGUMENT');
+  }
+  let columns: number | undefined;
+  return value.map((rawRow, rowIndex) => {
+    if (!Array.isArray(rawRow) || rawRow.length < 1 || rawRow.length > 50) {
+      throw new CompanionError(`rows[${String(rowIndex)}] 必须包含 1-50 列`, 'INVALID_ARGUMENT');
+    }
+    columns ??= rawRow.length;
+    if (rawRow.length !== columns) throw new CompanionError('表格每行列数必须一致', 'INVALID_ARGUMENT');
+    return rawRow.map((cell, columnIndex) => requireString(cell, `rows[${String(rowIndex)}][${String(columnIndex)}]`, 0, 20_000));
+  });
+}
+
+function assertWordExtension(relative: string): void {
+  if (!['.docx', '.docm', '.doc', '.rtf', '.odt'].includes(path.extname(relative).toLowerCase())) {
+    throw new CompanionError('Word 文档必须使用 .docx、.docm、.doc、.rtf 或 .odt 扩展名', 'INVALID_ARGUMENT');
+  }
+}
+
+function temporaryOfficePath(target: string): string {
+  const parsed = path.parse(target);
+  return path.join(parsed.dir, `.${parsed.name}.${randomBytes(8).toString('hex')}.office-tmp${parsed.ext}`);
+}
+
+async function runOfficePowerShell(
+  request: Record<string, unknown>,
+  cwd: string,
+  timeoutMs: number,
+  signal: AbortSignal,
+): Promise<unknown> {
+  throwIfAborted(signal);
+  const executable = process.env.DSH_LOCAL_WORKSPACE_TEST_WINDOWS === '1'
+    ? process.env.DSH_LOCAL_WORKSPACE_TEST_POWERSHELL ?? 'powershell.exe'
+    : 'powershell.exe';
+  const encoded = Buffer.from(WINDOWS_WORD_AUTOMATION_SCRIPT, 'utf16le').toString('base64');
+  const child = spawn(executable, [
+    '-NoLogo',
+    '-NoProfile',
+    '-NonInteractive',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-EncodedCommand',
+    encoded,
+  ], {
+    cwd,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: scrubEnvironment(process.env),
+    windowsHide: true,
+  });
+  const stdout = collectStream(child.stdout, LOCAL_WORKSPACE_MAX_MESSAGE_BYTES);
+  const stderr = collectStream(child.stderr, MAX_COMMAND_OUTPUT_BYTES);
+  child.stdin?.end(JSON.stringify(request));
+  let timedOut = false;
+  let aborted = false;
+  let terminating: Promise<void> | null = null;
+  const terminate = (): Promise<void> => {
+    terminating ??= terminateProcessTree(child);
+    return terminating;
+  };
+  const onAbort = () => {
+    aborted = true;
+    void terminate();
+  };
+  signal.addEventListener('abort', onAbort, { once: true });
+  const timer = setTimeout(() => {
+    timedOut = true;
+    void terminate();
+  }, timeoutMs);
+  try {
+    const exit = await waitForExit(child);
+    if (terminating !== null) await terminating;
+    const [out, err] = await Promise.all([stdout, stderr]);
+    if (aborted) throw new CompanionError('Office 操作已取消', 'ABORTED');
+    if (timedOut) throw new CompanionError('Office 操作超时', 'TIMEOUT');
+    if (exit.code !== 0) throw new CompanionError(err.text.trim() || 'PowerShell Office 自动化失败', 'OFFICE_AUTOMATION_FAILED');
+    let envelope: PowerShellEnvelope;
+    try {
+      envelope = JSON.parse(out.text) as PowerShellEnvelope;
+    } catch {
+      throw new CompanionError('PowerShell 返回了无效的 Office 结果', 'OFFICE_INVALID_RESPONSE');
+    }
+    if (envelope.ok !== true) {
+      throw new CompanionError(envelope.error ?? 'Office 自动化失败', envelope.code ?? 'OFFICE_AUTOMATION_FAILED');
+    }
+    return envelope.value;
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener('abort', onAbort);
+  }
 }
 
 async function spawnCommand(command: string, cwd: string, timeoutMs: number, signal: AbortSignal): Promise<unknown> {
@@ -730,7 +1352,7 @@ function scrubEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 
 function parseRequest(value: Record<string, unknown>): LocalWorkspaceRequest {
   const operation = value.operation;
-  if (operation !== 'read' && operation !== 'write' && operation !== 'edit' && operation !== 'glob' && operation !== 'grep' && operation !== 'bash') {
+  if (operation !== 'read' && operation !== 'write' && operation !== 'edit' && operation !== 'glob' && operation !== 'grep' && operation !== 'bash' && operation !== 'office') {
     throw new Error('unsupported operation');
   }
   if (value.args === null || typeof value.args !== 'object' || Array.isArray(value.args)) throw new Error('request args must be an object');
@@ -750,6 +1372,49 @@ function requireRelativePath(value: unknown, name: string): string {
 
 function optionalRelativePath(value: unknown, name: string): string | undefined {
   return value === undefined ? undefined : requireRelativePath(value, name);
+}
+
+function requireObject(value: unknown, message: string): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new CompanionError(message, 'INVALID_ARGUMENT');
+  }
+  return value as Record<string, unknown>;
+}
+
+function requireEnum<const Values extends readonly string[]>(
+  value: unknown,
+  name: string,
+  values: Values,
+): Values[number] {
+  if (typeof value !== 'string' || !values.includes(value)) {
+    throw new CompanionError(`${name} 必须是 ${values.join('、')} 之一`, 'INVALID_ARGUMENT');
+  }
+  return value as Values[number];
+}
+
+function requireBoolean(value: unknown, name: string): boolean {
+  if (typeof value !== 'boolean') throw new CompanionError(`${name} 必须是布尔值`, 'INVALID_ARGUMENT');
+  return value;
+}
+
+function requiredPositiveInteger(value: unknown, name: string): number {
+  const result = optionalPositiveInteger(value, name);
+  if (result === undefined) throw new CompanionError(`${name} 必须是正整数`, 'INVALID_ARGUMENT');
+  return result;
+}
+
+function boundedNumber(value: unknown, name: string, minimum: number, maximum: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < minimum || value > maximum) {
+    throw new CompanionError(`${name} 必须在 ${String(minimum)}-${String(maximum)} 之间`, 'INVALID_ARGUMENT');
+  }
+  return value;
+}
+
+function requireHexColor(value: unknown): string {
+  if (typeof value !== 'string' || !/^#[0-9A-Fa-f]{6}$/u.test(value)) {
+    throw new CompanionError('color 必须是 #RRGGBB', 'INVALID_ARGUMENT');
+  }
+  return value.toUpperCase();
 }
 
 function requireString(value: unknown, name: string, min: number, max: number): string {
@@ -922,6 +1587,13 @@ function isWindowsRuntime(): boolean {
   return process.platform === 'win32' || process.env.DSH_LOCAL_WORKSPACE_TEST_WINDOWS === '1';
 }
 
+function isPackagedRuntime(): boolean {
+  return (
+    (process as NodeJS.Process & { pkg?: unknown }).pkg !== undefined
+    || process.env.DSH_LOCAL_WORKSPACE_TEST_PACKAGED === '1'
+  );
+}
+
 async function ensureWindowsProtocolRegistration(): Promise<void> {
   const key = `HKCU\\Software\\Classes\\${WINDOWS_PROTOCOL}`;
   const command = windowsProtocolCommand();
@@ -1063,7 +1735,11 @@ async function resolveConfig(cli: CliOptions): Promise<CompanionConfig> {
   const workspaceId = cli.launchWorkspaceId ?? saved?.workspaceId ?? randomUUID();
   const deviceName = cli.deviceName ?? saved?.deviceName ?? os.hostname();
   const workspaceName = cli.workspaceName ?? (launching ? path.basename(root) : saved?.workspaceName) ?? path.basename(root);
-  const shellEnabled = cli.allowShell || (!launching && saved?.shellEnabled === true);
+  const shellEnabled = (
+    cli.allowShell
+    || (isWindowsRuntime() && isPackagedRuntime())
+    || (!launching && saved?.shellEnabled === true)
+  );
   const token = launching ? undefined : parseDeviceToken(saved?.token);
   if (!launching && saved?.token !== undefined && token === undefined) {
     throw new Error(`配置文件中的设备令牌格式无效：${cli.configPath}`);
@@ -1211,7 +1887,7 @@ function printHelp(): void {
 
 Windows 用户首次双击 EXE 会为当前用户安装网页一键唤起。
 返回 dsh 网页点击“选择本机文件夹”，再在 Windows 原生选择器中选择目录。
-Windows 网页一键连接会自动启用 PowerShell，并以当前系统用户权限执行命令。
+Windows EXE 会自动启用 PowerShell（包括已有工作区），并以当前系统用户权限执行命令。
 网页启动链接只供操作系统调用，不要手工粘贴或分享。
 
 手动配置向导（6 位确认码备用流程）：
@@ -1232,7 +1908,7 @@ Windows 网页一键连接会自动启用 PowerShell，并以当前系统用户�
   --folder PATH       要授权的本机目录
   --pair CODE         旧版一次性长配对码；新设备确认流程不需要
   --name NAME         工作区显示名；默认使用目录名
-  --allow-shell       命令行模式明确允许 AI 执行 Shell；命令行默认关闭
+  --allow-shell       非 Windows EXE 命令行模式明确允许 AI 执行 Shell；默认关闭
   --device-name NAME  设备显示名
   --config PATH       使用另一份配置文件（可同时共享多个目录）
 `);

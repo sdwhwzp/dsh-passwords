@@ -5,6 +5,7 @@
 //     JWT cookie 鉴权）
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client';
 import type {} from '@deepseek-ai/dsh-client-ui-slots/client';
+import type {} from '@deepseek-ai/dsh-client-ui-settings/client';
 import type {} from '@deepseek-ai/dsh-client-locale/client';
 import { DshPasswordsCard } from './card';
 import { DshPasswordsSection } from './section';
@@ -12,7 +13,7 @@ import { ChatLauncher } from './chat';
 import { TokenReporter } from './token';
 import { LocalWorkspaceLauncher } from './local-workspace-launcher';
 import { zh, en } from './locales';
-import { installDesktopLauncherLogoutBridge } from './account-logout';
+import { AccountLogoutRow, installDesktopLauncherSuppression } from './account-logout';
 
 /** 卡片样式：全部使用 dsh 设计令牌（--dsw-alias-*），颜色/主题与官方 PluginCard 完全一致 */
 const CSS = `
@@ -49,7 +50,12 @@ const CSS = `
 .dshpw-btn.danger{background:none;border:1px solid var(--dsw-alias-state-error-primary,#ef4444);color:var(--dsw-alias-state-error-primary,#ef4444)}
 .dshpw-btn.danger:hover:not(:disabled){filter:none;background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#ef4444) 10%,transparent)}
 .dshpw-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-.dshpw-logout{margin-left:auto}
+.dshpw-general-row{display:flex;align-items:center;gap:8px;padding:16px 0;border-bottom:1px solid var(--dsw-alias-border-l2)}
+.dshpw-general-row-copy{display:flex;flex:1;min-width:0;flex-direction:column;gap:4px;padding-right:48px}
+.dshpw-general-row-title{font-size:14px;font-weight:400;line-height:22px;color:var(--dsw-alias-label-primary)}
+.dshpw-general-row-desc{font-size:12px;font-weight:400;line-height:18px;color:var(--dsw-alias-label-tertiary)}
+.dshpw-general-logout{display:inline-flex;align-items:center;height:36px;padding:0 14px;border:1px solid var(--dsw-alias-state-error-primary,#ef4444);border-radius:18px;background:transparent;color:var(--dsw-alias-state-error-primary,#ef4444);font:inherit;font-size:14px;line-height:22px;cursor:pointer;white-space:nowrap}
+.dshpw-general-logout:hover{background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#ef4444) 10%,transparent)}
 .dshpw-user{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--dsw-alias-border-l2)}
 .dshpw-user:last-child{border-bottom:none}
 .dshpw-perm{border:1px solid var(--dsw-alias-border-l2);border-radius:10px;padding:10px;display:flex;flex-direction:column;gap:8px}
@@ -71,25 +77,18 @@ select.dshpw-input{height:auto;min-height:36px}
 .dshpw-error{color:var(--dsw-alias-state-error-primary,#ef4444);font-size:12px}
 .dshpw-ok{color:var(--dsw-alias-state-success-primary,#22c55e);font-size:12px}
 .dshpw-hint{font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}
-.dshpw-local-command{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;padding:10px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-2)}
-.dshpw-local-command code{min-width:0;overflow:auto;white-space:nowrap;font-size:11px;color:var(--dsw-alias-label-secondary)}
-.dshpw-local-command small{grid-column:1/-1}
 .dshpw-local-download{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-2)}
 .dshpw-download-btn{display:inline-flex;align-items:center;text-decoration:none}
-.dshpw-local-server{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-2)}
-.dshpw-local-server code{font-size:12px;color:var(--dsw-alias-label-primary);overflow-wrap:anywhere;user-select:all}
-.dshpw-local-approval{display:grid;grid-template-columns:minmax(0,1fr) minmax(140px,190px) auto;gap:10px;align-items:center;padding:12px;border:1px solid var(--dsw-alias-brand-primary);border-radius:10px;background:color-mix(in srgb,var(--dsw-alias-brand-primary) 6%,var(--dsw-alias-bg-layer-2))}
-.dshpw-local-code{text-align:center;font-size:16px;font-weight:650;font-variant-numeric:tabular-nums;letter-spacing:.18em}
-.dshpw-local-legacy{padding:10px 12px;border:1px dashed var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-2)}
-.dshpw-local-legacy summary{cursor:pointer;color:var(--dsw-alias-label-secondary);font-size:12px;font-weight:600}
-.dshpw-local-legacy>.dshpw-hint,.dshpw-local-legacy>.dshpw-btn,.dshpw-local-legacy>.dshpw-local-command{margin-top:10px}
 .dshpw-local-workspace{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:10px;align-items:center;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-2)}
 .dshpw-local-launcher{display:flex;flex-direction:column;gap:7px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-2);font-size:13px;line-height:1.45}
-.dshpw-local-launcher-popover{position:fixed;left:14px;bottom:164px;z-index:2147482800;pointer-events:auto}
-.dshpw-local-launcher-popover>summary{list-style:none;display:inline-flex;align-items:center;min-height:36px;box-shadow:0 2px 8px rgba(0,0,0,.18)}
-.dshpw-local-launcher-popover>summary::-webkit-details-marker{display:none}
-.dshpw-local-launcher-popover[open]>summary{filter:brightness(1.08)}
-.dshpw-local-launcher-popover>.dshpw-local-launcher{position:absolute;left:0;bottom:calc(100% + 8px);width:min(380px,calc(100vw - 28px));box-sizing:border-box;box-shadow:0 12px 36px rgba(0,0,0,.3)}
+.dshpw-local-launcher-seat{position:relative;display:inline-flex;min-width:0}
+.dshpw-local-launcher-trigger{display:inline-flex;align-items:center;gap:4px;min-height:28px;max-width:240px;padding:0 8px;border:0;border-radius:16px;list-style:none;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;font-weight:500;line-height:20px;cursor:pointer;white-space:nowrap}
+.dshpw-local-launcher-trigger::-webkit-details-marker{display:none}
+.dshpw-local-launcher-trigger>svg{flex:none}
+.dshpw-local-launcher-trigger>span{overflow:hidden;text-overflow:ellipsis}
+.dshpw-local-launcher-trigger:hover,.dshpw-local-launcher-seat[open]>.dshpw-local-launcher-trigger{background:var(--dsw-alias-interactive-bg-hover)}
+.dshpw-local-launcher-trigger[aria-disabled=true]{cursor:default;opacity:.5}
+.dshpw-local-launcher-seat>.dshpw-local-launcher{position:absolute;top:calc(100% + 8px);left:0;z-index:2147482800;width:min(380px,calc(100vw - 28px));box-sizing:border-box;box-shadow:0 12px 36px rgba(0,0,0,.3)}
 .dshpw-local-launcher-main{display:flex;align-items:center;justify-content:space-between;gap:12px}
 .dshpw-local-launcher-copy{display:flex;flex-direction:column;gap:2px;min-width:0;color:var(--dsw-alias-label-primary)}
 .dshpw-local-launcher-copy strong{font-size:13px;font-weight:650}
@@ -99,12 +98,25 @@ select.dshpw-input{height:auto;min-height:36px}
 .dshpw-local-launcher-help{display:flex;gap:6px 10px;align-items:baseline;flex-wrap:wrap;padding-top:7px}
 .dshpw-local-launcher-help a{color:var(--dsw-alias-brand-primary);font-weight:600;text-decoration:none}
 .dshpw-local-launcher-help a:hover{text-decoration:underline}
+.dshpw-local-guide-link{appearance:none;padding:0;border:0;background:transparent;color:var(--dsw-alias-brand-primary);font:inherit;font-size:12px;font-weight:600;cursor:pointer}
+.dshpw-local-guide-link:hover{text-decoration:underline}
+.dshpw-local-guide-backdrop{position:fixed;inset:0;z-index:2147483640;display:grid;place-items:center;box-sizing:border-box;padding:24px;background:rgba(0,0,0,.58);backdrop-filter:blur(3px)}
+.dshpw-local-guide-dialog{width:min(560px,100%);max-height:min(720px,calc(100vh - 48px));overflow:auto;box-sizing:border-box;padding:22px;border:1px solid var(--dsw-alias-border-l2);border-radius:16px;background:var(--dsw-alias-bg-layer-3);box-shadow:0 24px 80px rgba(0,0,0,.45);color:var(--dsw-alias-label-primary)}
+.dshpw-local-guide-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+.dshpw-local-guide-head h2{margin:0;font-size:20px;line-height:1.35}
+.dshpw-local-guide-close{appearance:none;flex:none;width:30px;height:30px;padding:0;border:0;border-radius:50%;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font-size:22px;line-height:30px;cursor:pointer}
+.dshpw-local-guide-dialog>p{margin:12px 0 0;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:1.65}
+.dshpw-local-guide-steps{display:flex;flex-direction:column;gap:10px;margin:18px 0;padding-left:24px;font-size:13px;line-height:1.6}
+.dshpw-local-guide-steps li::marker{color:var(--dsw-alias-brand-primary);font-weight:700}
+.dshpw-local-guide-note{padding:10px 12px;border-radius:10px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:1.55}
+.dshpw-local-guide-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-top:18px;flex-wrap:wrap}
+.dshpw-local-guide-dismiss{appearance:none;padding:7px 12px;border:0;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:13px;cursor:pointer}
 .dshpw-local-launcher-workspaces{display:flex;flex-direction:column;gap:6px}
 .dshpw-local-launcher-workspace{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1)}
 .dshpw-local-launcher-workspace>span{display:flex;flex-direction:column;min-width:0}
 .dshpw-local-launcher-workspace strong,.dshpw-local-launcher-workspace small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dshpw-local-launcher-workspace small{color:var(--dsw-alias-label-tertiary)}
-@media(max-width:640px){.dshpw-local-download,.dshpw-local-server,.dshpw-local-launcher-main{align-items:stretch;flex-direction:column}.dshpw-local-approval{grid-template-columns:1fr}.dshpw-local-workspace{grid-template-columns:minmax(0,1fr) auto}.dshpw-local-workspace>.dshpw-switch-copy{grid-column:1/-1}.dshpw-local-launcher-popover{right:14px}.dshpw-local-launcher-popover>.dshpw-local-launcher{width:calc(100vw - 28px)}}
+@media(max-width:640px){.dshpw-local-download,.dshpw-local-launcher-main,.dshpw-general-row{align-items:stretch;flex-direction:column}.dshpw-general-row-copy{padding-right:0}.dshpw-general-logout{justify-content:center}.dshpw-local-workspace{grid-template-columns:minmax(0,1fr) auto}.dshpw-local-workspace>.dshpw-switch-copy{grid-column:1/-1}.dshpw-local-launcher-seat>.dshpw-local-launcher{width:calc(100vw - 28px)}.dshpw-local-guide-backdrop{padding:12px}.dshpw-local-guide-dialog{max-height:calc(100vh - 24px);padding:18px}.dshpw-local-guide-actions{align-items:stretch;flex-direction:column}.dshpw-local-guide-actions>*{justify-content:center;width:100%;box-sizing:border-box;text-align:center}}
 `;
 
 export const inject = ['slots', 'locale', 'sessions', 'workspaces'] as const;
@@ -136,20 +148,33 @@ export function apply(ctx: ClientContext): void {
     return () => el.remove();
   }, 'dsh-passwords: styles');
 
-  // 经 3081 登录网关访问时，右下角第三方“退出 DeepSeek Harness”电源按钮
-  // 必须表示退出当前账号，而不是关闭全体用户共用的 dsh 服务。捕获阶段拦截
-  // 第三方 React onClick，杜绝其 requestShutdown + about:blank 路径。
+  // 登录网关是多用户入口；隐藏第三方启动器的机器级关机按钮，账号退出由
+  // “通用设置”内的独立条目承担。
   ctx.effect(() => {
     let disposed = false;
-    let disposeBridge = () => {};
+    let disposeSuppression = () => {};
     void isBehindGateway().then((behindGateway) => {
-      if (!disposed && behindGateway) disposeBridge = installDesktopLauncherLogoutBridge();
+      if (!disposed && behindGateway) disposeSuppression = installDesktopLauncherSuppression();
     });
     return () => {
       disposed = true;
-      disposeBridge();
+      disposeSuppression();
     };
-  }, 'dsh-passwords: account logout bridge');
+  }, 'dsh-passwords: desktop launcher suppression');
+
+  ctx.slots.inject('settings.general.item', () =>
+    ctx.slots.register(
+      {
+        name: 'settings.general.item',
+        id: 'dsh-passwords-account-logout',
+        key: 'dsh-passwords-account-logout',
+        order: 1000,
+        locale: 'dshpw',
+        inject: () => ({}),
+      },
+      AccountLogoutRow,
+    ),
+  );
 
   // 独立设置分区（参考 @linxin666 的 settings.section 模式）：在设置页左侧导航
   // 注册 dsh-passwords 一级分区，分区体内渲染注册进 dsh-passwords.plugin.item
@@ -208,11 +233,11 @@ export function apply(ctx: ClientContext): void {
     ),
   );
 
-  // 根作用域悬浮入口：没有会话或工作区时仍提供首次本机目录选择。
-  ctx.slots.inject('shell.overlay', () =>
+  // 新会话 Hero 控制行入口：没有会话或工作区时仍提供首次本机目录选择。
+  ctx.slots.inject('conversation.input.bootstrap', () =>
     ctx.slots.register(
       {
-        name: 'shell.overlay',
+        name: 'conversation.input.bootstrap',
         id: 'dsh-passwords-local-workspace-launcher',
         key: 'dsh-passwords-local-workspace-launcher',
         order: 30,

@@ -2,17 +2,23 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
-import { createElement } from 'react';
-import { renderToStaticMarkup } from 'react-dom/server';
 import {
   buildLocalWorkspaceLaunchUri,
-  LocalWorkspaceLauncher,
+  isWindowsBrowser,
   validatedLocalWorkspaceLaunchUri,
-} from '../src/client/local-workspace-launcher.tsx';
+} from '../src/client/local-workspace-launch-uri.ts';
 import { en, zh } from '../src/client/locales.ts';
 
 const root = path.resolve(import.meta.dirname, '..');
 const ticket = 'A'.repeat(43);
+
+test('Windows 首次引导只对桌面 Windows 浏览器启用', () => {
+  assert.equal(isWindowsBrowser({ platform: 'Win32', userAgent: 'Mozilla/5.0' }), true);
+  assert.equal(isWindowsBrowser({ userAgentData: { platform: 'Windows' } }), true);
+  assert.equal(isWindowsBrowser({ userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }), true);
+  assert.equal(isWindowsBrowser({ platform: 'MacIntel', userAgent: 'Mozilla/5.0 (Macintosh)' }), false);
+  assert.equal(isWindowsBrowser({ platform: 'Linux x86_64', userAgent: 'Mozilla/5.0 (X11; Linux x86_64)' }), false);
+});
 
 test('只接受 dsh-local-workspace://connect 自定义协议入口并兼容规范化尾斜杠', () => {
   assert.equal(
@@ -82,37 +88,47 @@ test('用受信 connection 推导服务器地址并覆盖 URI 内既有 server �
   }
 });
 
-test('全局入口包含一键按钮、下载与六位码备用说明', () => {
-  const markup = renderToStaticMarkup(createElement(LocalWorkspaceLauncher, {
-    t: (key: string) => key,
-    openWorkspacePath: async () => undefined,
-  }));
-  assert.match(markup, /<details class="dshpw-local-launcher-popover">/);
-  assert.match(markup, />localLaunchButton</);
-  assert.match(markup, /<details class="dshpw-local-launcher-fallback">/);
-  assert.match(markup, /localLaunchFallbackHint/);
-  assert.match(markup, /\/api\/dsh-passwords\/local-workspace\/windows/);
-  assert.match(markup, /山东梯智物联AI本机助手\.exe/);
-  assert.match(markup, /localConnectedHint/);
+test('全局入口包含一键按钮、下载与首次使用说明', () => {
+  const source = readFileSync(path.join(root, 'src/client/local-workspace-launcher.tsx'), 'utf8');
+  assert.match(source, /className: 'dshpw-local-launcher-seat'/);
+  assert.match(source, /className: 'dshpw-local-launcher-trigger'/);
+  assert.match(source, /t\('localLaunchButton'\)/);
+  assert.match(source, /className: 'dshpw-local-launcher-fallback'/);
+  assert.match(source, /t\('localLaunchFallbackHint'\)/);
+  assert.match(source, /\/api\/dsh-passwords\/local-workspace\/windows/);
+  assert.match(source, /山东梯智物联AI本机助手\.exe/);
+  assert.match(source, /t\('localConnectedHint'\)/);
+  assert.match(source, /dshpw\.windows-local-workspace-guide\.v2/);
+  assert.match(source, /role: 'dialog'/);
+  assert.match(source, /'aria-modal': true/);
+  assert.match(source, /t\('localGuideContinue'\)/);
+  assert.match(source, /t\('localGuideReopen'\)/);
 });
 
-test('通过无会话也可见的 shell.overlay 槽注册且 launch 响应经过校验后才导航', () => {
+test('通过新会话 Hero 控制行注册且 launch 响应经过校验后才导航', () => {
   const indexSource = readFileSync(path.join(root, 'src/client/index.tsx'), 'utf8');
   const launcherSource = readFileSync(path.join(root, 'src/client/local-workspace-launcher.tsx'), 'utf8');
+  const launchUriSource = readFileSync(path.join(root, 'src/client/local-workspace-launch-uri.ts'), 'utf8');
 
-  assert.match(indexSource, /ctx\.slots\.inject\('shell\.overlay'/);
-  assert.match(indexSource, /name: 'shell\.overlay'/);
+  assert.match(indexSource, /ctx\.slots\.inject\('conversation\.input\.bootstrap'/);
+  assert.match(indexSource, /name: 'conversation\.input\.bootstrap'/);
   assert.match(indexSource, /id: 'dsh-passwords-local-workspace-launcher'/);
   assert.match(indexSource, /ctx\.workspaces\.connectWorkspace\(workspace\.workspaceId\)/);
   assert.match(indexSource, /ctx\.sessions\.open\(sessionId\)/);
-  assert.doesNotMatch(indexSource, /conversation\.input\.bootstrap/);
   assert.match(indexSource, /order: 30/);
+  assert.doesNotMatch(indexSource, /dshpw-local-launcher-popover/);
   assert.doesNotMatch(launcherSource, /querySelector|MutationObserver/);
+  assert.match(launcherSource, /IconProjectAddOutline16/);
+  assert.match(launcherSource, /onClick: onSummaryClick/);
+  assert.match(launcherSource, /details instanceof HTMLDetailsElement && !details\.open/);
+  assert.match(launcherSource, /isWindowsClient && !guideSeen/);
+  assert.match(launcherSource, /setGuideOpen\(true\)/);
+  assert.match(launcherSource, /launch\(\);/);
   assert.match(launcherSource, /fetch\(LAUNCH_ENDPOINT/);
   assert.match(launcherSource, /result\.launch\?\.uri/);
   assert.match(launcherSource, /result\.launch\?\.connection/);
   assert.match(launcherSource, /buildLocalWorkspaceLaunchUri/);
-  assert.match(launcherSource, /localWorkspaceServerAddress/);
+  assert.match(launchUriSource, /localWorkspaceServerAddress/);
   assert.match(launcherSource, /document\.createElement\('a'\)/);
   assert.match(launcherSource, /anchor\.click\(\)/);
   assert.match(launcherSource, /never creates an about:blank tab/);
@@ -131,6 +147,17 @@ test('一键入口具备完整中英文文案', () => {
     'localLaunchFallbackTitle',
     'localLaunchDownload',
     'localLaunchFallbackHint',
+    'localGuideTitle',
+    'localGuideIntro',
+    'localGuideStep1',
+    'localGuideStep2',
+    'localGuideStep3',
+    'localGuideStep4',
+    'localGuideNote',
+    'localGuideDownload',
+    'localGuideContinue',
+    'localGuideDismiss',
+    'localGuideReopen',
     'localConnectedHint',
     'localOpenConversation',
     'localOpeningConversation',

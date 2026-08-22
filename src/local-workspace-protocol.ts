@@ -1,9 +1,9 @@
 /** Wire protocol shared by the dsh host plugin and the user's local companion. */
 
-export const LOCAL_WORKSPACE_PROTOCOL_VERSION = 1;
+export const LOCAL_WORKSPACE_PROTOCOL_VERSION = 2;
 export const LOCAL_WORKSPACE_MAX_MESSAGE_BYTES = 3 * 1024 * 1024;
 
-export type LocalWorkspaceOperation = 'read' | 'write' | 'edit' | 'glob' | 'grep' | 'bash';
+export type LocalWorkspaceOperation = 'read' | 'write' | 'edit' | 'glob' | 'grep' | 'bash' | 'office';
 
 export interface LocalWorkspaceHelloFields {
   protocol: typeof LOCAL_WORKSPACE_PROTOCOL_VERSION;

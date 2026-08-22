@@ -49,7 +49,8 @@ The owner can configure, per subuser, from the settings page:
 
 - Every signed-in user can pair one or more folders from their own computer as independent workspaces without uploading those files to the dsh server
 - dsh `read`, `write`, `edit`, `glob`, and `grep` operations act on the original authorized folder through the local companion
-- The Windows one-click companion adds `--allow-shell` automatically; command-line mode keeps Shell off until the user adds it explicitly
+- The Windows EXE enables `--allow-shell` automatically, including restored workspaces; non-Windows-EXE command-line mode keeps Shell off until the user adds it explicitly
+- Windows workspaces register `word_native_status`, `word_native_read`, and `word_native_edit`: they prefer Microsoft Word installed on the customer computer and fall back to WPS Writer without any `@univerjs-pro/*` dependency
 
 ## Identity and spend synchronization
 
@@ -98,12 +99,20 @@ bash install.sh
 
 ```bash
 npm install -g dsh-passwords
-dsh-passwords install     # generates a random SETUP_KEY, registers the plugin and applies the patch (one-click equivalent)
+dsh-passwords install     # generates SETUP_KEY, restores the plugin stack, and applies the patch
 ```
 
 (`dsh-passwords --version` prints the version; `dsh-passwords serve-gateway` runs the gateway manually.)
 
-The installer checks for prebuilt files, installing dependencies and building only when they are missing. It then generates `SETUP_KEY`, registers the plugin, and applies the remote-settings patch.
+The installer checks for prebuilt files, installing dependencies and building only when they are missing. It then generates `SETUP_KEY`, restores the recorded web-profile plugin stack, and applies the remote-settings patch.
+
+### Automatic plugin-stack restore
+
+`scripts/profile-plugins.json` is the versioned cross-machine deployment manifest. `dsh-passwords install` idempotently merges its NPM/Git sources, bundle order, Git build permissions, and required profile patches into `~/.dsh/profiles/web`, then runs one `pnpm install`. Existing local `link:` development sources and custom plugins outside the manifest are preserved.
+
+The default stack installs `dshmarket@1.16.2`, `@linxin666/dsh-web-ui-all@0.2.4`, the `dev` branches of `dsh-spend` and `dsh-plugin-subscriptions`, and the current `dsh-passwords`. The subscriptions entry enforces `github:sdwhwzp/dsh-plugin-subscriptions#dev`, preventing a fresh host from silently selecting the NPM stable release.
+
+`dsh-shandong-tizhi-brand` and `dsh-nas-webdav` are also recorded, but currently only have local source trees and no remotely fetchable branch. Before deploying them on another host, set `DSH_PLUGIN_BRAND_SPEC` and `DSH_PLUGIN_NAS_SPEC` to accessible NPM, Git, or `link:` sources. Without those variables the installer reports and skips those optional plugins while restoring the rest of the stack.
 
 At the end it prints the `SETUP_KEY` for first-time setup and writes it to `setup-key.txt` in the install directory. The file is deleted after setup succeeds; the active keys are kept as independent values in `.env`.
 
@@ -128,21 +137,17 @@ Windows users do not need Node.js:
 
 The current EXE is unsigned, so Windows may display a SmartScreen warning. Before production distribution, sign it with a valid company code-signing certificate and publish its SHA-256 checksum.
 
-Windows one-click selection adds `--allow-shell` automatically and enables PowerShell. Shell runs as the current Windows user and may access files outside the authorized folder. `山东梯智物联AI本机助手.exe --setup` and the macOS/Linux command-line flow still keep Shell off by default and can enable it explicitly when needed. The Settings page keeps the server address, six-digit approval, and legacy long pairing code for compatibility.
+The Windows EXE enables `--allow-shell` automatically for one-click selection and restored workspaces. PowerShell runs as the current Windows user and may access files outside the authorized folder. The customer UI exposes only the Windows one-click flow; it does not show a server address, approval code, or legacy pairing command.
 
-On macOS or Linux, install Node.js 22.5+ and run `npm install -g github:sdwhwzp/dsh-passwords#dev` to install the CLI companion. On first use, provide only the server address shown by the page and the real folder, for example:
+Windows local workspaces also expose native Word automation. `word_native_read` reads body text, paragraphs, and tables. `word_native_edit` creates documents or applies a batch of find/replace, paragraph insertion/deletion/formatting, tables, headers, footers, images, page breaks, and PDF exports. The companion tries `Word.Application` first and WPS `kwps.Application` second. Arguments reach a fixed PowerShell script as JSON over stdin instead of command interpolation; every document, image, and export path must stay under the authorized folder. The document is saved only after the complete batch succeeds, and macro automation is disabled while opening it.
 
-```bash
-dsh-local-workspace --server ws://192.168.1.10:3082 --folder "/home/user/projects/demo"
-```
-
-The CLI displays the same six-digit code; approve it while signed in to finish pairing. Older companions can still use a long `--pair` command from the collapsed **Legacy command-line companion** section, but new devices no longer expose or require that long secret.
+Office RPC requires local-companion protocol v2. After upgrading the server plugin, download and run the new EXE again; an older companion is rejected with an unsupported-protocol message.
 
 The default config file is `~/.dsh-local-workspace/config.json`. Each folder selected by the Windows one-click flow gets its own `~/.dsh-local-workspace/profiles/<workspace-id>.json`, and double-clicking the companion restores them together. For multiple CLI folders, use a different config file for each one, such as `--config ~/.dsh-local-workspace/project-b.json`.
 
 The companion port defaults to the gateway port plus one. If the dsh web gateway uses `3081`, the companion uses `3082`. Allow it through the server firewall. Behind NAT or a reverse proxy, or when the browser-derived address is incorrect, set `MCP_LOCAL_WORKSPACE_PUBLIC_URL=wss://your-domain:port`.
 
-The one-click web entry issues a random 256-bit launch ticket bound to the signed-in user; it expires after two minutes, can be consumed once, and is never written to companion configuration or logs. The fallback six-digit code is not a device credential either: the companion initiates it, it expires after ten minutes, only a signed-in user can approve it once, and failed attempts and pending connections are limited. The real high-entropy token is delivered over the existing WebSocket, stays on the user's computer, and is stored by the server only as a one-way hash. File operations accept only paths within the authorized folder and re-check resolved symlinks. `--allow-shell` is a high-privilege option: the Windows web protocol handler adds it automatically, while other command-line flows require it explicitly. The shell runs as the current OS user and may access files outside the authorized folder. Plain `ws://` is only for trusted LANs; use HTTPS/WSS across untrusted networks.
+The one-click web entry issues a random 256-bit launch ticket bound to the signed-in user; it expires after two minutes, can be consumed once, and is never written to companion configuration or logs. The real high-entropy token is delivered over the existing WebSocket, stays on the user's computer, and is stored by the server only as a one-way hash. File operations accept only paths within the authorized folder and re-check resolved symlinks. `--allow-shell` is a high-privilege option enabled by the packaged Windows EXE for new connections and saved profiles. The shell runs as the current OS user and may access files outside the authorized folder. Plain `ws://` is only for trusted LANs; use HTTPS/WSS across untrusted networks.
 
 Maintainers can run `npm run build:windows-assistant` to create `release/山东梯智物联AI本机助手.exe`. The repository's `Build Windows Local Workspace Assistant` workflow also builds and uploads the same artifact on a Windows runner.
 
@@ -210,7 +215,7 @@ After logging in to dsh, open **Settings → Plugins** to find the "dsh-password
 | **Change username** | Yourself; the owner can change anyone's | Sign in with the new username afterwards |
 | **Subuser management** | Owner only | Create/delete subusers (subusers can sign in but have no admin rights) |
 | **Subuser permissions** | Owner only | Workspace switches, per-session checkboxes, hourly token limit, daily time limit, sandbox level, upload/git-download toggles, ban |
-| **Local workspaces** | All signed-in users | Download the Windows companion, generate a one-time pairing command, inspect online state, and revoke their own paired devices |
+| **Local workspaces** | All signed-in users | Download the Windows companion, inspect online state, and revoke their own local workspaces |
 | **Chat / messages** | All signed-in users | Chat button in the bottom-left corner, with tags (issue/pull request/discussion/announcement/question); subusers DM the owner by default, broadcasting is owner-only; every account can hide its own chat entry in Settings |
 
 - **Owner** = the account created at first-time setup; everything added later is a **subuser**.
@@ -263,8 +268,7 @@ dsh-local-workspace                           # reconnect with the saved local d
 - **The local companion cannot connect?** Confirm the dsh console shows the local-companion listener and allow `MCP_LOCAL_WORKSPACE_PORT` through the server firewall. A web gateway on `3081` defaults the companion to `3082`; set `MCP_LOCAL_WORKSPACE_PUBLIC_URL` across NAT.
 - **The local workspace is online but has no composer?** Expand **Choose a local folder** in the lower-left corner and click **Open conversation** beside the online folder. `¥0` disables model calls; after submitting a question, the customer sees an explicit exhausted-allowance notice in the conversation.
 - **Nothing opens after clicking “Choose a local folder”?** Expand **Companion did not open?**, download the EXE, and double-click it once to register the protocol, then retry on the original page. Do not move or delete the registered EXE; if you move it, double-click it again at the new location. The web flow never opens `about:blank`, so the current conversation remains intact.
-- **The six-digit code is rejected?** Enter only the current six digits shown by the companion. A code expires after ten minutes and can be approved only once; keep the companion running after expiry and it will reconnect with a new code.
-- **dsh fails to start with `duplicate loader entry id`?** You used `dsh plugin add` in the profile. It reconciles ALL dependencies declaring `dsh.bundle` into the bundles layer, which crashes dsh when they overlap with already-installed plugins. Uninstall dsh-passwords and register precisely with `node scripts/register-plugin.mjs` (it appends only this plugin).
+- **dsh fails to start with `duplicate loader entry id`?** You used `dsh plugin add` in the profile. It reconciles ALL dependencies declaring `dsh.bundle` into the bundles layer, which crashes dsh when they overlap with already-installed plugins. Use `node scripts/register-plugin.mjs` to sync `scripts/profile-plugins.json` precisely; it appends only the bundles named by the manifest and preserves all other configuration.
 - **npm fails installing dsh (allow-scripts / node-pty)?** Newer npm blocks install scripts. Allow them first, then reinstall: `npm config set allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user` followed by `npm install -g @deepseek-ai/dsh` again (this project itself has no such issue — it's dsh's dependencies that run native builds).
 - **`dsh-passwords install` reports TS5058 after an npm `--prefix` install?** Upgrade to `dsh-passwords@2.5.4`. It correctly detects runtime dependencies hoisted to `<prefix>/node_modules` and no longer falls back to a source build.
 - **dsh reports `crypto.randomUUID is not a function`?** An older gateway build lacks the HTML injection compat layer — update the code and **hard-refresh the browser** (Ctrl+Shift+R).
@@ -280,7 +284,7 @@ dsh-local-workspace                           # reconnect with the saved local d
 1. `git clone https://github.com/sdwhwzp/dsh-passwords && cd dsh-passwords`
 2. `npm install && npm run build`
 3. `cp .env.example .env`, replace `SETUP_KEY` with a random string (`openssl rand -hex 24`)
-4. Register the plugin: `node scripts/register-plugin.mjs` (equivalent to adding `link:$(pwd)` to the dependencies and `dsh.profile.bundles` of `~/.dsh/profiles/web/package.json`, then `pnpm install`. **Don't use `dsh plugin add`** — see the FAQ)
+4. Restore the plugin stack: `node scripts/register-plugin.mjs` (merges the dependencies, bundles, build permissions, and profile patches from `scripts/profile-plugins.json`, then runs `pnpm install`. **Don't use `dsh plugin add`** — see the FAQ)
 5. Apply the patch: `node dist/cli.js patch` (if the dsh directory isn't found, set `MCP_DSH_ROOT=/path/to/@deepseek-ai/dsh`)
 
 Then as usual: start dsh → the gate starts automatically → open `https://<your-host>` to finish first-time setup.

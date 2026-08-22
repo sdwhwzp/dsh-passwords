@@ -736,7 +736,7 @@ export class LocalWorkspaceHub {
     agent.ctx.systemPrompt.section({
       name: 'remote-local-workspace',
       order: 95,
-      text: 'This session workspace is on the user’s paired computer. read, write, edit, glob, grep, and bash operate there through the local companion. Paths are relative to the selected local folder. If the companion is offline, stop and ask the user to start dsh-local-workspace.',
+      text: `This session workspace is on the user’s paired computer. read, write, edit, glob, grep, and bash operate there through the local companion.${workspace.platform === 'win32' ? ' word_native_read and word_native_edit use the installed Microsoft Word or WPS Writer on that computer.' : ''} Paths are relative to the selected local folder. If the companion is offline, stop and ask the user to start dsh-local-workspace.`,
     });
   }
 
@@ -1165,7 +1165,207 @@ function remoteToolDefinitions(workspace: LocalWorkspaceRow, request: RemoteRequ
       return { card: 'terminal', output: block.text };
     },
   };
-  return [read, write, edit, glob, grep, bash];
+  const tools = [read, write, edit, glob, grep, bash];
+  if (workspace.platform !== 'win32') return tools;
+
+  const providerSchema = { type: 'string', enum: ['auto', 'office', 'wps'] };
+  const wordStatus: ToolDefinition = {
+    name: 'word_native_status',
+    description: 'Detect Microsoft Word and WPS Writer automation on the user’s paired Windows computer. Prefer Microsoft Word when both are available.',
+    parameters: objectSchema([], {}),
+    output: {
+      schema: objectSchema(['platform', 'office', 'wps', 'preferred'], {
+        platform: { type: 'string', enum: ['win32'] },
+        office: { type: 'boolean' },
+        wps: { type: 'boolean' },
+        preferred: { oneOf: [{ type: 'string', enum: ['office', 'wps'] }, { type: 'null' }] },
+      }),
+      render: (_args, value) => {
+        const status = value as { office: boolean; wps: boolean; preferred: string | null };
+        return [textOutput(`Microsoft Word: ${status.office ? 'available' : 'unavailable'}\nWPS Writer: ${status.wps ? 'available' : 'unavailable'}\nPreferred: ${status.preferred ?? 'none'}`)];
+      },
+    },
+    isConcurrencySafe: () => true,
+    async execute(_args, exec) {
+      return await executeRemote(exec, 'office', { action: 'status' }, 190_000);
+    },
+  };
+  const wordRead: ToolDefinition = {
+    name: 'word_native_read',
+    description: 'Read text, paragraphs, and tables from an existing Word document using Microsoft Word or WPS Writer on the paired Windows computer.',
+    parameters: objectSchema(['file_path'], {
+      file_path: { type: 'string', description: 'Word path relative to the paired local workspace.' },
+      provider: providerSchema,
+      max_chars: { type: 'integer', minimum: 1, maximum: 200000 },
+    }),
+    timeoutMs: 200_000,
+    output: {
+      schema: objectSchema(['path', 'provider', 'progId', 'text', 'truncated', 'paragraphCount', 'tableCount', 'paragraphs', 'tables'], {
+        path: { type: 'string' },
+        provider: { type: 'string', enum: ['office', 'wps'] },
+        progId: { type: 'string' },
+        text: { type: 'string' },
+        truncated: { type: 'boolean' },
+        paragraphCount: { type: 'integer' },
+        tableCount: { type: 'integer' },
+        paragraphs: {
+          type: 'array',
+          items: objectSchema(['index', 'text'], { index: { type: 'integer' }, text: { type: 'string' } }),
+        },
+        tables: {
+          type: 'array',
+          items: objectSchema(['index', 'rows'], {
+            index: { type: 'integer' },
+            rows: { type: 'array', items: { type: 'array', items: { type: 'string' } } },
+          }),
+        },
+      }),
+      render: (_args, value) => {
+        const result = value as { path: string; text: string; truncated: boolean; provider: string };
+        return [textOutput(`<path>${result.path}</path>\n<type>word</type>\n<provider>${result.provider}</provider>\n<content>\n${result.text}\n</content>${result.truncated ? '\n[content truncated]' : ''}`)];
+      },
+    },
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const value = args as Record<string, unknown>;
+      return await executeRemote(exec, 'office', {
+        action: 'read_word',
+        path: pathArg(value.file_path),
+        ...(value.provider === undefined ? {} : { provider: requireStringField(value.provider, 'provider') }),
+        ...(value.max_chars === undefined ? {} : { maxChars: value.max_chars }),
+      }, 190_000);
+    },
+  };
+  const wordEdit: ToolDefinition = {
+    name: 'word_native_edit',
+    description: 'Create or batch-edit a Word document with installed Microsoft Word or WPS Writer. Supports text replacement, paragraph formatting, tables, headers, footers, images, page breaks, and PDF export. The document is saved only after every requested edit succeeds.',
+    parameters: objectSchema(['file_path', 'operations'], {
+      file_path: { type: 'string', description: 'Word path relative to the paired local workspace.' },
+      provider: providerSchema,
+      create: { type: 'boolean', description: 'Create a new document instead of opening an existing one.' },
+      overwrite: { type: 'boolean', description: 'Allow create mode to replace an existing file.' },
+      timeout_ms: { type: 'integer', minimum: 1000, maximum: 600000 },
+      operations: {
+        type: 'array',
+        minItems: 1,
+        maxItems: 100,
+        items: wordOperationSchema(),
+      },
+    }),
+    timeoutMs: MAX_RPC_TIMEOUT_MS,
+    output: {
+      schema: objectSchema(['path', 'provider', 'progId', 'created', 'operationsApplied', 'pdfPaths'], {
+        path: { type: 'string' },
+        provider: { type: 'string', enum: ['office', 'wps'] },
+        progId: { type: 'string' },
+        created: { type: 'boolean' },
+        operationsApplied: { type: 'integer' },
+        pdfPaths: { type: 'array', items: { type: 'string' } },
+      }),
+      render: (_args, value) => {
+        const result = value as { path: string; provider: string; operationsApplied: number; created: boolean; pdfPaths: string[] };
+        const exports = result.pdfPaths.length === 0 ? '' : `\nPDF: ${result.pdfPaths.join(', ')}`;
+        return [textOutput(`${result.created ? 'created' : 'edited'} ${result.path} with ${result.provider}; ${String(result.operationsApplied)} operation(s) applied${exports}`)];
+      },
+    },
+    async execute(args, exec) {
+      const value = args as Record<string, unknown>;
+      const timeoutMs = typeof value.timeout_ms === 'number' ? value.timeout_ms : 180_000;
+      return await executeRemote(exec, 'office', {
+        action: 'edit_word',
+        path: pathArg(value.file_path),
+        ...(value.provider === undefined ? {} : { provider: requireStringField(value.provider, 'provider') }),
+        create: value.create === true,
+        overwrite: value.overwrite === true,
+        timeoutMs,
+        operations: normalizeRemoteWordOperations(value.operations, pathArg),
+      }, timeoutMs + 10_000);
+    },
+  };
+  return [...tools, wordStatus, wordRead, wordEdit];
+}
+
+function wordOperationSchema(): Record<string, unknown> {
+  return objectSchema(['type'], {
+    type: {
+      type: 'string',
+      enum: [
+        'replace_text',
+        'append_paragraph',
+        'insert_paragraph',
+        'set_paragraph',
+        'delete_paragraph',
+        'add_table',
+        'set_header',
+        'set_footer',
+        'insert_image',
+        'page_break',
+        'export_pdf',
+      ],
+    },
+    find: { type: 'string' },
+    replace: { type: 'string' },
+    replace_all: { type: 'boolean' },
+    match_case: { type: 'boolean' },
+    whole_word: { type: 'boolean' },
+    text: { type: 'string' },
+    paragraph: { type: 'integer', minimum: 1 },
+    after_paragraph: { type: 'integer', minimum: 1 },
+    style: { type: 'string' },
+    alignment: { type: 'string', enum: ['left', 'center', 'right', 'justify'] },
+    bold: { type: 'boolean' },
+    italic: { type: 'boolean' },
+    font_name: { type: 'string' },
+    font_size: { type: 'number', minimum: 1, maximum: 200 },
+    color: { type: 'string', pattern: '^#[0-9A-Fa-f]{6}$' },
+    rows: {
+      type: 'array',
+      minItems: 1,
+      maxItems: 200,
+      items: { type: 'array', minItems: 1, maxItems: 50, items: { type: 'string' } },
+    },
+    header: { type: 'boolean' },
+    image_path: { type: 'string' },
+    width_points: { type: 'number', minimum: 1, maximum: 2000 },
+    height_points: { type: 'number', minimum: 1, maximum: 2000 },
+    output_path: { type: 'string' },
+  });
+}
+
+function normalizeRemoteWordOperations(
+  value: unknown,
+  pathArg: (value: unknown, name?: string) => string,
+): Array<Record<string, unknown>> {
+  if (!Array.isArray(value)) throw new Error('operations must be an array');
+  return value.map((raw) => {
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('each operation must be an object');
+    const operation = raw as Record<string, unknown>;
+    const type = requireStringField(operation.type, 'operation.type');
+    return {
+      type,
+      ...(operation.find === undefined ? {} : { find: requireStringField(operation.find, 'find') }),
+      ...(operation.replace === undefined ? {} : { replace: requireStringField(operation.replace, 'replace') }),
+      ...(operation.replace_all === undefined ? {} : { replaceAll: operation.replace_all }),
+      ...(operation.match_case === undefined ? {} : { matchCase: operation.match_case }),
+      ...(operation.whole_word === undefined ? {} : { wholeWord: operation.whole_word }),
+      ...(operation.text === undefined ? {} : { text: requireStringField(operation.text, 'text') }),
+      ...(operation.paragraph === undefined ? {} : { paragraph: operation.paragraph }),
+      ...(operation.after_paragraph === undefined ? {} : { afterParagraph: operation.after_paragraph }),
+      ...(operation.style === undefined ? {} : { style: requireStringField(operation.style, 'style') }),
+      ...(operation.alignment === undefined ? {} : { alignment: operation.alignment }),
+      ...(operation.bold === undefined ? {} : { bold: operation.bold }),
+      ...(operation.italic === undefined ? {} : { italic: operation.italic }),
+      ...(operation.font_name === undefined ? {} : { fontName: requireStringField(operation.font_name, 'font_name') }),
+      ...(operation.font_size === undefined ? {} : { fontSize: operation.font_size }),
+      ...(operation.color === undefined ? {} : { color: requireStringField(operation.color, 'color') }),
+      ...(operation.rows === undefined ? {} : { rows: operation.rows }),
+      ...(operation.header === undefined ? {} : { header: operation.header }),
+      ...(operation.image_path === undefined ? {} : { imagePath: pathArg(operation.image_path, 'image_path') }),
+      ...(operation.width_points === undefined ? {} : { widthPoints: operation.width_points }),
+      ...(operation.height_points === undefined ? {} : { heightPoints: operation.height_points }),
+      ...(operation.output_path === undefined ? {} : { outputPath: pathArg(operation.output_path, 'output_path') }),
+    };
+  });
 }
 
 function objectSchema(required: string[], properties: Record<string, unknown>): Record<string, unknown> {

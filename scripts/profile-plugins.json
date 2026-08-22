@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "plugins": [
+    {
+      "name": "dshmarket",
+      "defaultSpecifier": "1.16.2",
+      "activation": "bundle"
+    },
+    {
+      "name": "@linxin666/dsh-web-ui-all",
+      "defaultSpecifier": "0.2.4",
+      "activation": "bundle"
+    },
+    {
+      "name": "dsh-spend",
+      "defaultSpecifier": "github:sdwhwzp/dsh-spend#dev",
+      "activation": "bundle"
+    },
+    {
+      "name": "dsh-plugin-subscriptions",
+      "defaultSpecifier": "github:sdwhwzp/dsh-plugin-subscriptions#dev",
+      "activation": "bundle",
+      "allowBuild": true,
+      "enforceDefault": true
+    },
+    {
+      "name": "dsh-passwords",
+      "self": true,
+      "activation": "bundle"
+    },
+    {
+      "name": "dsh-shandong-tizhi-brand",
+      "specifierEnvironment": "DSH_PLUGIN_BRAND_SPEC",
+      "localCandidates": [
+        "../../dsh-shandong-tizhi-brand",
+        "../dsh-shandong-tizhi-brand"
+      ],
+      "activation": "bundle",
+      "optional": true
+    },
+    {
+      "name": "dsh-nas-webdav",
+      "specifierEnvironment": "DSH_PLUGIN_NAS_SPEC",
+      "localCandidates": [
+        "../nas"
+      ],
+      "activation": "profile-patch",
+      "patchId": "dsh-nas-webdav",
+      "patchYaml": "- insert:\n    - id: dsh-nas-webdav\n      name: dsh-nas-webdav\n",
+      "optional": true
+    }
+  ]
+}

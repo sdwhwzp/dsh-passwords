@@ -52,7 +52,7 @@ test('中英文文档和安装器指向正式仓库并保留本机工作区操�
     const source = read(relative);
     assert.match(source, /dsh-local-workspace/);
     assert.match(source, /MCP_LOCAL_WORKSPACE_PUBLIC_URL/);
-    assert.match(source, /github:sdwhwzp\/dsh-passwords#dev/);
+    assert.match(source, /github\.com\/sdwhwzp\/dsh-passwords/);
     assert.doesNotMatch(source, /github\.com\/slywalker2006\/dsh-passwords/);
   }
   for (const relative of ['install.sh', 'install.bat']) {

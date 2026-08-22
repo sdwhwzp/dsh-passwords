@@ -2,9 +2,9 @@
 // dsh-passwords 一键安装（跨平台核心逻辑；install.sh / install.bat 只是引导壳）
 //
 // 做的事：环境检查（node/dsh/pnpm）→ 装依赖 + 编译 → 生成随机 SETUP_KEY
-// → 写 .env 和 setup-key.txt（用完即删）→ 精确注册为 dsh 插件
+// → 写 .env 和 setup-key.txt（用完即删）→ 精确同步记录的 dsh 插件栈
 // （此后启动 dsh 会自动拉起密码门）→ 应用远程设置补丁。
-// 幂等：已存在 .env 不覆盖，插件已注册不重复加。
+// 幂等：已存在 .env 不覆盖，已记录插件不重复加，本地 link 源不被默认源覆盖。
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -223,8 +223,8 @@ if (isFirstInstall) {
   say('检测到已有 .env，不重复创建或打印首次配置密钥');
 }
 
-// ── 7. 注册为 dsh 插件（此后 dsh web 启动会自动拉起密码门） ──
-say('注册 dsh 插件（profile: web）…');
+// ── 7. 同步 dsh 插件栈（此后 dsh web 启动会自动拉起密码门） ──
+say('同步已记录的 dsh 插件（profile: web）…');
 mustRun(
   process.execPath,
   [path.join(root, 'scripts', 'register-plugin.mjs')],

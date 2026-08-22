@@ -257,7 +257,7 @@ async function connectDevice(
 function deviceHello(workspaceId: string) {
   return {
     type: 'device' as const,
-    protocol: 1 as const,
+    protocol: 2 as const,
     deviceName: 'owner-laptop',
     workspaceName: 'private-project',
     workspaceId,

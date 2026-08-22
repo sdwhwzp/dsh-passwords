@@ -206,7 +206,7 @@ test('Windows 网页 URI 自动启用 Shell、兼容规范化尾斜杠并使用�
   children.push(launched.child);
   const { socket, hello } = await pendingLaunch;
   assert.equal(hello.type, 'launch');
-  assert.equal(hello.protocol, 1);
+  assert.equal(hello.protocol, 2);
   assert.equal(hello.ticket, ticket);
   assert.equal(hello.code, undefined);
   assert.equal(hello.token, undefined);
@@ -270,6 +270,59 @@ test('Windows 网页 URI 自动启用 Shell、兼容规范化尾斜杠并使用�
   }));
   await waitUntil(() => resumed.output().includes('已连接'), 5_000, '独立 profile 未能在双击后 resume');
   resumedSocket.terminate();
+});
+
+test('Windows 打包版恢复旧的仅文件配置时自动启用 Shell', async (context) => {
+  const temp = mkdtempSync(path.join(tmpdir(), 'dsh-local-packaged-resume-'));
+  const root = path.join(temp, 'workspace');
+  const fakeBin = path.join(temp, 'bin');
+  const config = path.join(temp, '.dsh-local-workspace', 'config.json');
+  const regLog = path.join(temp, 'registry.log');
+  mkdirSync(root);
+  mkdirSync(fakeBin);
+  mkdirSync(path.dirname(config));
+  createWindowsCommandShims(fakeBin);
+
+  const server = new WebSocketServer({ host: '127.0.0.1', port: 0, perMessageDeflate: false });
+  await once(server, 'listening');
+  const address = server.address();
+  if (typeof address === 'string' || address === null) throw new Error('WebSocket server did not expose a TCP port');
+  writeFileSync(config, JSON.stringify({
+    server: `ws://127.0.0.1:${String(address.port)}`,
+    token: 'P'.repeat(43),
+    workspaceId: 'saved-files-only',
+    deviceName: 'customer-pc',
+    workspaceName: 'saved-workspace',
+    root: realpathSync(root),
+    shellEnabled: false,
+  }, null, 2) + '\n');
+
+  const pendingHello = nextHello(server);
+  const cli = startCli([], {
+    HOME: temp,
+    USERPROFILE: temp,
+    PATH: `${fakeBin}${path.delimiter}${process.env.PATH ?? ''}`,
+    DSH_LOCAL_WORKSPACE_TEST_WINDOWS: '1',
+    DSH_LOCAL_WORKSPACE_TEST_PACKAGED: '1',
+    DSH_TEST_REG_LOG: regLog,
+  });
+  context.after(async () => {
+    await stopCli(cli.child);
+    await closeServer(server);
+    rmSync(temp, { recursive: true, force: true });
+  });
+
+  const { socket, hello } = await pendingHello;
+  assert.equal(hello.type, 'resume');
+  assert.equal(hello.workspaceId, 'saved-files-only');
+  assert.equal(hello.shellEnabled, true);
+  socket.send(JSON.stringify({
+    type: 'ready',
+    workspaceId: hello.workspaceId,
+    workspacePath: '/host/placeholder',
+  }));
+  await waitUntil(() => cli.output().includes('Shell：已启用'), 5_000, '旧配置恢复后未自动启用 Shell');
+  socket.terminate();
 });
 
 test('Windows 首次双击只注册网页协议，不强迫填写服务器和目录', () => {

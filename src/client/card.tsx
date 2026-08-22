@@ -347,13 +347,6 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
     );
   };
 
-  const logout = () => {
-    if (!window.confirm(t('logoutConfirm'))) return;
-    setBusy(true);
-    setError('');
-    submitLogoutNavigation();
-  };
-
   const changePassword = () => {
     if (pwNew !== pwConfirm) return setError(t('pwMismatch'));
     if (!PASSWORD_RE.test(pwNew)) return setError(t('pwPolicy'));
@@ -520,17 +513,6 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
       isAdmin
         ? h('span', { className: 'dshpw-badge admin' }, t('owner'))
         : h('span', { className: 'dshpw-badge' }, t('subuser')),
-      h(
-        'button',
-        {
-          className: 'dshpw-btn danger dshpw-logout',
-          type: 'button',
-          disabled: busy,
-          onClick: logout,
-          'aria-label': t('logout'),
-        },
-        t('logout'),
-      ),
     ),
     // ── 聊天入口：按当前账号跨设备同步的显示偏好 ──
     h(

@@ -2760,11 +2760,22 @@ export function createGatewayServer(
           } else {
             targetPath = extractPathFromBody(bodyObj);
             if (targetPath === null) {
-              const wid = extractWorkspaceId(bodyObj);
-              if (wid !== null) targetPath = workspacePathById.get(wid) ?? null;
-              // 走到这里仍为 null = 既无路径字段、也无 workspaceId 缓存命中（含空 body /
-              // 缓存 miss）→ 一律 fail-closed：不能跳过白名单校验后透传，否则可创建到
-              // 白名单外的工作区
+              const workspaceId = extractWorkspaceId(bodyObj);
+              if (workspaceId !== null) {
+                targetPath = workspacePathById.get(workspaceId) ?? null;
+                if (targetPath === null) {
+                  try {
+                    await refreshWorkspaceAccessSnapshot();
+                  } catch {
+                    upstreamReq.destroy();
+                    res.status(502).type('text/plain').send('502 Upstream response unprocessable');
+                    return;
+                  }
+                  targetPath = workspacePathById.get(workspaceId) ?? null;
+                }
+              }
+              // 走到这里仍为 null = 既无路径字段、也无刷新后的 workspaceId 命中（含空 body）
+              // → 一律 fail-closed：不能跳过白名单校验后透传，否则可创建到白名单外的工作区
               if (targetPath === null) {
                 upstreamReq.destroy();
                 res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
