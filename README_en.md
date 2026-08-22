@@ -333,7 +333,7 @@ The UI is bilingual (Chinese/English) and follows dsh's language setting:
 
 ## Version compatibility
 
-Current release: dsh-passwords 2.6.0, targeting dsh 0.1.0-rc.8. Client slot registrations include the `options.key` values required by keyed slots and remain compatible with dsh 0.1.0-rc.6 and later; rc.8 is recommended for matching dependencies and profile layout.
+Current release: dsh-passwords 2.6.0, fully compatible with dsh 0.1.1-rc.2 (keyed slots, the patch chain and profile layout stay aligned since rc.8), and still compatible with dsh 0.1.0-rc.6 and later.
 
 The npm package ships the prebuilt `dist/`, TypeScript source, install/register scripts, Docker files, `cordis.yml`, READMEs and the license. The Docker image uses the same `src/`, `dist/` and `scripts/` as npm 2.6.0.
 

@@ -335,7 +335,7 @@ curl -s https://你的地址/gateway/readyz    # 就绪检查（含数据库）�
 
 ## 版本兼容
 
-当前版本 dsh-passwords 2.6.0，目标 dsh 0.1.0-rc.8。客户端槽位注册带 keyed slot 需要的 options.key，兼容 dsh 0.1.0-rc.6 及以上，但建议用 rc.8 保持依赖和 profile 布局一致。
+当前版本 dsh-passwords 2.6.0，与 dsh 0.1.1-rc.2 完全兼容（keyed slot、补丁链与 profile 布局均保持对齐），同样兼容 dsh 0.1.0-rc.6 及以上版本。
 
 npm 包带预构建的 dist/、TypeScript 源码、安装注册脚本、Docker 文件、cordis.yml、README 和许可证。Docker 镜像与 npm 2.6.0 用同一份 src/、dist/ 和 scripts/。
 
