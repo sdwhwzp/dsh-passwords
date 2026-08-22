@@ -6,7 +6,7 @@
 
 dsh 自带的网页界面没有登录、没有权限、没有用量控制。放到服务器上，任何拿到地址的人都能用，还会白白消耗你的模型额度。dsh-passwords 在 dsh 前面挡一层网关：没登录先看登录页；登录后按账号身份做权限与配额控制。安装只需一条命令，无需任何额外配置即可开箱即用。
 
-> 一句话定位：dsh-passwords = 让 dsh 真正变成服务器产品的那一层。企业内部分发、API 中转站给客户开子账号、团队共享一台服务器，都是它的目标场景。纯本地单机用 dsh 不需要它；但只要访问地址不是 localhost，先装它。
+> 什么时候需要它：只要 dsh 的访问地址不是 localhost，就值得装。企业内部分发、API 中转站给客户开子账号、团队共享一台服务器，都是典型场景。纯本地单机用不上。
 
 已收录于 [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek-harness) 生态索引（Infrastructure & Development）与 [Awesome DSH Plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) 插件精选列表（Development & Runtime）。
 
@@ -141,7 +141,7 @@ MCP_GATEWAY_PUBLIC_HOST=your.domain.example
 
 MCP_GATEWAY_PUBLIC_HOST 可留空；用自己的域名或 `<公网IP>.sslip.io` 时建议填实际访问地址。
 
-启动：
+启动（示例，参数按需调整）：
 
 ```bash
 docker run -d \
@@ -153,6 +153,8 @@ docker run -d \
   -v dsh-passwords-state:/data/dsh-passwords \
   skywalker237234/dsh-passwords
 ```
+
+容器名、端口映射、卷名都可以按你的环境改。
 
 等初始化完成，看日志确认：
 
@@ -176,15 +178,10 @@ docker logs -f dsh-passwords
 
 ## 密码门跟着 dsh 走
 
-不需要 systemd，不需要手动启动网关进程，不需要给 dsh 加任何启动参数：
+密码门是 dsh 插件的一部分，不用 systemd、不用手动起进程、不用给 dsh 加参数。dsh 启动时插件自动把密码门拉起来，dsh 退出时密码门跟着停，不会留僵尸进程占端口。
 
-```
-dsh 启动 → 插件被加载 → 插件自动拉起密码门（日志就在 dsh 控制台里）
-dsh 退出 → 密码门跟着停（不会留僵尸进程占端口）
-```
-
-- 想单独托管网关进程？`node dist/cli.js serve-gateway` 手动跑，或自己配 systemd 也行。
-- 临时禁止自动拉起（调试用）：启动 dsh 时加环境变量 `DSH_PASSWORDS_NO_AUTOSTART=1`。
+- 想单独托管网关进程：`node dist/cli.js serve-gateway`，或者自己配 systemd。
+- 调试时想临时关掉自动拉起：启动 dsh 时加 `DSH_PASSWORDS_NO_AUTOSTART=1`。
 
 ## 自动 HTTPS
 

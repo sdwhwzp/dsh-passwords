@@ -6,7 +6,7 @@ A server-grade gateway for DeepSeek Harness (dsh): it turns dsh from a local, si
 
 dsh's built-in web UI has no login, no permissions, and no usage controls — put it on a server and anyone with the URL can use it and burn your model credits. dsh-passwords puts a gateway in front of dsh: unauthenticated visitors see the login page first; after sign-in, every account is subject to per-account permission and quota enforcement. Installation takes a single command — no extra configuration required, works out of the box.
 
-> One-liner: dsh-passwords is the layer that turns dsh into a real server product. Enterprise distribution, API relay/reseller stations issuing sub-accounts to customers, and teams sharing one box are its target use cases. You don't need it for purely local use; but if the access URL isn't localhost, install it first.
+> When do you need it: if dsh's access URL isn't localhost, it's worth installing. Enterprise distribution, API relay/reseller stations issuing sub-accounts to customers, and teams sharing one box are the typical use cases. Purely local setups don't need it.
 
 Listed in the [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek-harness) ecosystem index (Infrastructure & Development) and the [Awesome DSH Plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) list (Development & Runtime).
 
@@ -141,7 +141,7 @@ MCP_GATEWAY_PUBLIC_HOST=your.domain.example
 
 `MCP_GATEWAY_PUBLIC_HOST` may be left empty; fill in the actual address when using your own domain or `<public-IP>.sslip.io`.
 
-Start the container:
+Start the container (example — adjust the parameters to your setup):
 
 ```bash
 docker run -d \
@@ -176,15 +176,10 @@ Host installs: `dsh-passwords --version` prints the version. Docker: `docker log
 
 ## The gate follows dsh
 
-No systemd unit, no manual gateway process, no extra flags for dsh:
+The gate is part of the dsh plugin — no systemd unit, no manual gateway process, no extra flags for dsh. When dsh starts, the plugin spawns the gate; when dsh exits, the gate stops with it, so no orphan process holds the ports.
 
-```
-dsh starts → plugin loads → plugin spawns the password gate (logs appear in dsh's console)
-dsh exits  → the gate stops with it (no orphan process holding ports)
-```
-
-- Advanced: to run the gateway standalone, use `node dist/cli.js serve-gateway` or set up your own systemd unit.
-- Temporarily disable the auto-start (debugging): start dsh with `DSH_PASSWORDS_NO_AUTOSTART=1`.
+- To run the gateway standalone: `node dist/cli.js serve-gateway`, or set up your own systemd unit.
+- To temporarily disable the auto-start while debugging: start dsh with `DSH_PASSWORDS_NO_AUTOSTART=1`.
 
 ## Automatic HTTPS
 
