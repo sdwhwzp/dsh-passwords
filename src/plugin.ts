@@ -730,7 +730,7 @@ export function apply(ctx: Context): void {
           const targetUser = await mutateUser(async () => {
             const existingUser = db!.getUserByUsername(target.trim());
             const registry = ctx.get('workspaceRegistry');
-            let managedUnregistered = false;
+            let managedUnregistered: Awaited<ReturnType<ManagedWorkspaceProvisioner['unregisterUser']>> = [];
             if (existingUser !== null && db!.getManagedWorkspace(existingUser.id) !== null) {
               if (registry === undefined || managedWorkspaces === null) {
                 throw new AuthError('WORKSPACE_UNAVAILABLE', {}, 503);
@@ -741,14 +741,14 @@ export function apply(ctx: Context): void {
               await auth!.removeUser(caller, target, metaOf(req));
             } catch (error) {
               if (
-                managedUnregistered &&
+                managedUnregistered.length > 0 &&
                 existingUser !== null &&
                 registry !== undefined &&
                 managedWorkspaces !== null &&
                 db!.getUserById(existingUser.id) !== null
               ) {
                 try {
-                  await managedWorkspaces.restoreUser(registry, existingUser);
+                  await managedWorkspaces.restoreUser(registry, existingUser, managedUnregistered);
                 } catch (restoreError) {
                   throw new AggregateError([error, restoreError], '删除子用户失败，且工作区注册恢复失败');
                 }

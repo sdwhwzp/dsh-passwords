@@ -10,6 +10,12 @@ import { Database, type UserListRow, type UserPermissionsRow } from './db.js';
 /** The sandbox level that permits writes inside a session workspace only. */
 export const MANAGED_WORKSPACE_SANDBOX = 'workspace-write';
 
+/** Durable workspace registrations removed while deleting one subuser. */
+export interface ManagedWorkspaceRegistration {
+  path: string;
+  title: string;
+}
+
 /** Creates, registers, restores, and revokes host directories owned by subusers. */
 export class ManagedWorkspaceProvisioner {
   private rootPromise: Promise<string> | null = null;
@@ -88,29 +94,72 @@ export class ManagedWorkspaceProvisioner {
   }
 
   /** Restore one still-existing user's registration after a failed account deletion. */
-  restoreUser(registry: WorkspaceRegistry, user: UserListRow): Promise<void> {
-    return this.enqueue(() => this.restoreUserNow(registry, user));
+  restoreUser(
+    registry: WorkspaceRegistry,
+    user: UserListRow,
+    registrations: readonly ManagedWorkspaceRegistration[] = [],
+  ): Promise<void> {
+    return this.enqueue(() => this.restoreUserNow(registry, user, registrations));
   }
 
-  private async restoreUserNow(registry: WorkspaceRegistry, user: UserListRow): Promise<void> {
+  private async restoreUserNow(
+    registry: WorkspaceRegistry,
+    user: UserListRow,
+    registrations: readonly ManagedWorkspaceRegistration[],
+  ): Promise<void> {
     const existing = this.db.getManagedWorkspace(user.id);
     if (existing === null) throw new Error(`用户 ${String(user.id)} 没有托管工作区记录`);
     const workspacePath = await this.prepareDirectory(user.id, existing.path);
-    const registration = await registry.create(workspacePath, workspaceTitle(user));
-    if (registration.title !== workspaceTitle(user)) await registration.setTitle(workspaceTitle(user));
+    const targets = registrations.length === 0
+      ? [{ path: workspacePath, title: workspaceTitle(user) }]
+      : registrations;
+    for (const target of targets) {
+      const canonical = await realpath(target.path);
+      if (!samePath(workspacePath, canonical) && !isWithin(workspacePath, canonical)) {
+        throw new Error(`工作区注册越出用户 ${String(user.id)} 的托管目录`);
+      }
+      const registration = await registry.create(canonical, target.title);
+      if (registration.title !== target.title) await registration.setTitle(target.title);
+    }
     if (!samePath(existing.path, workspacePath)) this.db.setManagedWorkspace(user.id, workspacePath);
   }
 
-  /** Unregister a deleted user's host workspace while retaining every file and session log. */
-  unregisterUser(registry: WorkspaceRegistry, userId: number): Promise<boolean> {
+  /** Unregister every workspace under a deleted user's host root while retaining all files. */
+  unregisterUser(registry: WorkspaceRegistry, userId: number): Promise<ManagedWorkspaceRegistration[]> {
     return this.enqueue(() => this.unregisterUserNow(registry, userId));
   }
 
-  private async unregisterUserNow(registry: WorkspaceRegistry, userId: number): Promise<boolean> {
+  private async unregisterUserNow(
+    registry: WorkspaceRegistry,
+    userId: number,
+  ): Promise<ManagedWorkspaceRegistration[]> {
     const managed = this.db.getManagedWorkspace(userId);
-    if (managed === null) return false;
-    const registration = registry.list().find((workspace) => samePath(workspace.path, managed.path));
-    return registration === undefined ? false : registry.delete(registration.id);
+    if (managed === null) return [];
+    const registrations = registry.list().filter((workspace) =>
+      samePath(workspace.path, managed.path) || isWithin(managed.path, workspace.path));
+    const removed: ManagedWorkspaceRegistration[] = [];
+    try {
+      for (const registration of registrations) {
+        if (await registry.delete(registration.id)) {
+          removed.push({ path: registration.path, title: registration.title });
+        }
+      }
+      return removed;
+    } catch (error) {
+      const restoreFailures: unknown[] = [];
+      for (const registration of removed) {
+        try {
+          const restored = await registry.create(registration.path, registration.title);
+          if (restored.title !== registration.title) await restored.setTitle(registration.title);
+        } catch (restoreError) {
+          restoreFailures.push(restoreError);
+        }
+      }
+      if (restoreFailures.length > 0) {
+        throw new AggregateError([error, ...restoreFailures], '撤销子用户工作区失败，且部分注册恢复失败');
+      }
+      throw error;
+    }
   }
 
   private async provisionExistingUser(registry: WorkspaceRegistry, user: UserListRow): Promise<void> {

@@ -165,13 +165,42 @@ test('removing a subuser unregisters access but retains the host directory', asy
     const registry = new FakeWorkspaceRegistry();
     const provisioner = new ManagedWorkspaceProvisioner(env.db, env.config);
     const workspacePath = await provisioner.provisionNewUser(registry as unknown as WorkspaceRegistry, user);
+    const childPath = path.join(workspacePath, 'project-a');
+    await mkdir(childPath);
+    await registry.create(childPath, 'project-a');
 
-    await provisioner.unregisterUser(registry as unknown as WorkspaceRegistry, user.id);
+    const removed = await provisioner.unregisterUser(registry as unknown as WorkspaceRegistry, user.id);
     env.db.deleteUser(user.id);
 
+    assert.equal(removed.length, 2);
     assert.equal(registry.workspaces.length, 0);
     assert.equal((await stat(workspacePath)).isDirectory(), true);
+    assert.equal((await stat(childPath)).isDirectory(), true);
     assert.equal(env.db.getManagedWorkspace(user.id), null);
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test('failed account deletion can restore root and child workspace registrations', async () => {
+  const env = await harness();
+  try {
+    const created = env.db.createUser('alice', await bcrypt.hash('UserPassword1!', 4), 'user');
+    const user = env.db.getUserListRowById(created.id)!;
+    const registry = new FakeWorkspaceRegistry();
+    const provisioner = new ManagedWorkspaceProvisioner(env.db, env.config);
+    const workspacePath = await provisioner.provisionNewUser(registry as unknown as WorkspaceRegistry, user);
+    const childPath = path.join(workspacePath, 'project-a');
+    await mkdir(childPath);
+    await registry.create(childPath, 'project-a');
+
+    const removed = await provisioner.unregisterUser(registry as unknown as WorkspaceRegistry, user.id);
+    await provisioner.restoreUser(registry as unknown as WorkspaceRegistry, user, removed);
+
+    assert.deepEqual(
+      registry.workspaces.map((workspace) => [workspace.path, workspace.title]).sort(),
+      [[childPath, 'project-a'], [workspacePath, 'alice · 专属工作区']].sort(),
+    );
   } finally {
     await env.cleanup();
   }
@@ -189,7 +218,7 @@ test('concurrent provision and unregister operations run in invocation order', a
     const unregister = provisioner.unregisterUser(registry as unknown as WorkspaceRegistry, user.id);
     const [workspacePath, unregistered] = await Promise.all([provision, unregister]);
 
-    assert.equal(unregistered, true);
+    assert.equal(unregistered.length, 1);
     assert.equal(registry.workspaces.length, 0);
     assert.equal(env.db.getManagedWorkspace(user.id)?.path, workspacePath);
     assert.equal((await stat(workspacePath)).isDirectory(), true);

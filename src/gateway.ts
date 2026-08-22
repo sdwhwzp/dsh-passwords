@@ -22,7 +22,6 @@ import { Database, type UserPermissionsRow, type MessageRow } from './db.js';
 import {
   folderAllowed,
   normalizePath,
-  isWorkspaceRestricted,
   isUploadRequest,
   isGitRequest,
   isAdminOnlyPluginEndpoint,
@@ -68,10 +67,60 @@ import { signedPrincipalHeaders } from './principal.js';
 type Req = Request & {
   dshpwUser?: number;
   dshpwPerms?: UserPermissionsRow;
+  /** The authenticated subuser's host-managed workspace root. */
+  dshpwManagedWorkspaceRoot?: string;
   /** 会话目录白名单校验用：本次请求判定出的目标工作区路径（session.create/fork 时）；
    *  由 needsFolderCheck 写入，供 session.create 响应回调记录 sessionId→cwd 缓存 */
   dshpwSessionCwd?: string;
 };
+
+const HOST_LIST_DIRECTORY_RE = /^\/api\/host[.\/]listDirectory$/;
+const HOST_CREATE_DIRECTORY_RE = /^\/api\/host[.\/]createDirectory$/;
+const WORKSPACE_CREATE_RE = /^\/api\/workspace[.\/]create$/;
+
+/** Resolve symlinks in every existing ancestor while retaining a missing leaf. */
+function canonicalCandidate(candidate: string): string | null {
+  let cursor = path.resolve(candidate);
+  const suffix: string[] = [];
+  for (;;) {
+    try {
+      return path.join(realpathSync(cursor), ...suffix.reverse());
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return null;
+      const parent = path.dirname(cursor);
+      if (parent === cursor) return null;
+      suffix.push(path.basename(cursor));
+      cursor = parent;
+    }
+  }
+}
+
+/** Whether candidate is the root itself or one of its descendants. */
+function pathWithin(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === '' || (
+    relative !== '..' &&
+    !relative.startsWith('..' + path.sep) &&
+    !path.isAbsolute(relative)
+  );
+}
+
+/** Read the payload object consumed by Typert host/workspace requests. */
+function rpcPayloadOf(value: unknown): Record<string, unknown> | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const envelope = value as Record<string, unknown>;
+  return envelope.payload !== null && typeof envelope.payload === 'object' && !Array.isArray(envelope.payload)
+    ? envelope.payload as Record<string, unknown>
+    : envelope;
+}
+
+/** Replace the path consumed by Typert host/workspace requests. */
+function setRpcPayloadPath(value: unknown, workspacePath: string): boolean {
+  const target = rpcPayloadOf(value);
+  if (target === null) return false;
+  target.path = workspacePath;
+  return true;
+}
 
 const COOKIE_NAME = 'dsh_gateway_token';
 /** 语言偏好 cookie（用户在登录页手动切换后持久化） */
@@ -826,14 +875,89 @@ export function createGatewayServer(
     );
   }
 
+  /** Resolve managed-workspace access, including symlinks entering or escaping a private root. */
+  function managedWorkspaceAccessFor(userId: number, candidate: string): boolean | null {
+    const canonical = canonicalCandidate(candidate);
+    for (const managed of db.listManagedWorkspaces()) {
+      const root = canonicalCandidate(managed.path);
+      if (root === null) continue;
+      const lexicalMatch = pathWithin(path.resolve(managed.path), path.resolve(candidate));
+      const canonicalMatch = canonical !== null && pathWithin(root, canonical);
+      if (lexicalMatch && !canonicalMatch) return false;
+      if (canonicalMatch) return managed.user_id === userId;
+    }
+    return null;
+  }
+
   /** 文件夹白名单与两类用户专属工作区所有权的统一判定。 */
   function pathAllowedFor(userId: number, candidate: string, allowedFolders: string[]): boolean {
     const localWorkspaceOwner = db.localWorkspaceOwnerForPath(candidate);
     if (localWorkspaceOwner !== null) return localWorkspaceOwner === userId;
-    const managedWorkspaceOwner = db.managedWorkspaceOwnerForPath(candidate);
-    return managedWorkspaceOwner === null
-      ? folderAllowed(candidate, allowedFolders)
-      : managedWorkspaceOwner === userId;
+    const managedWorkspaceAccess = managedWorkspaceAccessFor(userId, candidate);
+    if (managedWorkspaceAccess !== null) return managedWorkspaceAccess;
+    return folderAllowed(candidate, allowedFolders);
+  }
+
+  /** Canonicalize one existing or prospective path and confine it to this user's managed root. */
+  function managedPathFor(userId: number, candidate: string): string | null {
+    const managed = db.getManagedWorkspace(userId);
+    if (managed === null) return null;
+    const root = canonicalCandidate(managed.path);
+    const canonical = canonicalCandidate(candidate);
+    if (root === null || canonical === null || !pathWithin(root, canonical)) return null;
+    return canonical;
+  }
+
+  /** Limit a successful directory-list response to the authenticated user's private root. */
+  function restrictManagedDirectoryListing(value: unknown, userId: number): unknown {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return value;
+    const envelope = value as Record<string, unknown>;
+    const result = envelope.result;
+    if (result === null || typeof result !== 'object' || Array.isArray(result)) return value;
+    const resultRecord = result as Record<string, unknown>;
+    if (resultRecord.ok !== true) return value;
+    const listing = resultRecord.value;
+    if (listing === null || typeof listing !== 'object' || Array.isArray(listing)) {
+      throw new Error('host.listDirectory response has no listing');
+    }
+
+    const row = listing as Record<string, unknown>;
+    const managed = db.getManagedWorkspace(userId);
+    const root = managed === null ? null : canonicalCandidate(managed.path);
+    const listedPath = typeof row.path === 'string' ? canonicalCandidate(row.path) : null;
+    if (
+      root === null ||
+      listedPath === null ||
+      !pathWithin(root, listedPath) ||
+      !Array.isArray(row.crumbs) ||
+      !Array.isArray(row.entries)
+    ) {
+      throw new Error('host.listDirectory response escaped the managed workspace');
+    }
+
+    const user = db.getUserListRowById(userId);
+    const title = user === null ? path.basename(root) : `${user.username} · 专属工作区`;
+    const crumbs = row.crumbs.filter((entry): entry is Record<string, unknown> =>
+      entry !== null && typeof entry === 'object' && !Array.isArray(entry) && typeof (entry as Record<string, unknown>).path === 'string');
+    const rootIndex = crumbs.findIndex((entry) => {
+      const canonical = canonicalCandidate(entry.path as string);
+      return canonical !== null && pathWithin(root, canonical) && pathWithin(canonical, root);
+    });
+    if (rootIndex < 0) throw new Error('host.listDirectory response omitted the managed root crumb');
+
+    row.home = root;
+    row.path = listedPath;
+    row.crumbs = crumbs.slice(rootIndex).map((entry, index) => index === 0
+      ? { ...entry, name: title, path: root, hidden: false }
+      : entry);
+    row.entries = row.entries.filter((entry) => {
+      if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return false;
+      const entryPath = (entry as Record<string, unknown>).path;
+      if (typeof entryPath !== 'string') return false;
+      const canonical = canonicalCandidate(entryPath);
+      return canonical !== null && pathWithin(root, canonical);
+    });
+    return value;
   }
 
   /** 从会话 cookie 解析完整用户（含角色）；无会话/失效返回 null */
@@ -1773,6 +1897,8 @@ export function createGatewayServer(
       (req as Req).dshpwUser = user.userId;
       if (row.role !== 'admin') {
         const perms = effectivePermissions(user.userId);
+        const managedWorkspace = db.getManagedWorkspace(user.userId);
+        if (managedWorkspace !== null) (req as Req).dshpwManagedWorkspaceRoot = managedWorkspace.path;
         const lang = langOf(req);
         if (perms.banned) {
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.banned')));
@@ -1796,7 +1922,15 @@ export function createGatewayServer(
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.noUpload')));
           return;
         }
-        if (isWorkspaceRestricted(perms.allowed_folders) && isWorkspaceWrite(requestPath)) {
+        const managedWorkspaceCreate = WORKSPACE_CREATE_RE.test(requestPath) && managedWorkspace !== null;
+        if (isWorkspaceWrite(requestPath) && !managedWorkspaceCreate) {
+          res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.workspaceDenied')));
+          return;
+        }
+        if (
+          (HOST_LIST_DIRECTORY_RE.test(requestPath) || HOST_CREATE_DIRECTORY_RE.test(requestPath)) &&
+          managedWorkspace === null
+        ) {
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.workspaceDenied')));
           return;
         }
@@ -2198,6 +2332,36 @@ export function createGatewayServer(
           return;
         }
 
+        // ── host.listDirectory 响应：子用户只看到本人专属根目录及其内容 ──
+        if (
+          req.method === 'POST' &&
+          HOST_LIST_DIRECTORY_RE.test(proxyPath) &&
+          reqAs.dshpwUser !== undefined &&
+          reqAs.dshpwManagedWorkspaceRoot !== undefined
+        ) {
+          bufferUpstream(upstreamRes, res, (raw) => {
+            try {
+              let body = raw;
+              const enc = String(upstreamRes.headers['content-encoding'] ?? '');
+              if (enc.includes('gzip')) body = gunzipBounded(body);
+              const parsed = JSON.parse(body.toString('utf8'));
+              const restricted = restrictManagedDirectoryListing(parsed, reqAs.dshpwUser!);
+              const out = Buffer.from(JSON.stringify(restricted), 'utf8');
+              const respHeaders = headersForRewrittenBody(upstreamRes.headers);
+              respHeaders['content-length'] = String(out.length);
+              if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+              if (!res.writableEnded) res.end(out);
+            } catch (error) {
+              if (error instanceof OversizeResponseError) {
+                if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response too large');
+                return;
+              }
+              if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response unprocessable');
+            }
+          });
+          return;
+        }
+
         // ── workspace.list 响应：收集 id→path 缓存 + 受限子用户过滤白名单外的工作区 ──
         if (req.method === 'POST' && /^\/api\/workspace[.\/]list$/.test(proxyPath)) {
           bufferUpstream(upstreamRes, res, (raw) => {
@@ -2427,12 +2591,20 @@ export function createGatewayServer(
       if (!res.writableEnded) upstreamReq.destroy();
     });
     // 受限子用户的请求体缓冲检查（尽力而为）：
-    //   1) 文件夹白名单：session.create/fork 的 cwd/workspaceId 必须在授权目录内
+    //   1) 文件夹白名单：会话目录及子用户目录浏览/创建必须在授权根内
     //   2) 沙盒权限：settings.mutate 试图把 defaultPreset 切到高于授权级别 → 403
+    const needsManagedWorkspaceCheck =
+      reqAs.dshpwManagedWorkspaceRoot !== undefined &&
+      req.method === 'POST' &&
+      (
+        HOST_LIST_DIRECTORY_RE.test(proxyPath) ||
+        HOST_CREATE_DIRECTORY_RE.test(proxyPath) ||
+        WORKSPACE_CREATE_RE.test(proxyPath)
+      );
     const needsFolderCheck =
       reqAs.dshpwPerms !== undefined &&
       (req.method === 'POST' || req.method === 'PUT' || (req.method === 'DELETE' && isAionuiPanel(proxyPath))) &&
-      (WORKSPACE_ENDPOINT_RE.test(proxyPath) || isAionuiPanel(proxyPath));
+      (needsManagedWorkspaceCheck || WORKSPACE_ENDPOINT_RE.test(proxyPath) || isAionuiPanel(proxyPath));
     const needsSandboxCheck =
       reqAs.dshpwPerms !== undefined &&
       reqAs.dshpwPerms.sandbox_mode !== null &&
@@ -2546,7 +2718,36 @@ export function createGatewayServer(
 
         if (needsFolderCheck) {
           let targetPath: string | null = null;
-          if (isAionuiPanel(proxyPath)) {
+          if (needsManagedWorkspaceCheck) {
+            targetPath = extractPathFromBody(bodyObj);
+            if (targetPath === null && HOST_LIST_DIRECTORY_RE.test(proxyPath)) {
+              targetPath = reqAs.dshpwManagedWorkspaceRoot!;
+            }
+            const canonical = targetPath === null ? null : managedPathFor(reqAs.dshpwUser!, targetPath);
+            if (canonical === null || !setRpcPayloadPath(bodyObj, canonical)) {
+              upstreamReq.destroy();
+              res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+              return;
+            }
+            if (HOST_CREATE_DIRECTORY_RE.test(proxyPath)) {
+              const name = rpcPayloadOf(bodyObj)?.name;
+              if (
+                typeof name !== 'string' ||
+                name.trim() === '' ||
+                name === '.' ||
+                name === '..' ||
+                /[/\\]/.test(name) ||
+                managedPathFor(reqAs.dshpwUser!, path.join(canonical, name)) === null
+              ) {
+                upstreamReq.destroy();
+                res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+                return;
+              }
+            }
+            targetPath = canonical;
+            forwardBody = Buffer.from(JSON.stringify(bodyObj), 'utf8');
+            upstreamReq.setHeader('content-length', String(forwardBody.length));
+          } else if (isAionuiPanel(proxyPath)) {
             // aionui-panel 文件树：root 是工作区路径，path 是 root 下的相对文件路径
             targetPath = aionuiRootFrom(req.method, proxyPath, parsedUrl.searchParams, bodyObj);
             // F-17b：提取不到 root（DELETE 无 query/body、异常编码等）→ fail-closed，
