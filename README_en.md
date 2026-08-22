@@ -6,8 +6,6 @@ A server-grade gateway for DeepSeek Harness (dsh): it turns dsh from a local, si
 
 dsh's built-in web UI has no login, no permissions, and no usage controls — put it on a server and anyone with the URL can use it and burn your model credits. dsh-passwords puts a gateway in front of dsh: unauthenticated visitors see the login page first; after sign-in, every account is subject to per-account permission and quota enforcement. Installation takes a single command — no extra configuration required, works out of the box.
 
-> When do you need it: if dsh's access URL isn't localhost, it's worth installing. Enterprise distribution, API relay/reseller stations issuing sub-accounts to customers, and teams sharing one box are the typical use cases. Purely local setups don't need it.
-
 Listed in the [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek-harness) ecosystem index (Infrastructure & Development) and the [Awesome DSH Plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) list (Development & Runtime).
 
 ## Features

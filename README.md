@@ -6,8 +6,6 @@
 
 dsh 自带的网页界面没有登录、没有权限、没有用量控制。放到服务器上，任何拿到地址的人都能用，还会白白消耗你的模型额度。dsh-passwords 在 dsh 前面挡一层网关：没登录先看登录页；登录后按账号身份做权限与配额控制。安装只需一条命令，无需任何额外配置即可开箱即用。
 
-> 什么时候需要它：只要 dsh 的访问地址不是 localhost，就值得装。企业内部分发、API 中转站给客户开子账号、团队共享一台服务器，都是典型场景。纯本地单机用不上。
-
 已收录于 [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek-harness) 生态索引（Infrastructure & Development）与 [Awesome DSH Plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) 插件精选列表（Development & Runtime）。
 
 ## 功能一览
