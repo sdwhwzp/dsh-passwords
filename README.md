@@ -224,7 +224,7 @@ node scripts/start-http.mjs [端口]    # 默认 8080，会弹 y/N 确认
 | `MCP_JWT_SECRET` | 首次配置前从 SETUP_KEY 派生 | 会话签名密钥；首次配置后自动固化为独立值。手动更换会让现有登录会话失效 |
 | `MCP_DB_PATH` | `./data/platform.db` | 账户/权限 SQLite 文件；相对路径以 `.env` 所在目录为基准 |
 | `MCP_DB_ENC_KEY` | 安装脚本自动生成 | 数据加密密钥；首次配置后自动固化。**已使用的数据库绝不能换此值**，备份数据库必须同时备份 `.env` |
-| `MCP_MANAGED_WORKSPACE_ROOT` | `~/dsh-user-workspaces` | 子用户宿主机专属工作区根目录；新增/补建账号使用稳定的 `u<用户ID>` 子目录。不能放在数据库 data 目录内；相对路径按 `.env` 解析 |
+| `MCP_MANAGED_WORKSPACE_ROOT` | `~/dsh-user-workspaces` | 子用户宿主机专属工作区根目录；新增/补建账号通常使用稳定的 `u<用户ID>` 子目录，遇到保留目录时自动加随机后缀，避免把旧数据交给新账号。不能放在数据库 data 目录内；相对路径按 `.env` 解析 |
 | `MCP_GATEWAY_HOST` | `0.0.0.0` | 网关监听地址 |
 | `MCP_GATEWAY_PORT` | 安装器首次安装为 `443`；未设置时为 `8080` | 网关端口 |
 | `MCP_GATEWAY_UPSTREAM` | `http://127.0.0.1:3080` | dsh 网页地址（插件自动指向 dsh 实际端口，一般不用改） |
@@ -257,7 +257,7 @@ dsh-local-workspace                      # 使用已保存的设备令牌恢复�
 
 - **登录页一直显示"首次配置"？** 说明用户表是空的（新库或数据库被清过）。按页面提示输入 `SETUP_KEY` 重新创建主用户即可。
 - **忘记主用户密码？** 停服后跑 `node -e "const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync('data/platform.db');db.exec('DELETE FROM users;')"`，重启后重新走首次配置。
-- **删除子用户会删除他的宿主机文件吗？** 不会。系统只撤销工作区注册和账号访问，`MCP_MANAGED_WORKSPACE_ROOT/u<用户ID>` 会原样保留，管理员确认无用后再手工归档或删除。
+- **删除子用户会删除他的宿主机文件吗？** 不会。系统只撤销工作区注册和账号访问，`MCP_MANAGED_WORKSPACE_ROOT` 下该账号的 `u<用户ID>`（或带安全后缀）目录会原样保留，管理员确认无用后再手工归档或删除。
 - **dsh 控制台报错误码 30 / 31，密码门没起来？** 见上面「自动 HTTPS」的错误码表。修好后重启 dsh 会自动再拉起。
 - **443 端口绑定失败（非 root 用户）？** Linux 上 1024 以下端口需要 root：用 root/sudo 启动 dsh，或把 `MCP_GATEWAY_PORT` 改成高位端口（如 8443）并自行做端口转发。
 - **本机助手连不上？** 确认 dsh 控制台已显示“本机助手接入”，并在服务器防火墙放行 `MCP_LOCAL_WORKSPACE_PORT`。网页网关为 `3081` 时默认助手端口是 `3082`；跨 NAT 时设置 `MCP_LOCAL_WORKSPACE_PUBLIC_URL`。

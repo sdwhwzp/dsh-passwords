@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, realpath, rm, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import bcrypt from 'bcryptjs';
@@ -129,6 +129,29 @@ test('startup backfills existing subusers and preserves their explicit quotas an
     const restartedRegistry = new FakeWorkspaceRegistry();
     await provisioner.restore(restartedRegistry as unknown as WorkspaceRegistry);
     assert.equal(restartedRegistry.workspaces[0].path, managed.path);
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test('a retained directory is never reassigned when a database user id collides', async () => {
+  const env = await harness();
+  try {
+    const created = env.db.createUser('alice', await bcrypt.hash('UserPassword1!', 4), 'user');
+    const retainedPath = path.join(env.config.managedWorkspaceRoot, `u${String(created.id)}`);
+    await mkdir(retainedPath, { recursive: true });
+    await writeFile(path.join(retainedPath, 'old-owner.txt'), 'retained');
+    const registry = new FakeWorkspaceRegistry();
+    const provisioner = new ManagedWorkspaceProvisioner(env.db, env.config);
+
+    const workspacePath = await provisioner.provisionNewUser(
+      registry as unknown as WorkspaceRegistry,
+      env.db.getUserListRowById(created.id)!,
+    );
+
+    assert.notEqual(workspacePath, retainedPath);
+    assert.match(path.basename(workspacePath), new RegExp(`^u${String(created.id)}-[0-9a-f]{12}$`));
+    assert.equal((await stat(path.join(retainedPath, 'old-owner.txt'))).isFile(), true);
   } finally {
     await env.cleanup();
   }

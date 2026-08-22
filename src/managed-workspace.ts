@@ -1,6 +1,7 @@
 /** Host-side workspace provisioning for dsh-passwords subusers. */
 
 import type { Workspace, WorkspaceRegistry } from '@deepseek-ai/dsh-workspace';
+import { randomBytes } from 'node:crypto';
 import { chmod, lstat, mkdir, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import type { PlatformConfig } from './config.js';
@@ -115,28 +116,32 @@ export class ManagedWorkspaceProvisioner {
   }
 
   private async prepareDirectory(userId: number, recordedPath: string | null): Promise<string> {
-    const expectedName = `u${String(userId)}`;
+    const baseName = `u${String(userId)}`;
     let parent: string;
+    let directoryName: string;
     if (recordedPath === null) {
       parent = await this.managedRoot();
+      directoryName = await reserveDirectory(parent, baseName);
     } else {
       const resolved = path.resolve(recordedPath);
-      if (path.basename(resolved) !== expectedName) {
+      directoryName = path.basename(resolved);
+      if (!managedDirectoryName(userId, directoryName)) {
         throw new Error(`用户 ${String(userId)} 的托管工作区路径与稳定目录名不匹配`);
       }
       parent = await ensureDirectory(path.dirname(resolved));
+      const recordedDirectory = path.join(parent, directoryName);
+      await mkdir(recordedDirectory, { recursive: false, mode: 0o700 }).catch((error: unknown) => {
+        if (!isAlreadyExists(error)) throw error;
+      });
     }
-    const workspacePath = path.join(parent, expectedName);
-    await mkdir(workspacePath, { recursive: false, mode: 0o700 }).catch((error: unknown) => {
-      if (!isAlreadyExists(error)) throw error;
-    });
+    const workspacePath = path.join(parent, directoryName);
     const info = await lstat(workspacePath);
     if (info.isSymbolicLink() || !info.isDirectory()) {
       throw new Error(`托管工作区不是普通目录：${workspacePath}`);
     }
     if (process.platform !== 'win32') await chmod(workspacePath, 0o700);
     const canonical = await realpath(workspacePath);
-    if (path.basename(canonical) !== expectedName || !isWithin(parent, canonical)) {
+    if (path.basename(canonical) !== directoryName || !isWithin(parent, canonical)) {
       throw new Error(`托管工作区解析到了预期父目录之外：${workspacePath}`);
     }
     return canonical;
@@ -220,4 +225,21 @@ function isWithin(parent: string, candidate: string): boolean {
 
 function isAlreadyExists(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 'EEXIST';
+}
+
+async function reserveDirectory(parent: string, baseName: string): Promise<string> {
+  for (let attempt = 0; attempt < 32; attempt++) {
+    const directoryName = attempt === 0 ? baseName : `${baseName}-${randomBytes(6).toString('hex')}`;
+    try {
+      await mkdir(path.join(parent, directoryName), { recursive: false, mode: 0o700 });
+      return directoryName;
+    } catch (error) {
+      if (!isAlreadyExists(error)) throw error;
+    }
+  }
+  throw new Error(`无法为 ${baseName} 分配唯一的托管工作区目录`);
+}
+
+function managedDirectoryName(userId: number, directoryName: string): boolean {
+  return new RegExp(`^u${String(userId)}(?:-[0-9a-f]{12})?$`).test(directoryName);
 }
