@@ -172,6 +172,8 @@ Don't delete the two named volumes: `dsh-home` holds the dsh profile, dependenci
 
 > The container listens on `127.0.0.1:3088` only — don't expose 3088 to the public internet. Public traffic should be TLS-terminated by nginx or Caddy and forwarded to it; open 80/443 in the firewall and security group.
 
+For split-container deployments (dsh and the gate in separate containers), dsh only binds loopback by default, so the gateway container can't reach dsh web. Set `MCP_DSH_PATCH_ALLOW_BIND_ALL=1` on the dsh container to let dsh web bind 0.0.0.0 (this widens the security surface — use it only for split-container setups).
+
 Host installs: `dsh-passwords --version` prints the version. Docker: `docker logs dsh-passwords --tail 100` shows the logs.
 
 ## The gate follows dsh
@@ -229,14 +231,25 @@ After logging in to dsh, open Settings → Plugins to find the "dsh-passwords ·
 | Feature | Who can use it | Notes |
 |---|---|---|
 | Remote settings + reload patch | All signed-in users | Remote settings are applied (always on); after a dsh upgrade, click "Reload patch" to fix the settings page in one click (restarts the web service and refreshes the page — no SSH) |
+| Software updates | Status visible to all; actions owner-only | Auto-checks for new versions, rate-limited download, auto-install + restart after 1h of idle; or manual "Check now" / "Install & restart" |
 | Change password | Yourself; the owner can change anyone's | Old sessions are invalidated immediately |
 | Change username | Yourself; the owner can change anyone's | Sign in with the new username afterwards |
 | Subuser management | Owner only | Create/delete subusers (subusers can sign in but have no admin rights) |
 | Subuser permissions | Owner only | Workspace allowlist, hourly token limit, daily time limit, sandbox level, upload/git-download toggles, ban |
 | Chat / messages | All signed-in users | Chat button in the bottom-left corner, with tags (issue/pull request/discussion/announcement/question) |
+| Sign out | All signed-in users | Log out of the current account and return to the login page |
 
 - Owner = the account created at first-time setup; everything added later is a subuser.
 - Passwords follow the same rule as the login page: at least 12 characters with uppercase, lowercase, digits and symbols.
+
+## Software updates
+
+The settings card has a "Software updates" section that auto-checks GitHub for new releases by default:
+
+- Checks once at startup, then every 24 hours; downloads are rate-limited (default ≤1MiB/s, change with `MCP_DSH_UPDATE_MAX_BPS`) and verified against the npm registry's sha512 integrity before use (mismatch = discarded)
+- After verification, it waits for 1 hour of continuous idle before installing and restarting the dsh web service; or click "Install & restart now" to skip the idle window (10-minute cooldown)
+- Auto-update is on by default; the owner can turn it off in the card, and `MCP_DSH_AUTO_UPDATE=0` forces it off at the deployment level
+- Docker and git-source environments don't support auto-install (a container self-update would be wiped on restart, and a source tree shouldn't be touched automatically) — they only show the manual command
 
 ## Configuration reference
 
@@ -260,6 +273,9 @@ After logging in to dsh, open Settings → Plugins to find the "dsh-passwords ·
 | `MCP_GATEWAY_PUBLIC_HOST` | empty | Public IP/domain used for redirects (prevents Host-header reflection) |
 | `MCP_DSH_ROOT` | auto-detected | dsh install directory (where `@deepseek-ai/dsh` lives); set manually if detection fails |
 | `MCP_DSH_RESTART_SERVICE` | `dsh-web` | systemd service to restart after a patch reload; an explicit empty value disables auto-restart |
+| `MCP_DSH_AUTO_UPDATE` | on | Deployment-level auto-update master switch; `0/false/no` forces it off (manual check/install still available in the settings page) |
+| `MCP_DSH_UPDATE_MAX_BPS` | 1MiB/s | Update download rate limit (bytes/sec) |
+| `MCP_DSH_PATCH_ALLOW_BIND_ALL` | off | For split-container Docker: `1` lets dsh web bind 0.0.0.0 so a gateway in another container can reach it |
 | `DSH_PASSWORDS_ENV_FILE` | empty | Explicit path to `.env` (the plugin passes it automatically — usually not needed) |
 
 ## Common commands
@@ -270,6 +286,8 @@ node dist/cli.js patch status                 # remote-settings patch status
 node dist/cli.js patch                        # reload the patch (re-applies + restarts dsh-web)
 node dist/cli.js serve-gateway --port 9000    # run the gateway manually on another port
 node scripts/start-http.mjs 8080              # plaintext HTTP mode (dangerous, y/N confirmation)
+curl -s https://your-host/gateway/healthz     # liveness check, 200
+curl -s https://your-host/gateway/readyz      # readiness check (includes DB), 200/503
 ```
 
 ## FAQ
@@ -320,6 +338,12 @@ The UI is bilingual (Chinese/English) and follows dsh's language setting:
 - Login / setup pages: follow dsh's language (Settings → General → Language), then the browser language; a 中文/English toggle at the top-right persists your choice.
 - Settings card: follows dsh's language setting, switches instantly.
 - CLI: follows the `LANG` / `LC_ALL` environment variables (`en` prefix = English).
+
+## Version compatibility
+
+Current release: dsh-passwords 2.6.0, targeting dsh 0.1.0-rc.8. Client slot registrations include the `options.key` values required by keyed slots and remain compatible with dsh 0.1.0-rc.6 and later; rc.8 is recommended for matching dependencies and profile layout.
+
+The npm package ships the prebuilt `dist/`, TypeScript source, install/register scripts, Docker files, `cordis.yml`, READMEs and the license. The Docker image uses the same `src/`, `dist/` and `scripts/` as npm 2.6.0.
 
 ## License
 

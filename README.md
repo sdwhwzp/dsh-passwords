@@ -174,6 +174,8 @@ docker logs -f dsh-passwords
 
 > Docker 容器只在宿主机回环地址监听 3088，别把 3088 直接暴露到公网。公网访问由 nginx 或 Caddy 终结 TLS 后转发，防火墙和安全组放行 80/443。
 
+分容器部署（dsh 和密码门各一个容器）时，dsh 默认只绑回环，网关容器访问不到 dsh web。给 dsh 容器加 `MCP_DSH_PATCH_ALLOW_BIND_ALL=1` 可让 dsh web 绑 0.0.0.0（会放宽安全面，仅分容器场景用）。
+
 宿主机安装用 `dsh-passwords --version` 看版本；Docker 用 `docker logs dsh-passwords --tail 100` 看日志。
 
 ## 密码门跟着 dsh 走
@@ -231,14 +233,25 @@ node scripts/start-http.mjs [端口]    # 默认 8080，会弹 y/N 确认
 | 功能 | 谁可用 | 说明 |
 |---|---|---|
 | 远程设置 + 重载补丁 | 所有登录用户 | 远程设置已应用（强制启用）；dsh 升级后若设置页出现异常，点"重载补丁"一键修复（自动重启网页服务并刷新页面，不用 SSH） |
+| 软件更新 | 状态所有用户可见；操作仅主用户 | 自动检查新版本、限速下载、平台空闲 1 小时后自动安装重启；也可手动「立即检查」「立即安装重启」 |
 | 修改密码 | 本人改自己；主用户可改任何人 | 改密后旧会话全部立即失效，需重新登录 |
 | 修改用户名 | 本人改自己；主用户可改任何人 | 改名后需用新用户名重新登录 |
 | 子用户管理 | 仅主用户 | 创建/删除子用户（子用户可用登录页进入，但没有管理权限） |
 | 子用户权限 | 仅主用户 | 工作区白名单、每小时 token 上限、每日时长上限、沙盒级别、上传/git 下载开关、封禁 |
 | 聊天 / 留言 | 所有登录用户 | 左下角聊天按钮，支持标签（议题/拉取请求/讨论/公告/问题） |
+| 退出登录 | 所有登录用户 | 登出当前账号，回到登录页 |
 
 - 主用户 = 首次配置时创建的那个账号；之后添加的都是子用户。
 - 密码要求与登录页一致：至少 12 位，且大写、小写、数字、符号各至少一位。
+
+## 软件更新
+
+设置页卡片里有「软件更新」区块，默认自动检查 GitHub 上的新版本：
+
+- 启动时检查一次，之后每 24 小时自动重检；发现新版本后限速下载（默认 ≤1MiB/s，可用 `MCP_DSH_UPDATE_MAX_BPS` 改），下载完做 sha512 完整性校验（对照 npm registry，不匹配就丢弃）
+- 校验通过后，等平台连续空闲满 1 小时自动安装并重启 dsh 网页服务；也可以点「立即安装重启」不等空闲窗（10 分钟冷却）
+- 自动更新默认开启，主用户可以在卡片里关掉；部署级 `MCP_DSH_AUTO_UPDATE=0` 可以强制关闭
+- Docker 和 git 源码环境不支持自动安装（容器内自更新重启即复原、源码目录不该被自动动），只显示手动命令
 
 ## 配置参考
 
@@ -262,6 +275,9 @@ node scripts/start-http.mjs [端口]    # 默认 8080，会弹 y/N 确认
 | `MCP_GATEWAY_PUBLIC_HOST` | 空 | 跳转固定用的公网 IP/域名（防 Host 伪造反射） |
 | `MCP_DSH_ROOT` | 自动探测 | dsh 安装目录（`@deepseek-ai/dsh` 所在处），探测不到时手动指定 |
 | `MCP_DSH_RESTART_SERVICE` | `dsh-web` | 重载补丁后自动重启的 dsh systemd 服务名；显式留空不自动重启 |
+| `MCP_DSH_AUTO_UPDATE` | 开 | 部署级自动更新总开关；`0/false/no` 强制关闭（设置页仍可手动检查/安装） |
+| `MCP_DSH_UPDATE_MAX_BPS` | 1MiB/s | 更新下载限速（字节/秒） |
+| `MCP_DSH_PATCH_ALLOW_BIND_ALL` | 关 | 分容器 Docker 拓扑用：`1` 允许 dsh web 绑 0.0.0.0，让另一容器的网关能访问到 dsh web |
 | `DSH_PASSWORDS_ENV_FILE` | 空 | 手动指定 .env 路径（插件自动传，一般不用填） |
 
 ## 常用命令
@@ -272,6 +288,8 @@ node dist/cli.js patch status            # 看远程设置补丁状态
 node dist/cli.js patch                   # 重载补丁（重新应用 + 重启 dsh-web）
 node dist/cli.js serve-gateway --port 9000   # 手动启动网关并换端口
 node scripts/start-http.mjs 8080         # 明文 HTTP 模式（危险，y/N 确认）
+curl -s https://你的地址/gateway/healthz   # 存活检查，200
+curl -s https://你的地址/gateway/readyz    # 就绪检查（含数据库），200/503
 ```
 
 ## 常见问题
@@ -322,6 +340,12 @@ node scripts/start-http.mjs 8080         # 明文 HTTP 模式（危险，y/N 确
 - 登录页 / 首次配置页：跟随 dsh 的语言（设置 → 通用 → 语言），其次跟随浏览器语言；页面右上角有 中文/English 切换，点一下即持久生效。
 - 设置页卡片：跟随 dsh 的语言设置，切换语言即时生效。
 - 命令行（CLI）：跟随 `LANG` / `LC_ALL` 环境变量（`en` 开头即英文）。
+
+## 版本兼容
+
+当前版本 dsh-passwords 2.6.0，目标 dsh 0.1.0-rc.8。客户端槽位注册带 keyed slot 需要的 options.key，兼容 dsh 0.1.0-rc.6 及以上，但建议用 rc.8 保持依赖和 profile 布局一致。
+
+npm 包带预构建的 dist/、TypeScript 源码、安装注册脚本、Docker 文件、cordis.yml、README 和许可证。Docker 镜像与 npm 2.6.0 用同一份 src/、dist/ 和 scripts/。
 
 ## License
 
