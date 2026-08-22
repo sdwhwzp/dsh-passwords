@@ -328,6 +328,8 @@ The UI is bilingual (Chinese/English) and follows dsh's language setting:
 
 ## License
 
-[BSD 3-Clause](./LICENSE) © 2026 slywalker2006 — free to use, modify and distribute; keep the copyright notice.
+This project is licensed under the [GNU General Public License v3.0 only](https://www.gnu.org/licenses/gpl-3.0.html). See the repository copy in [LICENSE](LICENSE).
 
-This project is an independent extension for dsh and is not affiliated with DeepSeek. dsh itself is licensed under its own terms (MIT).
+Copyright (C) 2026 slywalker2006. You may use, study, modify, commercially use, distribute, and redistribute the project under the GPLv3 terms. Modified or redistributed versions must preserve the applicable copyright and license notices and provide the corresponding source as required by GPLv3.
+
+This is an independent dsh extension and is not affiliated with DeepSeek. dsh itself is licensed separately by its own project.

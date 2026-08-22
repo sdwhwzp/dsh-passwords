@@ -328,6 +328,6 @@ node scripts/start-http.mjs 8080         # 明文 HTTP 模式（危险，y/N 确
 
 ## License
 
-[BSD 3-Clause](./LICENSE) © 2026 slywalker2006——自由使用、修改、分发，保留版权声明即可。
+本项目采用 [GNU General Public License v3.0 only](https://www.gnu.org/licenses/gpl-3.0.html)，完整文本见 [LICENSE](LICENSE)。
 
-本项目是 dsh 的独立扩展，与 DeepSeek 无隶属关系。dsh 本身按它自己的许可证（MIT）授权。
+本项目是 dsh 的独立扩展，与 DeepSeek 无隶属关系。dsh 本身按它自己的许可证授权。
