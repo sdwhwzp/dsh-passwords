@@ -31,14 +31,14 @@ Listed in the [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deep
 
 The owner can configure, per subuser, from the settings page:
 
-- Workspace allowlist: a subuser only sees and opens the folders you assign
+- Workspace allowlist: a subuser only sees and opens the folders you assign; sessions inside an allowed workspace can also be toggled individually
 - Hourly token limit and daily usage-time limit: requests are rejected once the cap is hit
 - Sandbox level: read-only / workspace-write / full access; when a subuser's AI tries to escalate beyond its level, the gateway forces the approval to "reject"
 - Upload / git-download toggles and ban subusers
 
 ### Collaboration
 
-- A chat button in the bottom-left corner: owner ↔ subuser messages with tags (issue / pull request / discussion / announcement / question)
+- A chat button in the bottom-left corner: owner ↔ subuser messages with tags (issue / pull request / discussion / announcement / question); subuser messages default to a private DM to the owner, only the owner can broadcast
 
 ## Screenshots
 
@@ -176,13 +176,6 @@ For split-container deployments (dsh and the gate in separate containers), dsh o
 
 Host installs: `dsh-passwords --version` prints the version. Docker: `docker logs dsh-passwords --tail 100` shows the logs.
 
-## The gate follows dsh
-
-The gate is part of the dsh plugin — no systemd unit, no manual gateway process, no extra flags for dsh. When dsh starts, the plugin spawns the gate; when dsh exits, the gate stops with it, so no orphan process holds the ports.
-
-- To run the gateway standalone: `node dist/cli.js serve-gateway`, or set up your own systemd unit.
-- To temporarily disable the auto-start while debugging: start dsh with `DSH_PASSWORDS_NO_AUTOSTART=1`.
-
 ## Automatic HTTPS
 
 - By default the server's public IP is detected and a 90-day Let's Encrypt certificate is issued for `<IP>.sslip.io`; it renews automatically 30 days before expiry (hot-loaded, no restart) — zero ongoing effort
@@ -286,6 +279,7 @@ node dist/cli.js patch status                 # remote-settings patch status
 node dist/cli.js patch                        # reload the patch (re-applies + restarts dsh-web)
 node dist/cli.js serve-gateway --port 9000    # run the gateway manually on another port
 node scripts/start-http.mjs 8080              # plaintext HTTP mode (dangerous, y/N confirmation)
+DSH_PASSWORDS_NO_AUTOSTART=1 dsh web         # temporarily disable gate auto-start (debugging)
 curl -s https://your-host/gateway/healthz     # liveness check, 200
 curl -s https://your-host/gateway/readyz      # readiness check (includes DB), 200/503
 ```

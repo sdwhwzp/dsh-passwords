@@ -31,14 +31,14 @@ dsh 自带的网页界面没有登录、没有权限、没有用量控制。放�
 
 主用户可以在设置页给每个子用户单独配置：
 
-- 工作区白名单：子用户只能打开你指定的文件夹，看不到别的
+- 工作区白名单：子用户只能打开你指定的文件夹，看不到别的；白名单内还可以逐个会话开关
 - 每小时 token 上限、每日使用时长上限：到量自动拒绝
 - 沙盒权限：只读 / 可写工作区 / 完全访问，三档可选；子用户的 AI 想越权提权时，网关直接把审批改成「拒绝」
 - 上传 / git 下载开关、封禁子用户
 
 ### 协作
 
-- 界面左下角的聊天按钮：主用户和子用户之间留言，可打标签（议题 / 拉取请求 / 讨论 / 公告 / 问题）
+- 界面左下角的聊天按钮：主用户和子用户之间留言，可打标签（议题 / 拉取请求 / 讨论 / 公告 / 问题）；子用户消息默认私信给主用户，只有主用户能广播
 
 ## 界面截图
 
@@ -178,13 +178,6 @@ docker logs -f dsh-passwords
 
 宿主机安装用 `dsh-passwords --version` 看版本；Docker 用 `docker logs dsh-passwords --tail 100` 看日志。
 
-## 密码门跟着 dsh 走
-
-密码门是 dsh 插件的一部分，不用 systemd、不用手动起进程、不用给 dsh 加参数。dsh 启动时插件自动把密码门拉起来，dsh 退出时密码门跟着停，不会留僵尸进程占端口。
-
-- 想单独托管网关进程：`node dist/cli.js serve-gateway`，或者自己配 systemd。
-- 调试时想临时关掉自动拉起：启动 dsh 时加 `DSH_PASSWORDS_NO_AUTOSTART=1`。
-
 ## 自动 HTTPS
 
 - 默认自动探测服务器公网 IP，用 `<IP>.sslip.io` 域名向 Let's Encrypt 签发 90 天证书；到期前 30 天自动续期（新证书热加载，无需重启），全程零操作
@@ -288,6 +281,7 @@ node dist/cli.js patch status            # 看远程设置补丁状态
 node dist/cli.js patch                   # 重载补丁（重新应用 + 重启 dsh-web）
 node dist/cli.js serve-gateway --port 9000   # 手动启动网关并换端口
 node scripts/start-http.mjs 8080         # 明文 HTTP 模式（危险，y/N 确认）
+DSH_PASSWORDS_NO_AUTOSTART=1 dsh web    # 临时禁止密码门自动拉起（调试用）
 curl -s https://你的地址/gateway/healthz   # 存活检查，200
 curl -s https://你的地址/gateway/readyz    # 就绪检查（含数据库），200/503
 ```
