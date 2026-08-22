@@ -35,6 +35,12 @@ import { RequestPrincipalService } from './principal.js';
 import type { AuthenticatedPrincipal } from './principal.js';
 import { backupSqliteBeforeMigration } from './db-backup.js';
 import { createMonthlyBudgetResolver } from './spend-budget.js';
+import {
+  dailyTimeQuotaError,
+  hourlyTokenQuotaError,
+  monthlySpendQuotaError,
+  spendCheckUnavailableError,
+} from './quota-notice.js';
 
 interface SpendAccounting {
   reconcile(): Promise<void>;
@@ -435,33 +441,34 @@ export function apply(ctx: Context): void {
       if (usage !== null) {
         if (permissions.daily_minutes_limit !== null && usage.active_seconds >= permissions.daily_minutes_limit * 60) {
           db!.audit('daily_time_exhausted', { username: user.username });
-          return { kind: 'reject' } as const;
+          throw dailyTimeQuotaError(permissions.daily_minutes_limit);
         }
         const windowStart = usage.hourly_window_start === null ? NaN : new Date(usage.hourly_window_start).getTime();
         const inCurrentWindow = Number.isFinite(windowStart) && Date.now() - windowStart < 3_600_000;
         if (permissions.hourly_token_limit !== null && inCurrentWindow && usage.hourly_tokens >= permissions.hourly_token_limit) {
           db!.audit('hourly_tokens_exhausted', { username: user.username });
-          return { kind: 'reject' } as const;
+          throw hourlyTokenQuotaError(usage.hourly_tokens, permissions.hourly_token_limit);
         }
       }
       const accounting = ctx.get('spendAccounting');
       if (accounting === undefined) {
         db!.audit('budget_check_unavailable', { username: user.username });
-        return { kind: 'reject' } as const;
+        throw spendCheckUnavailableError();
       }
+      let status: ReturnType<SpendAccounting['budgetStatus']>;
       try {
         await accounting.reconcile();
-        const status = accounting.budgetStatus(principal, permissions.monthly_budget_micros);
-        if (status.exhausted) {
-          db!.audit('monthly_budget_exhausted', {
-            username: user.username,
-            detail: JSON.stringify({ usedMicros: status.usedMicros, budgetMicros: permissions.monthly_budget_micros }),
-          });
-          return { kind: 'reject' } as const;
-        }
+        status = accounting.budgetStatus(principal, permissions.monthly_budget_micros);
       } catch {
         db!.audit('budget_check_unavailable', { username: user.username });
-        return { kind: 'reject' } as const;
+        throw spendCheckUnavailableError();
+      }
+      if (status.exhausted) {
+        db!.audit('monthly_budget_exhausted', {
+          username: user.username,
+          detail: JSON.stringify({ usedMicros: status.usedMicros, budgetMicros: permissions.monthly_budget_micros }),
+        });
+        throw monthlySpendQuotaError(status.usedMicros, permissions.monthly_budget_micros ?? 0);
       }
       return next();
     });
