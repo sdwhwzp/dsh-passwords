@@ -4,11 +4,20 @@ chcp 65001 >nul
 rem dsh-passwords 一键安装（Windows 引导壳；实际逻辑在 scripts\install.mjs）
 rem
 rem 用法（二选一）:
-rem   1) 已 clone：在项目目录里运行 install.bat
-rem   2) 单独下载 install.bat 运行：会自动装依赖、下载项目、完成安装
+rem   1) 双击本文件（推荐）：自动装依赖、下载项目、完成安装，装完停在窗口里显示 SETUP_KEY
+rem   2) 已 clone：在项目目录里双击或运行 install.bat（跳过依赖安装和下载）
 rem
-rem 做什么：检查 Node.js 22.5+ / git / dsh，缺了用 winget 自动装；
+rem 做什么：检查 Node.js 22.5+ / git / dsh，缺了用 winget / npm 自动装；
 rem 然后下载项目，交给 scripts\install.mjs 完成安装（pnpm 缺了也会自动装）。
+
+call :main
+set "EXIT_CODE=%errorlevel%"
+echo.
+echo [dsh-passwords] 按任意键退出…
+pause >nul
+exit /b %EXIT_CODE%
+
+:main
 set "SCRIPT_DIR=%~dp0"
 
 rem ── 0. 已在 clone 的项目目录里：直接执行安装 ──
@@ -47,7 +56,7 @@ goto git_check
 echo [dsh-passwords] 无法自动安装 Node.js，请手动安装 22.5+（https://nodejs.org/）后重试。
 exit /b 1
 
-git_check:
+:git_check
 rem ── 2. git（缺了用 winget 自动装） ──
 where git >nul 2>nul
 if not errorlevel 1 goto git_ok
@@ -71,7 +80,7 @@ goto dsh_check
 echo [dsh-passwords] 无法自动安装 git，请手动安装（https://git-scm.com/download/win）后重试。
 exit /b 1
 
-dsh_check:
+:dsh_check
 rem ── 3. dsh（DeepSeek Harness，缺了自动装） ──
 where dsh >nul 2>nul
 if not errorlevel 1 goto dsh_ok
@@ -95,7 +104,7 @@ echo [dsh-passwords] dsh 自动安装失败，请手动执行：npm install -g @
 echo [dsh-passwords] 然后用 DEEPSEEK_API_KEY=sk-你的key dsh web 先跑一次确认能用，再重跑本脚本。
 exit /b 1
 
-prepare_dest:
+:prepare_dest
 rem ── 4. 安装目录（DSH_PASSWORDS_DIR 可自定义） ──
 set "DEST=%USERPROFILE%\dsh-passwords"
 if defined DSH_PASSWORDS_DIR set "DEST=%DSH_PASSWORDS_DIR%"
