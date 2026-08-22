@@ -6,7 +6,8 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "dsh-passwords": "dist/cli.js"
+    "dsh-passwords": "dist/cli.js",
+    "dsh-local-workspace": "dist/local-workspace-cli.js"
   },
   "exports": {
     ".": {
@@ -41,6 +42,7 @@
   ],
   "files": [
     "dist/",
+    "release/*.exe",
     "scripts/",
     "install.sh",
     "install.bat",
@@ -52,15 +54,18 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/slywalker2006/dsh-passwords.git"
+    "url": "git+https://github.com/sdwhwzp/dsh-passwords.git"
   },
-  "homepage": "https://github.com/slywalker2006/dsh-passwords",
+  "homepage": "https://github.com/sdwhwzp/dsh-passwords",
   "bugs": {
-    "url": "https://github.com/slywalker2006/dsh-passwords/issues"
+    "url": "https://github.com/sdwhwzp/dsh-passwords/issues"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/build-client.mjs",
     "build:client": "node scripts/build-client.mjs",
+    "build:local-workspace:bundle": "node scripts/build-local-workspace.mjs",
+    "build:windows-assistant": "npm run build:local-workspace:bundle && pkg dist/local-workspace-standalone.cjs --targets node22-win-x64 --output \"release/山东梯智物联AI本机助手.exe\" --compress Brotli --no-bytecode --public-packages \"*\" --public",
+    "prepare": "npm run build",
     "start": "node dist/cli.js serve-gateway",
     "start:gateway": "node dist/cli.js serve-gateway",
     "test": "node --import tsx --test \"test/**/*.test.ts\""
@@ -69,18 +74,25 @@
     "bcryptjs": "^3.0.2",
     "dotenv": "^16.4.5",
     "express": "^4.21.0",
-    "jsonwebtoken": "^9.0.2"
+    "jsonwebtoken": "^9.0.2",
+    "ws": "^8.18.3"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-agent": "^0.1.0-rc.7",
     "@deepseek-ai/dsh-client-locale": "^0.1.0-rc.7",
     "@deepseek-ai/dsh-client-runtime": "^0.1.0-rc.7",
     "@deepseek-ai/dsh-host-webserver": "^0.1.0-rc.7",
+    "@deepseek-ai/dsh-system-prompt": "^0.1.0-rc.7",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.7",
+    "@deepseek-ai/dsh-workspace": "^0.1.0-rc.7",
     "@types/express": "^4.17.21",
     "@types/jsonwebtoken": "^9.0.7",
     "@types/node": "^22.0.0",
     "@types/react": "~18.3.1",
     "@types/react-dom": "~18.3.0",
+    "@types/ws": "^8.18.1",
+    "@yao-pkg/pkg": "^6.22.0",
     "esbuild": "^0.25.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",

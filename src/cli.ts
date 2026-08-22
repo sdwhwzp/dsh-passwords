@@ -28,6 +28,7 @@ import {
   patchStatus,
 } from './patch.js';
 import { t, resolveCliLang } from './i18n.js';
+import { backupSqliteBeforeMigration } from './db-backup.js';
 
 /** CLI 输出语言：LANG / LC_ALL / LC_MESSAGES 以 en 开头则英文，否则中文 */
 const lang = resolveCliLang();
@@ -230,9 +231,10 @@ async function boot() {
     console.error(`[dsh-passwords] ${tr('cli.patchSyncFailed')}:`, error);
   }
 
+  backupSqliteBeforeMigration(config.dbPath);
   const db = new Database(config.dbPath, createFieldCrypto(config.dbEncKey, config.setupKey));
   db.init();
-
+  // dsh 登录只依赖本插件的本地 SQLite 账号库。
   const auth = new AuthService(config, db);
 
   // ── 80 端口：301 跳转 + ACME HTTP-01 挑战应答 ──

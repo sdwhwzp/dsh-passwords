@@ -9,7 +9,7 @@
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import type { PlatformConfig } from './config.js';
-import { Database } from './db.js';
+import { Database, type UserListRow } from './db.js';
 import { t, type Lang } from './i18n.js';
 
 const BCRYPT_ROUNDS = 10;
@@ -193,12 +193,11 @@ export class AuthService {
 
     // 2) 凭据校验（统一错误信息，避免用户名枚举；时序上用户不存在也空跑 bcrypt）
     const user = await this.db.getUserByUsername(username);
-    let valid = false;
-    if (user) {
-      valid = await bcrypt.compare(password, user.password_hash);
-    } else {
-      await bcrypt.compare(password, DUMMY_HASH); // 空跑一次，抹平时序差异
-    }
+    // 所有角色都只校验本插件 SQLite 中的 bcrypt 密码；外部文件插件
+    // 的账号体系不参与 dsh 登录。
+    const valid = user
+      ? await bcrypt.compare(password, user.password_hash)
+      : await bcrypt.compare(password, DUMMY_HASH).then(() => false);
     if (!user || !valid) {
       // 0.5) 记录 IP 级失败（跨用户名累计，防密码喷洒）；达阈值 → 该 IP 全局节流
       const ipCount = this.db.recordIpFailure(ip, IP_WINDOW_MS);
@@ -351,6 +350,7 @@ export class AuthService {
     caller: AuthedUser,
     username: string,
     password: string,
+    provision: (user: UserListRow) => Promise<void>,
     meta: RequestMeta = {},
   ): Promise<void> {
     if (caller.role !== 'admin') throw new AuthError('FORBIDDEN_ADD_USER', {}, 403);
@@ -362,17 +362,35 @@ export class AuthService {
     const pw = assertPassword(password);
     const hash = await bcrypt.hash(pw, BCRYPT_ROUNDS);
     const user = await this.db.createUser(name, hash, 'user');
-    // 新子用户默认关闭全部工作区；主用户在权限面板中逐个滑动开启。
+    // 先 fail-closed；宿主机专属工作区创建并注册成功后，provision 再原子地
+    // 替换成该目录与 workspace-write。失败时删除刚创建的账号，允许管理员重试。
     this.db.setPermissions(user.id, {
       allowedFolders: ['__deny__'],
       hourlyTokenLimit: null,
       dailyMinutesLimit: null,
+      monthlyBudgetMicros: 0,
       allowUpload: true,
       allowGitDownload: false,
       banned: false,
       sandboxMode: null,
       disabledSessions: [],
     });
+    try {
+      await provision({
+        id: user.id,
+        username: user.username,
+        role: user.role,
+        created_at: user.created_at,
+        last_login_at: user.last_login_at,
+      });
+    } catch (error) {
+      try {
+        this.db.deleteUser(user.id);
+      } catch (rollbackError) {
+        throw new AggregateError([error, rollbackError], '子用户工作区创建失败，且账号回滚失败');
+      }
+      throw error;
+    }
     await this.db.audit('subuser_created', {
       username: name,
       ip: meta.ip,

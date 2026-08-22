@@ -62,6 +62,7 @@ import {
 } from './permissions.js';
 import { findDshRoot, applyRemotePatch, restartDshWeb } from './patch.js';
 import { t, resolveGatewayLang, type Lang } from './i18n.js';
+import { signedPrincipalHeaders } from './principal.js';
 
 /** 网关内部扩展请求：权限执行时把用户/权限附在 req 上，供后续中间件与代理读取 */
 type Req = Request & {
@@ -722,6 +723,21 @@ export function createGatewayServer(
   // 供受限子用户的会话作用域 RPC（history/prompt 等）做 cwd 白名单校验——
   // 权限撤销后仍能按 sessionId 直读旧目录会话必须封堵
   const sessionCwdById = new Map<string, string>();
+  let activeWorkspaceSessionIds = new Set<string>();
+  let workspaceSnapshotRefresh: Promise<void> | null = null;
+
+  /** Replace all workspace-derived authorization state with one current registry snapshot. */
+  function replaceWorkspaceAccessSnapshot(value: unknown): void {
+    const nextWorkspacePaths = collectIdPathPairs(value);
+    const nextSessionCwds = collectSessionCwdFromWorkspaces(value);
+    workspacePathById.clear();
+    for (const [id, workspacePath] of nextWorkspacePaths) workspacePathById.set(id, workspacePath);
+    activeWorkspaceSessionIds = new Set(nextSessionCwds.keys());
+    for (const id of sessionCwdById.keys()) {
+      if (!activeWorkspaceSessionIds.has(id)) sessionCwdById.delete(id);
+    }
+    for (const [id, cwd] of nextSessionCwds) sessionCwdById.set(id, cwd);
+  }
 
   /**
    * 从 Cookie 校验会话；返回用户或 null（用户已不存在时旧 token 立即失效）。
@@ -797,6 +813,7 @@ export function createGatewayServer(
         allowed_folders: ['__deny__'],
         hourly_token_limit: null,
         daily_minutes_limit: null,
+        monthly_budget_micros: 0,
         allow_upload: true,
         // F-12 残余：新子用户默认禁 git 下载（含 dsh-uploads/download 等外带通道），
         // 主用户需要时按需开启；已有权限行的子用户不受影响
@@ -807,6 +824,16 @@ export function createGatewayServer(
         updated_at: '',
       }
     );
+  }
+
+  /** 文件夹白名单与两类用户专属工作区所有权的统一判定。 */
+  function pathAllowedFor(userId: number, candidate: string, allowedFolders: string[]): boolean {
+    const localWorkspaceOwner = db.localWorkspaceOwnerForPath(candidate);
+    if (localWorkspaceOwner !== null) return localWorkspaceOwner === userId;
+    const managedWorkspaceOwner = db.managedWorkspaceOwnerForPath(candidate);
+    return managedWorkspaceOwner === null
+      ? folderAllowed(candidate, allowedFolders)
+      : managedWorkspaceOwner === userId;
   }
 
   /** 从会话 cookie 解析完整用户（含角色）；无会话/失效返回 null */
@@ -1163,6 +1190,7 @@ export function createGatewayServer(
           allowedFolders: perms.allowed_folders,
           hourlyTokenLimit: perms.hourly_token_limit,
           dailyMinutesLimit: perms.daily_minutes_limit,
+          monthlyBudgetMicros: perms.monthly_budget_micros,
           allowUpload: perms.allow_upload,
           allowGitDownload: perms.allow_git_download,
           banned: perms.banned,
@@ -1215,7 +1243,7 @@ export function createGatewayServer(
 
     // 3) 目录白名单（子用户受限时）
     const perms = effectivePermissions(me.userId);
-    if (!folderAllowed(real, perms.allowed_folders)) {
+    if (!pathAllowedFor(me.userId, real, perms.allowed_folders)) {
       res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '目录越权' });
       return;
     }
@@ -1304,10 +1332,13 @@ export function createGatewayServer(
       res.status(400).json({ ok: false, code: 'FORBIDDEN', error: '不能修改主用户权限' });
       return;
     }
-    const allowedFolders = stringArray(body.allowedFolders);
+    const requestedFolders = stringArray(body.allowedFolders);
     // 空字符串、当前目录和根目录会被 folderAllowed 归一为“全盘允许”，与 UI 的
     // “允许的工作区”语义相反；显式拒绝，管理员应使用空数组表示不限制。
-    if (allowedFolders.some((folder) => {
+    // UI 用精确的单元素 __deny__ 列表表示关闭全部工作区；它是权限模型已经支持
+    // 的 fail-closed 值。与其他条目混用仍按非法输入拒绝，避免歧义。
+    const deniesAllWorkspaces = requestedFolders.length === 1 && requestedFolders[0] === '__deny__';
+    if (!deniesAllWorkspaces && requestedFolders.some((folder) => {
       const trimmed = folder.trim().replace(/\\/g, '/');
       return (
         trimmed === '' ||
@@ -1323,11 +1354,42 @@ export function createGatewayServer(
       res.status(400).json({ ok: false, code: 'INVALID', error: '允许的工作区不能包含空路径、当前目录或根目录' });
       return;
     }
+    if (!deniesAllWorkspaces && requestedFolders.some((folder) => {
+      const owner = db.managedWorkspaceOwnerForPath(folder);
+      return owner !== null && owner !== userId;
+    })) {
+      res.status(400).json({ ok: false, code: 'FORBIDDEN', error: '不能把其他子用户的专属工作区分配给该用户' });
+      return;
+    }
+    // 专属工作区属于账号基础能力，权限页不能将它关闭。空数组仍保留旧版“不限制
+    // 普通宿主目录”的语义；跨用户专属目录由 pathAllowedFor 的所有权检查另行拒绝。
+    const managedWorkspace = db.getManagedWorkspace(userId);
+    const allowedFolders = managedWorkspace === null || requestedFolders.length === 0
+      ? requestedFolders
+      : requestedFolders.some((folder) => normalizePath(folder) === normalizePath(managedWorkspace.path))
+        ? requestedFolders
+        : deniesAllWorkspaces
+          ? [managedWorkspace.path]
+          : [...requestedFolders, managedWorkspace.path];
     // 0 归一为 null（=不限）：避免"每日 0 分钟"被误当作"首次使用即封禁"
     const rawToken = nullableInt(body.hourlyTokenLimit);
     const rawMinutes = nullableInt(body.dailyMinutesLimit);
     const hourlyTokenLimit = rawToken === 0 ? null : rawToken;
     const dailyMinutesLimit = rawMinutes === 0 ? null : rawMinutes;
+    const existingMonthlyBudgetMicros = db.getPermissions(userId)?.monthly_budget_micros ?? 0;
+    const rawMonthlyBudget = typeof body.monthlyBudgetYuan === 'number'
+      ? String(body.monthlyBudgetYuan)
+      : typeof body.monthlyBudgetYuan === 'string' ? body.monthlyBudgetYuan.trim() : '';
+    if (rawMonthlyBudget !== '' && !/^(?:0|[1-9][0-9]{0,8})(?:\.[0-9]{1,2})?$/.test(rawMonthlyBudget)) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: '月额度必须是非负人民币金额，最多两位小数' });
+      return;
+    }
+    const monthlyBudgetMicros = rawMonthlyBudget === ''
+      ? existingMonthlyBudgetMicros
+      : (() => {
+          const [whole, fraction = ''] = rawMonthlyBudget.split('.');
+          return Number(whole) * 1_000_000 + Number(fraction.padEnd(2, '0')) * 10_000;
+        })();
     const allowUpload = body.allowUpload !== false;
     const allowGitDownload = body.allowGitDownload !== false;
     const banned = body.banned === true;
@@ -1348,6 +1410,7 @@ export function createGatewayServer(
       allowedFolders,
       hourlyTokenLimit,
       dailyMinutesLimit,
+      monthlyBudgetMicros,
       allowUpload,
       allowGitDownload,
       banned,
@@ -1366,6 +1429,7 @@ export function createGatewayServer(
         allowedFolders,
         hourlyTokenLimit,
         dailyMinutesLimit,
+        monthlyBudgetMicros,
         allowUpload,
         allowGitDownload,
         banned,
@@ -1657,6 +1721,18 @@ export function createGatewayServer(
         res.status(404).json({ ok: false, error: 'not found' });
         return;
       }
+      // 远程网关是多用户入口，任何浏览器（包括 Cookie 已过期的旧缓存页面）
+      // 都不能通过第三方 desktop-launcher 关闭全体用户共用的 dsh 进程。
+      // 必须在认证重定向之前拒绝，否则 fetch 跟随 302 得到登录页 200 后会误判
+      // 关机成功，并继续执行第三方的空白页跳转。
+      if (req.method === 'POST' && gatePath === '/api/dsh-desktop-launcher/shutdown') {
+        res.status(403).json({
+          ok: false,
+          code: 'REMOTE_SHUTDOWN_DISABLED',
+          error: 'Remote shutdown is disabled; use account logout instead.',
+        });
+        return;
+      }
       const user = sessionOf(req);
       if (!user) {
         // 重定向兼容层：记录原始 URL，登录后跳回
@@ -1728,13 +1804,12 @@ export function createGatewayServer(
         // ⚠ 只对 aionui-panel 路径做此检查——aionuiRootFrom 对非 aionui-panel 路径返回 null，
         //  若用 null 判 fail-closed 会把普通 GET/HEAD（state/messages/页面资源等）全部 403
         if (
-          isWorkspaceRestricted(perms.allowed_folders) &&
           (req.method === 'GET' || req.method === 'HEAD') &&
           isAionuiPanel(requestPath)
         ) {
           const aionuiRoot = aionuiRootFrom(req.method, requestPath, parsed.searchParams, null);
           // 提取不到 root 时也 fail-closed（之前直接放行→白名单外的目录可被下载）
-          if (aionuiRoot === null || !folderAllowed(aionuiRoot, perms.allowed_folders)) {
+          if (aionuiRoot === null || !pathAllowedFor(user.userId, aionuiRoot, perms.allowed_folders)) {
             res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
             return;
           }
@@ -1886,6 +1961,72 @@ export function createGatewayServer(
     upstreamRes.on('error', onError);
   }
 
+  /** Refresh active workspace/session membership directly from the trusted upstream registry. */
+  function refreshWorkspaceAccessSnapshot(): Promise<void> {
+    if (workspaceSnapshotRefresh !== null) return workspaceSnapshotRefresh;
+    const payload = Buffer.from(JSON.stringify({
+      type: 'client-request',
+      rpcId: `dshpw-workspaces-${randomBytes(12).toString('hex')}`,
+      method: 'workspace.list',
+      payload: {},
+    }), 'utf8');
+    const pending = new Promise<void>((resolve, reject) => {
+      const request = http.request(
+        {
+          hostname: upstreamHost,
+          port: upstreamPort,
+          path: '/api/workspace.list',
+          method: 'POST',
+          agent: upstreamAgent,
+          headers: {
+            accept: 'application/json',
+            'accept-encoding': 'identity',
+            'content-type': 'application/json',
+            'content-length': String(payload.length),
+          },
+          timeout: 5000,
+        },
+        (response) => {
+          if ((response.statusCode ?? 500) < 200 || (response.statusCode ?? 500) >= 300) {
+            response.resume();
+            reject(new Error(`workspace.list upstream status ${String(response.statusCode ?? 0)}`));
+            return;
+          }
+          const chunks: Buffer[] = [];
+          let size = 0;
+          response.on('data', (chunk: Buffer) => {
+            size += chunk.length;
+            if (size > MAX_BUFFER_BYTES) {
+              response.destroy(new OversizeResponseError());
+              return;
+            }
+            chunks.push(chunk);
+          });
+          response.on('end', () => {
+            try {
+              const raw = Buffer.concat(chunks);
+              const decoded = String(response.headers['content-encoding'] ?? '').includes('gzip')
+                ? gunzipBounded(raw)
+                : raw;
+              replaceWorkspaceAccessSnapshot(JSON.parse(decoded.toString('utf8')));
+              resolve();
+            } catch (error) {
+              reject(error);
+            }
+          });
+          response.on('error', reject);
+        },
+      );
+      request.on('timeout', () => request.destroy(new Error('workspace.list upstream timeout')));
+      request.on('error', reject);
+      request.end(payload);
+    }).finally(() => {
+      if (workspaceSnapshotRefresh === pending) workspaceSnapshotRefresh = null;
+    });
+    workspaceSnapshotRefresh = pending;
+    return pending;
+  }
+
   /**
    * F-26：向 dsh 注入会话沙盒（loopback + 内部密钥，fire-and-forget）。
    * 受限子用户（sandbox_mode 非空）建会话后，dsh 默认给 workspace-write 沙盒——
@@ -1939,6 +2080,21 @@ export function createGatewayServer(
     // 缓冲/改写路径用 end(body) 重写 content-length，chunked 的 transfer-encoding
     // 若保留会造成 Node 的 ERR_HTTP_CONTENT_LENGTH_MISMATCH
     delete headers['transfer-encoding'];
+    // Only this trusted gateway may assert identity to the Host. Strip every
+    // browser-supplied value before adding a fresh, 30-second HMAC assertion.
+    delete headers['x-dsh-principal'];
+    delete headers['x-dsh-principal-signature'];
+    const principalUserId = (req as Req).dshpwUser;
+    if (principalUserId !== undefined) {
+      const principalUser = db.getUserById(principalUserId);
+      if (principalUser !== null) {
+        Object.assign(headers, signedPrincipalHeaders({
+          userId: principalUser.id,
+          username: principalUser.username,
+          role: principalUser.role,
+        }, config.internalSecret));
+      }
+    }
     // F-15：剥离网关会话 Cookie（dsh_gateway_token JWT）——上游 dsh 是无认证
     // 应用，本不需要令牌；不剥离则上游或其第三方插件被入侵/投毒时可收割全部
     // 活动会话 JWT 并回放。白盒确认 dsh-host-webserver / dsh-anonymous-user-id
@@ -2050,14 +2206,16 @@ export function createGatewayServer(
               const enc = String(upstreamRes.headers['content-encoding'] ?? '');
               if (enc.includes('gzip')) body = gunzipBounded(body);
               const parsed = JSON.parse(body.toString('utf8'));
-              // 先缓存全量 id→path（供 session.create 用 workspaceId 时解析路径）
-              collectIdPathPairs(parsed, workspacePathById);
-              // 缓存会话 cwd：工作区 path → 其 sessionIds（供会话作用域 RPC 的 cwd 校验）
-              collectSessionCwdFromWorkspaces(parsed, sessionCwdById);
-              const restricted =
-                reqAs.dshpwPerms !== undefined && isWorkspaceRestricted(reqAs.dshpwPerms.allowed_folders);
-              const outBody = restricted
-                ? filterByPathField(parsed, reqAs.dshpwPerms!.allowed_folders, 'path')
+              // 原子替换当前工作区与活动会话快照；已删除工作区/会话不得残留在授权缓存。
+              replaceWorkspaceAccessSnapshot(parsed);
+              const outBody = reqAs.dshpwPerms !== undefined
+                ? filterByPathField(
+                    parsed,
+                    reqAs.dshpwPerms.allowed_folders,
+                    'path',
+                    0,
+                    (candidate) => pathAllowedFor(reqAs.dshpwUser!, candidate, reqAs.dshpwPerms!.allowed_folders),
+                  )
                 : parsed;
               // F-25：子用户（含 allowedFolders=[] 全部允许）只能看到被授权的会话——
               // 清空 archivedSessionIds 枚举源，并把活动 sessionIds 按逐会话禁用过滤
@@ -2107,6 +2265,7 @@ export function createGatewayServer(
                   ? reqCwd
                   : collectSessionCwd(parsed).get(sessionId);
                 if (cwd) sessionCwdById.set(sessionId, cwd);
+                activeWorkspaceSessionIds.add(sessionId);
                 if (reqAs.dshpwPerms !== undefined && reqAs.dshpwPerms.sandbox_mode !== null) {
                   applySandboxToSession(sessionId, reqAs.dshpwPerms.sandbox_mode);
                 }
@@ -2138,41 +2297,45 @@ export function createGatewayServer(
           /^\/api\/session[.\/]list$/.test(proxyPath)
         ) {
           bufferUpstream(upstreamRes, res, (raw) => {
-            try {
-              let body = raw;
-              const enc = String(upstreamRes.headers['content-encoding'] ?? '');
-              if (enc.includes('gzip')) body = gunzipBounded(body);
-              const parsed = JSON.parse(body.toString('utf8'));
-              // 先收集 sessionId→cwd 缓存（过滤前的原始响应，含受限前创建的旧目录会话），
-              // 供会话作用域 RPC（history/prompt 等）做 cwd 白名单校验
-              collectSessionCwd(parsed, sessionCwdById);
+            void refreshWorkspaceAccessSnapshot().then(() => {
+              try {
+                let body = raw;
+                const enc = String(upstreamRes.headers['content-encoding'] ?? '');
+                if (enc.includes('gzip')) body = gunzipBounded(body);
+                const parsed = JSON.parse(body.toString('utf8'));
+                const listedSessionCwds = collectSessionCwd(parsed);
+                for (const id of activeWorkspaceSessionIds) {
+                  const cwd = listedSessionCwds.get(id);
+                  if (cwd !== undefined) sessionCwdById.set(id, cwd);
+                }
 
-              // 子用户按工作区开关过滤：关闭工作区后，其会话一并从侧栏消失，
-              // 不产生「未分组」孤儿项。
-              const perms = reqAs.dshpwPerms!;
-              const cwdAllowed = isWorkspaceRestricted(perms.allowed_folders)
-                ? (cwd: string) => folderAllowed(cwd, perms.allowed_folders)
-                : null;
-              const disabled = new Set(perms.disabled_sessions);
-              const archived = collectArchivedSessionIds(parsed);
-              const filtered = filterSessionItems(parsed, (id) => !disabled.has(id) && !archived.has(id), cwdAllowed);
-              const out = Buffer.from(JSON.stringify(filtered), 'utf8');
-              const respHeaders = headersForRewrittenBody(upstreamRes.headers);
-              respHeaders['content-length'] = String(out.length);
-              if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
-              if (!res.writableEnded) res.end(out);
-            } catch (error) {
-              // 该分支仅处理子用户列表：任何解析/过滤异常都 fail-closed 502，
-              // 绝不把未过滤的全量列表回放给子用户（fail-open 泄露面）
-              if (!res.headersSent) {
-                const msg =
-                  error instanceof OversizeResponseError
+                // 子用户只看到当前活动工作区明确持有的会话。仅 cwd 相同但已从
+                // workspace.sessionIds 删除的会话不得以“未分组”形式重新出现。
+                const perms = reqAs.dshpwPerms!;
+                const cwdAllowed = (cwd: string) => pathAllowedFor(reqAs.dshpwUser!, cwd, perms.allowed_folders);
+                const disabled = new Set(perms.disabled_sessions);
+                const archived = collectArchivedSessionIds(parsed);
+                const filtered = filterSessionItems(
+                  parsed,
+                  (id) => activeWorkspaceSessionIds.has(id) && !disabled.has(id) && !archived.has(id),
+                  cwdAllowed,
+                );
+                const out = Buffer.from(JSON.stringify(filtered), 'utf8');
+                const respHeaders = headersForRewrittenBody(upstreamRes.headers);
+                respHeaders['content-length'] = String(out.length);
+                if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+                if (!res.writableEnded) res.end(out);
+              } catch (error) {
+                if (!res.headersSent) {
+                  const msg = error instanceof OversizeResponseError
                     ? '502 Upstream response too large'
                     : '502 Upstream response unprocessable';
-                res.status(502).type('text/plain').send(msg);
+                  res.status(502).type('text/plain').send(msg);
+                }
               }
-              return;
-            }
+            }).catch(() => {
+              if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response unprocessable');
+            });
           });
           return;
         }
@@ -2268,7 +2431,6 @@ export function createGatewayServer(
     //   2) 沙盒权限：settings.mutate 试图把 defaultPreset 切到高于授权级别 → 403
     const needsFolderCheck =
       reqAs.dshpwPerms !== undefined &&
-      isWorkspaceRestricted(reqAs.dshpwPerms.allowed_folders) &&
       (req.method === 'POST' || req.method === 'PUT' || (req.method === 'DELETE' && isAionuiPanel(proxyPath))) &&
       (WORKSPACE_ENDPOINT_RE.test(proxyPath) || isAionuiPanel(proxyPath));
     const needsSandboxCheck =
@@ -2409,7 +2571,10 @@ export function createGatewayServer(
               }
             }
           }
-          if (targetPath !== null && !folderAllowed(targetPath, reqAs.dshpwPerms!.allowed_folders)) {
+          if (
+            targetPath !== null &&
+            !pathAllowedFor(reqAs.dshpwUser!, targetPath, reqAs.dshpwPerms!.allowed_folders)
+          ) {
             upstreamReq.destroy();
             res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
             return;
@@ -2455,14 +2620,22 @@ export function createGatewayServer(
 
         // 会话访问校验：逐会话关闭优先；其余必须仍位于已开启工作区。
         if (needsOwnershipCheck && bodyObj !== null) {
+          try {
+            await refreshWorkspaceAccessSnapshot();
+          } catch {
+            upstreamReq.destroy();
+            res.status(502).type('text/plain').send('502 Upstream response unprocessable');
+            return;
+          }
           const sessionId = extractSessionId(bodyObj) ?? parsedUrl.searchParams.get('sessionId');
           const perms = reqAs.dshpwPerms!;
           const cwd = sessionId === null ? undefined : sessionCwdById.get(sessionId);
           if (
             sessionId === null ||
+            !activeWorkspaceSessionIds.has(sessionId) ||
             perms.disabled_sessions.includes(sessionId) ||
             cwd === undefined ||
-            !folderAllowed(cwd, perms.allowed_folders)
+            !pathAllowedFor(reqAs.dshpwUser!, cwd, perms.allowed_folders)
           ) {
             upstreamReq.destroy();
             res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));

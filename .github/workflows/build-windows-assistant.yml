@@ -1,0 +1,32 @@
+name: Build Windows Local Workspace Assistant
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [dev]
+    paths:
+      - 'src/local-workspace-*.ts'
+      - 'scripts/build-local-workspace.mjs'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/build-windows-assistant.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.21.1
+          cache: npm
+      - run: npm ci
+      - run: npm run build:windows-assistant
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 山东梯智物联AI本机助手-windows-x64
+          path: release/山东梯智物联AI本机助手.exe
+          if-no-files-found: error

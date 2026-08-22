@@ -3,7 +3,26 @@
 // 遗漏同段 198.19.0.0/16，会把它误判为公网并触发 ACME 签发（现已修复）。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isPublicIp } from '../src/config.js';
+import path from 'node:path';
+import { isPublicIp, resolveEnvRelativePath } from '../src/config.js';
+
+test('MCP_DB_PATH 相对 .env 解析，不受进程工作目录影响', () => {
+  const envFile = path.join(path.parse(process.cwd()).root, 'srv', 'dsh-passwords', '.env');
+  assert.equal(
+    resolveEnvRelativePath('./data/platform.db', envFile, '/unused/default.db'),
+    path.join(path.parse(process.cwd()).root, 'srv', 'dsh-passwords', 'data', 'platform.db'),
+  );
+});
+
+test('MCP_DB_PATH 保留绝对路径，空值采用绝对化默认路径', () => {
+  const root = path.parse(process.cwd()).root;
+  const absolute = path.join(root, 'var', 'lib', 'dsh-passwords', 'platform.db');
+  assert.equal(resolveEnvRelativePath(absolute, '/srv/dsh-passwords/.env', '/unused/default.db'), absolute);
+  assert.equal(
+    resolveEnvRelativePath('', '/srv/dsh-passwords/.env', './data/default.db'),
+    path.resolve('./data/default.db'),
+  );
+});
 
 test('isPublicIp：公网地址返回 true', () => {
   for (const ip of ['8.8.8.8', '1.1.1.1', '93.184.216.34', '104.16.132.229']) {

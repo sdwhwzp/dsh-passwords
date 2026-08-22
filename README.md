@@ -24,6 +24,8 @@ dsh 的网页界面默认面向本机使用。服务器地址一旦暴露，拿�
 
 - 一个**主用户**（首次配置创建）+ 任意多个**子用户**，各自独立账号密码登录
 - 所有账号管理都在 dsh 设置页的卡片里完成，不用 SSH：改密码、改用户名、创建/删除子用户
+- 新增子用户时自动在宿主机创建并注册一个专属工作区（默认 `~/dsh-user-workspaces/u<用户ID>`），初始沙盒为“可写工作区”；旧子用户会在升级后首次启动时自动补建
+- 当前身份旁提供“退出登录”按钮；确认后服务端立即吊销会话并清除 Cookie
 - 主用户可管理所有子用户；子用户只能改自己
 - 改密后旧会话全部立即失效；每次登录/失败都有记录，一条命令就能查谁在什么时候登录过
 
@@ -35,12 +37,27 @@ dsh 的网页界面默认面向本机使用。服务器地址一旦暴露，拿�
 - **会话与消息隔离**：子用户只能看到已授权工作区和启用会话；留言只显示广播、发给自己或自己发出的内容
 - **消息默认私信**：子用户留言默认只发给主用户；广播仅主用户可发且需显式勾选
 - **每小时 token 上限**、**每日使用时长上限**：到量自动拒绝
+- **每月模型金额额度**：以人民币微元整数保存，精确到 ¥0.01；显示本月已用、剩余和 80% 预警，达到 100% 后拒绝下一模型步骤
 - **沙盒权限**：只读 / 可写工作区 / 完全访问，三档可选；子用户的 AI 想越权提权时，网关直接把审批改成「拒绝」
 - **上传 / git 下载开关**、**封禁子用户**
 
 ### 4️⃣ 协作
 
 - 界面左下角的聊天按钮：主用户和子用户之间留言，可打标签（议题 / 拉取请求 / 讨论 / 公告 / 问题）；每个账号都可在设置中单独隐藏聊天入口
+
+### 5️⃣ 本机工作区
+
+- 每个登录用户可把自己电脑上的一个或多个目录配对为独立工作区，无需把文件上传到 dsh 服务器
+- dsh 的 `read`、`write`、`edit`、`glob`、`grep` 会通过本机助手直接操作授权目录中的原文件
+- Shell 默认关闭；用户明确添加 `--allow-shell` 后，`bash` 才会在该用户电脑上执行
+
+## 身份与消费额度同步
+
+所有主用户和子用户都只使用本项目 SQLite 中的本地账号与 bcrypt 密码登录。网关会删除浏览器自行提交的身份头，再为上游请求生成 30 秒有效的 HMAC 身份断言；Harness 验证后把 principal 固化到每条消息、模型步骤和工具执行。
+
+每个模型步骤开始前同时检查封禁、小时 token、每日时长和个人月额度，任一失败即拒绝。已开始的模型调用允许完成，因此最终金额可能小幅超过额度。金额由 `dsh-spend` 按 `(sessionId, turn, step)` 幂等归集；自然月固定使用 `Asia/Shanghai`，修改额度不会删除或清零历史账，管理员默认不限金额。插件会把当前账号的额度解析器注册给 `dsh-spend`，子账号可在 Spend 悬浮预览和总览中直接看到自己的人民币剩余额度。
+
+外部文件服务及其账号、密码和数据库由对应的独立插件管理，不属于 dsh-passwords 的登录或配置范围。
 
 ## 界面截图
 
@@ -67,10 +84,10 @@ dsh 的网页界面默认面向本机使用。服务器地址一旦暴露，拿�
 
 ```bash
 # Linux / macOS —— 方式 A：直接下载安装
-curl -fsSL https://raw.githubusercontent.com/slywalker2006/dsh-passwords/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/sdwhwzp/dsh-passwords/main/install.sh | bash
 
 # Linux / macOS —— 方式 B：先 clone 再装
-git clone https://github.com/slywalker2006/dsh-passwords
+git clone https://github.com/sdwhwzp/dsh-passwords
 cd dsh-passwords
 bash install.sh
 ```
@@ -97,6 +114,37 @@ dsh-passwords install     # 生成随机 SETUP_KEY + 注册插件 + 应用补丁
 3. 之后所有人访问 `https://<服务器IP>.sslip.io` 都会先过登录页
 
 别忘了在防火墙**和云服务商安全组**里放行 **80 和 443** 端口（开不了 80 的机器见下面的「部署场景矩阵」）。
+
+## 本机工作区助手
+
+本机助手适合“dsh 在服务器、文件在每个使用者电脑”的场景。助手由用户电脑主动连接服务器，不要求用户电脑开放入站端口；配对后，该目录会作为工作区出现在 dsh 侧栏中。
+
+Windows 使用者不需要安装 Node.js：
+
+1. 登录 dsh，在页面左下角展开“一键选择本机文件夹”，下载 `山东梯智物联AI本机助手.exe`（设置页的“本机工作区”里也可下载）
+2. 把 EXE 放在一个不会移动的位置并双击一次；它会在当前 Windows 用户下注册网页唤起协议，不需要管理员权限，也不会再要求填写服务器地址或目录
+3. 返回 dsh，点击页面左下角的 **一键选择本机文件夹**，直接在 Windows 系统文件夹选择框里选目录；服务器地址和一次性启动票据会在后台自动处理
+4. 保持助手窗口运行。连接成功后，页面左下角会列出该目录；点击 **打开对话** 会创建或复用这个工作区的空会话并显示输入框。设备令牌按目录保存，以后双击同一个 EXE 会自动重连所有已授权目录
+
+当前 EXE 未使用代码签名证书，Windows 可能显示 SmartScreen 提示。正式分发前应使用有效的公司代码签名证书签名，并同时发布 SHA-256 校验值。
+
+一键选择默认关闭 Shell，只开放受目录边界保护的文件操作。需要 PowerShell 的高级用户可运行 `山东梯智物联AI本机助手.exe --setup`，按旧的 6 位确认流程显式启用；网页设置页也保留了服务器地址、6 位确认码和旧版长配对码作为兼容入口。
+
+macOS / Linux 使用者先安装 Node.js 22.5+，再运行 `npm install -g github:sdwhwzp/dsh-passwords#dev` 安装命令行助手。首次运行只需提供页面显示的服务器地址和真实目录，例如：
+
+```bash
+dsh-local-workspace --server ws://192.168.1.10:3082 --folder "/home/user/projects/demo"
+```
+
+命令行同样会显示 6 位确认码，登录网页批准后即可完成配对。旧版助手仍可从网页折叠的“旧版命令行助手”入口生成长 `--pair` 命令，但新设备不再需要手工处理长配对令牌。
+
+默认配置文件是 `~/.dsh-local-workspace/config.json`；Windows 网页一键选择的每个目录会另存为 `~/.dsh-local-workspace/profiles/<工作区ID>.json`，双击助手时会一起恢复。命令行要授权多个目录时，请为每个目录使用不同配置文件，例如 `--config ~/.dsh-local-workspace/project-b.json`。
+
+本机助手端口默认是网关端口加一。例如 dsh 网页网关是 `3081`，助手端口就是 `3082`。服务器防火墙需放行该端口；经过 NAT、反向代理或网页推导地址不正确时，设置 `MCP_LOCAL_WORKSPACE_PUBLIC_URL=wss://你的域名:端口`。
+
+网页一键入口签发 256 位随机启动票据：绑定当前登录用户、两分钟失效、只能消费一次，且不会写入助手配置或日志。备用的 6 位确认码也不是设备凭据：它由助手先发起、十分钟失效、只能由已登录用户确认一次，并受错误尝试与待连接数量限制。真正的高强度设备令牌通过原 WebSocket 自动下发，只保存在用户电脑，服务器仅保存不可逆散列。文件操作只接受授权目录内的路径，并会解析符号链接后再次检查。`--allow-shell` 是显式高权限开关：Shell 以当前系统用户身份运行，可能访问授权目录之外的文件。明文 `ws://` 仅限可信局域网；跨不可信网络必须使用 HTTPS/WSS。
+
+维护者可运行 `npm run build:windows-assistant` 生成 `release/山东梯智物联AI本机助手.exe`。仓库中的 `Build Windows Local Workspace Assistant` 工作流也会在 Windows runner 上构建并上传同名 artifact。
 
 ## 密码门跟着 dsh 走
 
@@ -162,6 +210,7 @@ node scripts/start-http.mjs [端口]    # 默认 8080，会弹 y/N 确认
 | **修改用户名** | 本人改自己；主用户可改任何人 | 改名后需用新用户名重新登录 |
 | **子用户管理** | 仅主用户 | 创建/删除子用户（子用户可用登录页进入，但没有管理权限） |
 | **子用户权限** | 仅主用户 | 工作区滑动开关、逐会话勾选、每小时 token 上限、每日时长上限、沙盒级别、上传/git 下载开关、封禁 |
+| **本机工作区** | 所有登录用户 | 下载 Windows 助手、生成一次性配对命令、查看在线状态和撤销自己配对的设备 |
 | **聊天 / 留言** | 所有登录用户 | 左下角聊天按钮，支持标签（议题/拉取请求/讨论/公告/问题）；子用户默认私信主用户，广播仅主用户可发；每个账号均可在设置中隐藏自己的聊天入口 |
 
 - **主用户** = 首次配置时创建的那个账号；之后添加的都是**子用户**。
@@ -173,8 +222,9 @@ node scripts/start-http.mjs [端口]    # 默认 8080，会弹 y/N 确认
 |---|---|---|
 | `SETUP_KEY` | 安装脚本自动生成 | 首次配置密钥；首次配置成功后系统会轮换它，并自动固化 JWT/内部/数据库密钥。保留 `.env`，`setup-key.txt` 会自动删除 |
 | `MCP_JWT_SECRET` | 首次配置前从 SETUP_KEY 派生 | 会话签名密钥；首次配置后自动固化为独立值。手动更换会让现有登录会话失效 |
-| `MCP_DB_PATH` | `./data/platform.db` | 数据库文件（SQLite 自动建库，不需要 MySQL） |
+| `MCP_DB_PATH` | `./data/platform.db` | 账户/权限 SQLite 文件；相对路径以 `.env` 所在目录为基准 |
 | `MCP_DB_ENC_KEY` | 安装脚本自动生成 | 数据加密密钥；首次配置后自动固化。**已使用的数据库绝不能换此值**，备份数据库必须同时备份 `.env` |
+| `MCP_MANAGED_WORKSPACE_ROOT` | `~/dsh-user-workspaces` | 子用户宿主机专属工作区根目录；新增/补建账号使用稳定的 `u<用户ID>` 子目录。不能放在数据库 data 目录内；相对路径按 `.env` 解析 |
 | `MCP_GATEWAY_HOST` | `0.0.0.0` | 网关监听地址 |
 | `MCP_GATEWAY_PORT` | 安装器首次安装为 `443`；未设置时为 `8080` | 网关端口 |
 | `MCP_GATEWAY_UPSTREAM` | `http://127.0.0.1:3080` | dsh 网页地址（插件自动指向 dsh 实际端口，一般不用改） |
@@ -185,6 +235,9 @@ node scripts/start-http.mjs [端口]    # 默认 8080，会弹 y/N 确认
 | `MCP_GATEWAY_ACME_STAGING` | 关 | `1`=用 LE 测试环境签发（调试用，浏览器不信任） |
 | `MCP_GATEWAY_TLS_CERT` / `MCP_GATEWAY_TLS_KEY` | 空 | 两个都填 = 用你自己的证书（优先于自动 HTTPS） |
 | `MCP_GATEWAY_PUBLIC_HOST` | 空 | 跳转固定用的公网 IP/域名（防 Host 伪造反射） |
+| `MCP_LOCAL_WORKSPACE_HOST` | `0.0.0.0` | 本机助手 WebSocket 监听地址 |
+| `MCP_LOCAL_WORKSPACE_PORT` | 网关端口 + 1 | 本机助手连接端口；服务器防火墙需放行 |
+| `MCP_LOCAL_WORKSPACE_PUBLIC_URL` | 空 | 配对命令使用的完整 `ws://` 或 `wss://` 地址；NAT/反代后建议显式设置 |
 | `MCP_DSH_ROOT` | 自动探测 | dsh 安装目录（`@deepseek-ai/dsh` 所在处），探测不到时手动指定 |
 | `MCP_DSH_RESTART_SERVICE` | `dsh-web` | 重载补丁后自动重启的 dsh systemd 服务名；显式留空不自动重启 |
 | `DSH_PASSWORDS_ENV_FILE` | 空 | 手动指定 `.env` 路径（插件自动传，一般不用填） |
@@ -197,14 +250,20 @@ node dist/cli.js patch status            # 看远程设置补丁状态
 node dist/cli.js patch                   # 重载补丁（重新应用 + 重启 dsh-web）
 node dist/cli.js serve-gateway --port 9000   # 手动启动网关并换端口
 node scripts/start-http.mjs 8080         # 明文 HTTP 模式（危险，y/N 确认）
+dsh-local-workspace                      # 使用已保存的设备令牌恢复本机工作区连接
 ```
 
 ## 常见问题
 
 - **登录页一直显示"首次配置"？** 说明用户表是空的（新库或数据库被清过）。按页面提示输入 `SETUP_KEY` 重新创建主用户即可。
 - **忘记主用户密码？** 停服后跑 `node -e "const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync('data/platform.db');db.exec('DELETE FROM users;')"`，重启后重新走首次配置。
+- **删除子用户会删除他的宿主机文件吗？** 不会。系统只撤销工作区注册和账号访问，`MCP_MANAGED_WORKSPACE_ROOT/u<用户ID>` 会原样保留，管理员确认无用后再手工归档或删除。
 - **dsh 控制台报错误码 30 / 31，密码门没起来？** 见上面「自动 HTTPS」的错误码表。修好后重启 dsh 会自动再拉起。
 - **443 端口绑定失败（非 root 用户）？** Linux 上 1024 以下端口需要 root：用 root/sudo 启动 dsh，或把 `MCP_GATEWAY_PORT` 改成高位端口（如 8443）并自行做端口转发。
+- **本机助手连不上？** 确认 dsh 控制台已显示“本机助手接入”，并在服务器防火墙放行 `MCP_LOCAL_WORKSPACE_PORT`。网页网关为 `3081` 时默认助手端口是 `3082`；跨 NAT 时设置 `MCP_LOCAL_WORKSPACE_PUBLIC_URL`。
+- **本机工作区已连接但没有输入框？** 展开页面左下角的“一键选择本机文件夹”，在在线目录旁点击“打开对话”。如果消息提交后立即停止，检查该子账号的“每月模型额度”；`¥0` 表示禁止模型调用。
+- **点“一键选择本机文件夹”没有弹出窗口？** 先展开按钮下方的“助手没有打开？”，下载 EXE 并双击一次完成协议注册，然后回到原网页重试。不要移动或删除已注册的 EXE；如已移动，在新位置再双击一次即可更新注册。网页不会打开 `about:blank`，原对话会一直保留。
+- **6 位确认码无效？** 只输入助手窗口当前显示的六位数字。号码十分钟后失效且只能确认一次；过期后保持助手运行，它会重新连接并显示新号码。
 - **dsh 启动报 `duplicate loader entry id`？** 你在 profile 里用过 `dsh plugin add`。它会把 profile 里**所有**声明 `dsh.bundle` 的依赖全部加进 bundles 层，与已装的其它插件重复时 dsh 直接启动失败。卸载 dsh-passwords 后改用 `node scripts/register-plugin.mjs` 精确注册（只追加本插件一个条目）。
 - **npm 装 dsh 报 allow-scripts / node-pty 错？** npm 新版会拦截安装脚本，先放行再重装：`npm config set allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user`，然后重新 `npm install -g @deepseek-ai/dsh`（本项目自身没这个问题，是 dsh 的依赖要跑原生构建）。
 - **npm 用 `--prefix` 安装后运行 `dsh-passwords install` 报 TS5058？** 升级到 `dsh-passwords@2.5.4`。新版能正确识别被 npm 提升到 `<prefix>/node_modules` 的运行时依赖，不会再误触发源码编译。
@@ -218,7 +277,7 @@ node scripts/start-http.mjs 8080         # 明文 HTTP 模式（危险，y/N 确
 
 > Windows 用户建议直接用 `install.bat`；本节以 Linux 为例，步骤等价。
 
-1. `git clone https://github.com/slywalker2006/dsh-passwords && cd dsh-passwords`
+1. `git clone https://github.com/sdwhwzp/dsh-passwords && cd dsh-passwords`
 2. `npm install && npm run build`
 3. `cp .env.example .env`，把 `SETUP_KEY` 改成随机串（`openssl rand -hex 24`）
 4. 注册插件：`node scripts/register-plugin.mjs`（等价于把 `link:$(pwd)` 加进 `~/.dsh/profiles/web/package.json` 的 dependencies 和 `dsh.profile.bundles` 再 pnpm install。**不要用 `dsh plugin add`**，原因见常见问题）

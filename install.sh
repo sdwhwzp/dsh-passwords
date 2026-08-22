@@ -2,8 +2,8 @@
 # dsh-passwords 一键安装（Linux/macOS 引导壳；实际逻辑在 scripts/install.mjs）
 #
 # 用法（二选一）:
-#   1) curl 直接装:  curl -fsSL https://raw.githubusercontent.com/slywalker2006/dsh-passwords/main/install.sh | bash
-#   2) 先 clone 再装: git clone https://github.com/slywalker2006/dsh-passwords && cd dsh-passwords && bash install.sh
+#   1) curl 直接装:  curl -fsSL https://raw.githubusercontent.com/sdwhwzp/dsh-passwords/main/install.sh | bash
+#   2) 先 clone 再装: git clone https://github.com/sdwhwzp/dsh-passwords && cd dsh-passwords && bash install.sh
 # Windows 用户请运行 install.bat。
 set -euo pipefail
 
@@ -29,6 +29,6 @@ if [ -d "$DEST" ]; then
   echo "[dsh-passwords] 目录已存在：$DEST（重装请先手动删除，注意备份 .env 和 data/）"
   exit 1
 fi
-git clone --depth 1 https://github.com/slywalker2006/dsh-passwords.git "$DEST"
+git clone --depth 1 https://github.com/sdwhwzp/dsh-passwords.git "$DEST"
 cd "$DEST"
 exec node scripts/install.mjs

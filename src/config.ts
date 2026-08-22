@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { homedir } from 'node:os';
 import path from 'node:path';
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -50,6 +51,15 @@ export interface PlatformConfig {
   jwtSecret: string;
   /** 网关内部管理接口密钥（dsh 插件通知网关用；留空则从 SETUP_KEY 派生） */
   internalSecret: string;
+  /** 用户本机助手的出站 WebSocket 接入点。 */
+  localWorkspace: {
+    host: string;
+    port: number;
+    /** 对浏览器展示的完整 ws(s) 地址；留空时按当前访问主机与端口生成。 */
+    publicUrl: string;
+  };
+  /** 宿主机上为子用户自动创建的专属工作区根目录。 */
+  managedWorkspaceRoot: string;
   /** 远程设置补丁（settings host 模式 + 白名单）管理配置；补丁强制启用，无开关 */
   patch: {
     /** dsh 安装根目录（@deepseek-ai/dsh 所在位置）；留空自动探测 npm root -g */
@@ -81,11 +91,10 @@ export function loadConfig(): PlatformConfig {
     readEnv('MCP_INTERNAL_SECRET', '') ||
     createHash('sha256').update('dshpw-internal:' + setupKey).digest('hex');
 
-  const dbPath = readEnv(
-    'MCP_DB_PATH',
-    // 默认基于模块目录而非 cwd：无论从哪个目录运行都指向同一数据库，
-    // 与 .env 的模块相对解析语义保持一致（否则 systemd/CLI/调试目录
-    // 会各自开一个新库，表现为“配置改了不生效/数据丢了”）
+  const dbPath = resolveEnvRelativePath(
+    readEnv('MCP_DB_PATH', ''),
+    envFilePath(),
+    // 默认基于模块目录而非 cwd：无论从哪个目录运行都指向同一数据库。
     path.resolve(moduleDir, '..', 'data', 'platform.db'),
   );
 
@@ -123,6 +132,12 @@ export function loadConfig(): PlatformConfig {
     gatewayPortRaw !== '' && Number.isInteger(gatewayPortNum) && gatewayPortNum > 0 && gatewayPortNum <= 65535
       ? gatewayPortNum
       : 8080;
+  const localWorkspacePortRaw = readEnv('MCP_LOCAL_WORKSPACE_PORT', String(Math.min(gatewayPort + 1, 65535)));
+  const localWorkspacePortNum = Number(localWorkspacePortRaw);
+  const localWorkspacePort =
+    Number.isInteger(localWorkspacePortNum) && localWorkspacePortNum > 0 && localWorkspacePortNum <= 65535
+      ? localWorkspacePortNum
+      : Math.min(gatewayPort + 1, 65535);
 
   return {
     setupKey,
@@ -156,6 +171,16 @@ export function loadConfig(): PlatformConfig {
     },
     jwtSecret,
     internalSecret,
+    localWorkspace: {
+      host: readEnv('MCP_LOCAL_WORKSPACE_HOST', '0.0.0.0'),
+      port: localWorkspacePort,
+      publicUrl: readEnv('MCP_LOCAL_WORKSPACE_PUBLIC_URL', ''),
+    },
+    managedWorkspaceRoot: resolveEnvRelativePath(
+      readEnv('MCP_MANAGED_WORKSPACE_ROOT', ''),
+      envFilePath(),
+      path.join(homedir(), 'dsh-user-workspaces'),
+    ),
     patch: {
       dshRoot: readEnv('MCP_DSH_ROOT', ''),
       restartService,
@@ -166,6 +191,18 @@ export function loadConfig(): PlatformConfig {
 /** 当前生效的 .env 文件路径（与 loadConfig 的读取路径保持一致） */
 function envFilePath(): string {
   return process.env.DSH_PASSWORDS_ENV_FILE?.trim() || path.join(moduleDir, '..', '.env');
+}
+
+/**
+ * 配置中的相对文件路径必须相对承载它的 .env，而不是进程 cwd。
+ * dsh Host 与它拉起的网关使用不同 WorkingDirectory；若按 cwd 解析，二者会
+ * 打开不同 SQLite 文件，退出/重启后就会表现为账号丢失或密钥不匹配。
+ */
+export function resolveEnvRelativePath(configured: string, envFile: string, fallback: string): string {
+  const value = configured.trim();
+  if (value === '') return path.resolve(fallback);
+  if (path.isAbsolute(value)) return path.normalize(value);
+  return path.resolve(path.dirname(path.resolve(envFile)), value);
 }
 
 /**

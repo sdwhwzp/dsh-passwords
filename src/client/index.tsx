@@ -10,7 +10,9 @@ import { DshPasswordsCard } from './card';
 import { DshPasswordsSection } from './section';
 import { ChatLauncher } from './chat';
 import { TokenReporter } from './token';
+import { LocalWorkspaceLauncher } from './local-workspace-launcher';
 import { zh, en } from './locales';
+import { installDesktopLauncherLogoutBridge } from './account-logout';
 
 /** 卡片样式：全部使用 dsh 设计令牌（--dsw-alias-*），颜色/主题与官方 PluginCard 完全一致 */
 const CSS = `
@@ -47,6 +49,7 @@ const CSS = `
 .dshpw-btn.danger{background:none;border:1px solid var(--dsw-alias-state-error-primary,#ef4444);color:var(--dsw-alias-state-error-primary,#ef4444)}
 .dshpw-btn.danger:hover:not(:disabled){filter:none;background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#ef4444) 10%,transparent)}
 .dshpw-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.dshpw-logout{margin-left:auto}
 .dshpw-user{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--dsw-alias-border-l2)}
 .dshpw-user:last-child{border-bottom:none}
 .dshpw-perm{border:1px solid var(--dsw-alias-border-l2);border-radius:10px;padding:10px;display:flex;flex-direction:column;gap:8px}
@@ -68,11 +71,60 @@ select.dshpw-input{height:auto;min-height:36px}
 .dshpw-error{color:var(--dsw-alias-state-error-primary,#ef4444);font-size:12px}
 .dshpw-ok{color:var(--dsw-alias-state-success-primary,#22c55e);font-size:12px}
 .dshpw-hint{font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}
+.dshpw-local-command{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;padding:10px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-2)}
+.dshpw-local-command code{min-width:0;overflow:auto;white-space:nowrap;font-size:11px;color:var(--dsw-alias-label-secondary)}
+.dshpw-local-command small{grid-column:1/-1}
+.dshpw-local-download{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-2)}
+.dshpw-download-btn{display:inline-flex;align-items:center;text-decoration:none}
+.dshpw-local-server{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-2)}
+.dshpw-local-server code{font-size:12px;color:var(--dsw-alias-label-primary);overflow-wrap:anywhere;user-select:all}
+.dshpw-local-approval{display:grid;grid-template-columns:minmax(0,1fr) minmax(140px,190px) auto;gap:10px;align-items:center;padding:12px;border:1px solid var(--dsw-alias-brand-primary);border-radius:10px;background:color-mix(in srgb,var(--dsw-alias-brand-primary) 6%,var(--dsw-alias-bg-layer-2))}
+.dshpw-local-code{text-align:center;font-size:16px;font-weight:650;font-variant-numeric:tabular-nums;letter-spacing:.18em}
+.dshpw-local-legacy{padding:10px 12px;border:1px dashed var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-2)}
+.dshpw-local-legacy summary{cursor:pointer;color:var(--dsw-alias-label-secondary);font-size:12px;font-weight:600}
+.dshpw-local-legacy>.dshpw-hint,.dshpw-local-legacy>.dshpw-btn,.dshpw-local-legacy>.dshpw-local-command{margin-top:10px}
+.dshpw-local-workspace{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:10px;align-items:center;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-2)}
+.dshpw-local-launcher{display:flex;flex-direction:column;gap:7px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-2);font-size:13px;line-height:1.45}
+.dshpw-local-launcher-popover{position:fixed;left:14px;bottom:164px;z-index:2147482800;pointer-events:auto}
+.dshpw-local-launcher-popover>summary{list-style:none;display:inline-flex;align-items:center;min-height:36px;box-shadow:0 2px 8px rgba(0,0,0,.18)}
+.dshpw-local-launcher-popover>summary::-webkit-details-marker{display:none}
+.dshpw-local-launcher-popover[open]>summary{filter:brightness(1.08)}
+.dshpw-local-launcher-popover>.dshpw-local-launcher{position:absolute;left:0;bottom:calc(100% + 8px);width:min(380px,calc(100vw - 28px));box-sizing:border-box;box-shadow:0 12px 36px rgba(0,0,0,.3)}
+.dshpw-local-launcher-main{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.dshpw-local-launcher-copy{display:flex;flex-direction:column;gap:2px;min-width:0;color:var(--dsw-alias-label-primary)}
+.dshpw-local-launcher-copy strong{font-size:13px;font-weight:650}
+.dshpw-local-launcher-copy small,.dshpw-local-launcher-fallback{font-size:12px;color:var(--dsw-alias-label-tertiary)}
+.dshpw-local-launcher-status{font-size:12px;color:var(--dsw-alias-state-success-primary,#22c55e)}
+.dshpw-local-launcher-fallback summary{width:max-content;max-width:100%;cursor:pointer;color:var(--dsw-alias-label-secondary)}
+.dshpw-local-launcher-help{display:flex;gap:6px 10px;align-items:baseline;flex-wrap:wrap;padding-top:7px}
+.dshpw-local-launcher-help a{color:var(--dsw-alias-brand-primary);font-weight:600;text-decoration:none}
+.dshpw-local-launcher-help a:hover{text-decoration:underline}
+.dshpw-local-launcher-workspaces{display:flex;flex-direction:column;gap:6px}
+.dshpw-local-launcher-workspace{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1)}
+.dshpw-local-launcher-workspace>span{display:flex;flex-direction:column;min-width:0}
+.dshpw-local-launcher-workspace strong,.dshpw-local-launcher-workspace small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dshpw-local-launcher-workspace small{color:var(--dsw-alias-label-tertiary)}
+@media(max-width:640px){.dshpw-local-download,.dshpw-local-server,.dshpw-local-launcher-main{align-items:stretch;flex-direction:column}.dshpw-local-approval{grid-template-columns:1fr}.dshpw-local-workspace{grid-template-columns:minmax(0,1fr) auto}.dshpw-local-workspace>.dshpw-switch-copy{grid-column:1/-1}.dshpw-local-launcher-popover{right:14px}.dshpw-local-launcher-popover>.dshpw-local-launcher{width:calc(100vw - 28px)}}
 `;
 
-export const inject = ['slots', 'locale'] as const;
+export const inject = ['slots', 'locale', 'sessions', 'workspaces'] as const;
 
 export function apply(ctx: ClientContext): void {
+  let gatewayDetected: boolean | null = null;
+  const isBehindGateway = async (): Promise<boolean> => {
+    if (gatewayDetected !== null) return gatewayDetected;
+    try {
+      const resp = await fetch('/gateway/login', {
+        method: 'HEAD',
+        credentials: 'same-origin',
+      });
+      gatewayDetected = resp.headers.get('x-dsh-gateway') === '1';
+    } catch {
+      gatewayDetected = false;
+    }
+    return gatewayDetected;
+  };
+
   ctx.effect(() => {
     if (typeof document === 'undefined') return () => {};
     const existing = document.querySelector('style[data-dshpw-style="1"]');
@@ -83,6 +135,21 @@ export function apply(ctx: ClientContext): void {
     document.head.appendChild(el);
     return () => el.remove();
   }, 'dsh-passwords: styles');
+
+  // 经 3081 登录网关访问时，右下角第三方“退出 DeepSeek Harness”电源按钮
+  // 必须表示退出当前账号，而不是关闭全体用户共用的 dsh 服务。捕获阶段拦截
+  // 第三方 React onClick，杜绝其 requestShutdown + about:blank 路径。
+  ctx.effect(() => {
+    let disposed = false;
+    let disposeBridge = () => {};
+    void isBehindGateway().then((behindGateway) => {
+      if (!disposed && behindGateway) disposeBridge = installDesktopLauncherLogoutBridge();
+    });
+    return () => {
+      disposed = true;
+      disposeBridge();
+    };
+  }, 'dsh-passwords: account logout bridge');
 
   // 独立设置分区（参考 @linxin666 的 settings.section 模式）：在设置页左侧导航
   // 注册 dsh-passwords 一级分区，分区体内渲染注册进 dsh-passwords.plugin.item
@@ -141,27 +208,57 @@ export function apply(ctx: ClientContext): void {
     ),
   );
 
+  // 根作用域悬浮入口：没有会话或工作区时仍提供首次本机目录选择。
+  ctx.slots.inject('shell.overlay', () =>
+    ctx.slots.register(
+      {
+        name: 'shell.overlay',
+        id: 'dsh-passwords-local-workspace-launcher',
+        key: 'dsh-passwords-local-workspace-launcher',
+        order: 30,
+        locale: 'dshpw',
+        inject: () => ({
+          openWorkspacePath: async (workspacePath: string) => {
+            const findWorkspace = () => ctx.workspaces.list.getSnapshot().items
+              .find((workspace) => workspace.path === workspacePath);
+            let workspace = findWorkspace();
+            if (workspace === undefined) {
+              workspace = await new Promise((resolve, reject) => {
+                let settled = false;
+                let dispose = () => {};
+                const timer = window.setTimeout(() => {
+                  settled = true;
+                  dispose();
+                  reject(new Error(ctx.locale.bind('dshpw')('localOpenConversationFailed')));
+                }, 15_000);
+                const listener = () => {
+                  const next = findWorkspace();
+                  if (settled || next === undefined) return;
+                  settled = true;
+                  window.clearTimeout(timer);
+                  dispose();
+                  resolve(next);
+                };
+                dispose = ctx.workspaces.list.subscribe(listener);
+                if (settled) dispose();
+                else listener();
+              });
+            }
+            const sessionId = await ctx.workspaces.connectWorkspace(workspace.workspaceId);
+            ctx.sessions.open(sessionId);
+          },
+        }),
+      },
+      LocalWorkspaceLauncher,
+    ),
+  );
+
   // ── 远程文件下载（Issue #4）──────────────────────────────────
   // 经 dsh-passwords 网关远程访问时，点击对话里的“生成文件”标签会调用
   // workspaces.openPath → host.openPath → 服务器容器里 xdg-open（无桌面环境
   // → spawn xdg-open ENOENT）。这里包装 openPath：检测到经网关访问时改为
   // 跳转 /gateway/api/download 下载到浏览器；本地桌面访问保持原 RPC 行为。
   // 网关检测：探测一次响应头 X-Dsh-Gateway（网关在代理/自身响应里注入）。
-  let gatewayDetected: boolean | null = null;
-  const isBehindGateway = async (): Promise<boolean> => {
-    if (gatewayDetected !== null) return gatewayDetected;
-    try {
-      const resp = await fetch('/gateway/login', {
-        method: 'HEAD',
-        credentials: 'same-origin',
-      });
-      gatewayDetected = resp.headers.get('x-dsh-gateway') === '1';
-    } catch {
-      gatewayDetected = false;
-    }
-    return gatewayDetected;
-  };
-
   ctx.inject(['workspaces'], (scope) => {
     const workspaces = scope.workspaces as {
       openPath?: (path: string) => Promise<unknown>;
