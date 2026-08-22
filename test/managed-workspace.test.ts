@@ -177,6 +177,27 @@ test('removing a subuser unregisters access but retains the host directory', asy
   }
 });
 
+test('concurrent provision and unregister operations run in invocation order', async () => {
+  const env = await harness();
+  try {
+    const created = env.db.createUser('alice', await bcrypt.hash('UserPassword1!', 4), 'user');
+    const user = env.db.getUserListRowById(created.id)!;
+    const registry = new FakeWorkspaceRegistry();
+    const provisioner = new ManagedWorkspaceProvisioner(env.db, env.config);
+
+    const provision = provisioner.provisionNewUser(registry as unknown as WorkspaceRegistry, user);
+    const unregister = provisioner.unregisterUser(registry as unknown as WorkspaceRegistry, user.id);
+    const [workspacePath, unregistered] = await Promise.all([provision, unregister]);
+
+    assert.equal(unregistered, true);
+    assert.equal(registry.workspaces.length, 0);
+    assert.equal(env.db.getManagedWorkspace(user.id)?.path, workspacePath);
+    assert.equal((await stat(workspacePath)).isDirectory(), true);
+  } finally {
+    await env.cleanup();
+  }
+});
+
 test('managed workspace ownership includes descendants and excludes sibling users', async () => {
   const env = await harness();
   try {

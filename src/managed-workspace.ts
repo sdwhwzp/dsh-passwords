@@ -13,6 +13,7 @@ export const MANAGED_WORKSPACE_SANDBOX = 'workspace-write';
 /** Creates, registers, restores, and revokes host directories owned by subusers. */
 export class ManagedWorkspaceProvisioner {
   private rootPromise: Promise<string> | null = null;
+  private operationTail: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly db: Database,
@@ -20,7 +21,11 @@ export class ManagedWorkspaceProvisioner {
   ) {}
 
   /** Create the durable directory and permission assignment for a new subuser. */
-  async provisionNewUser(registry: WorkspaceRegistry, user: UserListRow): Promise<string> {
+  provisionNewUser(registry: WorkspaceRegistry, user: UserListRow): Promise<string> {
+    return this.enqueue(() => this.provisionNewUserNow(registry, user));
+  }
+
+  private async provisionNewUserNow(registry: WorkspaceRegistry, user: UserListRow): Promise<string> {
     if (user.role !== 'user') throw new Error('主用户不能分配子用户托管工作区');
     if (this.db.getManagedWorkspace(user.id) !== null) {
       throw new Error(`用户 ${String(user.id)} 已有托管工作区`);
@@ -55,7 +60,11 @@ export class ManagedWorkspaceProvisioner {
   }
 
   /** Restore registrations and backfill pre-existing subusers without replacing their quotas. */
-  async restore(registry: WorkspaceRegistry): Promise<void> {
+  restore(registry: WorkspaceRegistry): Promise<void> {
+    return this.enqueue(() => this.restoreNow(registry));
+  }
+
+  private async restoreNow(registry: WorkspaceRegistry): Promise<void> {
     const failures: unknown[] = [];
     for (const user of this.db.listUsers()) {
       if (user.role !== 'user') continue;
@@ -79,7 +88,11 @@ export class ManagedWorkspaceProvisioner {
   }
 
   /** Restore one still-existing user's registration after a failed account deletion. */
-  async restoreUser(registry: WorkspaceRegistry, user: UserListRow): Promise<void> {
+  restoreUser(registry: WorkspaceRegistry, user: UserListRow): Promise<void> {
+    return this.enqueue(() => this.restoreUserNow(registry, user));
+  }
+
+  private async restoreUserNow(registry: WorkspaceRegistry, user: UserListRow): Promise<void> {
     const existing = this.db.getManagedWorkspace(user.id);
     if (existing === null) throw new Error(`用户 ${String(user.id)} 没有托管工作区记录`);
     const workspacePath = await this.prepareDirectory(user.id, existing.path);
@@ -89,7 +102,11 @@ export class ManagedWorkspaceProvisioner {
   }
 
   /** Unregister a deleted user's host workspace while retaining every file and session log. */
-  async unregisterUser(registry: WorkspaceRegistry, userId: number): Promise<boolean> {
+  unregisterUser(registry: WorkspaceRegistry, userId: number): Promise<boolean> {
+    return this.enqueue(() => this.unregisterUserNow(registry, userId));
+  }
+
+  private async unregisterUserNow(registry: WorkspaceRegistry, userId: number): Promise<boolean> {
     const managed = this.db.getManagedWorkspace(userId);
     if (managed === null) return false;
     const registration = registry.list().find((workspace) => samePath(workspace.path, managed.path));
@@ -160,6 +177,12 @@ export class ManagedWorkspaceProvisioner {
       throw new Error('托管工作区根目录不能位于数据库数据目录内');
     }
     return ensureDirectory(configured);
+  }
+
+  private enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.operationTail.then(operation, operation);
+    this.operationTail = result.then(() => undefined, () => undefined);
+    return result;
   }
 }
 

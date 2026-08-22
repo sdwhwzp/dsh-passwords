@@ -151,7 +151,7 @@ test('Windows --setup 备用向导只询问服务器、目录和 Shell，并进�
   socket.terminate();
 });
 
-test('Windows 网页 URI 兼容规范化尾斜杠、注册协议并使用独立 profile 消费 launch ticket', async (context) => {
+test('Windows 网页 URI 自动启用 Shell、兼容规范化尾斜杠并使用独立 profile', async (context) => {
   const temp = mkdtempSync(path.join(tmpdir(), 'dsh-local-launch-uri-'));
   const selectedRoot = path.join(temp, 'selected workspace');
   const oldRoot = path.join(temp, 'old workspace');
@@ -202,7 +202,7 @@ test('Windows 网页 URI 兼容规范化尾斜杠、注册协议并使用独立 
   });
 
   const pendingLaunch = nextHello(server);
-  const launched = startCli([uri.toString()], env);
+  const launched = startCli(['--allow-shell', uri.toString()], env);
   children.push(launched.child);
   const { socket, hello } = await pendingLaunch;
   assert.equal(hello.type, 'launch');
@@ -211,7 +211,7 @@ test('Windows 网页 URI 兼容规范化尾斜杠、注册协议并使用独立 
   assert.equal(hello.code, undefined);
   assert.equal(hello.token, undefined);
   assert.equal(hello.root, realpathSync(selectedRoot));
-  assert.equal(hello.shellEnabled, false, '网页新授权不得继承旧 profile 的 Shell 权限');
+  assert.equal(hello.shellEnabled, true, 'Windows 协议处理器应自动添加 --allow-shell');
   assert.notEqual(hello.workspaceId, 'old-workspace-identity');
   assert.equal(readFileSync(defaultConfig, 'utf8'), oldConfig, '旧工作区配置不得被 launch 覆盖');
   assert.doesNotMatch(launched.output(), new RegExp(ticket, 'u'));
@@ -236,7 +236,7 @@ test('Windows 网页 URI 兼容规范化尾斜杠、注册协议并使用独立 
   assert.equal(profile.token, longLivedToken);
   assert.equal(profile.workspaceId, hello.workspaceId);
   assert.equal(profile.root, realpathSync(selectedRoot));
-  assert.equal(profile.shellEnabled, false);
+  assert.equal(profile.shellEnabled, true);
   assert.doesNotMatch(profileSource, new RegExp(ticket, 'u'));
   assert.doesNotMatch(profileSource, /dsh-local-workspace:\/\/connect/u);
   assert.equal(readFileSync(defaultConfig, 'utf8'), oldConfig);
@@ -245,6 +245,7 @@ test('Windows 网页 URI 兼容规范化尾斜杠、注册协议并使用独立 
   assert.match(registrySource, /HKCU\\Software\\Classes\\dsh-local-workspace/u);
   assert.match(registrySource, /URL Protocol/u);
   assert.match(registrySource, /shell\\open\\command/u);
+  assert.match(registrySource, /--allow-shell/u);
   assert.match(registrySource, /%1/u);
   assert.doesNotMatch(registrySource, new RegExp(ticket, 'u'));
   const powershellSource = readFileSync(powershellLog, 'utf8');
@@ -298,7 +299,9 @@ test('Windows 首次双击只注册网页协议，不强迫填写服务器和目
     assert.match(result.stdout, /网页一键选择已安装/u);
     assert.match(result.stdout, /请返回已登录的 dsh 网页/u);
     assert.doesNotMatch(result.stdout, /输入服务器 ws:\/\//u);
-    assert.match(readFileSync(regLog, 'utf8'), /shell\\open\\command/u);
+    const registrySource = readFileSync(regLog, 'utf8');
+    assert.match(registrySource, /shell\\open\\command/u);
+    assert.match(registrySource, /--allow-shell/u);
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }
@@ -348,6 +351,7 @@ test('--help 以网页一键唤起为推荐，并保留 6 位码、--setup 和�
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /6 位确认码/);
   assert.match(result.stdout, /网页一键唤起/);
+  assert.match(result.stdout, /自动启用 PowerShell/);
   assert.match(result.stdout, /--setup/);
   assert.match(result.stdout, /--server ws:\/\/服务器:3082 --folder/);
   assert.match(result.stdout, /旧版长配对码（兼容）/);

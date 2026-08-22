@@ -112,7 +112,7 @@ async function main(): Promise<void> {
       console.log('[dsh-local-workspace] 已取消选择文件夹。');
       return;
     }
-    options = { ...options, folder, allowShell: false };
+    options = { ...options, folder };
   }
   if (options.setup || process.env.DSH_LOCAL_WORKSPACE_FORCE_WIZARD === '1') {
     options = await runFirstPairingWizard(options);
@@ -951,7 +951,7 @@ function windowsProtocolCommand(): string {
     if (entry === undefined || entry === '') throw new Error('无法确定本机助手入口文件');
     values.push(path.resolve(entry));
   }
-  values.push('%1');
+  values.push('--allow-shell', '%1');
   return values.map(quoteWindowsCommandArgument).join(' ');
 }
 
@@ -1088,13 +1088,23 @@ async function saveConfig(file: string, config: CompanionConfig): Promise<void> 
 
 function parseArgs(args: string[]): CliOptions {
   const result = defaultCliOptions();
-  const protocolArgument = args.find((arg) => /^dsh-local-workspace:/iu.test(arg));
-  if (protocolArgument !== undefined) {
-    if (args.length !== 1) throw invalidLaunchUri();
+  const protocolArguments = args.filter((arg) => /^dsh-local-workspace:/iu.test(arg));
+  if (protocolArguments.length > 0) {
+    const allowShellArguments = args.filter((arg) => arg === '--allow-shell');
+    if (
+      protocolArguments.length !== 1
+      || allowShellArguments.length > 1
+      || args.length !== protocolArguments.length + allowShellArguments.length
+    ) {
+      throw invalidLaunchUri();
+    }
+    const protocolArgument = protocolArguments[0];
+    if (protocolArgument === undefined) throw invalidLaunchUri();
     const launch = parseLaunchUri(protocolArgument);
     const launchWorkspaceId = randomUUID();
     return {
       ...result,
+      allowShell: allowShellArguments.length === 1,
       configPath: path.join(path.dirname(result.configPath), 'profiles', `${launchWorkspaceId}.json`),
       launchTicket: launch.ticket,
       launchWorkspaceId,
@@ -1201,6 +1211,7 @@ function printHelp(): void {
 
 Windows 用户首次双击 EXE 会为当前用户安装网页一键唤起。
 返回 dsh 网页点击“选择本机文件夹”，再在 Windows 原生选择器中选择目录。
+Windows 网页一键连接会自动启用 PowerShell，并以当前系统用户权限执行命令。
 网页启动链接只供操作系统调用，不要手工粘贴或分享。
 
 手动配置向导（6 位确认码备用流程）：
@@ -1221,7 +1232,7 @@ Windows 用户首次双击 EXE 会为当前用户安装网页一键唤起。
   --folder PATH       要授权的本机目录
   --pair CODE         旧版一次性长配对码；新设备确认流程不需要
   --name NAME         工作区显示名；默认使用目录名
-  --allow-shell       明确允许 AI 在本机执行 Shell；默认关闭
+  --allow-shell       命令行模式明确允许 AI 执行 Shell；命令行默认关闭
   --device-name NAME  设备显示名
   --config PATH       使用另一份配置文件（可同时共享多个目录）
 `);

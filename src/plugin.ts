@@ -354,6 +354,12 @@ export function apply(ctx: Context): void {
 
   const localWorkspaceHub = db === null ? null : new LocalWorkspaceHub(ctx, db, cfg);
   const managedWorkspaces = db === null ? null : new ManagedWorkspaceProvisioner(db, cfg);
+  let userMutationTail: Promise<void> = Promise.resolve();
+  const mutateUser = <T>(operation: () => Promise<T>): Promise<T> => {
+    const result = userMutationTail.then(operation, operation);
+    userMutationTail = result.then(() => undefined, () => undefined);
+    return result;
+  };
   const localWorkspaceReady = localWorkspaceHub === null
     ? Promise.reject(new Error('本机助手服务不可用：数据库未初始化'))
     : localWorkspaceHub.start();
@@ -687,12 +693,21 @@ export function apply(ctx: Context): void {
           if (registry === undefined || managedWorkspaces === null) {
             throw new AuthError('WORKSPACE_UNAVAILABLE', {}, 503);
           }
-          await auth!.addSubUser(
-            caller,
-            username,
-            password,
-            (user) => managedWorkspaces.provisionNewUser(registry, user).then(() => undefined),
-            metaOf(req),
+          await mutateUser(() =>
+            auth!.addSubUser(
+              caller,
+              username,
+              password,
+              async (user) => {
+                try {
+                  await managedWorkspaces.provisionNewUser(registry, user);
+                } catch (error) {
+                  console.error('[dsh-passwords] 创建子用户宿主机工作区失败:', error);
+                  throw new AuthError('WORKSPACE_PROVISION_FAILED', {}, 500);
+                }
+              },
+              metaOf(req),
+            ),
           );
           writeJson(res, 200, { ok: true });
         } catch (error) {
@@ -712,33 +727,36 @@ export function apply(ctx: Context): void {
           const target = typeof body.target === 'string' ? body.target : '';
           assertNoSqlInjection(target, 'target');
           if (caller.role !== 'admin') throw new AuthError('FORBIDDEN_REMOVE_USER', {}, 403);
-          const targetUser = db!.getUserByUsername(target.trim());
-          const registry = ctx.get('workspaceRegistry');
-          let managedUnregistered = false;
-          if (targetUser !== null && db!.getManagedWorkspace(targetUser.id) !== null) {
-            if (registry === undefined || managedWorkspaces === null) {
-              throw new AuthError('WORKSPACE_UNAVAILABLE', {}, 503);
-            }
-            managedUnregistered = await managedWorkspaces.unregisterUser(registry, targetUser.id);
-          }
-          try {
-            await auth!.removeUser(caller, target, metaOf(req));
-          } catch (error) {
-            if (
-              managedUnregistered &&
-              targetUser !== null &&
-              registry !== undefined &&
-              managedWorkspaces !== null &&
-              db!.getUserById(targetUser.id) !== null
-            ) {
-              try {
-                await managedWorkspaces.restoreUser(registry, targetUser);
-              } catch (restoreError) {
-                throw new AggregateError([error, restoreError], '删除子用户失败，且工作区注册恢复失败');
+          const targetUser = await mutateUser(async () => {
+            const existingUser = db!.getUserByUsername(target.trim());
+            const registry = ctx.get('workspaceRegistry');
+            let managedUnregistered = false;
+            if (existingUser !== null && db!.getManagedWorkspace(existingUser.id) !== null) {
+              if (registry === undefined || managedWorkspaces === null) {
+                throw new AuthError('WORKSPACE_UNAVAILABLE', {}, 503);
               }
+              managedUnregistered = await managedWorkspaces.unregisterUser(registry, existingUser.id);
             }
-            throw error;
-          }
+            try {
+              await auth!.removeUser(caller, target, metaOf(req));
+            } catch (error) {
+              if (
+                managedUnregistered &&
+                existingUser !== null &&
+                registry !== undefined &&
+                managedWorkspaces !== null &&
+                db!.getUserById(existingUser.id) !== null
+              ) {
+                try {
+                  await managedWorkspaces.restoreUser(registry, existingUser);
+                } catch (restoreError) {
+                  throw new AggregateError([error, restoreError], '删除子用户失败，且工作区注册恢复失败');
+                }
+              }
+              throw error;
+            }
+            return existingUser;
+          });
           if (targetUser) {
             localWorkspaceHub?.disconnectUser(targetUser.id);
             await invalidateGatewaySessions(cfg, targetUser.id);

@@ -49,7 +49,7 @@ The owner can configure, per subuser, from the settings page:
 
 - Every signed-in user can pair one or more folders from their own computer as independent workspaces without uploading those files to the dsh server
 - dsh `read`, `write`, `edit`, `glob`, and `grep` operations act on the original authorized folder through the local companion
-- Shell is disabled by default; `bash` runs on the user's computer only after that user explicitly adds `--allow-shell`
+- The Windows one-click companion adds `--allow-shell` automatically; command-line mode keeps Shell off until the user adds it explicitly
 
 ## Identity and spend synchronization
 
@@ -128,7 +128,7 @@ Windows users do not need Node.js:
 
 The current EXE is unsigned, so Windows may display a SmartScreen warning. Before production distribution, sign it with a valid company code-signing certificate and publish its SHA-256 checksum.
 
-One-click selection always leaves Shell disabled and exposes only folder-bounded file operations. Advanced users who need PowerShell can run `山东梯智物联AI本机助手.exe --setup` and explicitly enable it through the six-digit fallback flow. The Settings page keeps the server address, six-digit approval, and legacy long pairing code for compatibility.
+Windows one-click selection adds `--allow-shell` automatically and enables PowerShell. Shell runs as the current Windows user and may access files outside the authorized folder. `山东梯智物联AI本机助手.exe --setup` and the macOS/Linux command-line flow still keep Shell off by default and can enable it explicitly when needed. The Settings page keeps the server address, six-digit approval, and legacy long pairing code for compatibility.
 
 On macOS or Linux, install Node.js 22.5+ and run `npm install -g github:sdwhwzp/dsh-passwords#dev` to install the CLI companion. On first use, provide only the server address shown by the page and the real folder, for example:
 
@@ -142,7 +142,7 @@ The default config file is `~/.dsh-local-workspace/config.json`. Each folder sel
 
 The companion port defaults to the gateway port plus one. If the dsh web gateway uses `3081`, the companion uses `3082`. Allow it through the server firewall. Behind NAT or a reverse proxy, or when the browser-derived address is incorrect, set `MCP_LOCAL_WORKSPACE_PUBLIC_URL=wss://your-domain:port`.
 
-The one-click web entry issues a random 256-bit launch ticket bound to the signed-in user; it expires after two minutes, can be consumed once, and is never written to companion configuration or logs. The fallback six-digit code is not a device credential either: the companion initiates it, it expires after ten minutes, only a signed-in user can approve it once, and failed attempts and pending connections are limited. The real high-entropy token is delivered over the existing WebSocket, stays on the user's computer, and is stored by the server only as a one-way hash. File operations accept only paths within the authorized folder and re-check resolved symlinks. `--allow-shell` is an explicit high-privilege option: the shell runs as the current OS user and may access files outside the authorized folder. Plain `ws://` is only for trusted LANs; use HTTPS/WSS across untrusted networks.
+The one-click web entry issues a random 256-bit launch ticket bound to the signed-in user; it expires after two minutes, can be consumed once, and is never written to companion configuration or logs. The fallback six-digit code is not a device credential either: the companion initiates it, it expires after ten minutes, only a signed-in user can approve it once, and failed attempts and pending connections are limited. The real high-entropy token is delivered over the existing WebSocket, stays on the user's computer, and is stored by the server only as a one-way hash. File operations accept only paths within the authorized folder and re-check resolved symlinks. `--allow-shell` is a high-privilege option: the Windows web protocol handler adds it automatically, while other command-line flows require it explicitly. The shell runs as the current OS user and may access files outside the authorized folder. Plain `ws://` is only for trusted LANs; use HTTPS/WSS across untrusted networks.
 
 Maintainers can run `npm run build:windows-assistant` to create `release/山东梯智物联AI本机助手.exe`. The repository's `Build Windows Local Workspace Assistant` workflow also builds and uploads the same artifact on a Windows runner.
 
