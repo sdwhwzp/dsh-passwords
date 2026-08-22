@@ -32,12 +32,26 @@ function commandPath(command) {
 }
 
 function run(command, args = [], { quiet = false, env } = {}) {
-  const result = spawnSync(commandPath(command), args, {
-    shell: isWin && WINDOWS_SHIMS.has(command),
+  const runOptions = {
     stdio: quiet ? 'ignore' : 'inherit',
     cwd: root,
     env: env ?? process.env,
-  });
+  };
+  let result;
+  if (isWin && WINDOWS_SHIMS.has(command)) {
+    // Windows 的 npm/pnpm/dsh 是 .cmd shim，只能由 cmd.exe 启动。
+    // cmd /d /s /c 显式调用（不用 shell:true，避开 Node 22 的 DEP0190
+    // "shell:true + 参数数组"弃用警告）；外部双引号让 /s 剥壳后
+    // 留下 "npm.cmd" "install" ... 的标准命令串。
+    const line = [commandPath(command), ...args].map((a) => `"${a}"`).join(' ');
+    result = spawnSync(
+      process.env.ComSpec || 'cmd.exe',
+      ['/d', '/s', '/c', `"${line}"`],
+      runOptions,
+    );
+  } else {
+    result = spawnSync(commandPath(command), args, runOptions);
+  }
   if (result.error !== undefined) {
     // ENOENT（Unix 上命令不存在）等 spawn 错误：返回非零状态码，走调用方的
     // 友好错误路径——不能 throw，否则 mustRun 的"先检测后安装"分支
