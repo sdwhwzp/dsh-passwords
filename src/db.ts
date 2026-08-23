@@ -14,6 +14,7 @@ import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import type { FieldCrypto } from './encrypt.js';
+import { normalizePath } from './permissions.js';
 
 type UserRole = 'admin' | 'user';
 
@@ -55,6 +56,7 @@ export interface UserPermissionsRow {
   daily_minutes_limit: number | null;
   allow_upload: boolean;
   allow_git_download: boolean;
+  allow_workspace_create: boolean;
   banned: boolean;
   sandbox_mode: string | null;
   disabled_sessions: string[];
@@ -132,6 +134,7 @@ CREATE TABLE IF NOT EXISTS user_permissions (
   daily_minutes_limit INTEGER,                      -- NULL = 不限
   allow_upload       INTEGER NOT NULL DEFAULT 1,
   allow_git_download INTEGER NOT NULL DEFAULT 0,
+  allow_workspace_create INTEGER NOT NULL DEFAULT 0,
   banned             INTEGER NOT NULL DEFAULT 0,
   sandbox_mode       TEXT,                          -- NULL = 不更改；read-only/workspace-write/danger-full-access
   disabled_sessions  TEXT NOT NULL DEFAULT '[]',    -- 已开启工作区内逐会话关闭的 sessionId JSON 数组
@@ -156,6 +159,13 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(id DESC);
+CREATE TABLE IF NOT EXISTS user_workspaces (
+  user_id    INTEGER NOT NULL,
+  path       TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (user_id, path)
+);
+CREATE INDEX IF NOT EXISTS idx_user_workspaces_path ON user_workspaces(path);
 
 `;
 
@@ -298,6 +308,9 @@ export class Database {
     }
     if (!cols.some((c) => c.name === 'disabled_sessions')) {
       this.db.exec("ALTER TABLE user_permissions ADD COLUMN disabled_sessions TEXT NOT NULL DEFAULT '[]'");
+    }
+    if (!cols.some((c) => c.name === 'allow_workspace_create')) {
+      this.db.exec('ALTER TABLE user_permissions ADD COLUMN allow_workspace_create INTEGER NOT NULL DEFAULT 0');
     }
   }
 
@@ -774,7 +787,7 @@ export class Database {
   // ── 子用户权限（网关强制执行） ────────────────────────────
   getPermissions(userId: number): UserPermissionsRow | null {
     const row = this.stmt(
-      'SELECT user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, allow_upload, allow_git_download, banned, sandbox_mode, disabled_sessions, updated_at FROM user_permissions WHERE user_id = ?',
+      'SELECT user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, allow_upload, allow_git_download, allow_workspace_create, banned, sandbox_mode, disabled_sessions, updated_at FROM user_permissions WHERE user_id = ?',
     ).get(userId) as
       | {
           user_id: number;
@@ -783,6 +796,7 @@ export class Database {
           daily_minutes_limit: number | null;
           allow_upload: number;
           allow_git_download: number;
+          allow_workspace_create: number;
           banned: number;
           sandbox_mode: string | null;
           disabled_sessions: string | null;
@@ -797,6 +811,7 @@ export class Database {
       daily_minutes_limit: row.daily_minutes_limit,
       allow_upload: row.allow_upload === 1,
       allow_git_download: row.allow_git_download === 1,
+      allow_workspace_create: row.allow_workspace_create === 1,
       banned: row.banned === 1,
       sandbox_mode: row.sandbox_mode,
       disabled_sessions: parseJsonArray(row.disabled_sessions),
@@ -812,6 +827,7 @@ export class Database {
       dailyMinutesLimit: number | null;
       allowUpload: boolean;
       allowGitDownload: boolean;
+      allowWorkspaceCreate: boolean;
       banned: boolean;
       sandboxMode: string | null;
       disabledSessions?: string[];
@@ -822,14 +838,15 @@ export class Database {
     const allowedFolders = sanitizeAllowedFolders(perms.allowedFolders);
     const disabledSessions = [...new Set((perms.disabledSessions ?? []).filter((id) => typeof id === 'string' && id.length > 0 && id.length <= 200))].slice(0, 2000);
     this.stmt(
-      `INSERT INTO user_permissions (user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, allow_upload, allow_git_download, banned, sandbox_mode, disabled_sessions)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO user_permissions (user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, allow_upload, allow_git_download, allow_workspace_create, banned, sandbox_mode, disabled_sessions)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(user_id) DO UPDATE SET
          allowed_folders = excluded.allowed_folders,
          hourly_token_limit = excluded.hourly_token_limit,
          daily_minutes_limit = excluded.daily_minutes_limit,
          allow_upload = excluded.allow_upload,
          allow_git_download = excluded.allow_git_download,
+         allow_workspace_create = excluded.allow_workspace_create,
          banned = excluded.banned,
          sandbox_mode = excluded.sandbox_mode,
          disabled_sessions = excluded.disabled_sessions,
@@ -841,10 +858,46 @@ export class Database {
       perms.dailyMinutesLimit,
       perms.allowUpload ? 1 : 0,
       perms.allowGitDownload ? 1 : 0,
+      perms.allowWorkspaceCreate ? 1 : 0,
       perms.banned ? 1 : 0,
       perms.sandboxMode,
       JSON.stringify(disabledSessions),
     );
+  }
+
+  // ── 子用户创建的工作区 ─────────────────────────
+  addUserWorkspace(userId: number, workspacePath: string): void {
+    this.stmt(
+      'INSERT OR IGNORE INTO user_workspaces (user_id, path) VALUES (?, ?)',
+    ).run(userId, normalizePath(workspacePath));
+  }
+
+  addAllowedFolder(userId: number, workspacePath: string): void {
+    const canonical = normalizePath(workspacePath);
+    const current = this.getPermissions(userId);
+    if (!current || current.allowed_folders.includes('__deny__')) {
+      if (current) this.setPermissions(userId, { allowedFolders: [canonical], hourlyTokenLimit: current.hourly_token_limit, dailyMinutesLimit: current.daily_minutes_limit, allowUpload: current.allow_upload, allowGitDownload: current.allow_git_download, allowWorkspaceCreate: current.allow_workspace_create, banned: current.banned, sandboxMode: current.sandbox_mode, disabledSessions: current.disabled_sessions });
+      return;
+    }
+    if (!current.allowed_folders.some((entry) => normalizePath(entry) === canonical)) {
+      this.setPermissions(userId, { allowedFolders: [...current.allowed_folders, canonical], hourlyTokenLimit: current.hourly_token_limit, dailyMinutesLimit: current.daily_minutes_limit, allowUpload: current.allow_upload, allowGitDownload: current.allow_git_download, allowWorkspaceCreate: current.allow_workspace_create, banned: current.banned, sandboxMode: current.sandbox_mode, disabledSessions: current.disabled_sessions });
+    }
+  }
+
+  listUserWorkspacePaths(userId: number): string[] {
+    return (this.stmt('SELECT path FROM user_workspaces WHERE user_id = ?').all(userId) as { path: string }[]).map((row) => row.path);
+  }
+
+  listWorkspaceOwners(): Array<{ userId: number; path: string }> {
+    return (this.stmt('SELECT user_id AS userId, path FROM user_workspaces').all() as Array<{ userId: number; path: string }>).map((row) => ({ ...row, path: normalizePath(row.path) }));
+  }
+
+  removeUserWorkspace(userId: number, workspacePath: string): void {
+    this.stmt('DELETE FROM user_workspaces WHERE user_id = ? AND path = ?').run(userId, normalizePath(workspacePath));
+  }
+
+  renameUserWorkspace(userId: number, oldPath: string, newPath: string): void {
+    this.stmt('UPDATE user_workspaces SET path = ? WHERE user_id = ? AND path = ?').run(normalizePath(newPath), userId, normalizePath(oldPath));
   }
 
   // ── 用户用量（时间 / token 配额） ─────────────────────────

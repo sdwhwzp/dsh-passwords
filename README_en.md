@@ -238,9 +238,9 @@ After logging in to dsh, open Settings → Plugins to find the "dsh-passwords ·
 The settings card has a "Software updates" section that auto-checks GitHub for new releases by default:
 
 - Checks once at startup, then every 24 hours; downloads are rate-limited (default ≤1MiB/s, change with `MCP_DSH_UPDATE_MAX_BPS`) and verified against the npm registry's sha512 integrity before use (mismatch = discarded)
-- After verification, it waits for 1 hour of continuous idle before installing and restarting the dsh web service; or click "Install & restart now" to skip the idle window (10-minute cooldown)
-- Auto-update is on by default; the owner can turn it off in the card, and `MCP_DSH_AUTO_UPDATE=0` forces it off at the deployment level
-- Docker and git-source environments don't support auto-install (a container self-update would be wiped on restart, and a source tree shouldn't be touched automatically) — they only show the manual command
+- After verification, it waits for 1 hour of continuous idle before installing and restarting the dsh web service; or click "Install now" to skip the idle window (10-minute cooldown)
+- Auto-update is on by default; the owner can turn it off in the card, and `MCP_DSH_AUTO_UPDATE=0` forces it off at the deployment level. The owner can still check and install manually
+- npm installations use the verified release package. A Git source tree is updated only when clean and after `npm ci`, tests, and the build pass. Docker auto-update is only suitable when the runtime can call the host's Compose setup; set `MCP_DSH_DOCKER_COMPOSE_DIR` and the engine will verify that the `dsh-passwords` service is running after the update
 
 ## Configuration reference
 
@@ -266,6 +266,7 @@ The settings card has a "Software updates" section that auto-checks GitHub for n
 | `MCP_DSH_RESTART_SERVICE` | `dsh-web` | systemd service to restart after a patch reload; an explicit empty value disables auto-restart |
 | `MCP_DSH_AUTO_UPDATE` | on | Deployment-level auto-update master switch; `0/false/no` forces it off (manual check/install still available in the settings page) |
 | `MCP_DSH_UPDATE_MAX_BPS` | 1MiB/s | Update download rate limit (bytes/sec) |
+| `MCP_DSH_DOCKER_COMPOSE_DIR` | empty | Compose directory used for Docker auto-updates; it only works when the runtime can call the host Docker/Compose setup, and stays off when unset |
 | `MCP_DSH_PATCH_ALLOW_BIND_ALL` | off | For split-container Docker: `1` lets dsh web bind 0.0.0.0 so a gateway in another container can reach it |
 | `DSH_PASSWORDS_ENV_FILE` | empty | Explicit path to `.env` (the plugin passes it automatically — usually not needed) |
 

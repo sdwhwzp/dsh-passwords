@@ -24,6 +24,13 @@ const CSS = `
 .dshpw-label{display:block;font-size:12px;font-weight:700;letter-spacing:.02em;color:var(--dshpw-muted);text-transform:none}
 .dshpw-action-row{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
 .dshpw-action-copy{flex:1;min-width:180px}
+.dshpw-patch-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.dshpw-patch-actions>.dshpw-action-row{width:100%}
+.dshpw-update-actions{justify-content:flex-end}
+.dshpw-update-progress{display:flex;flex-direction:column;gap:7px}
+.dshpw-update-progress-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.dshpw-progress-track{height:7px;overflow:hidden;border-radius:999px;background:var(--dshpw-line)}
+.dshpw-progress-fill{display:block;height:100%;border-radius:inherit;background:var(--dshpw-accent);transition:width .25s ease}
 .dshpw-form-actions{justify-content:flex-end}
 .dshpw-preference{padding-top:14px}
 .dshpw-profile{display:flex;align-items:center;gap:12px;padding:10px 0 18px;border-bottom:1px solid var(--dshpw-line)}
@@ -84,7 +91,7 @@ select.dshpw-input{height:auto;min-height:38px}
 .dshpw-ok{color:#10815f;font-size:12px}
 .dshpw-hint{font-size:12px;line-height:1.5;color:var(--dshpw-muted)}
 @media (prefers-reduced-motion:reduce){.dshpw-card,.dshpw-btn,.dshpw-switch,.dshpw-input,.dshpw-spinner{transition:none;animation:none}}
-@media (max-width:560px){.dshpw-body{padding:6px 14px 18px}.dshpw-section{padding:16px 0}.dshpw-action-row{align-items:stretch}.dshpw-action-row .dshpw-btn{width:100%}.dshpw-signout{width:auto!important}.dshpw-section-head{align-items:flex-start;flex-direction:column;gap:7px}.dshpw-status{max-width:100%;white-space:normal}.dshpw-profile{align-items:flex-start}.dshpw-profile .dshpw-signout{margin-left:auto}}
+@media (max-width:560px){.dshpw-body{padding:6px 14px 18px}.dshpw-section{padding:16px 0}.dshpw-action-row{align-items:stretch}.dshpw-action-row .dshpw-btn{width:100%}.dshpw-patch-actions .dshpw-btn{width:100%}.dshpw-signout{width:auto!important}.dshpw-section-head{align-items:flex-start;flex-direction:column;gap:7px}.dshpw-status{max-width:100%;white-space:normal}.dshpw-profile{align-items:flex-start}.dshpw-profile .dshpw-signout{margin-left:auto}}
 `;
 
 export const inject = ['slots', 'locale'] as const;

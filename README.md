@@ -240,9 +240,9 @@ node scripts/start-http.mjs [端口]    # 默认 8080，会弹 y/N 确认
 设置页卡片里有「软件更新」区块，默认自动检查 GitHub 上的新版本：
 
 - 启动时检查一次，之后每 24 小时自动重检；发现新版本后限速下载（默认 ≤1MiB/s，可用 `MCP_DSH_UPDATE_MAX_BPS` 改），下载完做 sha512 完整性校验（对照 npm registry，不匹配就丢弃）
-- 校验通过后，等平台连续空闲满 1 小时自动安装并重启 dsh 网页服务；也可以点「立即安装重启」不等空闲窗（10 分钟冷却）
-- 自动更新默认开启，主用户可以在卡片里关掉；部署级 `MCP_DSH_AUTO_UPDATE=0` 可以强制关闭
-- Docker 和 git 源码环境不支持自动安装（容器内自更新重启即复原、源码目录不该被自动动），只显示手动命令
+- 校验通过后，等平台连续空闲满 1 小时自动安装并重启 dsh 网页服务；也可以点「立即安装」跳过空闲窗（10 分钟冷却）
+- 自动更新默认开启，主用户可以在卡片里关掉；部署级 `MCP_DSH_AUTO_UPDATE=0` 可以强制关闭，但主用户仍可手动检查和安装
+- npm 安装会使用已校验的发布包；Git 源码目录会在工作区干净、`npm ci`、测试和构建都通过后更新；Docker 自动更新只适用于能从该环境调用宿主机 compose 的部署，需要配置 `MCP_DSH_DOCKER_COMPOSE_DIR`，更新后会检查 `dsh-passwords` 服务是否运行
 
 ## 配置参考
 
@@ -268,6 +268,7 @@ node scripts/start-http.mjs [端口]    # 默认 8080，会弹 y/N 确认
 | `MCP_DSH_RESTART_SERVICE` | `dsh-web` | 重载补丁后自动重启的 dsh systemd 服务名；显式留空不自动重启 |
 | `MCP_DSH_AUTO_UPDATE` | 开 | 部署级自动更新总开关；`0/false/no` 强制关闭（设置页仍可手动检查/安装） |
 | `MCP_DSH_UPDATE_MAX_BPS` | 1MiB/s | 更新下载限速（字节/秒） |
+| `MCP_DSH_DOCKER_COMPOSE_DIR` | 空 | Docker 自动更新使用的 compose 文件目录；仅在运行环境能调用宿主机 Docker/Compose 时有效，未配置时不会自动更新 |
 | `MCP_DSH_PATCH_ALLOW_BIND_ALL` | 关 | 分容器 Docker 拓扑用：`1` 允许 dsh web 绑 0.0.0.0，让另一容器的网关能访问到 dsh web |
 | `DSH_PASSWORDS_ENV_FILE` | 空 | 手动指定 .env 路径（插件自动传，一般不用填） |
 

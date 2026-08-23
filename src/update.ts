@@ -1,11 +1,10 @@
 // 自动更新引擎：检查 GitHub 最新发布 → 限速（默认 ≤1MiB/s）断点续传下载 →
 // sha512 完整性校验（对照 npm registry dist.integrity，独立信任域，fail-closed）→
-// 按环境安装（npm 全局 / npm --prefix）→ 平台连续空闲满 1 小时后重启 dsh 网页服务。
+// 按环境安装（npm 全局 / npm --prefix / Git / Docker）→ 平台连续空闲满 1 小时后重启 dsh 网页服务。
 //
 // 环境矩阵（决定「能否自动安装」）：
-//   docker     — 容器内代码随镜像分发，容器内自更新=重启即复原（无效）；只检测+提示
-//                宿主侧命令（docker compose pull && up -d），不下载不安装
-//   git        — 源码目录（含 .git）：开发环境，不自动动，只提示手动命令
+//   docker     — 需要 MCP_DSH_DOCKER_COMPOSE_DIR；由 compose pull/up -d 更新宿主容器
+//   git        — 工作区干净时 fetch/pull，npm ci + test + build 成功后才重启；失败回退 HEAD
 //   npm-global — 安装根 == `<npm root -g>/dsh-passwords`：npm install -g <tgz>
 //   npm-prefix — `<prefix>/<lib/>node_modules/dsh-passwords`（Issue #7 的 --prefix
 //                TS5058 场景）：npm_config_prefix=<prefix> + npm install -g <tgz>
@@ -17,7 +16,8 @@
 //      任一环节失败（GitHub/npm 不可达、哈希不符）→ 丢弃产物，绝不安装
 //   3. 安装仅通过 npm 自身完成（它负责文件布局与 bin 链接），不手写覆盖
 //   4. 校验与安装都带超时；错误持久化到 DB，设置页可见（不静默）
-//   5. 空闲判定在网关层：任何用户请求（登录/API/页面/SSE 连接）都刷新活动时间，
+//   5. npm 更新使用已校验的 tgz；Git 更新只接受干净工作区并在构建通过后切换；Docker 通过已配置的 compose 目录更新镜像
+//   6. 空闲判定在网关层：任何用户请求（登录/API/页面/SSE 连接）都刷新活动时间，
 //      内部通道调用（/gateway/internal/*）不算用户活动
 import { createHash } from 'node:crypto';
 import {
@@ -70,6 +70,7 @@ export interface UpdateStatus {
   /** 最近一次检到的线上版本；未检过为 null */
   latestVersion: string | null;
   updateAvailable: boolean;
+  checking: boolean;
   phase: UpdatePhase;
   /** 下载进度 0-100；非下载中为 null */
   downloadPercent: number | null;
@@ -79,7 +80,7 @@ export interface UpdateStatus {
   idleRemainingMs: number | null;
   /** 自动更新开关（数据库设置优先；部署级 MCP_DSH_AUTO_UPDATE=false 可强制关闭） */
   autoUpdateEnabled: boolean;
-  /** 当前环境是否支持自动安装（docker/git/unknown 为 false → 只提示手动） */
+  /** 当前环境是否支持自动安装；Docker 需要配置 compose 目录，unknown 保持关闭 */
   autoInstallSupported: boolean;
   /** 环境不支持时给的手动命令；支持自动时为空串 */
   manualCommand: string;
@@ -132,10 +133,10 @@ export function detectRuntime(installRoot: string, env: NodeJS.ProcessEnv = proc
     /* best effort */
   }
   try {
-    const globalRoot = spawnSync('npm', ['root', '-g'], {
+    const globalRoot = spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['root', '-g'], {
       encoding: 'utf8',
       timeout: 8000,
-      shell: process.platform === 'win32',
+      shell: false,
     }).stdout.trim();
     if (globalRoot !== '' && path.dirname(installRoot) === path.resolve(globalRoot)) return 'npm-global';
     if (resolveNpmPrefix(installRoot, globalRoot) !== null) return 'npm-prefix';
@@ -209,21 +210,30 @@ export interface UpdateEngineOps {
   /** 拉取 GitHub release JSON（真实实现只请求受信任的 api.github.com） */
   fetchRelease(url: string): Promise<unknown>;
   /** 限速流式下载（内含 Range 续传 + 完成后整体 sha512），返回 hex */
-  download(url: string, dest: string, maxBps: number, resumedBytes: number): Promise<string>;
+  download(
+    url: string,
+    dest: string,
+    maxBps: number,
+    resumedBytes: number,
+    onProgress?: (receivedBytes: number, totalBytes: number | null) => void,
+  ): Promise<string>;
   /** 读取 npm dist.integrity（独立信任域校验源）；null 表示拿不到（fail-closed） */
   readIntegrity(packageSpec: string): Promise<string | null>;
   /** 执行安装命令；返回 {ok, message（错误摘要）}，不得阻塞网关事件循环 */
   runInstall(args: string[], env: NodeJS.ProcessEnv): Promise<{ ok: boolean; message: string }>;
+  /** 执行 Git/Docker 子进程；不得经过 shell；成功时 message 保留 stdout。 */
+  runCommand(command: string, args: string[], cwd: string, env?: NodeJS.ProcessEnv): Promise<{ ok: boolean; message: string }>;
   /** 重启 dsh 网页服务（systemd）；测试注入记录调用 */
   restartWebService(service: string): void;
   log(message: string): void;
 }
 
-function runNpm(args: string[], env: NodeJS.ProcessEnv): Promise<{ ok: boolean; output: string }> {
+function runProcess(command: string, args: string[], env: NodeJS.ProcessEnv, cwd?: string): Promise<{ ok: boolean; output: string }> {
   return new Promise((resolve) => {
-    const child = spawn('npm', args, {
+    const child = spawn(command, args, {
       env,
-      shell: process.platform === 'win32',
+      cwd,
+      shell: false,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     const chunks: Buffer[] = [];
@@ -237,9 +247,9 @@ function runNpm(args: string[], env: NodeJS.ProcessEnv): Promise<{ ok: boolean; 
     child.stdout.on('data', append);
     child.stderr.on('data', append);
     const timer = setTimeout(() => child.kill(), UPDATE_NPM_TIMEOUT_MS);
-    child.on('error', () => {
+    child.on('error', (error) => {
       clearTimeout(timer);
-      resolve({ ok: false, output: 'npm 命令启动失败' });
+      resolve({ ok: false, output: error instanceof Error ? error.message : '命令启动失败' });
     });
     child.on('close', (code) => {
       clearTimeout(timer);
@@ -249,10 +259,14 @@ function runNpm(args: string[], env: NodeJS.ProcessEnv): Promise<{ ok: boolean; 
   });
 }
 
+function runNpm(args: string[], env: NodeJS.ProcessEnv): Promise<{ ok: boolean; output: string }> {
+  return runProcess(process.platform === 'win32' ? 'npm.cmd' : 'npm', args, env);
+}
+
 const defaultOps: UpdateEngineOps = {
   now: () => Date.now(),
   fetchRelease: (url) => fetchReleaseJson(url),
-  download: (url, dest, maxBps, resumed) => downloadThrottled(url, dest, maxBps, resumed),
+  download: (url, dest, maxBps, resumed, onProgress) => downloadThrottled(url, dest, maxBps, resumed, onProgress),
   readIntegrity: async (spec) => {
     const result = await runNpm(['view', spec, 'dist.integrity', '--json'], process.env);
     if (!result.ok) return null;
@@ -271,6 +285,10 @@ const defaultOps: UpdateEngineOps = {
   runInstall: async (args, env) => {
     const result = await runNpm(args, env);
     return { ok: result.ok, message: result.ok ? '' : result.output || 'npm 命令失败' };
+  },
+  runCommand: async (command, args, cwd, env = process.env) => {
+    const result = await runProcess(command, args, env, cwd);
+    return { ok: result.ok, message: result.output || (result.ok ? '' : `${command} 命令失败`) };
   },
   restartWebService: (service) => restartDshWeb(service, 800),
   log: (message) => console.log(`[dsh-passwords] ${message}`),
@@ -325,6 +343,8 @@ export class UpdateEngine {
   private lastError: string | null;
   private lastApplyAt = 0;
   private downloadRunning = false;
+  private checkRunning = false;
+  private checkPromise: Promise<void> | null = null;
   private installRunning = false;
   private disposed = false;
   private tickTimer: ReturnType<typeof setInterval> | null = null;
@@ -402,7 +422,13 @@ export class UpdateEngine {
   }
 
   private autoInstallSupported(): boolean {
-    return this.runtime === 'npm-global' || this.runtime === 'npm-prefix';
+    if (this.runtime === 'npm-global' || this.runtime === 'npm-prefix' || this.runtime === 'git') return true;
+    return this.runtime === 'docker' && this.dockerComposeDir() !== null;
+  }
+
+  private dockerComposeDir(): string | null {
+    const dir = this.env.MCP_DSH_DOCKER_COMPOSE_DIR?.trim() ?? '';
+    return dir === '' ? null : path.resolve(dir);
   }
 
   private artifactPath(version: string): string {
@@ -422,7 +448,7 @@ export class UpdateEngine {
     }
   }
 
-  /** 面向用户的手动命令（环境不支持自动安装时展示） */
+  /** 面向不支持自动安装的环境提供兜底命令。 */
   private manualCommand(version: string | null): string {
     const v = version ?? this.version;
     if (this.runtime === 'docker') return 'docker compose pull && docker compose up -d';
@@ -444,13 +470,18 @@ export class UpdateEngine {
         void this.checkNow().catch(() => undefined);
         return;
       }
-      // 自动安装：已开启 + 已就绪 + 连续空闲满 1 小时 + 不在手动冷却中。
-      // 关闭开关后保留已下载产物，但绝不能继续自动安装/重启。
+      // 自动安装：已开启 + 已就绪（npm）或已发现新 Release（Git/Docker）+
+      // 连续空闲满 1 小时 + 不在手动冷却中。
+      // 关闭开关后保留已下载产物/版本信息，但绝不能继续自动安装/重启。
+      const nonPackageUpdateReady =
+        (this.runtime === 'git' || this.runtime === 'docker') &&
+        this.latestVersion !== null &&
+        compareVersions(this.latestVersion, this.version) !== null &&
+        compareVersions(this.latestVersion, this.version)! > 0;
       if (
         this.autoUpdateEnabled() &&
         !this.installRunning &&
-        this.pendingVersion !== null &&
-        this.phase === 'ready' &&
+        ((this.pendingVersion !== null && this.phase === 'ready') || nonPackageUpdateReady) &&
         this.activityAgeMs() >= UPDATE_IDLE_MS &&
         now - this.lastApplyAt >= UPDATE_APPLY_COOLDOWN_MS
       ) {
@@ -461,9 +492,20 @@ export class UpdateEngine {
     }
   }
 
-  /** 手动或启动触发：查 GitHub 最新版；发现新版本（环境可自动安装时）立即限速下载 */
+  /** 手动或启动触发：查 GitHub 最新版；npm 环境下载校验，Git/Docker 由各自更新器处理。 */
   async checkNow(): Promise<void> {
+    if (this.checkPromise !== null) return this.checkPromise;
+    this.checkPromise = this.checkNowInternal();
+    try {
+      await this.checkPromise;
+    } finally {
+      this.checkPromise = null;
+    }
+  }
+
+  private async checkNowInternal(): Promise<void> {
     if (this.downloadRunning) return;
+    this.checkRunning = true;
     try {
       this.lastCheckedAt = this.ops.now();
       this.db.setSetting('update_checked_at', new Date(this.ops.now()).toISOString());
@@ -482,6 +524,7 @@ export class UpdateEngine {
       if (cmp === null || cmp <= 0) {
         // 无新版本：清错误；若已下载的正是当前版本（装机后首次启动）→ 复位待装标记
         this.lastError = null;
+        this.db.setSetting('update_last_error', '');
         if (this.pendingVersion !== null && this.pendingVersion === this.version) {
           this.pendingVersion = null;
           this.phase = 'idle';
@@ -491,13 +534,13 @@ export class UpdateEngine {
       }
       // 已下载就绪的正好是目标版本 → 无需重复下载
       if (this.pendingVersion === release.version && this.phase === 'ready') return;
-      if (!this.autoInstallSupported()) {
-        // docker/git/unknown：不下载不安装，仅提示手动命令
-        return;
-      }
+      if (this.runtime === 'git' || this.runtime === 'docker') return;
+      if (!this.autoInstallSupported()) return;
       await this.startDownload(release.version, release.tgzUrl ?? '');
     } catch (error) {
       this.setError(error instanceof Error ? error.message : String(error));
+    } finally {
+      this.checkRunning = false;
     }
   }
 
@@ -514,7 +557,9 @@ export class UpdateEngine {
       const partFile = `${finalFile}.part`;
       const resumed = existsSync(partFile) ? statSync(partFile).size : 0;
       this.ops.log(`update: 下载 dsh-passwords@${version}（限速 ≤${Math.round(maxBps / 1024)}KiB/s）`);
-      const sha512 = await this.ops.download(url, partFile, maxBps, resumed);
+      const sha512 = await this.ops.download(url, partFile, maxBps, resumed, (received, total) => {
+        this.downloadPercent = total === null || total <= 0 ? null : Math.min(99, (received / total) * 100);
+      });
       // 完整性校验：对照 npm registry dist.integrity（独立信任域），fail-closed
       const integrity = await this.ops.readIntegrity(`dsh-passwords@${version}`);
       if (integrity === null) {
@@ -558,12 +603,14 @@ export class UpdateEngine {
   }
 
   private async performInstallInternal(): Promise<{ ok: boolean; requiresManualRestart: boolean }> {
-    const version = this.pendingVersion;
-    if (version === null || !existsSync(this.artifactPath(version))) {
+    const version = this.pendingVersion ?? this.latestVersion ?? this.version;
+    if (this.runtime === 'git') return this.performGitInstall(version);
+    if (this.runtime === 'docker') return this.performDockerInstall(version);
+    if (this.pendingVersion === null || !existsSync(this.artifactPath(this.pendingVersion))) {
       this.setError('安装取消：待装产物缺失');
       return { ok: false, requiresManualRestart: false };
     }
-    const tgz = this.artifactPath(version);
+    const tgz = this.artifactPath(this.pendingVersion);
     let args: string[];
     let installEnv: NodeJS.ProcessEnv = process.env;
     if (this.runtime === 'npm-global') {
@@ -614,8 +661,24 @@ export class UpdateEngine {
       const remain = Math.ceil((UPDATE_APPLY_COOLDOWN_MS - (now - this.lastApplyAt)) / 60000);
       return { ok: false, code: 'RATE_LIMITED', message: `安装过于频繁，请 ${remain} 分钟后再试` };
     }
-    if (this.pendingVersion === null || this.phase !== 'ready') {
-      return { ok: false, code: 'NOT_READY', message: '尚无已校验的更新产物，请先点击「立即检查」' };
+    // 若检查或后台下载正在进行，等待同一个任务完成后再判断是否可安装。
+    // 这样“立即安装”不会在下载刚开始时误报“尚无产物”。
+    if (this.checkPromise !== null) await this.checkPromise;
+    if (this.runtime === 'npm-global' || this.runtime === 'npm-prefix') {
+      if (this.pendingVersion === null || this.phase !== 'ready') {
+        await this.checkNow();
+      }
+      if (this.pendingVersion === null || this.phase !== 'ready') {
+        return { ok: false, code: 'NOT_READY', message: this.lastError ?? '尚无已校验的更新产物' };
+      }
+    }
+    if (this.runtime === 'git' || this.runtime === 'docker') {
+      if (this.latestVersion === null) await this.checkNow();
+      const cmp = this.latestVersion === null ? null : compareVersions(this.latestVersion, this.version);
+      if (cmp === null || cmp <= 0) return { ok: false, code: 'NO_UPDATE', message: '当前已经是最新版本' };
+    }
+    if (this.runtime !== 'git' && this.runtime !== 'docker' && this.pendingVersion === null) {
+      return { ok: false, code: 'NOT_READY', message: '当前环境没有可安装的更新' };
     }
     const result = await this.performInstall();
     if (!result.ok) {
@@ -631,6 +694,111 @@ export class UpdateEngine {
     return { ok: true, message: '新版本已安装，dsh 网页服务即将重启（约 3-5 秒）' };
   }
 
+  private async performGitInstall(version: string): Promise<{ ok: boolean; requiresManualRestart: boolean }> {
+    const result = await this.ops.runCommand('git', ['status', '--porcelain'], this.installRoot);
+    if (!result.ok) {
+      this.setError(`Git 状态检查失败：${result.message}`);
+      return { ok: false, requiresManualRestart: false };
+    }
+    if (result.message.trim() !== '') {
+      this.setError('Git 工作区有未提交修改，已停止自动更新');
+      return { ok: false, requiresManualRestart: false };
+    }
+    const before = await this.ops.runCommand('git', ['rev-parse', 'HEAD'], this.installRoot);
+    if (!before.ok || before.message.trim() === '') {
+      this.setError(`Git 当前版本读取失败：${before.message}`);
+      return { ok: false, requiresManualRestart: false };
+    }
+    const beforeBranch = await this.ops.runCommand('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], this.installRoot);
+    const restore = async (): Promise<void> => {
+      if (beforeBranch.ok && beforeBranch.message.trim() !== '') {
+        await this.ops.runCommand('git', ['checkout', '--force', beforeBranch.message.trim()], this.installRoot);
+      } else {
+        await this.ops.runCommand('git', ['reset', '--hard', before.message.trim()], this.installRoot);
+      }
+    };
+    const fetch = await this.ops.runCommand('git', ['fetch', '--tags', 'origin'], this.installRoot);
+    if (!fetch.ok) {
+      this.setError(`Git 拉取失败：${fetch.message}`);
+      return { ok: false, requiresManualRestart: false };
+    }
+    const tag = `v${version}`;
+    const checkout = await this.ops.runCommand('git', ['checkout', '--detach', '--force', tag], this.installRoot);
+    if (!checkout.ok) {
+      await restore();
+      this.setError(`Git Release 标签不存在或切换失败：${checkout.message}`);
+      return { ok: false, requiresManualRestart: false };
+    }
+    const npmCi = await this.ops.runCommand(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['ci'], this.installRoot);
+    const test = npmCi.ok
+      ? await this.ops.runCommand(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['test'], this.installRoot)
+      : npmCi;
+  const build = test.ok
+      ? await this.ops.runCommand(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'build'], this.installRoot)
+      : test;
+    if (!build.ok || readCurrentVersion(this.installRoot) !== version) {
+      await restore();
+      // npm ci 已经替换了 node_modules；只回退 Git 不足以恢复可运行状态。
+      const npmRestore = await this.ops.runCommand(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['ci'], this.installRoot);
+      const buildRestore = npmRestore.ok
+        ? await this.ops.runCommand(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'build'], this.installRoot)
+        : npmRestore;
+      const reason = build.ok ? `package.json 版本不是 ${version}` : build.message;
+      const restoreNote = buildRestore.ok ? '' : `；旧版本依赖恢复失败：${buildRestore.message}`;
+      this.setError(`Git 构建验证失败，已回退：${reason}${restoreNote}`);
+      return { ok: false, requiresManualRestart: false };
+    }
+    // 构建成功后恢复原分支，并让该分支明确指向已验证 release tag，避免留下 detached HEAD。
+    if (beforeBranch.ok && beforeBranch.message.trim() !== '') {
+      const branch = beforeBranch.message.trim();
+      const restoreBranch = await this.ops.runCommand('git', ['checkout', '--force', branch], this.installRoot);
+      const advanceBranch = restoreBranch.ok
+        ? await this.ops.runCommand('git', ['reset', '--hard', tag], this.installRoot)
+        : restoreBranch;
+      if (!advanceBranch.ok) {
+        this.setError(`Git 已构建但无法切回部署分支：${advanceBranch.message}`);
+        return { ok: false, requiresManualRestart: false };
+      }
+    }
+    this.db.audit('update_applied', { username: 'system', ip: 'update', detail: `dsh-passwords ${this.version} → ${version}（git）` });
+    this.latestVersion = version;
+    this.db.setSetting('update_latest_version', version);
+    this.lastApplyAt = this.ops.now();
+    if (this.config.patch.restartService !== '') {
+      this.ops.restartWebService(this.config.patch.restartService);
+      return { ok: true, requiresManualRestart: false };
+    }
+    return { ok: true, requiresManualRestart: true };
+  }
+
+  private async performDockerInstall(version: string): Promise<{ ok: boolean; requiresManualRestart: boolean }> {
+    const dir = this.dockerComposeDir();
+    if (dir === null) {
+      this.setError('未配置 Docker compose 目录');
+      return { ok: false, requiresManualRestart: false };
+    }
+    const pull = await this.ops.runCommand('docker', ['compose', 'pull'], dir);
+    if (!pull.ok) {
+      this.setError(`Docker 镜像拉取失败：${pull.message}`);
+      return { ok: false, requiresManualRestart: false };
+    }
+    const up = await this.ops.runCommand('docker', ['compose', 'up', '-d'], dir);
+    if (!up.ok) {
+      this.setError(`Docker 容器重启失败：${up.message}`);
+      return { ok: false, requiresManualRestart: false };
+    }
+    const running = await this.ops.runCommand('docker', ['compose', 'ps', '--status', 'running', '--services', 'dsh-passwords'], dir);
+    if (!running.ok || !running.message.split(/\r?\n/).some((service) => service.trim() === 'dsh-passwords')) {
+      this.setError(`Docker 健康检查失败：dsh-passwords 服务没有运行${running.message ? `（${running.message}）` : ''}`);
+      return { ok: false, requiresManualRestart: false };
+    }
+    this.db.audit('update_applied', { username: 'system', ip: 'update', detail: `dsh-passwords ${this.version} → ${version}（docker）` });
+    this.latestVersion = version;
+    this.db.setSetting('update_latest_version', version);
+    this.lastApplyAt = this.ops.now();
+    return { ok: true, requiresManualRestart: false };
+  }
+
   status(): UpdateStatus {
     const now = this.ops.now();
     const checked = this.lastCheckedAt ?? 0;
@@ -640,6 +808,7 @@ export class UpdateEngine {
       currentVersion: this.version,
       latestVersion: this.latestVersion,
       updateAvailable: cmp !== null && cmp > 0,
+      checking: this.checkRunning,
       phase: this.phase,
       downloadPercent: this.phase === 'downloading' ? this.downloadPercent : this.phase === 'ready' ? 100 : null,
       pendingVersion: this.pendingVersion,
@@ -700,12 +869,44 @@ function fetchReleaseJson(url: string): Promise<unknown> {
  * - 完成后整体重读文件累计 sha512：append 续传时旧字节不在本次接收流里，
  *   必须整文件重算，否则校验对象不一致
  */
-function downloadThrottled(url: string, dest: string, maxBps: number, resumedBytes: number): Promise<string> {
+function downloadThrottled(
+  url: string,
+  dest: string,
+  maxBps: number,
+  resumedBytes: number,
+  onProgress?: (receivedBytes: number, totalBytes: number | null) => void,
+  redirectCount = 0,
+): Promise<string> {
   return new Promise((resolve, reject) => {
+    let target: URL;
+    try {
+      target = new URL(url);
+    } catch {
+      reject(new Error('下载地址无效'));
+      return;
+    }
+    if (target.protocol !== 'https:' || !ALLOWED_DOWNLOAD_HOSTS.has(target.hostname)) {
+      reject(new Error('下载地址不在受信任的 GitHub 域名白名单中'));
+      return;
+    }
+    if (redirectCount > 3) {
+      reject(new Error('下载重定向次数过多'));
+      return;
+    }
     const headers: Record<string, string> = {};
     let mode: 'append' | 'truncate' = resumedBytes > 0 ? 'append' : 'truncate';
     if (mode === 'append') headers.range = `bytes=${String(resumedBytes)}-`;
-    const req = https.get(url, { headers, timeout: 15000 }, (res) => {
+    const req = https.get(target, { headers, timeout: 15000 }, (res) => {
+      if (res.statusCode !== undefined && res.statusCode >= 300 && res.statusCode < 400) {
+        const location = res.headers.location;
+        res.resume();
+        if (typeof location !== 'string' || location === '') {
+          reject(new Error('下载重定向缺少目标地址'));
+          return;
+        }
+        downloadThrottled(new URL(location, target).toString(), dest, maxBps, resumedBytes, onProgress, redirectCount + 1).then(resolve, reject);
+        return;
+      }
       if (res.statusCode === 404) {
         res.resume();
         reject(new Error('下载地址 404（资产可能已下架）'));
@@ -726,12 +927,18 @@ function downloadThrottled(url: string, dest: string, maxBps: number, resumedByt
         return;
       }
       const out = createWriteStream(dest, { flags: mode === 'append' ? 'a' : 'w' });
+      const contentLength = Number(res.headers['content-length'] ?? 0);
+      const totalBytes = Number.isFinite(contentLength) && contentLength > 0 ? contentLength + (mode === 'append' ? resumedBytes : 0) : null;
+      let receivedBytes = mode === 'append' ? resumedBytes : 0;
+      onProgress?.(receivedBytes, totalBytes);
       let completed = false;
       let lastChunkAt = 0;
       let paused = false;
       res.on('data', (chunk: Buffer) => {
         if (out.destroyed) return;
         out.write(chunk);
+        receivedBytes += chunk.length;
+        onProgress?.(receivedBytes, totalBytes);
         // 逐块节流：块大小应有的耗时与实际经过时间差，超出则暂停源等待
         const now = Date.now();
         const elapsed = lastChunkAt === 0 ? 0 : now - lastChunkAt;

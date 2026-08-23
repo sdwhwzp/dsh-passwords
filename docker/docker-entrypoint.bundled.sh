@@ -23,6 +23,20 @@ node /opt/dsh-passwords/dist/cli.js serve-gateway &
 gateway_pid=$!
 dsh web --no-open &
 dsh_pid=$!
-trap "kill $dsh_pid $gateway_pid 2>/dev/null || true" INT TERM EXIT
-wait "$gateway_pid"
+
+cleanup() {
+  trap - INT TERM
+  kill "$dsh_pid" "$gateway_pid" 2>/dev/null || true
+  wait "$dsh_pid" 2>/dev/null || true
+  wait "$gateway_pid" 2>/dev/null || true
+}
+
+# The gateway is useful only while its bundled dsh upstream is alive. Monitor
+# both processes so a failed upstream cannot leave a healthy-looking container.
+trap "cleanup; exit 0" INT TERM
+while kill -0 "$dsh_pid" 2>/dev/null && kill -0 "$gateway_pid" 2>/dev/null; do
+  sleep 1
+done
+cleanup
+exit 1
 '

@@ -310,6 +310,16 @@ export function folderAllowed(path: string, allowedFolders: string[]): boolean {
  * depth 上限 8：防上游投毒深嵌套 JSON 导致栈溢出 DoS（与同文件其他递归函数口径一致）。
  */
 export function filterByPathField(value: unknown, allowedFolders: string[], field: string, depth = 0): unknown {
+  return filterByPathFieldWithPredicate(value, field, (candidate) => folderAllowed(candidate, allowedFolders), depth);
+}
+
+/** 与 filterByPathField 相同，但由调用方提供路径可见性规则。 */
+export function filterByPathFieldWithPredicate(
+  value: unknown,
+  field: string,
+  allowed: (candidate: string) => boolean,
+  depth = 0,
+): unknown {
   // 深度超限时无法可靠检查路径字段，丢弃该子树而不是原样返回（fail-closed）。
   if (depth > 8) return null;
   if (value === null) return value;
@@ -321,11 +331,11 @@ export function filterByPathField(value: unknown, allowedFolders: string[], fiel
         typeof item === 'object' &&
         typeof (item as Record<string, unknown>)[field] === 'string' &&
         (item as Record<string, unknown>)[field] !== '' &&
-        !folderAllowed((item as Record<string, unknown>)[field] as string, allowedFolders)
+        !allowed((item as Record<string, unknown>)[field] as string)
       ) {
         continue;
       }
-      out.push(filterByPathField(item, allowedFolders, field, depth + 1));
+      out.push(filterByPathFieldWithPredicate(item, field, allowed, depth + 1));
     }
     return out;
   }
@@ -333,7 +343,7 @@ export function filterByPathField(value: unknown, allowedFolders: string[], fiel
     const obj = value as Record<string, unknown>;
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(obj)) {
-      out[k] = filterByPathField(v, allowedFolders, field, depth + 1);
+      out[k] = filterByPathFieldWithPredicate(v, field, allowed, depth + 1);
     }
     return out;
   }
@@ -406,6 +416,30 @@ export function extractWorkspaceId(value: unknown, depth = 0): string | null {
     if (nested !== null) return nested;
   }
   return null;
+}
+
+/** 从工作区删除/重命名请求中提取明确的旧路径和新路径。缺任一项就返回 null，调用方应保持 fail-closed。 */
+export function extractWorkspaceRenamePaths(value: unknown): { oldPath: string; newPath: string } | null {
+  const oldKeys = new Set(['oldPath', 'previousPath', 'sourcePath', 'fromPath']);
+  const newKeys = new Set(['newPath', 'targetPath', 'destinationPath', 'toPath']);
+  let oldPath: string | null = null;
+  let newPath: string | null = null;
+  const visit = (current: unknown, depth: number): void => {
+    if (depth > 6 || current === null || typeof current !== 'object' || (oldPath !== null && newPath !== null)) return;
+    if (Array.isArray(current)) {
+      for (const item of current) visit(item, depth + 1);
+      return;
+    }
+    for (const [key, item] of Object.entries(current as Record<string, unknown>)) {
+      if (typeof item === 'string' && item.trim() !== '') {
+        if (oldKeys.has(key) && oldPath === null) oldPath = item;
+        if (newKeys.has(key) && newPath === null) newPath = item;
+      }
+      visit(item, depth + 1);
+    }
+  };
+  visit(value, 0);
+  return oldPath !== null && newPath !== null ? { oldPath, newPath } : null;
 }
 
 /** 沙盒权限级别（dsh SANDBOX_MODES）+ 严重度排序（越靠后越宽松） */
@@ -643,9 +677,23 @@ export function aionuiRootFrom(
   return null;
 }
 
-/** 工作区创建/删除/重命名/归档/移动等写操作（受限子用户直接禁止，防止绕过文件夹白名单） */
+/** 工作区创建端点；创建权限与其他工作区管理权限分开控制。 */
+export function isWorkspaceCreate(pathname: string): boolean {
+  return /^\/api\/workspace[.\/](add|create)([.\/]|$)/.test(pathname);
+}
+
+/** 当前 dsh 已提供的删除/重命名端点；移动、归档、导入暂不纳入子用户权限。 */
+export function isWorkspaceDeleteOrRename(pathname: string): boolean {
+  return /^\/api\/workspace[.\/](remove|delete|rename|update)([.\/]|$)/.test(pathname);
+}
+
+/** 工作区管理写操作（默认仅主用户；子用户由 allowWorkspaceCreate 控制创建/删除/重命名）。 */
 export function isWorkspaceWrite(pathname: string): boolean {
-  return /^\/api\/workspace[.\/](add|create|import|remove|delete|rename|update|move|archiveSession|insertBefore|insertSessionBefore|materialize|adopt)/.test(pathname);
+  return (
+    isWorkspaceCreate(pathname) ||
+    isWorkspaceDeleteOrRename(pathname) ||
+    /^\/api\/workspace[.\/](import|move|archiveSession|insertBefore|insertSessionBefore|materialize|adopt)([.\/]|$)/.test(pathname)
+  );
 }
 
 // ── 工作区/会话文件夹限制：需要读 JSON 请求体 ──────────────────────────

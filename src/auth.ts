@@ -369,6 +369,7 @@ export class AuthService {
       dailyMinutesLimit: null,
       allowUpload: true,
       allowGitDownload: false,
+      allowWorkspaceCreate: false,
       banned: false,
       sandboxMode: null,
       disabledSessions: [],

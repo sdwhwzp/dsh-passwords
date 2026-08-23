@@ -31,12 +31,16 @@ import {
   isAionuiPanel,
   aionuiRootFrom,
   isWorkspaceWrite,
+  isWorkspaceCreate,
+  isWorkspaceDeleteOrRename,
+  extractWorkspaceRenamePaths,
   isStaticAsset,
   isPollingRequest,
   isUsageAnchorRequest,
   WORKSPACE_ENDPOINT_RE,
   extractPathFromBody,
   filterByPathField,
+  filterByPathFieldWithPredicate,
   collectIdPathPairs,
   collectSessionCwd,
   collectSessionCwdFromWorkspaces,
@@ -71,6 +75,12 @@ type Req = Request & {
   /** 会话目录白名单校验用：本次请求判定出的目标工作区路径（session.create/fork 时）；
    *  由 needsFolderCheck 写入，供 session.create 响应回调记录 sessionId→cwd 缓存 */
   dshpwSessionCwd?: string;
+  /** 工作区管理请求通过白名单校验后的目标路径。 */
+  dshpwWorkspacePath?: string;
+  dshpwWorkspaceCreate?: boolean;
+  dshpwWorkspaceOldPath?: string;
+  dshpwWorkspaceNewPath?: string;
+  dshpwIsAdmin?: boolean;
 };
 
 const COOKIE_NAME = 'dsh_gateway_token';
@@ -809,6 +819,7 @@ export function createGatewayServer(
         hourly_token_limit: null,
         daily_minutes_limit: null,
         allow_upload: true,
+        allow_workspace_create: false,
         // F-12 残余：新子用户默认禁 git 下载（含 dsh-uploads/download 等外带通道），
         // 主用户需要时按需开启；已有权限行的子用户不受影响
         allow_git_download: false,
@@ -1227,6 +1238,7 @@ export function createGatewayServer(
           dailyMinutesLimit: perms.daily_minutes_limit,
           allowUpload: perms.allow_upload,
           allowGitDownload: perms.allow_git_download,
+          allowWorkspaceCreate: perms.allow_workspace_create,
           banned: perms.banned,
           sandboxMode: perms.sandbox_mode,
           disabledSessions: perms.disabled_sessions,
@@ -1392,6 +1404,7 @@ export function createGatewayServer(
     const dailyMinutesLimit = rawMinutes === 0 ? null : rawMinutes;
     const allowUpload = body.allowUpload !== false;
     const allowGitDownload = body.allowGitDownload !== false;
+    const allowWorkspaceCreate = body.allowWorkspaceCreate === true;
     const banned = body.banned === true;
     const rawSandbox = typeof body.sandboxMode === 'string' ? body.sandboxMode : '';
     const sandboxMode =
@@ -1412,6 +1425,7 @@ export function createGatewayServer(
       dailyMinutesLimit,
       allowUpload,
       allowGitDownload,
+      allowWorkspaceCreate,
       banned,
       sandboxMode,
       disabledSessions,
@@ -1430,6 +1444,7 @@ export function createGatewayServer(
         dailyMinutesLimit,
         allowUpload,
         allowGitDownload,
+        allowWorkspaceCreate,
         banned,
         sandboxMode,
         disabledSessions,
@@ -1762,6 +1777,7 @@ export function createGatewayServer(
       // 记录所有登录用户（含主用户）的用户 id：供 session.create/fork 响应回调
       // 登记 sessionId→cwd 缓存与 dsh-ssh 主机 SSRF 校验使用；权限行仍只挂子用户
       (req as Req).dshpwUser = user.userId;
+      (req as Req).dshpwIsAdmin = row.role === 'admin';
       if (row.role !== 'admin') {
         const perms = effectivePermissions(user.userId);
         const lang = langOf(req);
@@ -1787,7 +1803,8 @@ export function createGatewayServer(
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.noUpload')));
           return;
         }
-        if (isWorkspaceRestricted(perms.allowed_folders) && isWorkspaceWrite(requestPath)) {
+        const workspaceManagementAllowed = perms.allow_workspace_create && (isWorkspaceCreate(requestPath) || isWorkspaceDeleteOrRename(requestPath));
+        if (isWorkspaceWrite(requestPath) && !workspaceManagementAllowed) {
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.workspaceDenied')));
           return;
         }
@@ -2109,6 +2126,23 @@ export function createGatewayServer(
           return;
         }
 
+        // ── workspace 管理响应：创建成功后登记创建者并默认授权全部会话 ──
+        if (
+          reqAs.dshpwWorkspacePath !== undefined &&
+          (upstreamRes.statusCode ?? 500) >= 200 &&
+          (upstreamRes.statusCode ?? 500) < 300 &&
+          reqAs.dshpwUser !== undefined
+        ) {
+          if (reqAs.dshpwWorkspaceCreate === true) {
+            db.addUserWorkspace(reqAs.dshpwUser, reqAs.dshpwWorkspacePath);
+            db.addAllowedFolder(reqAs.dshpwUser, reqAs.dshpwWorkspacePath);
+          } else if (reqAs.dshpwWorkspaceOldPath !== undefined && reqAs.dshpwWorkspaceNewPath !== undefined) {
+            db.renameUserWorkspace(reqAs.dshpwUser, reqAs.dshpwWorkspaceOldPath, reqAs.dshpwWorkspaceNewPath);
+          } else if (/(?:remove|delete)(?:[./]|$)/.test(proxyPath)) {
+            db.removeUserWorkspace(reqAs.dshpwUser, reqAs.dshpwWorkspacePath);
+          }
+        }
+
         // ── workspace.list 响应：收集 id→path 缓存 + 受限子用户过滤白名单外的工作区 ──
         if (req.method === 'POST' && /^\/api\/workspace[.\/]list$/.test(proxyPath)) {
           bufferUpstream(upstreamRes, res, (raw) => {
@@ -2123,8 +2157,14 @@ export function createGatewayServer(
               collectSessionCwdFromWorkspaces(parsed, sessionCwdById);
               const restricted =
                 reqAs.dshpwPerms !== undefined && isWorkspaceRestricted(reqAs.dshpwPerms.allowed_folders);
-              const outBody = restricted
-                ? filterByPathField(parsed, reqAs.dshpwPerms!.allowed_folders, 'path')
+              const workspaceVisible = (candidate: string): boolean => {
+                if (!folderAllowed(candidate, reqAs.dshpwPerms?.allowed_folders ?? [])) return false;
+                if (reqAs.dshpwUser === undefined || reqAs.dshpwIsAdmin === true) return true;
+                const owners = db.listWorkspaceOwners();
+                return !owners.some((owner) => owner.path === candidate && owner.userId !== reqAs.dshpwUser);
+              };
+              const outBody = reqAs.dshpwUser !== undefined
+                ? filterByPathFieldWithPredicate(parsed, 'path', workspaceVisible)
                 : parsed;
               // F-25：子用户（含 allowedFolders=[] 全部允许）只能看到被授权的会话——
               // 清空 archivedSessionIds 枚举源，并把活动 sessionIds 按逐会话禁用过滤
@@ -2333,11 +2373,11 @@ export function createGatewayServer(
     // 受限子用户的请求体缓冲检查（尽力而为）：
     //   1) 文件夹白名单：session.create/fork 的 cwd/workspaceId 必须在授权目录内
     //   2) 沙盒权限：settings.mutate 试图把 defaultPreset 切到高于授权级别 → 403
+    const workspaceManagementRequest = isWorkspaceCreate(proxyPath) || isWorkspaceDeleteOrRename(proxyPath);
     const needsFolderCheck =
       reqAs.dshpwPerms !== undefined &&
-      isWorkspaceRestricted(reqAs.dshpwPerms.allowed_folders) &&
       (req.method === 'POST' || req.method === 'PUT' || (req.method === 'DELETE' && isAionuiPanel(proxyPath))) &&
-      (WORKSPACE_ENDPOINT_RE.test(proxyPath) || isAionuiPanel(proxyPath));
+      ((isWorkspaceRestricted(reqAs.dshpwPerms.allowed_folders) && (WORKSPACE_ENDPOINT_RE.test(proxyPath) || isAionuiPanel(proxyPath))) || workspaceManagementRequest);
     const needsSandboxCheck =
       reqAs.dshpwPerms !== undefined &&
       reqAs.dshpwPerms.sandbox_mode !== null &&
@@ -2476,10 +2516,40 @@ export function createGatewayServer(
               }
             }
           }
-          if (targetPath !== null && !folderAllowed(targetPath, reqAs.dshpwPerms!.allowed_folders)) {
+          // 新建工作区由专门权限控制：成功后会自动加入创建者白名单，因此不能被
+          // 新用户的初始 __deny__ 白名单反向锁死。已有工作区的删除/重命名仍须在白名单内。
+          if (targetPath !== null && !isWorkspaceCreate(proxyPath) && !folderAllowed(targetPath, reqAs.dshpwPerms!.allowed_folders)) {
             upstreamReq.destroy();
             res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
             return;
+          }
+          if (targetPath !== null && (isWorkspaceCreate(proxyPath) || isWorkspaceDeleteOrRename(proxyPath))) {
+            const renamePaths = isWorkspaceDeleteOrRename(proxyPath) ? extractWorkspaceRenamePaths(bodyObj) : null;
+            if (isWorkspaceDeleteOrRename(proxyPath) && renamePaths === null && /(?:rename|update)(?:[./]|$)/.test(proxyPath)) {
+              upstreamReq.destroy();
+              res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+              return;
+            }
+            const oldPath = normalizePath(renamePaths?.oldPath ?? targetPath);
+            const newPath = renamePaths === null ? null : normalizePath(renamePaths.newPath);
+            const pathsToAuthorize = newPath === null ? [oldPath] : [oldPath, newPath];
+            const owners = db.listWorkspaceOwners();
+            if (!reqAs.dshpwIsAdmin && owners.some((owner) => pathsToAuthorize.includes(normalizePath(owner.path)) && owner.userId !== reqAs.dshpwUser)) {
+              upstreamReq.destroy();
+              res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.workspaceDenied')));
+              return;
+            }
+            if (newPath !== null && !folderAllowed(newPath, reqAs.dshpwPerms!.allowed_folders)) {
+              upstreamReq.destroy();
+              res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+              return;
+            }
+            reqAs.dshpwWorkspacePath = oldPath;
+            reqAs.dshpwWorkspaceCreate = isWorkspaceCreate(proxyPath);
+            if (newPath !== null) {
+              reqAs.dshpwWorkspaceOldPath = oldPath;
+              reqAs.dshpwWorkspaceNewPath = newPath;
+            }
           }
           // 记录本次判定出的目标目录，供 session.create/fork 响应回调登记 sessionId→cwd 缓存
           if (targetPath !== null) reqAs.dshpwSessionCwd = targetPath;

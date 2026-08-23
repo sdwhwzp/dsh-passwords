@@ -45,6 +45,7 @@ export interface UpdateInfo {
   idleRemainingMs: number | null;
   autoUpdateEnabled: boolean;
   autoInstallSupported: boolean;
+  checking: boolean;
   manualCommand: string;
   lastCheckedAt: string | null;
   lastError: string | null;
@@ -63,6 +64,7 @@ export interface PermOverview {
       dailyMinutesLimit: number | null;
       allowUpload: boolean;
       allowGitDownload: boolean;
+      allowWorkspaceCreate: boolean;
       banned: boolean;
       sandboxMode: string | null;
       disabledSessions: string[];
@@ -83,6 +85,7 @@ interface PermDraft {
   minutes: string;
   upload: boolean;
   git: boolean;
+  workspaceCreate: boolean;
   banned: boolean;
   sandbox: string;
   disabledSessions: string[];
@@ -239,6 +242,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
                   minutes: u.permissions.dailyMinutesLimit === null ? '' : String(u.permissions.dailyMinutesLimit),
                   upload: u.permissions.allowUpload,
                   git: u.permissions.allowGitDownload,
+                  workspaceCreate: u.permissions.allowWorkspaceCreate,
                   banned: u.permissions.banned,
                   sandbox: u.permissions.sandboxMode ?? '',
                   disabledSessions: [...(u.permissions.disabledSessions ?? [])],
@@ -359,19 +363,16 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
     setUpdateChecking(true);
     setError('');
     setNotice('');
-    const previousCheckedAt = updateInfo?.lastCheckedAt ?? null;
     try {
       await api('/api/dsh-passwords/update/check', {});
-      const deadline = Date.now() + 30_000;
+      const deadline = Date.now() + 60_000;
       while (Date.now() < deadline) {
         const response = await api<{ status?: UpdateInfo }>('/api/dsh-passwords/update/status');
         const status = response.status;
         if (status) {
           setUpdateInfo(status);
-          // checkNow 在发起 GitHub 请求前写入 lastCheckedAt；下载阶段由状态行单独展示。
-          if (status.lastCheckedAt !== previousCheckedAt || status.phase === 'error' || status.phase === 'ready' || status.phase === 'downloading') {
-            break;
-          }
+          // 检查接口会异步触发下载；只有检查和下载都结束后才结束 loading。
+          if (!status.checking && status.phase !== 'downloading') break;
         }
         await new Promise((resolve) => window.setTimeout(resolve, 700));
       }
@@ -559,6 +560,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
           dailyMinutesLimit: minutesNum,
           allowUpload: d.upload,
           allowGitDownload: d.git,
+          allowWorkspaceCreate: d.workspaceCreate,
           banned: d.banned,
           sandboxMode: d.sandbox === '' ? null : d.sandbox,
           disabledSessions: d.disabledSessions.filter((id) => liveEnabledSessions.has(id)),
@@ -663,12 +665,12 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
       h(SectionHeader, { label: t('patch'), status: patchText, tone: patchOk ? 'success' : 'danger' }),
       h(
         'div',
-        { className: 'dshpw-patch-actions' },
+        { className: 'dshpw-patch-actions dshpw-form-actions' },
         isAdmin &&
           h(
             'div',
-            { className: 'dshpw-patch-command' },
-            h('span', { className: 'dshpw-hint' }, t('patchHint2')),
+            { className: 'dshpw-action-row' },
+            h('span', { className: 'dshpw-action-copy dshpw-hint' }, t('patchHint2')),
             h('button', { className: 'dshpw-btn', disabled: busy, onClick: reloadPatch }, t('reloadPatch')),
           ),
       ),
@@ -680,24 +682,16 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
       { className: 'dshpw-section' },
       h(SectionHeader, {
         label: t('update'),
-        status: updateChecking
+        status: updateChecking || updateInfo?.checking
           ? h('span', { className: 'dshpw-update-status', role: 'status', 'aria-live': 'polite' }, h('span', { className: 'dshpw-spinner', 'aria-hidden': 'true' }), t('updateChecking'))
           : updateInfo === null
             ? t('updateUnknown')
             : updateInfo.updateAvailable
-              ? t('updateAvailable')
-              : t('updateUpToDate'),
-        tone: updateChecking ? 'neutral' : updateInfo?.updateAvailable ? 'warning' : updateInfo === null ? 'neutral' : 'success',
+              ? `${t('updateAvailable')} · ${updateInfo.latestVersion ?? '—'}`
+              : `${t('updateUpToDate')} · ${updateInfo.currentVersion}`,
+        tone: updateChecking || updateInfo?.checking ? 'neutral' : updateInfo?.updateAvailable ? 'warning' : updateInfo === null ? 'neutral' : 'success',
       }),
-      h(
-        'div',
-        { className: 'dshpw-row' },
-        h('span', null, t('updateCurrentVersion')),
-        h('strong', null, updateInfo?.currentVersion ?? '—'),
-        updateInfo?.latestVersion
-          ? h('span', { className: 'dshpw-hint' }, `${t('updateLatest')} ${updateInfo.latestVersion}`)
-          : null,
-      ),
+
       updateInfo !== null
         ? h(
             'label',
@@ -722,12 +716,30 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
             ),
           )
         : null,
-      updateInfo?.phase === 'downloading' && updateInfo.downloadPercent !== null
+      updateInfo?.phase === 'downloading'
         ? h(
             'div',
-            { className: 'dshpw-row' },
-            h('span', null, t('updateDownloading')),
-            h('span', { className: 'dshpw-hint' }, `${Math.floor(updateInfo.downloadPercent)}%`),
+            { className: 'dshpw-update-progress' },
+            h(
+              'div',
+              { className: 'dshpw-update-progress-head' },
+              h('span', null, t('updateDownloading')),
+              h('span', { className: 'dshpw-hint' }, updateInfo.downloadPercent === null ? '—' : `${Math.floor(updateInfo.downloadPercent)}%`),
+            ),
+            h(
+              'div',
+              {
+                className: 'dshpw-progress-track',
+                role: 'progressbar',
+                'aria-valuemin': 0,
+                'aria-valuemax': 100,
+                'aria-valuenow': updateInfo.downloadPercent ?? undefined,
+              },
+              h('span', {
+                className: 'dshpw-progress-fill',
+                style: { width: `${Math.max(0, Math.min(100, updateInfo.downloadPercent ?? 0))}%` },
+              }),
+            ),
           )
         : null,
       updateInfo?.phase === 'ready' && updateInfo.idleRemainingMs !== null
@@ -741,17 +753,11 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
       updateInfo?.lastError
         ? h('div', { className: 'dshpw-error' }, updateInfo.lastError)
         : null,
-      updateInfo !== null && !updateInfo.autoInstallSupported
-        ? h(
-            'div',
-            { className: 'dshpw-row' },
-            h('span', null, t('updateManualCmd')),
-            h('code', { className: 'dshpw-hint' }, updateInfo.manualCommand || '—'),
-          )
-        : null,
       h(
         'div',
-        { className: 'dshpw-action-row' },
+        {
+          className: 'dshpw-action-row dshpw-update-actions',
+        },
         isAdmin &&
           h(
             'button',
@@ -759,8 +765,11 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
             updateChecking ? t('updateChecking') : t('updateCheck'),
           ),
         isAdmin &&
-          updateInfo?.phase === 'ready' &&
-          h('button', { className: 'dshpw-btn', disabled: updateBusy, onClick: applyUpdate }, t('updateApplyNow')),
+          h(
+            'button',
+            { className: 'dshpw-btn', disabled: updateBusy || updateInfo === null, onClick: applyUpdate },
+            t('updateApplyNow'),
+          ),
       ),
     ),
 
@@ -1033,6 +1042,16 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
                     onChange: (e: { target: { checked: boolean } }) => setDraft(u.id, { git: e.target.checked }),
                   }),
                   t('permsGit'),
+                ),
+                h(
+                  'label',
+                  { className: 'dshpw-check' },
+                  h('input', {
+                    type: 'checkbox',
+                    checked: d.workspaceCreate,
+                    onChange: (e: { target: { checked: boolean } }) => setDraft(u.id, { workspaceCreate: e.target.checked }),
+                  }),
+                  t('permsWorkspaceCreate'),
                 ),
                 h(
                   'label',
