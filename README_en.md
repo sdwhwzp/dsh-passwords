@@ -38,6 +38,7 @@ The owner can configure, per subuser, from the settings page:
 - **DM-by-default messages**: subuser messages go to the owner by default; broadcasting is owner-only and must be explicitly chosen
 - **Hourly token limit** and **daily usage-time limit**: requests are rejected once the cap is hit
 - **Monthly model-spend allowance**: stored as integer CNY micros with ¥0.01 admin precision; shows used, remaining and an 80% warning, and rejects the next model step at 100%
+- **Customer model scope**: subuser selectors show only GPT-5.6-Sol, GPT-5.6-Terra, and GPT-5.6-Luna; the server also rejects every other model, while the owner retains access to all installed models
 - **Sandbox level**: read-only / workspace-write / full access; when a subuser's AI tries to escalate beyond its level, the gateway forces the approval to "reject"
 - **Upload / git-download toggles** and **ban subusers**
 

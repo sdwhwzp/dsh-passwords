@@ -41,6 +41,7 @@ import {
   monthlySpendQuotaError,
   spendCheckUnavailableError,
 } from './quota-notice.js';
+import { CUSTOMER_MODEL_IDS, customerModelAllowed } from './model-policy.js';
 
 interface SpendAccounting {
   reconcile(): Promise<void>;
@@ -471,6 +472,30 @@ export function apply(ctx: Context): void {
         throw monthlySpendQuotaError(status.usedMicros, permissions.monthly_budget_micros ?? 0);
       }
       return next();
+    });
+
+    // The catalog filter is a usability control; this request hook is the
+    // authorization control and also covers crafted RPC calls or stale clients.
+    ctx.on('agent/request', async (payload, next) => {
+      const config = await next();
+      const principal = (payload as typeof payload & { principal?: AuthenticatedPrincipal }).principal;
+      if (principal === undefined) return config;
+      if (principal.source !== 'dsh-passwords' || !/^[1-9][0-9]*$/.test(principal.id)) {
+        throw new Error('无法验证当前账号的模型权限，请重新登录后再试。');
+      }
+      const user = db!.getUserById(Number(principal.id));
+      if (user === null || user.username !== principal.username || user.role !== principal.role) {
+        throw new Error('无法验证当前账号的模型权限，请重新登录后再试。');
+      }
+      if (user.role === 'admin') return config;
+      if (customerModelAllowed(config.provider, config.model)) return config;
+      db!.audit('customer_model_denied', {
+        username: user.username,
+        detail: JSON.stringify({ provider: config.provider, model: config.model }),
+      });
+      throw new Error(
+        `该子账号仅可使用 ${[...CUSTOMER_MODEL_IDS].join('、')}，请先切换模型后重试。`,
+      );
     });
   }
 

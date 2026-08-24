@@ -62,6 +62,7 @@ import {
 import { findDshRoot, applyRemotePatch, restartDshWeb } from './patch.js';
 import { t, resolveGatewayLang, type Lang } from './i18n.js';
 import { signedPrincipalHeaders } from './principal.js';
+import { filterCustomerModelCatalogResponse } from './model-policy.js';
 
 /** 网关内部扩展请求：权限执行时把用户/权限附在 req 上，供后续中间件与代理读取 */
 type Req = Request & {
@@ -77,6 +78,7 @@ type Req = Request & {
 const HOST_LIST_DIRECTORY_RE = /^\/api\/host[.\/]listDirectory$/;
 const HOST_CREATE_DIRECTORY_RE = /^\/api\/host[.\/]createDirectory$/;
 const WORKSPACE_CREATE_RE = /^\/api\/workspace[.\/]create$/;
+const MODEL_CATALOG_RE = /^\/api\/(?:llm|session)[.\/]models$/;
 
 /** Resolve symlinks in every existing ancestor while retaining a missing leaf. */
 function canonicalCandidate(candidate: string): string | null {
@@ -2263,6 +2265,37 @@ export function createGatewayServer(
       (upstreamRes) => {
         const contentType = String(upstreamRes.headers['content-type'] ?? '');
         const encoding = String(upstreamRes.headers['content-encoding'] ?? '');
+
+        // Customer model selectors expose only the three supported GPT-5.6
+        // routes. Both the host catalog and the per-session catalog are
+        // filtered; malformed successful responses fail closed.
+        if (
+          reqAs.dshpwPerms !== undefined &&
+          req.method === 'POST' &&
+          MODEL_CATALOG_RE.test(proxyPath)
+        ) {
+          bufferUpstream(upstreamRes, res, (raw) => {
+            try {
+              const decoded = encoding.includes('gzip') ? gunzipBounded(raw) : raw;
+              const filtered = filterCustomerModelCatalogResponse(JSON.parse(decoded.toString('utf8')));
+              if (filtered === null) {
+                res.status(502).type('text/plain').send('502 Upstream response unprocessable');
+                return;
+              }
+              const out = Buffer.from(JSON.stringify(filtered), 'utf8');
+              const respHeaders = headersForRewrittenBody(upstreamRes.headers);
+              respHeaders['content-length'] = String(out.length);
+              if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+              if (!res.writableEnded) res.end(out);
+            } catch (error) {
+              const message = error instanceof OversizeResponseError
+                ? '502 Upstream response too large'
+                : '502 Upstream response unprocessable';
+              if (!res.headersSent) res.status(502).type('text/plain').send(message);
+            }
+          });
+          return;
+        }
 
         // ── HTML 响应：缓冲 + 注入兼容脚本（crypto.randomUUID polyfill 等） ──
         if (contentType.includes('text/html')) {
