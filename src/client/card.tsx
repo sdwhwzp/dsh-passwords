@@ -54,6 +54,7 @@ export interface UpdateInfo {
 
 export interface PermOverview {
   me: { id: number; username: string; role: 'admin' | 'user' };
+  availableWebSocketPaths: string[];
   users: Array<{
     id: number;
     username: string;
@@ -65,6 +66,7 @@ export interface PermOverview {
       allowUpload: boolean;
       allowGitDownload: boolean;
       allowWorkspaceCreate: boolean;
+      allowedWebSocketPaths: string[];
       banned: boolean;
       sandboxMode: string | null;
       disabledSessions: string[];
@@ -89,6 +91,7 @@ interface PermDraft {
   banned: boolean;
   sandbox: string;
   disabledSessions: string[];
+  webSocketPaths: string[];
 }
 
 interface WorkspaceInfo {
@@ -244,6 +247,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
                   git: u.permissions.allowGitDownload,
                   workspaceCreate: u.permissions.allowWorkspaceCreate,
                   banned: u.permissions.banned,
+                  webSocketPaths: [...(u.permissions.allowedWebSocketPaths ?? [])],
                   sandbox: u.permissions.sandboxMode ?? '',
                   disabledSessions: [...(u.permissions.disabledSessions ?? [])],
                 };
@@ -561,6 +565,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
           allowUpload: d.upload,
           allowGitDownload: d.git,
           allowWorkspaceCreate: d.workspaceCreate,
+          allowedWebSocketPaths: d.webSocketPaths,
           banned: d.banned,
           sandboxMode: d.sandbox === '' ? null : d.sandbox,
           disabledSessions: d.disabledSessions.filter((id) => liveEnabledSessions.has(id)),
@@ -981,6 +986,31 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
                       );
                     }),
                   ),
+              overview.availableWebSocketPaths.length > 0
+                ? h(
+                    'div',
+                    { className: 'dshpw-row' },
+                    h('div', { className: 'dshpw-label' }, t('permsWebSockets')),
+                    ...overview.availableWebSocketPaths.map((rule) =>
+                      h(
+                        'label',
+                        { className: 'dshpw-check', key: rule },
+                        h('input', {
+                          type: 'checkbox',
+                          checked: d.webSocketPaths.includes(rule),
+                          disabled: busy,
+                          onChange: (e: { target: { checked: boolean } }) => {
+                            const next = new Set(d.webSocketPaths);
+                            if (e.target.checked) next.add(rule);
+                            else next.delete(rule);
+                            setDraft(u.id, { webSocketPaths: [...next] });
+                          },
+                        }),
+                        rule,
+                      ),
+                    ),
+                  )
+                : null,
               h(
                 'select',
                 {

@@ -33,6 +33,7 @@ function makeConfig(dbPath: string): PlatformConfig {
     jwtSecret: 'test-jwt-secret',
     internalSecret: 'test-internal-secret',
     patch: { dshRoot: '', restartService: 'dsh-web' },
+    webSocket: { adminAllowlist: [], userAllowlist: [] },
   };
 }
 

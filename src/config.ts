@@ -8,6 +8,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
+import { parseWebSocketAllowlist } from './permissions.js';
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 // dsh 进程里没有本项目的 .env（通过 DSH_PASSWORDS_ENV_FILE 显式指定网关 .env 路径）
@@ -56,6 +57,11 @@ export interface PlatformConfig {
     dshRoot: string;
     /** 补丁应用后要重启的 dsh systemd 服务名；留空则不自动重启 */
     restartService: string;
+  };
+  /** WebSocket 路径授权：内置事件默认开放，第三方路径必须显式配置。 */
+  webSocket: {
+    adminAllowlist: string[];
+    userAllowlist: string[];
   };
 }
 
@@ -162,6 +168,10 @@ export function loadConfig(): PlatformConfig {
     patch: {
       dshRoot: readEnv('MCP_DSH_ROOT', ''),
       restartService,
+    },
+    webSocket: {
+      adminAllowlist: parseWebSocketAllowlist(process.env.MCP_GATEWAY_WS_ADMIN_ALLOWLIST, 'MCP_GATEWAY_WS_ADMIN_ALLOWLIST'),
+      userAllowlist: parseWebSocketAllowlist(process.env.MCP_GATEWAY_WS_USER_ALLOWLIST, 'MCP_GATEWAY_WS_USER_ALLOWLIST'),
     },
   };
 }

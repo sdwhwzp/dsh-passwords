@@ -57,6 +57,7 @@ export interface UserPermissionsRow {
   allow_upload: boolean;
   allow_git_download: boolean;
   allow_workspace_create: boolean;
+  allowed_websocket_paths: string[];
   banned: boolean;
   sandbox_mode: string | null;
   disabled_sessions: string[];
@@ -135,6 +136,7 @@ CREATE TABLE IF NOT EXISTS user_permissions (
   allow_upload       INTEGER NOT NULL DEFAULT 1,
   allow_git_download INTEGER NOT NULL DEFAULT 0,
   allow_workspace_create INTEGER NOT NULL DEFAULT 0,
+  allowed_websocket_paths TEXT NOT NULL DEFAULT '[]', -- 第三方 WebSocket 子用户授权路径
   banned             INTEGER NOT NULL DEFAULT 0,
   sandbox_mode       TEXT,                          -- NULL = 不更改；read-only/workspace-write/danger-full-access
   disabled_sessions  TEXT NOT NULL DEFAULT '[]',    -- 已开启工作区内逐会话关闭的 sessionId JSON 数组
@@ -311,6 +313,9 @@ export class Database {
     }
     if (!cols.some((c) => c.name === 'allow_workspace_create')) {
       this.db.exec('ALTER TABLE user_permissions ADD COLUMN allow_workspace_create INTEGER NOT NULL DEFAULT 0');
+    }
+    if (!cols.some((c) => c.name === 'allowed_websocket_paths')) {
+      this.db.exec("ALTER TABLE user_permissions ADD COLUMN allowed_websocket_paths TEXT NOT NULL DEFAULT '[]'");
     }
   }
 
@@ -787,7 +792,7 @@ export class Database {
   // ── 子用户权限（网关强制执行） ────────────────────────────
   getPermissions(userId: number): UserPermissionsRow | null {
     const row = this.stmt(
-      'SELECT user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, allow_upload, allow_git_download, allow_workspace_create, banned, sandbox_mode, disabled_sessions, updated_at FROM user_permissions WHERE user_id = ?',
+      'SELECT user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, allow_upload, allow_git_download, allow_workspace_create, allowed_websocket_paths, banned, sandbox_mode, disabled_sessions, updated_at FROM user_permissions WHERE user_id = ?',
     ).get(userId) as
       | {
           user_id: number;
@@ -797,6 +802,7 @@ export class Database {
           allow_upload: number;
           allow_git_download: number;
           allow_workspace_create: number;
+          allowed_websocket_paths: string | null;
           banned: number;
           sandbox_mode: string | null;
           disabled_sessions: string | null;
@@ -812,6 +818,7 @@ export class Database {
       allow_upload: row.allow_upload === 1,
       allow_git_download: row.allow_git_download === 1,
       allow_workspace_create: row.allow_workspace_create === 1,
+      allowed_websocket_paths: parseJsonArray(row.allowed_websocket_paths),
       banned: row.banned === 1,
       sandbox_mode: row.sandbox_mode,
       disabled_sessions: parseJsonArray(row.disabled_sessions),
@@ -828,6 +835,7 @@ export class Database {
       allowUpload: boolean;
       allowGitDownload: boolean;
       allowWorkspaceCreate: boolean;
+      allowedWebSocketPaths?: string[];
       banned: boolean;
       sandboxMode: string | null;
       disabledSessions?: string[];
@@ -837,9 +845,14 @@ export class Database {
     // （fail-open 陷阱）——网关端点已拒绝，数据层再兑底一次。
     const allowedFolders = sanitizeAllowedFolders(perms.allowedFolders);
     const disabledSessions = [...new Set((perms.disabledSessions ?? []).filter((id) => typeof id === 'string' && id.length > 0 && id.length <= 200))].slice(0, 2000);
+    const current = this.getPermissions(userId);
+    const allowedWebSocketPaths = [...new Set(
+      (perms.allowedWebSocketPaths ?? current?.allowed_websocket_paths ?? [])
+        .filter((path) => typeof path === 'string' && path.length > 0 && path.length <= 256),
+    )].slice(0, 64);
     this.stmt(
-      `INSERT INTO user_permissions (user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, allow_upload, allow_git_download, allow_workspace_create, banned, sandbox_mode, disabled_sessions)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO user_permissions (user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, allow_upload, allow_git_download, allow_workspace_create, allowed_websocket_paths, banned, sandbox_mode, disabled_sessions)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(user_id) DO UPDATE SET
          allowed_folders = excluded.allowed_folders,
          hourly_token_limit = excluded.hourly_token_limit,
@@ -847,6 +860,7 @@ export class Database {
          allow_upload = excluded.allow_upload,
          allow_git_download = excluded.allow_git_download,
          allow_workspace_create = excluded.allow_workspace_create,
+         allowed_websocket_paths = excluded.allowed_websocket_paths,
          banned = excluded.banned,
          sandbox_mode = excluded.sandbox_mode,
          disabled_sessions = excluded.disabled_sessions,
@@ -859,6 +873,7 @@ export class Database {
       perms.allowUpload ? 1 : 0,
       perms.allowGitDownload ? 1 : 0,
       perms.allowWorkspaceCreate ? 1 : 0,
+      JSON.stringify(allowedWebSocketPaths),
       perms.banned ? 1 : 0,
       perms.sandboxMode,
       JSON.stringify(disabledSessions),
@@ -876,11 +891,11 @@ export class Database {
     const canonical = normalizePath(workspacePath);
     const current = this.getPermissions(userId);
     if (!current || current.allowed_folders.includes('__deny__')) {
-      if (current) this.setPermissions(userId, { allowedFolders: [canonical], hourlyTokenLimit: current.hourly_token_limit, dailyMinutesLimit: current.daily_minutes_limit, allowUpload: current.allow_upload, allowGitDownload: current.allow_git_download, allowWorkspaceCreate: current.allow_workspace_create, banned: current.banned, sandboxMode: current.sandbox_mode, disabledSessions: current.disabled_sessions });
+      if (current) this.setPermissions(userId, { allowedFolders: [canonical], hourlyTokenLimit: current.hourly_token_limit, dailyMinutesLimit: current.daily_minutes_limit, allowUpload: current.allow_upload, allowGitDownload: current.allow_git_download, allowWorkspaceCreate: current.allow_workspace_create, allowedWebSocketPaths: current.allowed_websocket_paths, banned: current.banned, sandboxMode: current.sandbox_mode, disabledSessions: current.disabled_sessions });
       return;
     }
     if (!current.allowed_folders.some((entry) => normalizePath(entry) === canonical)) {
-      this.setPermissions(userId, { allowedFolders: [...current.allowed_folders, canonical], hourlyTokenLimit: current.hourly_token_limit, dailyMinutesLimit: current.daily_minutes_limit, allowUpload: current.allow_upload, allowGitDownload: current.allow_git_download, allowWorkspaceCreate: current.allow_workspace_create, banned: current.banned, sandboxMode: current.sandbox_mode, disabledSessions: current.disabled_sessions });
+      this.setPermissions(userId, { allowedFolders: [...current.allowed_folders, canonical], hourlyTokenLimit: current.hourly_token_limit, dailyMinutesLimit: current.daily_minutes_limit, allowUpload: current.allow_upload, allowGitDownload: current.allow_git_download, allowWorkspaceCreate: current.allow_workspace_create, allowedWebSocketPaths: current.allowed_websocket_paths, banned: current.banned, sandboxMode: current.sandbox_mode, disabledSessions: current.disabled_sessions });
     }
   }
 

@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 FROM node:22-slim
 
 ARG DSH_VERSION=0.1.1-rc.2

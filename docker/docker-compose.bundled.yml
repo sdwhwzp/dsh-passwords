@@ -9,6 +9,8 @@ services:
     environment:
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?set DEEPSEEK_API_KEY in docker/.env}
       MCP_GATEWAY_PUBLIC_HOST: ${MCP_GATEWAY_PUBLIC_HOST:-}
+      MCP_GATEWAY_WS_ADMIN_ALLOWLIST: ${MCP_GATEWAY_WS_ADMIN_ALLOWLIST:-/sidebar/ws/terminal,/sidebar/ws/agent-terminals}
+      MCP_GATEWAY_WS_USER_ALLOWLIST: ${MCP_GATEWAY_WS_USER_ALLOWLIST:-}
       MCP_GATEWAY_UPSTREAM: http://127.0.0.1:3080
     ports:
       - "127.0.0.1:3088:3088"

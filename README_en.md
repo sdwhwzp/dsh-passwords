@@ -226,7 +226,7 @@ After logging in to dsh, open Settings → Plugins to find the "dsh-passwords ·
 | Change password | Yourself; the owner can change anyone's | Old sessions are invalidated immediately |
 | Change username | Yourself; the owner can change anyone's | Sign in with the new username afterwards |
 | Subuser management | Owner only | Create/delete subusers (subusers can sign in but have no admin rights) |
-| Subuser permissions | Owner only | Workspace allowlist, hourly token limit, daily time limit, sandbox level, upload/git-download toggles, ban |
+| Subuser permissions | Owner only | Workspace allowlist, hourly token limit, daily time limit, sandbox level, upload/git-download toggles, third-party WebSocket grants, ban |
 | Chat / messages | All signed-in users | Chat button in the bottom-left corner, with tags (issue/pull request/discussion/announcement/question) |
 | Sign out | All signed-in users | Log out of the current account and return to the login page |
 
@@ -255,6 +255,8 @@ The settings card has a "Software updates" section that auto-checks GitHub for n
 | `MCP_GATEWAY_HOST` | `0.0.0.0` | Gateway listen address |
 | `MCP_GATEWAY_PORT` | `443` | Gateway port |
 | `MCP_GATEWAY_UPSTREAM` | `http://127.0.0.1:3080` | dsh web address (the plugin points it at dsh's actual port automatically — usually leave as-is) |
+| `MCP_GATEWAY_WS_ADMIN_ALLOWLIST` | empty | Comma-separated configured third-party WebSocket paths. They appear in the owner settings card, where the owner can grant them to each subuser. Exact paths and a trailing `/*` are supported; for dsh-better-sidebar use `/sidebar/ws/terminal,/sidebar/ws/agent-terminals` |
+| `MCP_GATEWAY_WS_USER_ALLOWLIST` | empty | Kept for compatibility with older configurations; its paths are merged into the same settings list. New configurations only need `MCP_GATEWAY_WS_ADMIN_ALLOWLIST` |
 | `MCP_GATEWAY_REDIRECT_PORT` | `80` | Port 80: ACME challenge answers + 301 redirect to 443 |
 | `MCP_GATEWAY_DOMAIN` | empty | Your own domain; when empty, `<public-IP>.sslip.io` is used |
 | `MCP_GATEWAY_AUTO_TLS` | on | Empty = auto; `0` disables it (plaintext HTTP, dangerous) |
@@ -334,9 +336,9 @@ The UI is bilingual (Chinese/English) and follows dsh's language setting:
 
 ## Version compatibility
 
-Current release: dsh-passwords 2.6.0, fully compatible with dsh 0.1.1-rc.2 (keyed slots, the patch chain and profile layout stay aligned since rc.8), and still compatible with dsh 0.1.0-rc.6 and later.
+Current release: dsh-passwords 2.6.2, fully compatible with dsh 0.1.1-rc.2 (keyed slots, the patch chain and profile layout stay aligned since rc.8), and still compatible with dsh 0.1.0-rc.6 and later.
 
-The npm package ships the prebuilt `dist/`, TypeScript source, install/register scripts, Docker files, `cordis.yml`, READMEs and the license. The Docker image uses the same `src/`, `dist/` and `scripts/` as npm 2.6.0.
+The npm package ships the prebuilt `dist/`, TypeScript source, install/register scripts, Docker files, `cordis.yml`, READMEs and the license. The Docker image uses the same `src/`, `dist/` and `scripts/` as npm 2.6.2.
 
 ## License
 

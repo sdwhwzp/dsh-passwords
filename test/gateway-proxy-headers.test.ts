@@ -62,6 +62,11 @@ function startMockUpstream(): Promise<http.Server> {
         res.end();
       }
     });
+    server.on('upgrade', (req, socket) => {
+      lastUpstreamHeaders = req.headers;
+      socket.write('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n');
+      socket.destroy();
+    });
     server.listen(0, '127.0.0.1', () => resolve(server));
   });
 }
@@ -76,6 +81,7 @@ function gatewayReq(
   method: string,
   url: string,
   headers: Record<string, string> = {},
+  body?: string,
 ): Promise<{ status: number; rawHeaders: string[]; body: string }> {
   return new Promise((resolve, reject) => {
     const req = http.request(
@@ -93,7 +99,7 @@ function gatewayReq(
       },
     );
     req.on('error', reject);
-    req.end();
+    req.end(body);
   });
 }
 
@@ -136,6 +142,7 @@ before(async () => {
     jwtSecret: 'test-secret',
     internalSecret: 'test-internal',
     patch: { dshRoot: '', restartService: '' },
+    webSocket: { adminAllowlist: ['/sidebar/ws/terminal'], userAllowlist: ['/plugin/ws/*'] },
   };
 
   auth = new AuthService(config, db);
@@ -160,6 +167,145 @@ after(() => {
     rmSync(tempDir, { recursive: true, force: true });
   } catch {
     /* 忽略：文件锁未释放 */
+  }
+});
+
+function websocketHandshake(url: string, headers: Record<string, string>): Promise<{ statusLine: string; headers: string }> {
+  return new Promise((resolve, reject) => {
+    const req = http.request({
+      host: '127.0.0.1',
+      port: gatewayPort,
+      path: url,
+      headers: {
+        connection: 'Upgrade',
+        upgrade: 'websocket',
+        'sec-websocket-version': '13',
+        'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==',
+        ...headers,
+      },
+    });
+    req.once('upgrade', (res, socket) => {
+      const statusLine = `HTTP/${res.httpVersion} ${String(res.statusCode)} ${res.statusMessage ?? ''}`.trim();
+      socket.destroy();
+      resolve({ statusLine, headers: JSON.stringify(res.headers) });
+    });
+    req.once('response', (res) => {
+      res.resume();
+      res.once('end', () => resolve({ statusLine: `HTTP/${res.httpVersion} ${String(res.statusCode)}`, headers: JSON.stringify(res.headers) }));
+    });
+    req.once('error', reject);
+    req.end();
+  });
+}
+
+test('better-sidebar HTTP 宿主路由：子用户请求在网关层拒绝', async () => {
+  const subUser = db.createUser('sidebar-denied', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: [], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: true, allowGitDownload: true, allowWorkspaceCreate: false,
+    banned: false, sandboxMode: null, disabledSessions: [],
+  });
+  const subToken = jwt.sign({ sub: String(subUser.id), username: subUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' });
+  const originalCookie = cookie;
+  cookie = `dsh_gateway_token=${subToken}`;
+  try {
+    for (const path of ['/sidebar/api/fs.tree', '/sidebar/upload', '/sidebar/file/x', '/sidebar/html/x']) {
+      const response = await gatewayReq('POST', path, { origin: 'http://127.0.0.1' }, '{}');
+      assert.equal(response.status, 403, `${path} must be denied before upstream`);
+    }
+  } finally {
+    cookie = originalCookie;
+  }
+});
+
+test('better-sidebar WebSocket：管理员可升级，未知路径被拒绝', async () => {
+  const allowed = await websocketHandshake('/sidebar/ws/terminal?tab=test', {
+    cookie,
+    origin: 'http://127.0.0.1',
+    host: '127.0.0.1',
+  });
+  assert.match(allowed.statusLine, /101 Switching Protocols/);
+  const denied = await websocketHandshake('/sidebar/ws/unknown', {
+    cookie,
+    origin: 'http://127.0.0.1',
+    host: '127.0.0.1',
+  });
+  assert.match(denied.statusLine, /404/);
+});
+
+test('跨源 better-sidebar WebSocket 在升级前被拒绝', async () => {
+  const denied = await websocketHandshake('/sidebar/ws/terminal', {
+    cookie,
+    origin: 'https://attacker.example',
+    host: '127.0.0.1',
+  });
+  assert.match(denied.statusLine, /403/);
+});
+
+test('Issue #13：子用户必须先获得主用户授予的 WebSocket 路径权限', async () => {
+  const subUser = db.createUser('plugin-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: [],
+    hourlyTokenLimit: null,
+    dailyMinutesLimit: null,
+    allowUpload: true,
+    allowGitDownload: true,
+    allowWorkspaceCreate: false,
+    banned: false,
+    sandboxMode: null,
+    disabledSessions: [],
+  });
+  const subToken = jwt.sign({ sub: String(subUser.id), username: subUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' });
+  const subCookie = `dsh_gateway_token=${subToken}`;
+  const originalCookie = cookie;
+  try {
+    const beforeGrant = await websocketHandshake('/plugin/ws/run', {
+      cookie: subCookie,
+      origin: 'http://127.0.0.1',
+      host: '127.0.0.1',
+    });
+    assert.match(beforeGrant.statusLine, /404/);
+
+    cookie = originalCookie;
+    const save = await gatewayReq(
+      'POST',
+      '/gateway/api/permissions',
+      { 'content-type': 'application/json' },
+      JSON.stringify({
+        userId: subUser.id,
+        allowedFolders: [],
+        allowedWebSocketPaths: ['/plugin/ws/*', '/sidebar/ws/terminal'],
+      }),
+    );
+    assert.equal(save.status, 200);
+
+    const overview = await gatewayReq('GET', '/gateway/api/overview');
+    assert.equal(overview.status, 200);
+    const overviewBody = JSON.parse(overview.body) as {
+      availableWebSocketPaths: string[];
+      users: Array<{ id: number; permissions: { allowedWebSocketPaths: string[] } }>;
+    };
+    assert.deepEqual(overviewBody.availableWebSocketPaths, ['/sidebar/ws/terminal', '/plugin/ws/*']);
+    assert.deepEqual(
+      overviewBody.users.find((user) => user.id === subUser.id)?.permissions.allowedWebSocketPaths,
+      ['/plugin/ws/*', '/sidebar/ws/terminal'],
+    );
+
+    const afterGrant = await websocketHandshake('/plugin/ws/run', {
+      cookie: subCookie,
+      origin: 'http://127.0.0.1',
+      host: '127.0.0.1',
+    });
+    assert.match(afterGrant.statusLine, /101 Switching Protocols/);
+
+    const sidebarAfterGrant = await websocketHandshake('/sidebar/ws/terminal', {
+      cookie: subCookie,
+      origin: 'http://127.0.0.1',
+      host: '127.0.0.1',
+    });
+    assert.match(sidebarAfterGrant.statusLine, /101 Switching Protocols/);
+  } finally {
+    cookie = originalCookie;
   }
 });
 
@@ -219,6 +365,51 @@ test('F-15：网关会话 Cookie 不得转发给上游（信任边界最小化�
     undefined,
     `上游收到网关 Cookie：${JSON.stringify(lastUpstreamHeaders['cookie'])}`,
   );
+});
+
+test('工作区创建权限关闭时拒绝 rc.2 目录选择器写入', async () => {
+  const subUser = db.createUser('workspace-denied', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: ['__deny__'],
+    hourlyTokenLimit: null,
+    dailyMinutesLimit: null,
+    allowUpload: true,
+    allowGitDownload: false,
+    allowWorkspaceCreate: false,
+    banned: false,
+    sandboxMode: null,
+    disabledSessions: [],
+  });
+  const subToken = jwt.sign({ sub: String(subUser.id), username: subUser.username, cv: 0 }, 'test-secret', {
+    expiresIn: '12h',
+  });
+  const originalCookie = cookie;
+  cookie = `dsh_gateway_token=${subToken}`;
+  try {
+    const r = await gatewayReq('POST', '/api/host.createDirectory', { 'content-type': 'application/json' }, JSON.stringify({ path: '/tmp', name: 'should-not-exist' }));
+    assert.equal(r.status, 403, '子用户无创建权限时不得进入目录选择器写入');
+  } finally {
+    cookie = originalCookie;
+  }
+});
+
+test('权限保存接受唯一的拒绝全部工作区哨兵', async () => {
+  const subUser = db.createUser('save-deny-sentinel', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  const payload = JSON.stringify({
+    userId: subUser.id,
+    allowedFolders: ['__deny__'],
+    hourlyTokenLimit: null,
+    dailyMinutesLimit: null,
+    allowUpload: true,
+    allowGitDownload: false,
+    allowWorkspaceCreate: false,
+    banned: false,
+    sandboxMode: null,
+    disabledSessions: [],
+  });
+  const r = await gatewayReq('POST', '/gateway/api/permissions', { 'content-type': 'application/json', 'content-length': String(Buffer.byteLength(payload)) }, payload);
+  assert.equal(r.status, 200, r.body);
+  assert.deepEqual(db.getPermissions(subUser.id)?.allowed_folders, ['__deny__']);
 });
 
 test('F-15 例外：自身插件路由 /api/dsh-passwords/* 必须保留 Cookie（插件 guard 鉴权依赖）', async () => {

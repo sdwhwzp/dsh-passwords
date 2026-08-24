@@ -228,7 +228,7 @@ node scripts/start-http.mjs [端口]    # 默认 8080，会弹 y/N 确认
 | 修改密码 | 本人改自己；主用户可改任何人 | 改密后旧会话全部立即失效，需重新登录 |
 | 修改用户名 | 本人改自己；主用户可改任何人 | 改名后需用新用户名重新登录 |
 | 子用户管理 | 仅主用户 | 创建/删除子用户（子用户可用登录页进入，但没有管理权限） |
-| 子用户权限 | 仅主用户 | 工作区白名单、每小时 token 上限、每日时长上限、沙盒级别、上传/git 下载开关、封禁 |
+| 子用户权限 | 仅主用户 | 工作区白名单、每小时 token 上限、每日时长上限、沙盒级别、上传/git 下载开关、第三方 WebSocket 路径授权、封禁 |
 | 聊天 / 留言 | 所有登录用户 | 左下角聊天按钮，支持标签（议题/拉取请求/讨论/公告/问题） |
 | 退出登录 | 所有登录用户 | 登出当前账号，回到登录页 |
 
@@ -257,6 +257,8 @@ node scripts/start-http.mjs [端口]    # 默认 8080，会弹 y/N 确认
 | `MCP_GATEWAY_HOST` | `0.0.0.0` | 网关监听地址 |
 | `MCP_GATEWAY_PORT` | `443` | 网关端口 |
 | `MCP_GATEWAY_UPSTREAM` | `http://127.0.0.1:3080` | dsh 网页地址（插件自动指向 dsh 实际端口，一般不用改） |
+| `MCP_GATEWAY_WS_ADMIN_ALLOWLIST` | 空 | 已配置的第三方 WebSocket 路径，逗号分隔；路径会显示在主用户设置页，主用户可为每个子用户逐项勾选授权。支持精确路径和末尾 `/*`。dsh-better-sidebar 可填 `/sidebar/ws/terminal,/sidebar/ws/agent-terminals` |
+| `MCP_GATEWAY_WS_USER_ALLOWLIST` | 空 | 兼容旧配置；其中的路径会与 `MCP_GATEWAY_WS_ADMIN_ALLOWLIST` 合并显示。新配置只需使用上面的变量。 |
 | `MCP_GATEWAY_REDIRECT_PORT` | `80` | 80 端口：ACME 证书验证 + 301 跳转 443 |
 | `MCP_GATEWAY_DOMAIN` | 空 | 自己的域名；留空自动用 `<公网IP>.sslip.io` |
 | `MCP_GATEWAY_AUTO_TLS` | 开 | 留空=自动；`0` 关闭（明文 HTTP，危险） |
@@ -336,9 +338,9 @@ curl -s https://你的地址/gateway/readyz    # 就绪检查（含数据库）�
 
 ## 版本兼容
 
-当前版本 dsh-passwords 2.6.0，与 dsh 0.1.1-rc.2 完全兼容（keyed slot、补丁链与 profile 布局均保持对齐），同样兼容 dsh 0.1.0-rc.6 及以上版本。
+当前版本 dsh-passwords 2.6.2，与 dsh 0.1.1-rc.2 完全兼容（keyed slot、补丁链与 profile 布局均保持对齐），同样兼容 dsh 0.1.0-rc.6 及以上版本。
 
-npm 包带预构建的 dist/、TypeScript 源码、安装注册脚本、Docker 文件、cordis.yml、README 和许可证。Docker 镜像与 npm 2.6.0 用同一份 src/、dist/ 和 scripts/。
+npm 包带预构建的 dist/、TypeScript 源码、安装注册脚本、Docker 文件、cordis.yml、README 和许可证。Docker 镜像与 npm 2.6.2 使用同一份 src/、dist/ 和 scripts/。
 
 ## License
 

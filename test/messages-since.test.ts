@@ -93,6 +93,7 @@ before(async () => {
     jwtSecret: 'test-secret',
     internalSecret: 'test-internal',
     patch: { dshRoot: '', restartService: '' },
+    webSocket: { adminAllowlist: [], userAllowlist: [] },
   };
 
   const auth = new AuthService(config, db);

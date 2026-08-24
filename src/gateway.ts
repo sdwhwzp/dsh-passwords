@@ -26,12 +26,14 @@ import {
   isUploadRequest,
   isGitRequest,
   isAdminOnlyPluginEndpoint,
+  isAdminOnlySidebarEndpoint,
   isAionuiFileRead,
   isAionuiFileWrite,
   isAionuiPanel,
   aionuiRootFrom,
   isWorkspaceWrite,
   isWorkspaceCreate,
+  isWorkspaceDirectoryCreate,
   isWorkspaceDeleteOrRename,
   extractWorkspaceRenamePaths,
   isStaticAsset,
@@ -63,6 +65,7 @@ import {
   sanitizeText,
   sanitizeHiddenUnicode,
   todayLocal,
+  webSocketAccessForPath,
 } from './permissions.js';
 import { findDshRoot, applyRemotePatch, restartDshWeb } from './patch.js';
 import { t, resolveGatewayLang, type Lang } from './i18n.js';
@@ -175,20 +178,29 @@ function safeNext(next: string | undefined): string {
  * 公网直连请求不能带伪造头绕过。无 Origin（非浏览器/旧客户端）返回 true，
  * 由 HttpOnly+SameSite Cookie 兜底。
  */
-function originHostMatches(req: Request): boolean {
-  const originRaw = req.headers.origin;
-  if (typeof originRaw !== 'string' || originRaw === '') return true;
+type OriginRequest = {
+  headers: {
+    origin?: string | string[];
+    host?: string | string[];
+    'x-forwarded-host'?: string | string[];
+  };
+  socket: { remoteAddress?: string | null };
+};
+
+function firstHeader(value: string | string[] | undefined): string {
+  return Array.isArray(value) ? value[0] ?? '' : value ?? '';
+}
+
+function originHostMatches(req: OriginRequest): boolean {
+  const originRaw = firstHeader(req.headers.origin);
+  if (originRaw === '') return true;
   try {
     const origin = new URL(originRaw);
     if (origin.origin === 'null') return false;
     const peer = req.socket.remoteAddress ?? '';
     const trustedProxy = peer === '127.0.0.1' || peer === '::1' || peer === '::ffff:127.0.0.1';
-    const forwardedHost =
-      typeof req.headers['x-forwarded-host'] === 'string'
-        ? req.headers['x-forwarded-host'].split(',')[0].trim()
-        : '';
-    const effectiveHost =
-      trustedProxy && forwardedHost !== '' ? forwardedHost : String(req.headers.host ?? '');
+    const forwardedHost = firstHeader(req.headers['x-forwarded-host']).split(',')[0].trim();
+    const effectiveHost = trustedProxy && forwardedHost !== '' ? forwardedHost : firstHeader(req.headers.host);
     return origin.host === effectiveHost;
   } catch {
     return false;
@@ -682,6 +694,12 @@ export function createGatewayServer(
   updateEngine?: UpdateEngine,
 ): http.Server {
   const app = express();
+  // WebSocket 路径只保留一个用户授权面：历史上分别写入 admin/user
+  // allowlist 的路径都展示给主用户，由主用户为子用户勾选授权。
+  const configuredWebSocketPaths = [...new Set([
+    ...config.webSocket.adminAllowlist,
+    ...config.webSocket.userAllowlist,
+  ])];
   // 不泄露框架信息
   app.disable('x-powered-by');
   // 仅解析 /gateway 表单请求；代理请求的 body 必须原样透传给上游
@@ -820,6 +838,7 @@ export function createGatewayServer(
         daily_minutes_limit: null,
         allow_upload: true,
         allow_workspace_create: false,
+        allowed_websocket_paths: [],
         // F-12 残余：新子用户默认禁 git 下载（含 dsh-uploads/download 等外带通道），
         // 主用户需要时按需开启；已有权限行的子用户不受影响
         allow_git_download: false,
@@ -1225,8 +1244,10 @@ export function createGatewayServer(
     const me = apiAuth(req, res, true);
     if (!me) return;
     const day = todayLocal();
+    const registeredUserWebSocketPaths = new Set(configuredWebSocketPaths);
     const users = db.listUsers().map((u) => {
       const perms = effectivePermissions(u.id);
+      const allowedWebSocketPaths = perms.allowed_websocket_paths.filter((rule) => registeredUserWebSocketPaths.has(rule));
       const usage = db.getUsage(u.id, day);
       return {
         id: u.id,
@@ -1239,6 +1260,7 @@ export function createGatewayServer(
           allowUpload: perms.allow_upload,
           allowGitDownload: perms.allow_git_download,
           allowWorkspaceCreate: perms.allow_workspace_create,
+          allowedWebSocketPaths,
           banned: perms.banned,
           sandboxMode: perms.sandbox_mode,
           disabledSessions: perms.disabled_sessions,
@@ -1254,7 +1276,12 @@ export function createGatewayServer(
           : null,
       };
     });
-    res.json({ ok: true, me: { id: me.userId, username: me.username, role: me.role }, users });
+    res.json({
+      ok: true,
+      me: { id: me.userId, username: me.username, role: me.role },
+      availableWebSocketPaths: configuredWebSocketPaths,
+      users,
+    });
   });
 
   // ── 远程文件下载（Issue #4）──────────────────────────────────
@@ -1378,10 +1405,18 @@ export function createGatewayServer(
       res.status(400).json({ ok: false, code: 'FORBIDDEN', error: '不能修改主用户权限' });
       return;
     }
+    // `__deny__` 是本插件用于表达“不给任何工作区”的唯一内部哨兵值。前端在
+    // 关闭最后一个工作区时会提交它；此前它被下面的绝对路径校验误判，导致保存
+    // 权限时显示“输入无效”。哨兵只能单独出现，不能与真实目录混用。
+    if (!Array.isArray(body.allowedFolders) || body.allowedFolders.some((folder) => typeof folder !== 'string')) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: '允许的工作区必须是路径数组' });
+      return;
+    }
     const allowedFolders = stringArray(body.allowedFolders);
+    const denyAll = allowedFolders.length === 1 && allowedFolders[0] === '__deny__';
     // 空字符串、当前目录和根目录会被 folderAllowed 归一为“全盘允许”，与 UI 的
     // “允许的工作区”语义相反；显式拒绝，管理员应使用空数组表示不限制。
-    if (allowedFolders.some((folder) => {
+    if (!denyAll && allowedFolders.some((folder) => {
       const trimmed = folder.trim().replace(/\\/g, '/');
       return (
         trimmed === '' ||
@@ -1411,8 +1446,30 @@ export function createGatewayServer(
       rawSandbox === 'read-only' || rawSandbox === 'workspace-write' || rawSandbox === 'danger-full-access'
         ? rawSandbox
         : null;
+    const submittedWebSocketPaths = body.allowedWebSocketPaths;
+    if (submittedWebSocketPaths !== undefined && !Array.isArray(submittedWebSocketPaths)) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: 'WebSocket 权限必须是路径数组' });
+      return;
+    }
+    if (
+      submittedWebSocketPaths !== undefined &&
+      (submittedWebSocketPaths.length > 64 || submittedWebSocketPaths.some((value) => typeof value !== 'string'))
+    ) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: 'WebSocket 权限列表无效' });
+      return;
+    }
+    const registeredWebSocketPaths = new Set(configuredWebSocketPaths);
+    const existingWebSocketPaths = effectivePermissions(userId).allowed_websocket_paths
+      .filter((rule) => registeredWebSocketPaths.has(rule));
+    const allowedWebSocketPaths = submittedWebSocketPaths === undefined
+      ? existingWebSocketPaths
+      : [...new Set(submittedWebSocketPaths as string[])];
     const disabledSessions = stringArray(body.disabledSessions, 2000)
       .filter((id) => id.length > 0 && id.length <= 200);
+    if (allowedWebSocketPaths.some((rule) => !registeredWebSocketPaths.has(rule))) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: 'WebSocket 权限必须来自服务器已登记的用户路径' });
+      return;
+    }
     // 配额语义："改配额 = 重新给额度"——当 token/时长上限发生变化时
     // 重置该子用户已累计的用量（不同子用户每时段用量不同，改上限应重新计）。
     // 只改文件夹/上传/封禁等非配额字段时不重置（避免误清用量）。
@@ -1426,6 +1483,7 @@ export function createGatewayServer(
       allowUpload,
       allowGitDownload,
       allowWorkspaceCreate,
+      allowedWebSocketPaths,
       banned,
       sandboxMode,
       disabledSessions,
@@ -1445,6 +1503,7 @@ export function createGatewayServer(
         allowUpload,
         allowGitDownload,
         allowWorkspaceCreate,
+        allowedWebSocketPaths,
         banned,
         sandboxMode,
         disabledSessions,
@@ -1787,7 +1846,7 @@ export function createGatewayServer(
         }
         // F-09/F-12：第三方插件“运维面”端点（dsh-ssh 主机清单/隧道、skin-center、modlens、
         // dsh-uploads 列表/删除等）不在网关权限模型内，对子用户一律 403（仅主用户可访问）
-        if (isAdminOnlyPluginEndpoint(req.method, requestPath)) {
+        if (isAdminOnlyPluginEndpoint(req.method, requestPath) || isAdminOnlySidebarEndpoint(requestPath)) {
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.adminOnly')));
           return;
         }
@@ -1803,8 +1862,16 @@ export function createGatewayServer(
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.noUpload')));
           return;
         }
-        const workspaceManagementAllowed = perms.allow_workspace_create && (isWorkspaceCreate(requestPath) || isWorkspaceDeleteOrRename(requestPath));
-        if (isWorkspaceWrite(requestPath) && !workspaceManagementAllowed) {
+        const workspaceManagementAllowed =
+          perms.allow_workspace_create &&
+          (isWorkspaceCreate(requestPath) || isWorkspaceDeleteOrRename(requestPath));
+        // 新建工作区的目录选择器会先调用 host.createDirectory；它不属于
+        // workspace.* RPC。该调用必须复用同一开关，否则子用户虽不能登记
+        // 工作区，仍能在服务器文件系统中创建目录。
+        if (
+          (isWorkspaceWrite(requestPath) && !workspaceManagementAllowed) ||
+          (isWorkspaceDirectoryCreate(requestPath) && !perms.allow_workspace_create)
+        ) {
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.workspaceDenied')));
           return;
         }
@@ -2729,10 +2796,17 @@ export function createGatewayServer(
     }
     const queryIndex = (req.url ?? '').indexOf('?');
     const fwdPath = gatePath + (queryIndex >= 0 ? (req.url ?? '').slice(queryIndex) : '');
+    // WebSocket 同样是浏览器携带 Cookie 的状态变更通道，先拒绝跨源升级。
+    if (!originHostMatches(req)) {
+      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+      socket.destroy();
+      return;
+    }
     // 认证检查（复用 Cookie；与 HTTP 侧一致：校验 cv + banned + 登出吊销）
     const token = readCookie(req.headers.cookie, COOKIE_NAME);
     let authed = false;
-    let userRole: string | null = null;
+    let userRole: 'admin' | 'user' | null = null;
+    let userWebSocketGrants: string[] = [];
     if (token && !isTokenRevoked(token)) {
       try {
         const user = auth.verifyToken(token);
@@ -2741,7 +2815,9 @@ export function createGatewayServer(
           const perms = effectivePermissions(row.id);
           if (!perms.banned) {
             authed = true;
-            userRole = row.role;
+            userRole = row.role === 'admin' ? 'admin' : 'user';
+            const registeredWebSocketPaths = new Set(configuredWebSocketPaths);
+            userWebSocketGrants = perms.allowed_websocket_paths.filter((rule) => registeredWebSocketPaths.has(rule));
           }
         }
       } catch {
@@ -2760,22 +2836,23 @@ export function createGatewayServer(
       socket.destroy();
       return;
     }
-    // WebSocket 仅是 dsh 的服务器→客户端事件下行通道；客户端消息是协议违规。
-    // 不允许把任意 HTTP 路径升级为 WS，否则会绕过 HTTP 侧完整的权限模型。
-    const allowedWsPath =
+    // 内置事件通道保持原有行为。第三方 WebSocket 必须先配置，
+    // 子用户还必须获得主用户在设置页中的明确授权。默认拒绝未知路径。
+    const builtinWsPath =
       gatePath === '/api/events.mux' ||
       gatePath === '/api/events.host' ||
       gatePath === '/plugins/events' ||
       gatePath === '/aionui-panel/events' ||
       gatePath.startsWith('/aionui-panel/events/');
-    if (!allowedWsPath) {
+    const wsAccess = webSocketAccessForPath(
+      gatePath,
+      configuredWebSocketPaths,
+      userWebSocketGrants,
+      userRole ?? 'user',
+      builtinWsPath,
+    );
+    if (wsAccess === 'deny') {
       socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
-      socket.destroy();
-      return;
-    }
-    // P1-3：WS 升级路径级权限——admin-only 端点对非 admin 拒绝
-    if (userRole !== 'admin' && isAdminOnlyPluginEndpoint(req.method ?? 'GET', gatePath)) {
-      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
       socket.destroy();
       return;
     }

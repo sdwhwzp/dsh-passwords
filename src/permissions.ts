@@ -27,6 +27,73 @@ export function normalizePath(p: string): string {
   return n;
 }
 
+export type WebSocketAccess = 'deny' | 'authenticated';
+
+/**
+ * Parse a comma-separated WebSocket path list. Rules are deliberately small:
+ * an exact path or a trailing `/*` for explicit descendants. A WebSocket rule
+ * is an authority boundary, so malformed input fails startup instead of being
+ * silently widened or ignored.
+ */
+export function parseWebSocketAllowlist(raw: string | undefined, envName: string): string[] {
+  if (raw === undefined || raw.trim() === '') return [];
+  const rules = new Set<string>();
+  for (const item of raw.split(',')) {
+    const rule = item.trim();
+    if (rule === '') continue;
+    if (rule.length > 256) throw new Error(`${envName}: rule is longer than 256 characters`);
+    if (!rule.startsWith('/')) throw new Error(`${envName}: rule must start with /: ${rule}`);
+    if (/[? #%\\\\\u0000-\u001f\u007f]/.test(rule)) {
+      throw new Error(`${envName}: rule contains query, encoding, backslash, or control characters: ${rule}`);
+    }
+    const wildcard = rule.endsWith('/*');
+    if (rule.includes('*') && !wildcard) {
+      throw new Error(`${envName}: only a trailing /* wildcard is supported: ${rule}`);
+    }
+    const pathPart = wildcard ? rule.slice(0, -2) : rule;
+    if (pathPart === '' || pathPart === '/') throw new Error(`${envName}: root and /* are not allowed`);
+    if (pathPart === '/gateway' || pathPart.startsWith('/gateway/')) {
+      throw new Error(`${envName}: gateway paths cannot be allowlisted: ${rule}`);
+    }
+    if (pathPart === '/api/dsh-passwords/internal' || pathPart.startsWith('/api/dsh-passwords/internal/')) {
+      throw new Error(`${envName}: internal gateway paths cannot be allowlisted: ${rule}`);
+    }
+    const segments = pathPart.split('/').slice(1);
+    if (segments.some((segment) => segment === '.' || segment === '..' || segment === '')) {
+      throw new Error(`${envName}: rule contains an empty or dot path segment: ${rule}`);
+    }
+    rules.add(rule);
+    if (rules.size > 64) throw new Error(`${envName}: at most 64 rules are supported`);
+  }
+  return [...rules];
+}
+
+export function matchesWebSocketRule(pathname: string, rule: string): boolean {
+  if (rule.endsWith('/*')) {
+    const prefix = rule.slice(0, -2);
+    return pathname.startsWith(`${prefix}/`);
+  }
+  return pathname === rule;
+}
+
+export function webSocketAccessForPath(
+  pathname: string,
+  configuredRules: readonly string[],
+  grantedRules: readonly string[],
+  userRole: 'admin' | 'user',
+  builtin: boolean,
+): WebSocketAccess {
+  // Built-in DSH event channels remain available to every authenticated user.
+  if (builtin) return 'authenticated';
+  if (!configuredRules.some((rule) => matchesWebSocketRule(pathname, rule))) return 'deny';
+  // The owner can use every configured path. Subusers only get paths that the
+  // owner explicitly checked in the settings card.
+  if (userRole === 'admin' || grantedRules.some((rule) => matchesWebSocketRule(pathname, rule))) {
+    return 'authenticated';
+  }
+  return 'deny';
+}
+
 /**
  * 工作区白名单的"禁止所有"哨兵值：主用户选择"禁止工作区"时存入白名单，
  * 与空数组（=全部允许）区分开（空数组还是"未限制"语义，兼容默认子用户）。
@@ -605,7 +672,12 @@ export function isGitRequest(pathname: string): boolean {
 }
 
 /**
- * 第三方插件“运维面”端点（仅主用户可访问）：
+ /** better-sidebar 的宿主侧文件、Git、上传、预览和终端管理面（仅主用户可访问）。 */
+ export function isAdminOnlySidebarEndpoint(pathname: string): boolean {
+   return pathname === '/sidebar' || pathname.startsWith('/sidebar/');
+ }
+
+ /** 第三方插件“运维面”端点（仅主用户可访问）：
  *   - dsh-ssh —— SSH 主机清单/隧道/远程文件：含服务器连接信息（host/port/user/auth/keyReady），
  *     泄露即扩大 SSH 凭据面；
  *   - skin-center —— 皮肤中心（未纳入网关权限模型）；
@@ -680,6 +752,15 @@ export function aionuiRootFrom(
 /** 工作区创建端点；创建权限与其他工作区管理权限分开控制。 */
 export function isWorkspaceCreate(pathname: string): boolean {
   return /^\/api\/workspace[.\/](add|create)([.\/]|$)/.test(pathname);
+}
+
+/**
+ * dsh 0.1.1-rc.2 的新建工作区流程会先通过目录选择器创建磁盘目录，
+ * 再调用 workspace.create 登记工作区。目录创建不是 workspace RPC，必须单独拦截，
+ * 否则关闭创建权限的子用户仍可在主机上留下任意文件夹。
+ */
+export function isWorkspaceDirectoryCreate(pathname: string): boolean {
+  return /^\/api\/host[.\/]createDirectory(?:[.\/]|$)/.test(pathname);
 }
 
 /** 当前 dsh 已提供的删除/重命名端点；移动、归档、导入暂不纳入子用户权限。 */
