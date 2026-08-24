@@ -31,15 +31,15 @@ const response = {
   },
 };
 
-test('customer model policy allows only the three GPT-5.6 Codex routes', () => {
+test('customer model policy restricts Codex to three GPT-5.6 routes and allows other providers', () => {
   assert.equal(customerModelAllowed('codex', 'gpt-5.6-sol'), true);
   assert.equal(customerModelAllowed('codex', 'gpt-5.6-terra'), true);
   assert.equal(customerModelAllowed('codex', 'gpt-5.6-luna'), true);
   assert.equal(customerModelAllowed('codex', 'gpt-5.5'), false);
-  assert.equal(customerModelAllowed('deepseek-official', 'gpt-5.6-sol'), false);
+  assert.equal(customerModelAllowed('deepseek-official', 'deepseek-v4'), true);
 });
 
-test('customer catalog keeps only allowed models and hides unrelated failures', () => {
+test('customer catalog filters Codex while retaining other providers and their failures', () => {
   const filtered = filterCustomerModelCatalogResponse(response) as typeof response;
   assert.notEqual(filtered, response);
   assert.deepEqual(
@@ -47,9 +47,12 @@ test('customer catalog keeps only allowed models and hides unrelated failures', 
       id: group.id,
       models: group.models.map(model => model.id),
     })),
-    [{ id: 'codex', models: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'] }],
+    [
+      { id: 'codex', models: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'] },
+      { id: 'deepseek-official', models: ['deepseek-v4'] },
+    ],
   );
-  assert.deepEqual(filtered.result.value.failures, []);
+  assert.deepEqual(filtered.result.value.failures, [{ id: 'private-provider', name: 'Private', message: 'unavailable' }]);
   assert.deepEqual(filtered.result.value.current, { provider: 'codex', model: 'gpt-5.5' });
   assert.equal(response.result.value.groups.length, 2, 'filter must not mutate the upstream object');
 });

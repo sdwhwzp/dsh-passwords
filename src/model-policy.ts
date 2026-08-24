@@ -10,7 +10,7 @@ export const CUSTOMER_MODEL_IDS = new Set([
 
 /** Whether a model route is available to a customer subaccount. */
 export function customerModelAllowed(provider: string, model: string): boolean {
-  return provider === CUSTOMER_MODEL_PROVIDER && CUSTOMER_MODEL_IDS.has(model);
+  return provider !== CUSTOMER_MODEL_PROVIDER || CUSTOMER_MODEL_IDS.has(model);
 }
 
 function recordOf(value: unknown): Record<string, unknown> | null {
@@ -36,15 +36,14 @@ export function filterCustomerModelCatalogResponse(response: unknown): unknown |
 
   const groups = value.groups.flatMap((candidate) => {
     const group = recordOf(candidate);
-    if (group === null || group.id !== CUSTOMER_MODEL_PROVIDER || !Array.isArray(group.models)) return [];
+    if (group === null || !Array.isArray(group.models)) return [];
+    if (group.id !== CUSTOMER_MODEL_PROVIDER) return [group];
     const models = group.models.filter((candidateModel) => {
       const model = recordOf(candidateModel);
       return model !== null && typeof model.id === 'string' && CUSTOMER_MODEL_IDS.has(model.id);
     });
     return models.length === 0 ? [] : [{ ...group, models }];
   });
-  const failures = value.failures.filter((candidate) => recordOf(candidate)?.id === CUSTOMER_MODEL_PROVIDER);
-
   return {
     ...envelope,
     result: {
@@ -52,7 +51,7 @@ export function filterCustomerModelCatalogResponse(response: unknown): unknown |
       value: {
         ...value,
         groups,
-        failures,
+        failures: value.failures,
       },
     },
   };

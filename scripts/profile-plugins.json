@@ -7,9 +7,16 @@
       "activation": "bundle"
     },
     {
-      "name": "@linxin666/dsh-web-ui-all",
-      "defaultSpecifier": "0.2.4",
-      "activation": "bundle"
+      "name": "@linxin666/dsh-web-all",
+      "defaultSpecifier": "github:sdwhwzp/dsh-web#dev&path:/packages/dsh-web-all",
+      "localCandidates": [
+        "../dsh-web/packages/dsh-web-all"
+      ],
+      "replaces": [
+        "@linxin666/dsh-web-ui-all"
+      ],
+      "activation": "bundle",
+      "allowBuild": true
     },
     {
       "name": "dsh-spend",

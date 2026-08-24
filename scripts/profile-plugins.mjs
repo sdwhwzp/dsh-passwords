@@ -45,11 +45,27 @@ export function loadProfilePlugins(file) {
       || candidate.localCandidates.some(value => typeof value !== 'string' || value.trim() === ''))) {
       throw new Error(`profile plugin manifest: ${name}.localCandidates must contain non-empty strings`);
     }
+    if (candidate.replaces !== undefined && !Array.isArray(candidate.replaces)) {
+      throw new Error(`profile plugin manifest: ${name}.replaces must contain package names`);
+    }
+    const replaces = (candidate.replaces ?? []).map((value, replacementIndex) => {
+      const replacement = requireString(value, `${name}.replaces[${replacementIndex}]`);
+      if (!PLUGIN_NAME_RE.test(replacement)) {
+        throw new Error(`profile plugin manifest: invalid replacement package ${JSON.stringify(replacement)}`);
+      }
+      if (replacement === name) {
+        throw new Error(`profile plugin manifest: ${name} cannot replace itself`);
+      }
+      return replacement;
+    });
+    if (new Set(replaces).size !== replaces.length) {
+      throw new Error(`profile plugin manifest: ${name}.replaces contains duplicates`);
+    }
     if (activation === 'profile-patch') {
       requireString(candidate.patchId, `${name}.patchId`);
       requireString(candidate.patchYaml, `${name}.patchYaml`);
     }
-    return Object.freeze({ ...candidate, name, activation });
+    return Object.freeze({ ...candidate, name, activation, replaces: Object.freeze(replaces) });
   });
   return Object.freeze(plugins);
 }
@@ -75,6 +91,9 @@ export function resolveProfilePlugins(plugins, existingDependencies, installRoot
   const allowBuilds = [];
   const patches = [];
   const skipped = [];
+  const replaced = [...new Set(plugins.flatMap(plugin => plugin.replaces ?? []))];
+
+  for (const name of replaced) delete dependencies[name];
 
   for (const plugin of plugins) {
     const environmentSpecifier = plugin.specifierEnvironment === undefined
@@ -89,8 +108,8 @@ export function resolveProfilePlugins(plugins, existingDependencies, installRoot
       : environmentSpecifier
         ?? (plugin.enforceDefault === true ? plugin.defaultSpecifier : undefined)
         ?? existingSpecifier
-        ?? plugin.defaultSpecifier
-        ?? localSpecifier(plugin, installRoot);
+        ?? localSpecifier(plugin, installRoot)
+        ?? plugin.defaultSpecifier;
 
     if (specifier === undefined) {
       if (plugin.optional === true) {
@@ -107,12 +126,15 @@ export function resolveProfilePlugins(plugins, existingDependencies, installRoot
     }
   }
 
-  return { dependencies, bundles, allowBuilds, patches, skipped };
+  return { dependencies, bundles, allowBuilds, patches, skipped, replaced };
 }
 
-/** Append missing bundle names while preserving existing profile order and custom entries. */
-export function mergeBundles(existing, recorded) {
-  const bundles = Array.isArray(existing) ? [...existing] : [];
+/** Replace retired bundles and append missing names while preserving custom profile order. */
+export function mergeBundles(existing, recorded, replaced = []) {
+  const replacedNames = new Set(replaced);
+  const bundles = Array.isArray(existing)
+    ? existing.filter(name => !replacedNames.has(name))
+    : [];
   for (const name of recorded) {
     if (!bundles.includes(name)) bundles.push(name);
   }
@@ -122,11 +144,11 @@ export function mergeBundles(existing, recorded) {
 /** Add pnpm build permissions required by Git-source plugins. */
 export function mergeAllowBuilds(workspace, packageNames) {
   const missing = [...new Set(packageNames)].filter(name =>
-    !new RegExp(`^  ${name.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}:\\s*true\\s*$`, 'm').test(workspace));
+    !new RegExp(`^  (?:["']${name.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}["']|${name.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}):\\s*true\\s*$`, 'm').test(workspace));
   if (missing.length === 0) return workspace.endsWith('\n') ? workspace : `${workspace}\n`;
   const lines = workspace.replace(/\n?$/, '\n').split('\n');
   const start = lines.findIndex(line => line === 'allowBuilds:');
-  const rows = missing.map(name => `  ${name}: true`);
+  const rows = missing.map(name => `  ${JSON.stringify(name)}: true`);
   if (start < 0) {
     const prefix = lines.at(-1) === '' ? lines.slice(0, -1) : lines;
     return [...prefix, 'allowBuilds:', ...rows, ''].join('\n');

@@ -2266,9 +2266,9 @@ export function createGatewayServer(
         const contentType = String(upstreamRes.headers['content-type'] ?? '');
         const encoding = String(upstreamRes.headers['content-encoding'] ?? '');
 
-        // Customer model selectors expose only the three supported GPT-5.6
-        // routes. Both the host catalog and the per-session catalog are
-        // filtered; malformed successful responses fail closed.
+        // In customer model selectors, the Codex provider exposes only the
+        // three supported GPT-5.6 routes. Other providers remain untouched.
+        // Both catalogs are filtered; malformed successes fail closed.
         if (
           reqAs.dshpwPerms !== undefined &&
           req.method === 'POST' &&

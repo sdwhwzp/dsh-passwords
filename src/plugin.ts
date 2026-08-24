@@ -494,7 +494,7 @@ export function apply(ctx: Context): void {
         detail: JSON.stringify({ provider: config.provider, model: config.model }),
       });
       throw new Error(
-        `该子账号仅可使用 ${[...CUSTOMER_MODEL_IDS].join('、')}，请先切换模型后重试。`,
+        `该子账号在 ChatGPT 服务商下仅可使用 ${[...CUSTOMER_MODEL_IDS].join('、')}，请先切换模型后重试。`,
       );
     });
   }

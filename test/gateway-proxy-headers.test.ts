@@ -230,7 +230,7 @@ test('流式透传路径（session.list，管理员）：保留 chunked，不带
   assert.equal(parsed.ok, true);
 });
 
-test('管理员模型目录保持完整，子用户的两个模型目录只保留 GPT-5.6 三个模型', async () => {
+test('管理员模型目录保持完整，子用户只过滤 Codex 的旧模型', async () => {
   const admin = await gatewayReq('POST', '/api/llm.models', { 'content-type': 'application/json' });
   assert.equal(admin.status, 200);
   assert.deepEqual(JSON.parse(admin.body), MODELS_RESPONSE);
@@ -246,10 +246,16 @@ test('管理员模型目录保持完整，子用户的两个模型目录只保�
     assert.deepEqual(value.groups.map((group: { id: string; models: Array<{ id: string }> }) => ({
       id: group.id,
       models: group.models.map(model => model.id),
-    })), [{
-      id: 'codex',
-      models: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
-    }]);
+    })), [
+      {
+        id: 'codex',
+        models: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
+      },
+      {
+        id: 'deepseek-official',
+        models: ['deepseek-v4'],
+      },
+    ]);
   }
 });
 

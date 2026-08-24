@@ -38,7 +38,7 @@ dsh 的网页界面默认面向本机使用。服务器地址一旦暴露，拿�
 - **消息默认私信**：子用户留言默认只发给主用户；广播仅主用户可发且需显式勾选
 - **每小时 token 上限**、**每日使用时长上限**：到量自动拒绝
 - **每月模型金额额度**：以人民币微元整数保存，精确到 ¥0.01；显示本月已用、剩余和 80% 预警，达到 100% 后拒绝下一模型步骤
-- **客户模型范围**：子用户的模型选择器只显示 GPT-5.6-Sol、GPT-5.6-Terra、GPT-5.6-Luna；服务端同时拒绝其他模型，主用户仍可使用全部已安装模型
+- **客户模型范围**：子用户在 ChatGPT（Codex）服务商下只显示 GPT-5.6-Sol、GPT-5.6-Terra、GPT-5.6-Luna，其他服务商模型保持可用；服务端同时拒绝子用户调用其他 Codex 模型，主用户不受限制
 - **沙盒权限**：只读 / 可写工作区 / 完全访问，三档可选；子用户的 AI 想越权提权时，网关直接把审批改成「拒绝」
 - **上传 / git 下载开关**、**封禁子用户**
 
@@ -109,9 +109,9 @@ dsh-passwords install     # 生成随机 SETUP_KEY + 恢复插件栈 + 应用补
 
 ### 自动恢复已安装插件
 
-`scripts/profile-plugins.json` 是跨机器部署的版本化插件清单。运行 `dsh-passwords install` 会把清单中的 NPM/Git 来源、bundle 顺序、Git 构建授权和必要的 profile patch 幂等合并到 `~/.dsh/profiles/web`，然后统一执行 `pnpm install`。已有本地 `link:` 开发源和未纳入清单的自定义插件不会被覆盖或删除。
+`scripts/profile-plugins.json` 是跨机器部署的版本化插件清单。运行 `dsh-passwords install` 会把清单中的 NPM/Git 来源、bundle 顺序、Git 构建授权和必要的 profile patch 幂等合并到 `~/.dsh/profiles/web`，然后统一执行 `pnpm install`。已有本地 `link:` 开发源和未纳入清单的自定义插件不会被覆盖或删除；清单明确标记的旧聚合包会自动迁移。
 
-清单默认自动安装 `dshmarket@1.16.2`、`@linxin666/dsh-web-ui-all@0.2.4`、`dsh-spend` 的 `dev` 分支、`dsh-plugin-subscriptions` 的 `dev` 分支以及当前 `dsh-passwords`。`dsh-plugin-subscriptions` 始终使用记录的 `github:sdwhwzp/dsh-plugin-subscriptions#dev`，避免新机器误装 NPM 稳定版。
+清单默认自动安装 `dshmarket@1.16.2`、你自己的 `sdwhwzp/dsh-web` 仓库 `dev` 分支中的 `@linxin666/dsh-web-all`、`dsh-spend` 的 `dev` 分支、`dsh-plugin-subscriptions` 的 `dev` 分支以及当前 `dsh-passwords`。安装器会移除已停用的 `@linxin666/dsh-web-ui-all` 依赖和 bundle；如果 `dsh-web` 与 `dsh-passwords` 位于同一父目录，则优先使用本地 `dsh-web/packages/dsh-web-all`，便于直接开发。`dsh-plugin-subscriptions` 始终使用记录的 `github:sdwhwzp/dsh-plugin-subscriptions#dev`，避免新机器误装 NPM 稳定版。
 
 `dsh-shandong-tizhi-brand` 和 `dsh-nas-webdav` 也在清单中，但目前只有本机源码，没有可公开拉取的远程分支。新机器部署前分别设置 `DSH_PLUGIN_BRAND_SPEC` 和 `DSH_PLUGIN_NAS_SPEC` 为可访问的 NPM、Git 或 `link:` 来源；未设置时安装器会明确提示并跳过，其他插件继续安装。
 

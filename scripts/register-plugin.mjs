@@ -4,7 +4,7 @@
 // 为什么不用 dsh 自带的 `dsh plugin add`：
 //   它的 reconcile 会把 profile 里【所有】声明 dsh.bundle 的依赖全部加入
 //   bundles 层。若用户之前装过其它独立插件（如 @linxin666 系列，它们同时
-//   又被 dsh-web-ui-all 加载），会触发 duplicate loader entry id，dsh 直接
+//   又被 Web 聚合包加载），会触发 duplicate loader entry id，dsh 直接
 //   启动失败。本脚本只追加 scripts/profile-plugins.json 明确声明的 bundle，
 //   保留用户已有依赖、bundle、补丁和本地 link 开发源。
 //
@@ -71,7 +71,11 @@ manifest.dependencies = recorded.dependencies;
 manifest.dsh = manifest.dsh ?? {};
 manifest.dsh.profile = manifest.dsh.profile ?? {};
 manifest.dsh.profile.bundles = manifest.dsh.profile.bundles ?? [...WEB_BUNDLES];
-manifest.dsh.profile.bundles = mergeBundles(manifest.dsh.profile.bundles, recorded.bundles);
+manifest.dsh.profile.bundles = mergeBundles(
+  manifest.dsh.profile.bundles,
+  recorded.bundles,
+  recorded.replaced,
+);
 writeFileSync(manifestPath, JSON.stringify(manifest, undefined, 2) + '\n');
 
 // 3) 缺失的配套文件按 dsh 模板补齐（已存在的不动）

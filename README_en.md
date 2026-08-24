@@ -38,7 +38,7 @@ The owner can configure, per subuser, from the settings page:
 - **DM-by-default messages**: subuser messages go to the owner by default; broadcasting is owner-only and must be explicitly chosen
 - **Hourly token limit** and **daily usage-time limit**: requests are rejected once the cap is hit
 - **Monthly model-spend allowance**: stored as integer CNY micros with ¥0.01 admin precision; shows used, remaining and an 80% warning, and rejects the next model step at 100%
-- **Customer model scope**: subuser selectors show only GPT-5.6-Sol, GPT-5.6-Terra, and GPT-5.6-Luna; the server also rejects every other model, while the owner retains access to all installed models
+- **Customer model scope**: under the ChatGPT (Codex) provider, subuser selectors show only GPT-5.6-Sol, GPT-5.6-Terra, and GPT-5.6-Luna; models from other providers remain available, while the server rejects other Codex models for subusers and leaves the owner unrestricted
 - **Sandbox level**: read-only / workspace-write / full access; when a subuser's AI tries to escalate beyond its level, the gateway forces the approval to "reject"
 - **Upload / git-download toggles** and **ban subusers**
 
@@ -109,9 +109,9 @@ The installer checks for prebuilt files, installing dependencies and building on
 
 ### Automatic plugin-stack restore
 
-`scripts/profile-plugins.json` is the versioned cross-machine deployment manifest. `dsh-passwords install` idempotently merges its NPM/Git sources, bundle order, Git build permissions, and required profile patches into `~/.dsh/profiles/web`, then runs one `pnpm install`. Existing local `link:` development sources and custom plugins outside the manifest are preserved.
+`scripts/profile-plugins.json` is the versioned cross-machine deployment manifest. `dsh-passwords install` idempotently merges its NPM/Git sources, bundle order, Git build permissions, and required profile patches into `~/.dsh/profiles/web`, then runs one `pnpm install`. Existing local `link:` development sources and custom plugins outside the manifest are preserved; retired aggregate packages explicitly named by the manifest are migrated automatically.
 
-The default stack installs `dshmarket@1.16.2`, `@linxin666/dsh-web-ui-all@0.2.4`, the `dev` branches of `dsh-spend` and `dsh-plugin-subscriptions`, and the current `dsh-passwords`. The subscriptions entry enforces `github:sdwhwzp/dsh-plugin-subscriptions#dev`, preventing a fresh host from silently selecting the NPM stable release.
+The default stack installs `dshmarket@1.16.2`, `@linxin666/dsh-web-all` from the `dev` branch of your `sdwhwzp/dsh-web` repository, the `dev` branches of `dsh-spend` and `dsh-plugin-subscriptions`, and the current `dsh-passwords`. The installer removes the retired `@linxin666/dsh-web-ui-all` dependency and bundle. When `dsh-web` and `dsh-passwords` share a parent directory, it prefers the local `dsh-web/packages/dsh-web-all` checkout for direct development. The subscriptions entry enforces `github:sdwhwzp/dsh-plugin-subscriptions#dev`, preventing a fresh host from silently selecting the NPM stable release.
 
 `dsh-shandong-tizhi-brand` and `dsh-nas-webdav` are also recorded, but currently only have local source trees and no remotely fetchable branch. Before deploying them on another host, set `DSH_PLUGIN_BRAND_SPEC` and `DSH_PLUGIN_NAS_SPEC` to accessible NPM, Git, or `link:` sources. Without those variables the installer reports and skips those optional plugins while restoring the rest of the stack.
 
