@@ -22,6 +22,7 @@ import {
   loadProfilePlugins,
   mergeAllowBuilds,
   mergeBundles,
+  mergeMinimumReleaseAgeExcludes,
   mergeProfilePatches,
   resolveProfilePlugins,
 } from './profile-plugins.mjs';
@@ -84,9 +85,13 @@ if (!existsSync(patchPath)) writeFileSync(patchPath, PATCH_TEMPLATE);
 writeFileSync(patchPath, mergeProfilePatches(readFileSync(patchPath, 'utf8'), recorded.patches));
 const workspacePath = path.join(profileDir, 'pnpm-workspace.yaml');
 if (!existsSync(workspacePath)) writeFileSync(workspacePath, WORKSPACE);
+const workspace = mergeMinimumReleaseAgeExcludes(
+  readFileSync(workspacePath, 'utf8'),
+  recorded.minimumReleaseAgeExcludes,
+);
 writeFileSync(
   workspacePath,
-  mergeAllowBuilds(readFileSync(workspacePath, 'utf8'), recorded.allowBuilds),
+  mergeAllowBuilds(workspace, recorded.allowBuilds),
 );
 
 for (const plugin of recorded.skipped) {
@@ -95,7 +100,23 @@ for (const plugin of recorded.skipped) {
   );
 }
 
-// 4) pnpm 物化 link（Windows 需经 shell 调 .cmd shim）
+// 4) 本地 monorepo 开发源先生成全部运行时产物。
+for (const prepare of recorded.prepares) {
+  const [command, ...args] = prepare.command;
+  console.log(`[dsh-passwords] 构建本地插件工作区 ${prepare.name}: ${prepare.cwd}`);
+  const prepareResult = spawnSync(command, args, {
+    cwd: prepare.cwd,
+    stdio: 'inherit',
+    shell: process.platform === 'win32',
+  });
+  if (prepareResult.error !== undefined) {
+    console.error(`[dsh-passwords] 本地插件构建命令启动失败：${String(prepareResult.error)}`);
+    process.exit(127);
+  }
+  if (prepareResult.status !== 0) process.exit(prepareResult.status ?? 1);
+}
+
+// 5) pnpm 物化 link（Windows 需经 shell 调 .cmd shim）
 console.log(`[dsh-passwords] profile: ${profileDir}`);
 const result = spawnSync('pnpm', ['install'], {
   cwd: profileDir,

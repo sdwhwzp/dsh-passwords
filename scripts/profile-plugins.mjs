@@ -45,6 +45,45 @@ export function loadProfilePlugins(file) {
       || candidate.localCandidates.some(value => typeof value !== 'string' || value.trim() === ''))) {
       throw new Error(`profile plugin manifest: ${name}.localCandidates must contain non-empty strings`);
     }
+    if (candidate.localWorkspacePackages !== undefined && (!Array.isArray(candidate.localWorkspacePackages)
+      || candidate.localWorkspacePackages.some(value => typeof value !== 'string' || value.trim() === ''))) {
+      throw new Error(`profile plugin manifest: ${name}.localWorkspacePackages must contain non-empty strings`);
+    }
+    if ((candidate.localWorkspacePackages !== undefined || candidate.localPrepare !== undefined)
+      && candidate.localCandidates === undefined) {
+      throw new Error(`profile plugin manifest: ${name} local workspace fields require localCandidates`);
+    }
+    if (candidate.localDependencies !== undefined) {
+      if (candidate.localDependencies === null || typeof candidate.localDependencies !== 'object'
+        || Array.isArray(candidate.localDependencies)) {
+        throw new Error(`profile plugin manifest: ${name}.localDependencies must be an object`);
+      }
+      for (const [dependency, specifier] of Object.entries(candidate.localDependencies)) {
+        if (!PLUGIN_NAME_RE.test(dependency)) {
+          throw new Error(`profile plugin manifest: invalid local dependency ${JSON.stringify(dependency)}`);
+        }
+        requireString(specifier, `${name}.localDependencies[${JSON.stringify(dependency)}]`);
+      }
+      if (candidate.localCandidates === undefined) {
+        throw new Error(`profile plugin manifest: ${name}.localDependencies requires localCandidates`);
+      }
+    }
+    if (candidate.minimumReleaseAgeExclude !== undefined
+      && (!Array.isArray(candidate.minimumReleaseAgeExclude)
+        || candidate.minimumReleaseAgeExclude.some(value => typeof value !== 'string' || value.trim() === ''))) {
+      throw new Error(`profile plugin manifest: ${name}.minimumReleaseAgeExclude must contain non-empty strings`);
+    }
+    if (candidate.localPrepare !== undefined) {
+      if (candidate.localPrepare === null || typeof candidate.localPrepare !== 'object'
+        || Array.isArray(candidate.localPrepare)) {
+        throw new Error(`profile plugin manifest: ${name}.localPrepare must be an object`);
+      }
+      requireString(candidate.localPrepare.cwd, `${name}.localPrepare.cwd`);
+      if (!Array.isArray(candidate.localPrepare.command) || candidate.localPrepare.command.length === 0
+        || candidate.localPrepare.command.some(value => typeof value !== 'string' || value.trim() === '')) {
+        throw new Error(`profile plugin manifest: ${name}.localPrepare.command must contain non-empty strings`);
+      }
+    }
     if (candidate.replaces !== undefined && !Array.isArray(candidate.replaces)) {
       throw new Error(`profile plugin manifest: ${name}.replaces must contain package names`);
     }
@@ -84,6 +123,24 @@ function localSpecifier(plugin, installRoot) {
   return undefined;
 }
 
+function requiredLocalWorkspacePackage(candidate, installRoot, owner) {
+  const resolved = path.resolve(installRoot, candidate);
+  const manifestPath = path.join(resolved, 'package.json');
+  if (!existsSync(manifestPath)) {
+    throw new Error(`profile plugin manifest: ${owner} local workspace package is missing: ${resolved}`);
+  }
+  let packageJson;
+  try {
+    packageJson = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  } catch (error) {
+    throw new Error(`profile plugin manifest: ${owner} local workspace package has invalid package.json: ${resolved}`, { cause: error });
+  }
+  if (typeof packageJson.name !== 'string' || !PLUGIN_NAME_RE.test(packageJson.name)) {
+    throw new Error(`profile plugin manifest: ${owner} local workspace package has an invalid name: ${resolved}`);
+  }
+  return { name: packageJson.name, specifier: `link:${resolved}` };
+}
+
 /** Resolve portable defaults without replacing an existing local development source. */
 export function resolveProfilePlugins(plugins, existingDependencies, installRoot, environment = process.env) {
   const dependencies = { ...existingDependencies };
@@ -91,6 +148,8 @@ export function resolveProfilePlugins(plugins, existingDependencies, installRoot
   const allowBuilds = [];
   const patches = [];
   const skipped = [];
+  const prepares = [];
+  const minimumReleaseAgeExcludes = [];
   const replaced = [...new Set(plugins.flatMap(plugin => plugin.replaces ?? []))];
 
   for (const name of replaced) delete dependencies[name];
@@ -119,14 +178,43 @@ export function resolveProfilePlugins(plugins, existingDependencies, installRoot
       throw new Error(`profile plugin manifest: no install source for ${plugin.name}`);
     }
     dependencies[plugin.name] = specifier;
+    if (specifier.startsWith('link:')) {
+      for (const candidate of plugin.localWorkspacePackages ?? []) {
+        const companion = requiredLocalWorkspacePackage(candidate, installRoot, plugin.name);
+        if (companion.name === plugin.name) {
+          throw new Error(`profile plugin manifest: ${plugin.name} cannot list itself as a local workspace package`);
+        }
+        dependencies[companion.name] = companion.specifier;
+      }
+      for (const [dependency, dependencySpecifier] of Object.entries(plugin.localDependencies ?? {})) {
+        dependencies[dependency] = dependencySpecifier.trim();
+      }
+      if (plugin.localPrepare !== undefined) {
+        prepares.push({
+          name: plugin.name,
+          cwd: path.resolve(installRoot, plugin.localPrepare.cwd),
+          command: plugin.localPrepare.command.map(value => value.trim()),
+        });
+      }
+    }
     if (plugin.activation === 'bundle') bundles.push(plugin.name);
     if (plugin.allowBuild === true) allowBuilds.push(plugin.name);
+    minimumReleaseAgeExcludes.push(...(plugin.minimumReleaseAgeExclude ?? []));
     if (plugin.activation === 'profile-patch') {
       patches.push({ id: plugin.patchId, yaml: plugin.patchYaml });
     }
   }
 
-  return { dependencies, bundles, allowBuilds, patches, skipped, replaced };
+  return {
+    dependencies,
+    bundles,
+    allowBuilds,
+    patches,
+    skipped,
+    replaced,
+    prepares,
+    minimumReleaseAgeExcludes: [...new Set(minimumReleaseAgeExcludes)],
+  };
 }
 
 /** Replace retired bundles and append missing names while preserving custom profile order. */
@@ -152,6 +240,26 @@ export function mergeAllowBuilds(workspace, packageNames) {
   if (start < 0) {
     const prefix = lines.at(-1) === '' ? lines.slice(0, -1) : lines;
     return [...prefix, 'allowBuilds:', ...rows, ''].join('\n');
+  }
+  let end = start + 1;
+  while (end < lines.length && (lines[end] === '' || /^\s/.test(lines[end]))) end += 1;
+  lines.splice(end, 0, ...rows);
+  return lines.join('\n');
+}
+
+/** Add exact-version exceptions required by the recorded plugin stack. */
+export function mergeMinimumReleaseAgeExcludes(workspace, packageVersions) {
+  const missing = [...new Set(packageVersions)].filter(packageVersion => {
+    const escaped = packageVersion.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return !new RegExp(`^  - (?:["']${escaped}["']|${escaped})\\s*$`, 'm').test(workspace);
+  });
+  if (missing.length === 0) return workspace.endsWith('\n') ? workspace : `${workspace}\n`;
+  const lines = workspace.replace(/\n?$/, '\n').split('\n');
+  const start = lines.findIndex(line => line === 'minimumReleaseAgeExclude:');
+  const rows = missing.map(packageVersion => `  - ${JSON.stringify(packageVersion)}`);
+  if (start < 0) {
+    const prefix = lines.at(-1) === '' ? lines.slice(0, -1) : lines;
+    return [...prefix, 'minimumReleaseAgeExclude:', ...rows, ''].join('\n');
   }
   let end = start + 1;
   while (end < lines.length && (lines[end] === '' || /^\s/.test(lines[end]))) end += 1;
