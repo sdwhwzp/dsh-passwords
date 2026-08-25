@@ -11,8 +11,10 @@ import path from 'node:path';
 import { parseWebSocketAllowlist } from './permissions.js';
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-// dsh 进程里没有本项目的 .env（通过 DSH_PASSWORDS_ENV_FILE 显式指定网关 .env 路径）
+// dsh 进程里没有本项目的 .env（通过 DSH_PASSWORDS_ENV_FILE 显式指定网关 .env 路径）。
+// npm 更新会切换模块目录；部署配置和数据必须跟随这个显式配置文件，而不能跟随新包目录。
 const explicitEnvFile = process.env.DSH_PASSWORDS_ENV_FILE?.trim();
+const configRoot = explicitEnvFile ? path.dirname(path.resolve(explicitEnvFile)) : path.resolve(moduleDir, '..');
 if (explicitEnvFile) {
   loadEnv({ path: explicitEnvFile, quiet: true });
 }
@@ -20,6 +22,12 @@ loadEnv({ path: path.join(moduleDir, '..', '.env'), quiet: true });
 
 function readEnv(name: string, fallback: string): string {
   return (process.env[name] ?? '').trim() || fallback;
+}
+
+/** 环境文件明确指定时，配置相对路径必须以环境文件目录为锚点。 */
+export function resolveConfigPath(value: string, configRoot: string, fallbackName: string): string {
+  const raw = value.trim() || fallbackName;
+  return path.isAbsolute(raw) ? raw : path.resolve(configRoot, raw);
 }
 
 export interface PlatformConfig {
@@ -89,14 +97,13 @@ export function loadConfig(): PlatformConfig {
 
   const dbPath = readEnv(
     'MCP_DB_PATH',
-    // 默认基于模块目录而非 cwd：无论从哪个目录运行都指向同一数据库，
-    // 与 .env 的模块相对解析语义保持一致（否则 systemd/CLI/调试目录
-    // 会各自开一个新库，表现为“配置改了不生效/数据丢了”）
-    path.resolve(moduleDir, '..', 'data', 'platform.db'),
+    // 若服务通过 DSH_PASSWORDS_ENV_FILE 指向部署目录，更新后的 npm 包会位于
+    // 另一模块目录。默认数据库必须锚定该部署配置目录，避免切包后打开空库。
+    path.join(configRoot, 'data', 'platform.db'),
   );
-  // 显式相对路径也必须按模块目录解析。网关和 dsh 进程内插件的 cwd
-  // 不同，否则会各自打开一份数据库，造成登录状态与设置不一致。
-  const dbPathResolved = path.isAbsolute(dbPath) ? dbPath : path.resolve(moduleDir, '..', dbPath);
+  // 显式相对路径也按配置目录解析。网关和 dsh 进程内插件的 cwd/模块目录
+  // 可能不同，统一锚点避免各自打开一份数据库。
+  const dbPathResolved = resolveConfigPath(dbPath, configRoot, path.join('data', 'platform.db'));
 
   // MCP_DSH_RESTART_SERVICE 语义：未设置→默认 'dsh-web'；显式空值→不自动重启。
   // （不能用 readEnv：它会把空值当未设置回退到默认，导致 Windows 上

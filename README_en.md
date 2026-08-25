@@ -222,7 +222,7 @@ After logging in to dsh, open Settings → Plugins to find the "dsh-passwords ·
 | Feature | Who can use it | Notes |
 |---|---|---|
 | Remote settings + reload patch | All signed-in users | Remote settings are applied (always on); after a dsh upgrade, click "Reload patch" to fix the settings page in one click (restarts the web service and refreshes the page — no SSH) |
-| Software updates | Status visible to all; actions owner-only | Auto-checks for new versions, rate-limited download, auto-install + restart after 1h of idle; or manual "Check now" / "Install & restart" |
+| Software updates | Status visible to all; actions owner-only | Auto-checks versions, downloads automatically at <=1MiB/s, installs after 1h idle; Docker uses Compose; manual updates use separate download and install steps |
 | Change password | Yourself; the owner can change anyone's | Old sessions are invalidated immediately |
 | Change username | Yourself; the owner can change anyone's | Sign in with the new username afterwards |
 | Subuser management | Owner only | Create/delete subusers (subusers can sign in but have no admin rights) |
@@ -237,10 +237,10 @@ After logging in to dsh, open Settings → Plugins to find the "dsh-passwords ·
 
 The settings card has a "Software updates" section that auto-checks GitHub for new releases by default:
 
-- Checks once at startup, then every 24 hours; downloads are rate-limited (default ≤1MiB/s, change with `MCP_DSH_UPDATE_MAX_BPS`) and verified against the npm registry's sha512 integrity before use (mismatch = discarded)
-- After verification, it waits for 1 hour of continuous idle before installing and restarting the dsh web service; or click "Install now" to skip the idle window (10-minute cooldown)
-- Auto-update is on by default; the owner can turn it off in the card, and `MCP_DSH_AUTO_UPDATE=0` forces it off at the deployment level. The owner can still check and install manually
-- npm installations use the verified release package. A Git source tree is updated only when clean and after `npm ci`, tests, and the build pass. Docker auto-update is only suitable when the runtime can call the host's Compose setup; set `MCP_DSH_DOCKER_COMPOSE_DIR` and the engine will verify that the `dsh-passwords` service is running after the update
+- GitHub Releases only discover versions. Packages always download from the npm registry and are verified against that version's `dist.integrity` sha512 value; mismatches are discarded.
+- With automatic updates on, startup and 24-hour checks automatically download at <=1MiB/s (`MCP_DSH_UPDATE_MAX_BPS` can only lower the cap). After verification, installation waits for one hour of continuous idle; the owner can use "Install now" to skip that wait.
+- With automatic updates off, "Check now" only discovers a version. The owner's first "Download and prepare" click downloads without a speed cap and reports completion; the second "Install now" click installs and restarts.
+- npm installation uses the verified tarball. A Git source checkout is never changed or queried with Git: the verified package is staged into the protected deployment directory, `.env`, `data/`, the database, TLS files, and the profile are preserved, then dsh restarts in the background. Docker updates never download an npm tarball and never treat a running service as proof of the target version. The app only enables Docker updates when `MCP_DSH_DOCKER_SELF_UPDATE=1`, `MCP_DSH_DOCKER_COMPOSE_DIR`, `MCP_DSH_DOCKER_COMPOSE_FILE`, and `MCP_DSH_DOCKER_IMAGE` are configured and the container has explicit Docker CLI/socket access. It writes a versioned override, runs `docker compose pull` → `docker compose up -d`, then verifies the in-container version and `/gateway/readyz`. Otherwise the UI only shows the host-side manual command. Docker socket access is equivalent to host Docker control and should only be enabled in a trusted deployment.
 
 ## Configuration reference
 
@@ -267,8 +267,12 @@ The settings card has a "Software updates" section that auto-checks GitHub for n
 | `MCP_DSH_ROOT` | auto-detected | dsh install directory (where `@deepseek-ai/dsh` lives); set manually if detection fails |
 | `MCP_DSH_RESTART_SERVICE` | `dsh-web` | systemd service to restart after a patch reload; an explicit empty value disables auto-restart |
 | `MCP_DSH_AUTO_UPDATE` | on | Deployment-level auto-update master switch; `0/false/no` forces it off (manual check/install still available in the settings page) |
-| `MCP_DSH_UPDATE_MAX_BPS` | 1MiB/s | Update download rate limit (bytes/sec) |
-| `MCP_DSH_DOCKER_COMPOSE_DIR` | empty | Compose directory used for Docker auto-updates; it only works when the runtime can call the host Docker/Compose setup, and stays off when unset |
+| `MCP_DSH_UPDATE_MAX_BPS` | 1MiB/s | Automatic update download rate limit in bytes/sec (cannot exceed 1MiB/s) |
+| `MCP_DSH_DOCKER_SELF_UPDATE` | off | Explicitly enables in-app Docker updates; requires trusted Docker CLI/socket access and a versioned Compose image contract |
+| `MCP_DSH_DOCKER_COMPOSE_DIR` | empty | Host Compose project directory for Docker updates; it must contain the `dsh-passwords` service |
+| `MCP_DSH_DOCKER_COMPOSE_FILE` | empty | Compose filename such as `compose.yml`; must be a relative path inside the Compose directory |
+| `MCP_DSH_DOCKER_IMAGE` | empty | Versioned image repository, such as `skywalker237234/dsh-passwords`; the target release tag is appended during update |
+| `MCP_DSH_DOCKER_SOCKET` | `/var/run/docker.sock` | Docker daemon socket path; only useful when explicitly mounted and authorized |
 | `MCP_DSH_PATCH_ALLOW_BIND_ALL` | off | For split-container Docker: `1` lets dsh web bind 0.0.0.0 so a gateway in another container can reach it |
 | `DSH_PASSWORDS_ENV_FILE` | empty | Explicit path to `.env` (the plugin passes it automatically — usually not needed) |
 

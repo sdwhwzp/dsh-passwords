@@ -224,7 +224,7 @@ node scripts/start-http.mjs [端口]    # 默认 8080，会弹 y/N 确认
 | 功能 | 谁可用 | 说明 |
 |---|---|---|
 | 远程设置 + 重载补丁 | 所有登录用户 | 远程设置已应用（强制启用）；dsh 升级后若设置页出现异常，点"重载补丁"一键修复（自动重启网页服务并刷新页面，不用 SSH） |
-| 软件更新 | 状态所有用户可见；操作仅主用户 | 自动检查新版本、限速下载、平台空闲 1 小时后自动安装重启；也可手动「立即检查」「立即安装重启」 |
+| 软件更新 | 状态所有用户可见；操作仅主用户 | 自动检查新版本、自动下载限速 1MiB/s、平台空闲 1 小时后安装重启；Docker 使用 Compose；手动更新分下载和安装两步 |
 | 修改密码 | 本人改自己；主用户可改任何人 | 改密后旧会话全部立即失效，需重新登录 |
 | 修改用户名 | 本人改自己；主用户可改任何人 | 改名后需用新用户名重新登录 |
 | 子用户管理 | 仅主用户 | 创建/删除子用户（子用户可用登录页进入，但没有管理权限） |
@@ -239,10 +239,10 @@ node scripts/start-http.mjs [端口]    # 默认 8080，会弹 y/N 确认
 
 设置页卡片里有「软件更新」区块，默认自动检查 GitHub 上的新版本：
 
-- 启动时检查一次，之后每 24 小时自动重检；发现新版本后限速下载（默认 ≤1MiB/s，可用 `MCP_DSH_UPDATE_MAX_BPS` 改），下载完做 sha512 完整性校验（对照 npm registry，不匹配就丢弃）
-- 校验通过后，等平台连续空闲满 1 小时自动安装并重启 dsh 网页服务；也可以点「立即安装」跳过空闲窗（10 分钟冷却）
-- 自动更新默认开启，主用户可以在卡片里关掉；部署级 `MCP_DSH_AUTO_UPDATE=0` 可以强制关闭，但主用户仍可手动检查和安装
-- npm 安装会使用已校验的发布包；Git 源码目录会在工作区干净、`npm ci`、测试和构建都通过后更新；Docker 自动更新只适用于能从该环境调用宿主机 compose 的部署，需要配置 `MCP_DSH_DOCKER_COMPOSE_DIR`，更新后会检查 `dsh-passwords` 服务是否运行
+- GitHub Release 只用于发现版本；包始终从 npm registry 下载，并用该版本 `dist.integrity` 的 sha512 校验，不匹配就丢弃
+- 自动更新开启时：启动后及每 24 小时检查，发现版本后自动限速下载（默认 <=1MiB/s，`MCP_DSH_UPDATE_MAX_BPS` 只能降低），校验完成后等待平台连续空闲 1 小时安装；主用户点「立即安装」可跳过空闲等待
+- 自动更新关闭时：「立即检查」只发现版本；主用户首次点「下载并准备安装」以不限速下载，完成后会提示再次点击「立即安装」，第二次才安装并重启
+- npm 安装使用已校验 tarball。即使从 Git 源码目录运行，也不会修改工作区或调用 Git：新包安装到受保护的部署目录，保留 `.env`、`data/`、数据库、TLS 和 profile，切换完成后后台重启 dsh。Docker 更新不下载 npm tarball，也不会把“服务正在运行”当成版本成功。只有显式配置 `MCP_DSH_DOCKER_SELF_UPDATE=1`、`MCP_DSH_DOCKER_COMPOSE_DIR`、`MCP_DSH_DOCKER_COMPOSE_FILE`、`MCP_DSH_DOCKER_IMAGE`，并向容器授予 Docker CLI/socket 访问时，应用才会写入目标版本覆盖文件，执行 `docker compose pull` → `docker compose up -d`，再校验容器内版本和 `/gateway/readyz`。未满足条件时只显示宿主机手动命令；Docker socket 等同授予容器宿主 Docker 控制权限，请仅在可信部署中启用。
 
 ## 配置参考
 
@@ -269,8 +269,12 @@ node scripts/start-http.mjs [端口]    # 默认 8080，会弹 y/N 确认
 | `MCP_DSH_ROOT` | 自动探测 | dsh 安装目录（`@deepseek-ai/dsh` 所在处），探测不到时手动指定 |
 | `MCP_DSH_RESTART_SERVICE` | `dsh-web` | 重载补丁后自动重启的 dsh systemd 服务名；显式留空不自动重启 |
 | `MCP_DSH_AUTO_UPDATE` | 开 | 部署级自动更新总开关；`0/false/no` 强制关闭（设置页仍可手动检查/安装） |
-| `MCP_DSH_UPDATE_MAX_BPS` | 1MiB/s | 更新下载限速（字节/秒） |
-| `MCP_DSH_DOCKER_COMPOSE_DIR` | 空 | Docker 自动更新使用的 compose 文件目录；仅在运行环境能调用宿主机 Docker/Compose 时有效，未配置时不会自动更新 |
+| `MCP_DSH_UPDATE_MAX_BPS` | 1MiB/s | 自动更新下载限速（字节/秒，只能低于 1MiB/s） |
+| `MCP_DSH_DOCKER_SELF_UPDATE` | 关 | 显式启用 Docker 应用内更新；需要可信环境、Docker CLI/socket 和版本化 Compose image 配置，默认关闭 |
+| `MCP_DSH_DOCKER_COMPOSE_DIR` | 空 | Docker 自动更新使用的宿主 Compose 文件目录；必须包含 `dsh-passwords` 服务，未配置时不会自动更新 |
+| `MCP_DSH_DOCKER_COMPOSE_FILE` | 空 | Compose 文件名，例如 `compose.yml`；必须是 Compose 目录内的相对路径 |
+| `MCP_DSH_DOCKER_IMAGE` | 空 | 版本化 Docker 镜像仓库名，例如 `skywalker237234/dsh-passwords`；更新时追加目标版本 tag |
+| `MCP_DSH_DOCKER_SOCKET` | `/var/run/docker.sock` | Docker daemon socket 路径；只有明确挂载并授权时才可启用应用内 Docker 更新 |
 | `MCP_DSH_PATCH_ALLOW_BIND_ALL` | 关 | 分容器 Docker 拓扑用：`1` 允许 dsh web 绑 0.0.0.0，让另一容器的网关能访问到 dsh web |
 | `DSH_PASSWORDS_ENV_FILE` | 空 | 手动指定 .env 路径（插件自动传，一般不用填） |
 

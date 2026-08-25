@@ -39,9 +39,14 @@ export interface UpdateInfo {
   currentVersion: string;
   latestVersion: string | null;
   updateAvailable: boolean;
-  phase: 'idle' | 'downloading' | 'ready' | 'error';
+  phase: 'idle' | 'downloading' | 'ready' | 'installing' | 'restarting' | 'error';
   downloadPercent: number | null;
+  downloadMode: 'automatic' | 'manual' | null;
+  downloadedBytes: number;
+  totalBytes: number | null;
   pendingVersion: string | null;
+  installConfirmationRequired: boolean;
+  lastNotificationAt: string | null;
   idleRemainingMs: number | null;
   autoUpdateEnabled: boolean;
   autoInstallSupported: boolean;
@@ -297,6 +302,25 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
     return () => window.clearInterval(timer);
   }, []);
 
+  // 后台自动下载不经过“立即检查/立即安装”按钮，下载进度也必须在设置页
+  // 实时可见；只轮询轻量 update/status，不重复拉取用户、权限和工作区数据。
+  useEffect(() => {
+    const phase = updateInfo?.phase;
+    const active = updateInfo?.checking || phase === 'downloading' || phase === 'installing' || phase === 'restarting'
+      || (updateInfo?.autoUpdateEnabled === true && updateInfo.updateAvailable && phase === 'idle');
+    if (!active) return undefined;
+    const poll = () => {
+      api<{ ok?: boolean; status?: UpdateInfo }>('/api/dsh-passwords/update/status')
+        .then((r) => {
+          if (r.status) setUpdateInfo(r.status);
+        })
+        .catch(() => undefined);
+    };
+    poll();
+    const timer = window.setInterval(poll, 700);
+    return () => window.clearInterval(timer);
+  }, [updateInfo?.checking, updateInfo?.phase, updateInfo?.autoUpdateEnabled, updateInfo?.updateAvailable]);
+
   const isAdmin = data?.me?.role === 'admin';
   const me = data?.me?.username ?? '';
   const chatEnabled = data?.chatEnabled ?? true;
@@ -375,8 +399,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
         const status = response.status;
         if (status) {
           setUpdateInfo(status);
-          // 检查接口会异步触发下载；只有检查和下载都结束后才结束 loading。
-          if (!status.checking && status.phase !== 'downloading') break;
+          if (!status.checking) break;
         }
         await new Promise((resolve) => window.setTimeout(resolve, 700));
       }
@@ -389,17 +412,34 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
     }
   };
 
-  /** 立即安装重启（仅主用户，引擎自带 10 分钟冷却）：只锁定更新区。 */
+  /** 主用户更新操作：首次手动操作启动下载，已就绪时才安装。 */
   const applyUpdate = async () => {
     if (updateBusy) return;
     setUpdateBusy(true);
     setError('');
     setNotice('');
     try {
-      const result = await api<{ ok?: boolean; message?: string; error?: string }>('/api/dsh-passwords/update/apply', {});
-      if (result.ok === false) throw new Error(result.message || result.error || t('updateApplyFailed'));
-      setNotice(t('updateApplyStarted'));
-      refresh();
+      const result = await api<{ ok?: boolean; code?: string; message?: string; error?: string; requiresManualRestart?: boolean; phase?: UpdateInfo['phase'] }>('/api/dsh-passwords/update/apply', {});
+      const inProgress = result.code === 'DOWNLOAD_IN_PROGRESS' || result.code === 'INSTALL_STARTED' || result.code === 'INSTALL_IN_PROGRESS';
+      if (result.ok === false && !inProgress) throw new Error(result.message || result.error || t('updateApplyFailed'));
+      if (result.code === 'DOWNLOAD_STARTED') {
+        // 立即进入 indeterminate 状态，避免小包在首轮轮询前完成而没有任何视觉反馈。
+        setUpdateInfo((current) => current ? { ...current, phase: 'downloading', downloadPercent: null, downloadMode: 'manual' } : current);
+      } else if (result.code === 'INSTALL_STARTED') {
+        // Compose 更新会在后台执行，先显示进行中状态，避免点击后无反馈。
+        setUpdateInfo((current) => current ? { ...current, phase: 'installing', downloadPercent: null } : current);
+      }
+      setNotice(result.code === 'DOWNLOAD_STARTED' ? t('updateDownloadStarted') : inProgress ? (result.message || t('updateApplyStarted')) : result.requiresManualRestart ? t('updateManualRestart') : t('updateApplyStarted'));
+      const deadline = Date.now() + 30 * 60_000;
+      while (Date.now() < deadline) {
+        const response = await api<{ status?: UpdateInfo }>('/api/dsh-passwords/update/status');
+        const status = response.status;
+        if (status) {
+          setUpdateInfo(status);
+          if (status.phase !== 'downloading' && status.phase !== 'installing' && status.phase !== 'restarting') break;
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 700));
+      }
     } catch (e) {
       setError(errText(e, trErr));
     } finally {
@@ -434,11 +474,8 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
       .finally(() => window.location.assign('/gateway/login'));
   };
 
-  /** 空闲窗剩余毫秒 → 可读文案 */
-  const fmtIdle = (ms: number): string => {
-    const minutes = Math.max(1, Math.ceil(ms / 60000));
-    return t('updateIdleMinutes', { minutes: String(minutes) });
-  };
+  /** 空闲窗剩余毫秒 → 模板需要的分钟数 */
+  const idleMinutes = (ms: number): string => String(Math.max(1, Math.ceil(ms / 60000)));
 
   /** 聊天入口按账号跨设备同步；保存成功后立即通知 overlay，无需刷新页面。 */
   const toggleChatEntry = () => {
@@ -606,6 +643,16 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
   const patchText =
     patchState === null ? t('patchUnknown') : patchOk ? t('patchOk') : t('patchBad');
   const managedUsers = overview?.users.filter((u) => u.role === 'user') ?? [];
+  const updateDownloading = updateInfo?.phase === 'downloading';
+  const updateInstalling = updateInfo?.phase === 'installing' || updateInfo?.phase === 'restarting';
+  const updateProgressVisible = updateDownloading || updateInstalling || (updateInfo?.phase === 'ready' && updateInfo.pendingVersion !== null);
+  const updateManualOnly = updateInfo?.env === 'docker' && !updateInfo.autoInstallSupported && updateInfo.manualCommand !== '';
+  const updateProgress = updateInfo?.downloadPercent;
+  const applyLabel = updateInfo?.phase === 'ready' && updateInfo.installConfirmationRequired
+    ? t('updateApplyNow')
+    : !updateInfo?.autoUpdateEnabled && updateInfo?.updateAvailable && updateInfo.pendingVersion === null
+      ? t('updateDownloadPrepare')
+      : t('updateApplyNow');
 
   const body = h(
     'div',
@@ -721,59 +768,63 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
             ),
           )
         : null,
-      updateInfo?.phase === 'downloading'
-        ? h(
-            'div',
-            { className: 'dshpw-update-progress' },
-            h(
-              'div',
-              { className: 'dshpw-update-progress-head' },
-              h('span', null, t('updateDownloading')),
-              h('span', { className: 'dshpw-hint' }, updateInfo.downloadPercent === null ? '—' : `${Math.floor(updateInfo.downloadPercent)}%`),
-            ),
-            h(
-              'div',
-              {
-                className: 'dshpw-progress-track',
-                role: 'progressbar',
-                'aria-valuemin': 0,
-                'aria-valuemax': 100,
-                'aria-valuenow': updateInfo.downloadPercent ?? undefined,
-              },
-              h('span', {
-                className: 'dshpw-progress-fill',
-                style: { width: `${Math.max(0, Math.min(100, updateInfo.downloadPercent ?? 0))}%` },
-              }),
-            ),
-          )
+      updateInfo?.phase === 'ready' && updateInfo.installConfirmationRequired
+        ? h('div', { className: 'dshpw-ok' }, t('updateDownloadReadyConfirm'))
         : null,
-      updateInfo?.phase === 'ready' && updateInfo.idleRemainingMs !== null
+      updateInfo?.phase === 'ready' && !updateInfo.installConfirmationRequired && updateInfo.idleRemainingMs !== null
         ? h(
             'div',
             { className: 'dshpw-row' },
-            h('span', null, t('updateReadyWaitIdle')),
-            h('span', { className: 'dshpw-hint' }, fmtIdle(updateInfo.idleRemainingMs)),
+            h('span', null, t('updateReadyWaitIdle', { minutes: idleMinutes(updateInfo.idleRemainingMs) })),
           )
         : null,
       updateInfo?.lastError
         ? h('div', { className: 'dshpw-error' }, updateInfo.lastError)
         : null,
+      updateManualOnly
+        ? h(
+            'div',
+            { className: 'dshpw-update-manual-block' },
+            h('div', { className: 'dshpw-hint' }, t('updateDockerManual')),
+            h('div', { className: 'dshpw-hint dshpw-update-manual-command' }, updateInfo.manualCommand),
+          )
+        : null,
       h(
         'div',
         {
-          className: 'dshpw-action-row dshpw-update-actions',
+          className: `dshpw-action-row dshpw-update-actions${updateProgressVisible ? ' has-progress' : ' no-progress'}`,
         },
+        isAdmin && updateProgressVisible &&
+          h(
+            'div',
+            { className: 'dshpw-update-inline-progress', role: 'status', 'aria-live': 'polite' },
+            h(
+              'div',
+              {
+                className: `dshpw-progress-track${updateProgress === null ? ' indeterminate' : ''}`,
+                role: 'progressbar',
+                'aria-valuemin': 0,
+                'aria-valuemax': 100,
+                'aria-valuenow': updateProgress ?? undefined,
+              },
+              h('span', {
+                className: 'dshpw-progress-fill',
+                style: updateProgress === null ? undefined : { width: `${Math.max(0, Math.min(100, updateProgress ?? 0))}%` },
+              }),
+            ),
+            h('span', { className: 'dshpw-hint' }, updateDownloading ? (updateInfo?.downloadMode === 'automatic' ? t('updateAutoDownloading') : t('updateManualDownloading')) : updateInstalling ? t('updateInstalling') : '100%'),
+          ),
         isAdmin &&
           h(
             'button',
-            { className: 'dshpw-btn', disabled: updateBusy, onClick: checkUpdate },
+            { className: 'dshpw-btn', disabled: updateBusy || updateChecking || updateDownloading || updateInstalling, onClick: checkUpdate },
             updateChecking ? t('updateChecking') : t('updateCheck'),
           ),
         isAdmin &&
           h(
             'button',
-            { className: 'dshpw-btn', disabled: updateBusy || updateInfo === null, onClick: applyUpdate },
-            t('updateApplyNow'),
+            { className: 'dshpw-btn dshpw-update-apply', disabled: updateBusy || updateInfo === null || updateChecking || updateDownloading || updateInstalling || updateManualOnly, onClick: applyUpdate },
+            applyLabel,
           ),
       ),
     ),

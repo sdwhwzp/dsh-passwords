@@ -262,6 +262,9 @@ function gatewayAlreadyRunning(port: number): Promise<boolean> {
 function startGateway(ctx: Context, cfg: PlatformConfig): void {
   const installRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const cliPath = path.join(installRoot, 'dist', 'cli.js');
+  // dsh/systemd 可能已提供稳定的部署环境文件。npm 更新后插件模块目录会变成
+  // /usr/lib/node_modules/...，不能因此把网关切到新包目录下的另一份 .env/数据库。
+  const gatewayEnvFile = process.env.DSH_PASSWORDS_ENV_FILE?.trim() || path.join(installRoot, '.env');
   const gatewayPort = cfg.gateway.port;
 
   ctx.effect(
@@ -300,7 +303,7 @@ function startGateway(ctx: Context, cfg: PlatformConfig): void {
           env: {
             ...process.env,
             DSH_GATEWAY_PARENT_PID: String(process.pid),
-            DSH_PASSWORDS_ENV_FILE: path.join(installRoot, '.env'),
+            DSH_PASSWORDS_ENV_FILE: gatewayEnvFile,
           },
           stdio: ['ignore', 'inherit', 'inherit'],
         });
@@ -674,7 +677,7 @@ export function apply(ctx: Context): void {
         const caller = guard(req, res);
         if (!caller) return;
         if (!requireMethod(req, res, 'POST')) return;
-        // 检查会触发 GitHub 请求并可能开始下载：仅主用户可触发（补丁重载同口径）
+        // 手动检查只发现 GitHub 最新版本；下载和安装由更新工作流单独触发。
         if (caller.role !== 'admin') {
           writeJson(res, 403, { ok: false, code: 'FORBIDDEN', error: '仅主用户可操作' });
           return;
@@ -731,7 +734,13 @@ export function apply(ctx: Context): void {
           writeJson(res, 502, { ok: false, code: 'BAD_GATEWAY', error: '更新服务不可用（网关未就绪）' });
           return;
         }
-        writeJson(res, 200, result.body);
+        const code = typeof result.body.code === 'string' ? result.body.code : '';
+        // 下载/安装进行中是可轮询的正常状态，不应让设置页把它误显示为 HTTP 错误。
+        const status = code === 'DOWNLOAD_STARTED' || code === 'DOWNLOAD_IN_PROGRESS' || code === 'INSTALL_STARTED' || code === 'INSTALL_IN_PROGRESS' ? 202
+          : code === 'RATE_LIMITED' ? 429
+            : code === 'NOT_READY' ? 409
+              : result.body.ok === false ? 422 : 200;
+        writeJson(res, status, result.body);
       },
     },
     {

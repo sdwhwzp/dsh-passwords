@@ -687,6 +687,10 @@ function resolveSshHostSafe(host: string): Promise<'private' | string | null> {
   });
 }
 
+export function isBackgroundUpdateRequest(gatePath: string): boolean {
+  return gatePath === '/api/dsh-passwords/update/status' || gatePath === '/gateway/internal/update';
+}
+
 export function createGatewayServer(
   config: PlatformConfig,
   auth: AuthService,
@@ -1147,8 +1151,8 @@ export function createGatewayServer(
   // ── 内部接口：自动更新引擎（插件经内部通道调用） ───────
   // 仅限本机 dsh 插件调用（回环 + 恒定时间比对内部密钥）。action：
   //   status — 查询引擎状态（当前/最新版本、下载进度、空闲窗剩余、手动命令）
-  //   check  — 立即检查 GitHub 并（环境支持时）开始限速下载
-  //   apply  — 立即安装重启（主用户按钮触发；引擎自带冷却）
+  //   check  — 立即检查 GitHub 最新 release（只发现版本，不下载）
+  //   apply  — 按更新状态机下载或安装（主用户按钮触发）
   //   set-auto — 持久化自动更新开关（仅主用户通过插件调用）
   if (updateEngine !== undefined) {
     app.post('/gateway/internal/update', express.json({ limit: '4kb' }), async (req, res) => {
@@ -1172,8 +1176,8 @@ export function createGatewayServer(
         return;
       }
       if (action === 'check') {
-        // 检查本身异步；先立即返回「已触发」，结果由设置页轮询状态可见
-        void updateEngine.checkNow().catch(() => undefined);
+        // 手动检查只发现版本；设置页轮询状态展示结果。
+        void updateEngine.checkNow({ downloadIfAllowed: false }).catch(() => undefined);
         res.json({ ok: true, started: true });
         return;
       }
@@ -1743,7 +1747,7 @@ export function createGatewayServer(
       const gatePath = gatePathOf(req.url ?? '/');
       // 自动更新引擎的用户活动刷新：任何非内部通道请求都算用户活动（登录/API/页面/SSE），
       // 内部通道（/gateway/internal/*）是引擎/插件自己的调用，不算使用。
-      if (updateEngine !== undefined && !gatePath.startsWith('/gateway/internal/')) {
+      if (updateEngine !== undefined && !gatePath.startsWith('/gateway/internal/') && !isBackgroundUpdateRequest(gatePath)) {
         updateEngine.bumpActivity();
       }
       // /gateway 精确路径与 /gateway/* 都视为网关自有前缀——但只放行已知路由，

@@ -477,22 +477,34 @@ export function rollbackPatch(dshRoot: string): 'rolled-back' | 'no-backup' | 'm
 /** 延迟重启 dsh 网页服务（补丁生效需要 dsh 重新加载模块）；仅适用于常驻进程
  *  用 spawnSync 参数数组（不拼 shell），杜绝命令注入；服务名仍做字符白名单
  *  双保险（systemctl 只接受合法 unit 名）。 */
-export function restartDshWeb(service: string, delayMs = 2500): void {
-  if (!service) return;
-  if (!/^[A-Za-z0-9_.@-]+$/.test(service)) {
-    console.error(`[dsh-passwords] 重启服务名非法（拒绝执行）：${service}`);
-    return;
-  }
-  setTimeout(() => {
-    try {
-      const result = spawnSync('systemctl', ['restart', service], { stdio: 'ignore' });
-      // spawnSync 对 ENOENT 不抛异常而是写 result.error；两者都要显式检查，
-      // 否则 systemctl 失败（如服务不存在）会被静默吞掉，补丁表面“已应用”实际未生效。
-      if (result.status !== 0 || result.error) {
-        console.error(`[dsh-passwords] 重启 ${service} 失败（补丁将在下次 dsh 重启后生效）:`, result.error ?? `exit ${String(result.status)}`);
-      }
-    } catch (error) {
-      console.error(`[dsh-passwords] 重启 ${service} 失败（补丁将在下次 dsh 重启后生效）:`, error);
+export function restartDshWebChecked(service: string, delayMs = 2500): Promise<{ ok: boolean; message: string }> {
+  return new Promise((resolve) => {
+    if (!service) {
+      resolve({ ok: false, message: '未配置 dsh-web 服务名' });
+      return;
     }
-  }, delayMs).unref();
+    if (!/^[A-Za-z0-9_.@-]+$/.test(service)) {
+      resolve({ ok: false, message: '重启服务名非法' });
+      return;
+    }
+    const timer = setTimeout(() => {
+      try {
+        const result = spawnSync('systemctl', ['restart', service], { stdio: 'ignore' });
+        if (result.status !== 0 || result.error) {
+          resolve({ ok: false, message: result.error instanceof Error ? result.error.message : `systemctl exit ${String(result.status)}` });
+          return;
+        }
+        resolve({ ok: true, message: '' });
+      } catch (error) {
+        resolve({ ok: false, message: error instanceof Error ? error.message : String(error) });
+      }
+    }, delayMs);
+    timer.unref();
+  });
+}
+
+export function restartDshWeb(service: string, delayMs = 2500): void {
+  void restartDshWebChecked(service, delayMs).then((result) => {
+    if (!result.ok) console.error(`[dsh-passwords] 重启 ${service} 失败（补丁将在下次 dsh 重启后生效）: ${result.message}`);
+  });
 }
