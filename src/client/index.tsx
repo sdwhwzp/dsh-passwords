@@ -80,6 +80,17 @@ select.dshpw-input{height:auto;min-height:36px}
 .dshpw-local-download{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-2)}
 .dshpw-download-btn{display:inline-flex;align-items:center;text-decoration:none}
 .dshpw-local-workspace{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:10px;align-items:center;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-2)}
+.dshpw-managed-files-path{max-width:65%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-tertiary);font-size:12px}
+.dshpw-managed-files-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.dshpw-managed-files-upload{display:inline-flex;align-items:center}
+.dshpw-managed-files-upload.disabled{pointer-events:none;opacity:.4}
+.dshpw-managed-files-upload input{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+.dshpw-managed-files-list{display:flex;flex-direction:column;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;overflow:hidden;background:var(--dsw-alias-bg-layer-2)}
+.dshpw-managed-files-row{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:10px;min-height:40px;padding:6px 8px;border-top:1px solid var(--dsw-alias-border-l2)}
+.dshpw-managed-files-row:first-child{border-top:0}
+.dshpw-managed-files-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-primary);font:inherit;text-align:left}
+button.dshpw-managed-files-name{appearance:none;padding:4px;border:0;background:transparent;cursor:pointer}
+button.dshpw-managed-files-name:hover{color:var(--dsw-alias-brand-primary)}
 .dshpw-local-launcher{display:flex;flex-direction:column;gap:7px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-2);font-size:13px;line-height:1.45}
 .dshpw-local-launcher-seat{position:relative;display:inline-flex;min-width:0}
 .dshpw-local-launcher-trigger{display:inline-flex;align-items:center;gap:4px;min-height:28px;max-width:240px;padding:0 8px;border:0;border-radius:16px;list-style:none;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;font-weight:500;line-height:20px;cursor:pointer;white-space:nowrap}
@@ -116,7 +127,7 @@ select.dshpw-input{height:auto;min-height:36px}
 .dshpw-local-launcher-workspace>span{display:flex;flex-direction:column;min-width:0}
 .dshpw-local-launcher-workspace strong,.dshpw-local-launcher-workspace small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dshpw-local-launcher-workspace small{color:var(--dsw-alias-label-tertiary)}
-@media(max-width:640px){.dshpw-local-download,.dshpw-local-launcher-main,.dshpw-general-row{align-items:stretch;flex-direction:column}.dshpw-general-row-copy{padding-right:0}.dshpw-general-logout{justify-content:center}.dshpw-local-workspace{grid-template-columns:minmax(0,1fr) auto}.dshpw-local-workspace>.dshpw-switch-copy{grid-column:1/-1}.dshpw-local-launcher-seat>.dshpw-local-launcher{width:calc(100vw - 28px)}.dshpw-local-guide-backdrop{padding:12px}.dshpw-local-guide-dialog{max-height:calc(100vh - 24px);padding:18px}.dshpw-local-guide-actions{align-items:stretch;flex-direction:column}.dshpw-local-guide-actions>*{justify-content:center;width:100%;box-sizing:border-box;text-align:center}}
+@media(max-width:640px){.dshpw-local-download,.dshpw-local-launcher-main,.dshpw-general-row{align-items:stretch;flex-direction:column}.dshpw-general-row-copy{padding-right:0}.dshpw-general-logout{justify-content:center}.dshpw-local-workspace{grid-template-columns:minmax(0,1fr) auto}.dshpw-local-workspace>.dshpw-switch-copy{grid-column:1/-1}.dshpw-managed-files-row{grid-template-columns:minmax(0,1fr) auto}.dshpw-managed-files-row>.dshpw-hint{display:none}.dshpw-local-launcher-seat>.dshpw-local-launcher{width:calc(100vw - 28px)}.dshpw-local-guide-backdrop{padding:12px}.dshpw-local-guide-dialog{max-height:calc(100vh - 24px);padding:18px}.dshpw-local-guide-actions{align-items:stretch;flex-direction:column}.dshpw-local-guide-actions>*{justify-content:center;width:100%;box-sizing:border-box;text-align:center}}
 `;
 
 export const inject = ['slots', 'locale', 'sessions', 'workspaces'] as const;

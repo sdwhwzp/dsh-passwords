@@ -25,6 +25,7 @@ Listed in [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek
 - One **owner** (created at first-time setup) + any number of **subusers**, each with their own login
 - All account management happens in a card on dsh's settings page — no SSH needed: change passwords, change usernames, create/delete subusers
 - Creating a subuser also creates and registers a private host workspace (default `~/dsh-user-workspaces/u<user-id>`) with an initial `workspace-write` sandbox; existing subusers are backfilled on the first startup after upgrade
+- Subusers can open **Password Gate → Private host folder** to browse their own managed directory, download files, and upload local files or whole folders into the current directory. Folder structure is retained (browser folder selection does not report empty directories), and relative-path authorization prevents access to other accounts or host directories
 - A **Sign out** button beside the current identity immediately revokes the server-side session and clears the cookie after confirmation
 - The owner manages all subusers; subusers can only change themselves
 - Changing a password immediately invalidates all old sessions; every login and failure is logged — one command shows who signed in when
@@ -40,7 +41,7 @@ The owner can configure, per subuser, from the settings page:
 - **Monthly model-spend allowance**: stored as integer CNY micros with ¥0.01 admin precision; shows used, remaining and an 80% warning, and rejects the next model step at 100%
 - **Customer model scope**: under the ChatGPT (Codex) provider, subuser selectors show only GPT-5.6-Sol, GPT-5.6-Terra, and GPT-5.6-Luna; models from other providers remain available, while the server rejects other Codex models for subusers and leaves the owner unrestricted
 - **Sandbox level**: read-only / workspace-write / full access; when a subuser's AI tries to escalate beyond its level, the gateway forces the approval to "reject"
-- **Upload / git-download toggles** and **ban subusers**
+- **Upload toggle** (including private-folder uploads), **git-download toggle**, and **ban subusers**
 
 ### 4️⃣ Collaboration
 

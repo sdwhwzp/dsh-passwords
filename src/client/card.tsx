@@ -13,6 +13,7 @@ import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots';
 import { publishChatEntryChanged } from './events';
 import { submitLogoutNavigation } from './account-logout';
 import { LocalWorkspacePanel } from './local-workspace';
+import { ManagedFilesPanel } from './managed-files';
 
 export interface UserInfo {
   id: number;
@@ -543,6 +544,13 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
       ),
     ),
     h(LocalWorkspacePanel, {
+      t: trErr,
+      busy,
+      setBusy,
+      setError,
+      setNotice,
+    }),
+    data?.me?.role === 'user' && h(ManagedFilesPanel, {
       t: trErr,
       busy,
       setBusy,

@@ -5,12 +5,14 @@
 import http, { type IncomingMessage, type IncomingHttpHeaders } from 'node:http';
 import https from 'node:https';
 import { createSecureContext } from 'node:tls';
-import { readFileSync, statSync, createReadStream, realpathSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, createReadStream, createWriteStream, realpathSync } from 'node:fs';
+import { link, lstat, mkdir, realpath, unlink } from 'node:fs/promises';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { createHmac, createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { type Duplex, Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import zlib from 'node:zlib';
 import { URL } from 'node:url';
 import dns from 'node:dns';
@@ -79,6 +81,8 @@ const HOST_LIST_DIRECTORY_RE = /^\/api\/host[.\/]listDirectory$/;
 const HOST_CREATE_DIRECTORY_RE = /^\/api\/host[.\/]createDirectory$/;
 const WORKSPACE_CREATE_RE = /^\/api\/workspace[.\/]create$/;
 const MODEL_CATALOG_RE = /^\/api\/(?:llm|session)[.\/]models$/;
+const MANAGED_FILE_UPLOAD_MAX_BYTES = 256 * 1024 * 1024;
+const MANAGED_FILE_LIST_MAX_ENTRIES = 1_000;
 
 /** Resolve symlinks in every existing ancestor while retaining a missing leaf. */
 function canonicalCandidate(candidate: string): string | null {
@@ -105,6 +109,24 @@ function pathWithin(root: string, candidate: string): boolean {
     !relative.startsWith('..' + path.sep) &&
     !path.isAbsolute(relative)
   );
+}
+
+/** Parse a browser relative path into portable, non-traversing path segments. */
+function managedFileSegments(relativePath: string): string[] | null {
+  if (
+    relativePath.includes('\0') ||
+    relativePath.length > 4_096 ||
+    path.posix.isAbsolute(relativePath) ||
+    path.win32.isAbsolute(relativePath)
+  ) return null;
+  const segments = relativePath === '' ? [] : relativePath.split(/[\\/]/);
+  if (segments.some((segment) =>
+    segment === '' ||
+    segment === '.' ||
+    segment === '..' ||
+    /[\u0000-\u001f\u007f]/.test(segment) ||
+    Buffer.byteLength(segment, 'utf8') > 255)) return null;
+  return segments;
 }
 
 /** Read the payload object consumed by Typert host/workspace requests. */
@@ -910,6 +932,63 @@ export function createGatewayServer(
     return canonical;
   }
 
+  /** Resolve a browser-supplied relative path inside one subuser's managed root. */
+  function managedFilePathFor(
+    userId: number,
+    relativePath: string,
+  ): { root: string; target: string; relative: string } | null {
+    const segments = managedFileSegments(relativePath);
+    if (segments === null) return null;
+    const managed = db.getManagedWorkspace(userId);
+    if (managed === null) return null;
+    const root = canonicalCandidate(managed.path);
+    if (root === null) return null;
+    const target = canonicalCandidate(path.join(root, ...segments));
+    if (target === null || !pathWithin(root, target)) return null;
+    return {
+      root,
+      target,
+      relative: path.relative(root, target).split(path.sep).join('/'),
+    };
+  }
+
+  /** Create upload subdirectories one level at a time without following links. */
+  async function ensureManagedUploadDirectory(
+    root: string,
+    baseDirectory: string,
+    segments: readonly string[],
+  ): Promise<string> {
+    let current = baseDirectory;
+    for (const segment of segments) {
+      const candidate = path.join(current, segment);
+      let info;
+      try {
+        info = await lstat(candidate);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        try {
+          await mkdir(candidate, { mode: 0o700 });
+        } catch (mkdirError) {
+          if ((mkdirError as NodeJS.ErrnoException).code !== 'EEXIST') throw mkdirError;
+        }
+        info = await lstat(candidate);
+      }
+      if (info.isSymbolicLink() || !info.isDirectory()) {
+        const error = new Error('上传目录包含符号链接或非目录项目');
+        error.name = 'ManagedFilePathError';
+        throw error;
+      }
+      const canonical = await realpath(candidate);
+      if (!pathWithin(root, canonical)) {
+        const error = new Error('上传目录越出专属文件夹');
+        error.name = 'ManagedFilePathError';
+        throw error;
+      }
+      current = canonical;
+    }
+    return current;
+  }
+
   /** Limit a successful directory-list response to the authenticated user's private root. */
   function restrictManagedDirectoryListing(value: unknown, userId: number): unknown {
     if (value === null || typeof value !== 'object' || Array.isArray(value)) return value;
@@ -1335,6 +1414,219 @@ export function createGatewayServer(
       };
     });
     res.json({ ok: true, me: { id: me.userId, username: me.username, role: me.role }, users });
+  });
+
+  /** Authenticate access to the caller's private host-managed directory. */
+  const managedFilesAuth = (req: Request, res: Response, write = false) => {
+    const me = apiAuth(req, res);
+    if (me === null) return null;
+    if (me.role !== 'user' || db.getManagedWorkspace(me.userId) === null) {
+      res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '当前账号没有专属宿主机文件夹' });
+      return null;
+    }
+    const permissions = effectivePermissions(me.userId);
+    if (permissions.banned) {
+      res.status(403).json({ ok: false, code: 'BANNED', error: '账号已被封禁' });
+      return null;
+    }
+    if (write && !permissions.allow_upload) {
+      res.status(403).json({ ok: false, code: 'NO_UPLOAD', error: '当前账号没有上传权限' });
+      return null;
+    }
+    return { me };
+  };
+
+  // ── 子账号专属宿主机文件夹 ──────────────────────────────────
+  // 浏览器只交换相对路径；服务端逐次解析现有祖先和符号链接，并把所有操作
+  // 约束在该账号的 managed workspace 内。管理员没有隐式跨账号入口。
+  app.get('/gateway/api/managed-files', (req, res) => {
+    const access = managedFilesAuth(req, res);
+    if (access === null) return;
+    const relativePath = typeof req.query.path === 'string' ? req.query.path : '';
+    const resolved = managedFilePathFor(access.me.userId, relativePath);
+    if (resolved === null) {
+      res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '目录越出专属文件夹' });
+      return;
+    }
+    let directory;
+    try {
+      directory = statSync(resolved.target);
+    } catch {
+      res.status(404).json({ ok: false, code: 'NOT_FOUND', error: '目录不存在' });
+      return;
+    }
+    if (!directory.isDirectory()) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: '目标不是目录' });
+      return;
+    }
+
+    const rows = readdirSync(resolved.target, { withFileTypes: true });
+    const entries = rows
+      .slice(0, MANAGED_FILE_LIST_MAX_ENTRIES)
+      .flatMap((entry) => {
+        if (entry.isSymbolicLink() || entry.name.startsWith('.dsh-upload-')) return [];
+        const childRelative = resolved.relative === '' ? entry.name : `${resolved.relative}/${entry.name}`;
+        const child = managedFilePathFor(access.me.userId, childRelative);
+        if (child === null) return [];
+        try {
+          const info = statSync(child.target);
+          if (!info.isDirectory() && !info.isFile()) return [];
+          return [{
+            name: entry.name,
+            path: child.relative,
+            kind: info.isDirectory() ? 'directory' as const : 'file' as const,
+            bytes: info.isFile() ? info.size : null,
+            modifiedAt: info.mtime.toISOString(),
+          }];
+        } catch {
+          return [];
+        }
+      })
+      .sort((left, right) => {
+        if (left.kind !== right.kind) return left.kind === 'directory' ? -1 : 1;
+        return left.name.localeCompare(right.name);
+      });
+    const segments = resolved.relative === '' ? [] : resolved.relative.split('/');
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      ok: true,
+      path: resolved.relative,
+      parent: segments.length === 0 ? null : segments.slice(0, -1).join('/'),
+      entries,
+      truncated: rows.length > MANAGED_FILE_LIST_MAX_ENTRIES,
+    });
+  });
+
+  app.get('/gateway/api/managed-files/download', (req, res) => {
+    const access = managedFilesAuth(req, res);
+    if (access === null) return;
+    const relativePath = typeof req.query.path === 'string' ? req.query.path : '';
+    const resolved = managedFilePathFor(access.me.userId, relativePath);
+    if (resolved === null || resolved.relative === '') {
+      res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '文件越出专属文件夹' });
+      return;
+    }
+    let info;
+    try {
+      info = statSync(resolved.target);
+    } catch {
+      res.status(404).json({ ok: false, code: 'NOT_FOUND', error: '文件不存在' });
+      return;
+    }
+    if (!info.isFile()) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: '目标不是普通文件' });
+      return;
+    }
+    const name = path.basename(resolved.target);
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(name)}`);
+    res.setHeader('Content-Length', String(info.size));
+    if (req.method === 'HEAD') {
+      res.end();
+      return;
+    }
+    const stream = createReadStream(resolved.target);
+    stream.on('error', () => {
+      if (!res.headersSent) res.status(500).json({ ok: false, code: 'INTERNAL', error: '读取失败' });
+      else res.destroy();
+    });
+    stream.pipe(res);
+  });
+
+  app.put('/gateway/api/managed-files/upload', async (req, res) => {
+    const access = managedFilesAuth(req, res, true);
+    if (access === null) return;
+    const relativeDirectory = typeof req.query.path === 'string' ? req.query.path : '';
+    const relativeUploadPath = typeof req.query.relativePath === 'string'
+      ? req.query.relativePath
+      : typeof req.query.name === 'string' ? req.query.name : '';
+    const uploadSegments = managedFileSegments(relativeUploadPath);
+    if (uploadSegments === null || uploadSegments.length === 0) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: '上传相对路径无效' });
+      return;
+    }
+    const directory = managedFilePathFor(access.me.userId, relativeDirectory);
+    if (directory === null) {
+      res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '目录越出专属文件夹' });
+      return;
+    }
+    try {
+      if (!statSync(directory.target).isDirectory()) {
+        res.status(400).json({ ok: false, code: 'INVALID', error: '目标不是目录' });
+        return;
+      }
+    } catch {
+      res.status(404).json({ ok: false, code: 'NOT_FOUND', error: '目录不存在' });
+      return;
+    }
+    const declaredRaw = req.headers['content-length'];
+    const declared = typeof declaredRaw === 'string' ? Number(declaredRaw) : NaN;
+    if (Number.isFinite(declared) && declared > MANAGED_FILE_UPLOAD_MAX_BYTES) {
+      req.resume();
+      res.status(413).json({ ok: false, code: 'FILE_TOO_LARGE', error: '单个文件不能超过 256 MiB' });
+      return;
+    }
+
+    const name = uploadSegments.at(-1)!;
+    let uploadDirectory: string;
+    try {
+      uploadDirectory = await ensureManagedUploadDirectory(
+        directory.root,
+        directory.target,
+        uploadSegments.slice(0, -1),
+      );
+    } catch (error) {
+      if (error instanceof Error && error.name === 'ManagedFilePathError') {
+        res.status(403).json({ ok: false, code: 'FORBIDDEN', error: error.message });
+      } else {
+        res.status(500).json({ ok: false, code: 'INTERNAL', error: '创建上传目录失败' });
+      }
+      return;
+    }
+    const destinationRelative = [directory.relative, ...uploadSegments].filter(Boolean).join('/');
+    const destination = managedFilePathFor(access.me.userId, destinationRelative);
+    if (destination === null || path.dirname(destination.target) !== uploadDirectory) {
+      res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '文件越出专属文件夹' });
+      return;
+    }
+    const temporary = path.join(uploadDirectory, `.dsh-upload-${randomBytes(16).toString('hex')}`);
+    let bytes = 0;
+    const limiter = new Transform({
+      transform(chunk: Buffer, _encoding, callback) {
+        bytes += chunk.length;
+        if (bytes > MANAGED_FILE_UPLOAD_MAX_BYTES) {
+          const error = new Error('单个文件不能超过 256 MiB');
+          error.name = 'ManagedFileTooLargeError';
+          callback(error);
+          return;
+        }
+        callback(null, chunk);
+      },
+    });
+    try {
+      await pipeline(req, limiter, createWriteStream(temporary, { flags: 'wx', mode: 0o600 }));
+      await link(temporary, destination.target);
+      db.audit('managed_file_uploaded', {
+        username: access.me.username,
+        detail: JSON.stringify({ path: destination.relative, bytes }),
+      });
+      res.status(201).json({ ok: true, file: { name, path: destination.relative, bytes } });
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (!res.headersSent && !res.writableEnded) {
+        if (code === 'EEXIST') {
+          res.status(409).json({ ok: false, code: 'FILE_EXISTS', error: '同名文件已存在' });
+        } else if (error instanceof Error && error.name === 'ManagedFileTooLargeError') {
+          res.status(413).json({ ok: false, code: 'FILE_TOO_LARGE', error: error.message });
+        } else {
+          res.status(500).json({ ok: false, code: 'INTERNAL', error: '上传失败' });
+        }
+      }
+    } finally {
+      await unlink(temporary).catch(() => undefined);
+    }
   });
 
   // ── 远程文件下载（Issue #4）──────────────────────────────────
