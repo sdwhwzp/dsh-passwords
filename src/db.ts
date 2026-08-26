@@ -100,6 +100,13 @@ export interface LocalWorkspaceRow {
   revoked_at: string | null;
 }
 
+/** 由平台在宿主机上为子用户托管的专属工作区。 */
+export interface ManagedWorkspaceRow {
+  user_id: number;
+  path: string;
+  created_at: string;
+}
+
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
@@ -189,6 +196,11 @@ CREATE TABLE IF NOT EXISTS local_workspaces (
   revoked_at       TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_local_workspaces_user ON local_workspaces(user_id, revoked_at);
+CREATE TABLE IF NOT EXISTS managed_workspaces (
+  user_id    INTEGER PRIMARY KEY,
+  path       TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 
 `;
 
@@ -610,6 +622,7 @@ export class Database {
       this.stmt('DELETE FROM user_usage WHERE user_id = ?').run(id);
       this.stmt('DELETE FROM messages WHERE sender_id = ? OR recipient_id = ?').run(id, id);
       this.stmt('DELETE FROM local_workspaces WHERE user_id = ?').run(id);
+      this.stmt('DELETE FROM managed_workspaces WHERE user_id = ?').run(id);
       this.stmt('DELETE FROM users WHERE id = ?').run(id);
       this.db.exec('COMMIT');
     } catch (error) {
@@ -952,6 +965,47 @@ export class Database {
 
   // ── 用户本机工作区 ────────────────────────────────────────
 
+  /** 记录或刷新一个子用户的宿主机专属工作区路径。 */
+  setManagedWorkspace(userId: number, workspacePath: string): void {
+    this.stmt(
+      `INSERT INTO managed_workspaces (user_id, path) VALUES (?, ?)
+       ON CONFLICT(user_id) DO UPDATE SET path = excluded.path`,
+    ).run(userId, workspacePath);
+  }
+
+  /** 读取一个子用户的宿主机专属工作区。 */
+  getManagedWorkspace(userId: number): ManagedWorkspaceRow | null {
+    const row = this.stmt(
+      'SELECT user_id, path, created_at FROM managed_workspaces WHERE user_id = ?',
+    ).get(userId) as ManagedWorkspaceRow | undefined;
+    return row ?? null;
+  }
+
+  /** 启动恢复与所有权判定使用的全部宿主机专属工作区。 */
+  listManagedWorkspaces(): ManagedWorkspaceRow[] {
+    return this.stmt(
+      'SELECT user_id, path, created_at FROM managed_workspaces ORDER BY user_id ASC',
+    ).all() as unknown as ManagedWorkspaceRow[];
+  }
+
+  /** 删除一条托管记录；不触碰宿主机目录。 */
+  deleteManagedWorkspace(userId: number): void {
+    this.stmt('DELETE FROM managed_workspaces WHERE user_id = ?').run(userId);
+  }
+
+  /** 返回包含目标路径的宿主机专属工作区所有者；普通路径返回 null。 */
+  managedWorkspaceOwnerForPath(candidate: string): number | null {
+    const resolved = path.resolve(candidate);
+    for (const workspace of this.listManagedWorkspaces()) {
+      const root = path.resolve(workspace.path);
+      const relative = path.relative(root, resolved);
+      if (relative === '' || (!relative.startsWith('..' + path.sep) && relative !== '..' && !path.isAbsolute(relative))) {
+        return workspace.user_id;
+      }
+    }
+    return null;
+  }
+
   /** 持久化一次成功配对；令牌只保存不可逆等值散列。 */
   createLocalWorkspace(input: {
     id: string;
@@ -982,6 +1036,19 @@ export class Database {
     const row = this.getLocalWorkspace(input.id);
     if (row === null) throw new Error('本机工作区配对写入后无法读取');
     return row;
+  }
+
+  /**
+   * Roll back a just-created device-confirmation row when its original socket
+   * disconnects before the token can be delivered. This is intentionally
+   * owner-scoped and is only called while the Hub still treats the row as
+   * provisional; established pairings are removed through revoke instead.
+   */
+  deleteProvisionalLocalWorkspace(userId: number, id: string): boolean {
+    const result = this.stmt(
+      'DELETE FROM local_workspaces WHERE id = ? AND user_id = ? AND revoked_at IS NULL',
+    ).run(id, userId);
+    return Number(result.changes) > 0;
   }
 
   /** 用长期设备令牌恢复一个未撤销的配对。 */
@@ -1097,6 +1164,7 @@ export class Database {
       revoked_at: row.revoked_at,
     };
   }
+
 
   // ── 留言 / 聊天 ───────────────────────────────────────────
   // ⚠ 多租户可见性必须在 SQL 层先过滤再 LIMIT：旧实现先全局 LIMIT 300 再到

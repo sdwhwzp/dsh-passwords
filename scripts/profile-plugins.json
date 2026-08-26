@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "plugins": [
+    {
+      "name": "dshmarket",
+      "defaultSpecifier": "1.16.2",
+      "activation": "bundle"
+    },
+    {
+      "name": "@linxin666/dsh-web-all",
+      "defaultSpecifier": "github:sdwhwzp/dsh-web#dev&path:/packages/dsh-web-all",
+      "localCandidates": [
+        "../dsh-web/packages/dsh-web-all"
+      ],
+      "localWorkspacePackages": [
+        "../dsh-web/packages/dsh-chat-recovery",
+        "../dsh-web/packages/dsh-aionui-panel",
+        "../dsh-web/packages/dsh-community-plugins",
+        "../dsh-web/packages/dsh-git-graph",
+        "../dsh-web/packages/dsh-market",
+        "../dsh-web/packages/dsh-plugin-manager",
+        "../dsh-web/packages/dsh-skill-explorer",
+        "../dsh-web/packages/skins/skin-center",
+        "../dsh-web/packages/dsh-task-board",
+        "../dsh-web/packages/dsh-web-settings",
+        "../dsh-web/packages/dsh-desktop-launcher",
+        "../dsh-web/packages/dsh-doctor",
+        "../dsh-web/packages/dsh-liangshen",
+        "../dsh-web/packages/dsh-pet",
+        "../dsh-web/packages/dsh-remote-web-ui",
+        "../dsh-web/packages/dsh-ssh",
+        "../dsh-web/packages/dsh-tool-describe-image"
+      ],
+      "localPrepare": {
+        "cwd": "../dsh-web",
+        "command": [
+          "pnpm",
+          "-r",
+          "run",
+          "build"
+        ]
+      },
+      "localDependencies": {
+        "@mlgbnb/dsh-archive-manager": "1.0.7",
+        "dsh-better-sidebar": "0.15.2"
+      },
+      "minimumReleaseAgeExclude": [
+        "@mlgbnb/dsh-archive-manager@1.0.7",
+        "dsh-better-sidebar@0.15.2"
+      ],
+      "replaces": [
+        "@linxin666/dsh-web-ui-all"
+      ],
+      "activation": "bundle",
+      "allowBuild": true
+    },
+    {
+      "name": "dsh-spend",
+      "defaultSpecifier": "github:sdwhwzp/dsh-spend#dev",
+      "activation": "bundle"
+    },
+    {
+      "name": "dsh-plugin-subscriptions",
+      "defaultSpecifier": "github:sdwhwzp/dsh-plugin-subscriptions#dev",
+      "activation": "bundle",
+      "allowBuild": true,
+      "enforceDefault": true
+    },
+    {
+      "name": "dsh-passwords",
+      "self": true,
+      "activation": "bundle"
+    },
+    {
+      "name": "dsh-shandong-tizhi-brand",
+      "specifierEnvironment": "DSH_PLUGIN_BRAND_SPEC",
+      "localCandidates": [
+        "../../dsh-shandong-tizhi-brand",
+        "../dsh-shandong-tizhi-brand"
+      ],
+      "activation": "bundle",
+      "optional": true
+    },
+    {
+      "name": "dsh-nas-webdav",
+      "specifierEnvironment": "DSH_PLUGIN_NAS_SPEC",
+      "localCandidates": [
+        "../nas"
+      ],
+      "activation": "profile-patch",
+      "patchId": "dsh-nas-webdav",
+      "patchYaml": "- insert:\n    - id: dsh-nas-webdav\n      name: dsh-nas-webdav\n",
+      "optional": true
+    }
+  ]
+}

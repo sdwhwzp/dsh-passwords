@@ -5,12 +5,14 @@
 import http, { type IncomingMessage, type IncomingHttpHeaders } from 'node:http';
 import https from 'node:https';
 import { createSecureContext } from 'node:tls';
-import { readFileSync, statSync, createReadStream, realpathSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, createReadStream, createWriteStream, realpathSync } from 'node:fs';
+import { link, lstat, mkdir, realpath, unlink } from 'node:fs/promises';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { createHmac, createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { type Duplex, Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import zlib from 'node:zlib';
 import { URL } from 'node:url';
 import dns from 'node:dns';
@@ -22,7 +24,6 @@ import { Database, type UserPermissionsRow, type MessageRow } from './db.js';
 import {
   folderAllowed,
   normalizePath,
-  isWorkspaceRestricted,
   isUploadRequest,
   isGitRequest,
   isAdminOnlyPluginEndpoint,
@@ -63,15 +64,87 @@ import {
 import { findDshRoot, applyRemotePatch, restartDshWeb } from './patch.js';
 import { t, resolveGatewayLang, type Lang } from './i18n.js';
 import { signedPrincipalHeaders } from './principal.js';
+import { filterCustomerModelCatalogResponse } from './model-policy.js';
 
 /** 网关内部扩展请求：权限执行时把用户/权限附在 req 上，供后续中间件与代理读取 */
 type Req = Request & {
   dshpwUser?: number;
   dshpwPerms?: UserPermissionsRow;
+  /** The authenticated subuser's host-managed workspace root. */
+  dshpwManagedWorkspaceRoot?: string;
   /** 会话目录白名单校验用：本次请求判定出的目标工作区路径（session.create/fork 时）；
    *  由 needsFolderCheck 写入，供 session.create 响应回调记录 sessionId→cwd 缓存 */
   dshpwSessionCwd?: string;
 };
+
+const HOST_LIST_DIRECTORY_RE = /^\/api\/host[.\/]listDirectory$/;
+const HOST_CREATE_DIRECTORY_RE = /^\/api\/host[.\/]createDirectory$/;
+const WORKSPACE_CREATE_RE = /^\/api\/workspace[.\/]create$/;
+const MODEL_CATALOG_RE = /^\/api\/(?:llm|session)[.\/]models$/;
+const MANAGED_FILE_UPLOAD_MAX_BYTES = 256 * 1024 * 1024;
+const MANAGED_FILE_LIST_MAX_ENTRIES = 1_000;
+
+/** Resolve symlinks in every existing ancestor while retaining a missing leaf. */
+function canonicalCandidate(candidate: string): string | null {
+  let cursor = path.resolve(candidate);
+  const suffix: string[] = [];
+  for (;;) {
+    try {
+      return path.join(realpathSync(cursor), ...suffix.reverse());
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return null;
+      const parent = path.dirname(cursor);
+      if (parent === cursor) return null;
+      suffix.push(path.basename(cursor));
+      cursor = parent;
+    }
+  }
+}
+
+/** Whether candidate is the root itself or one of its descendants. */
+function pathWithin(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === '' || (
+    relative !== '..' &&
+    !relative.startsWith('..' + path.sep) &&
+    !path.isAbsolute(relative)
+  );
+}
+
+/** Parse a browser relative path into portable, non-traversing path segments. */
+function managedFileSegments(relativePath: string): string[] | null {
+  if (
+    relativePath.includes('\0') ||
+    relativePath.length > 4_096 ||
+    path.posix.isAbsolute(relativePath) ||
+    path.win32.isAbsolute(relativePath)
+  ) return null;
+  const segments = relativePath === '' ? [] : relativePath.split(/[\\/]/);
+  if (segments.some((segment) =>
+    segment === '' ||
+    segment === '.' ||
+    segment === '..' ||
+    /[\u0000-\u001f\u007f]/.test(segment) ||
+    Buffer.byteLength(segment, 'utf8') > 255)) return null;
+  return segments;
+}
+
+/** Read the payload object consumed by Typert host/workspace requests. */
+function rpcPayloadOf(value: unknown): Record<string, unknown> | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const envelope = value as Record<string, unknown>;
+  return envelope.payload !== null && typeof envelope.payload === 'object' && !Array.isArray(envelope.payload)
+    ? envelope.payload as Record<string, unknown>
+    : envelope;
+}
+
+/** Replace the path consumed by Typert host/workspace requests. */
+function setRpcPayloadPath(value: unknown, workspacePath: string): boolean {
+  const target = rpcPayloadOf(value);
+  if (target === null) return false;
+  target.path = workspacePath;
+  return true;
+}
 
 const COOKIE_NAME = 'dsh_gateway_token';
 /** 语言偏好 cookie（用户在登录页手动切换后持久化） */
@@ -723,6 +796,21 @@ export function createGatewayServer(
   // 供受限子用户的会话作用域 RPC（history/prompt 等）做 cwd 白名单校验——
   // 权限撤销后仍能按 sessionId 直读旧目录会话必须封堵
   const sessionCwdById = new Map<string, string>();
+  let activeWorkspaceSessionIds = new Set<string>();
+  let workspaceSnapshotRefresh: Promise<void> | null = null;
+
+  /** Replace all workspace-derived authorization state with one current registry snapshot. */
+  function replaceWorkspaceAccessSnapshot(value: unknown): void {
+    const nextWorkspacePaths = collectIdPathPairs(value);
+    const nextSessionCwds = collectSessionCwdFromWorkspaces(value);
+    workspacePathById.clear();
+    for (const [id, workspacePath] of nextWorkspacePaths) workspacePathById.set(id, workspacePath);
+    activeWorkspaceSessionIds = new Set(nextSessionCwds.keys());
+    for (const id of sessionCwdById.keys()) {
+      if (!activeWorkspaceSessionIds.has(id)) sessionCwdById.delete(id);
+    }
+    for (const [id, cwd] of nextSessionCwds) sessionCwdById.set(id, cwd);
+  }
 
   /**
    * 从 Cookie 校验会话；返回用户或 null（用户已不存在时旧 token 立即失效）。
@@ -811,12 +899,146 @@ export function createGatewayServer(
     );
   }
 
-  /** 文件夹白名单与本机工作区所有权的统一判定。 */
+  /** Resolve managed-workspace access, including symlinks entering or escaping a private root. */
+  function managedWorkspaceAccessFor(userId: number, candidate: string): boolean | null {
+    const canonical = canonicalCandidate(candidate);
+    for (const managed of db.listManagedWorkspaces()) {
+      const root = canonicalCandidate(managed.path);
+      if (root === null) continue;
+      const lexicalMatch = pathWithin(path.resolve(managed.path), path.resolve(candidate));
+      const canonicalMatch = canonical !== null && pathWithin(root, canonical);
+      if (lexicalMatch && !canonicalMatch) return false;
+      if (canonicalMatch) return managed.user_id === userId;
+    }
+    return null;
+  }
+
+  /** 文件夹白名单与两类用户专属工作区所有权的统一判定。 */
   function pathAllowedFor(userId: number, candidate: string, allowedFolders: string[]): boolean {
     const localWorkspaceOwner = db.localWorkspaceOwnerForPath(candidate);
-    return localWorkspaceOwner === null
-      ? folderAllowed(candidate, allowedFolders)
-      : localWorkspaceOwner === userId;
+    if (localWorkspaceOwner !== null) return localWorkspaceOwner === userId;
+    const managedWorkspaceAccess = managedWorkspaceAccessFor(userId, candidate);
+    if (managedWorkspaceAccess !== null) return managedWorkspaceAccess;
+    return folderAllowed(candidate, allowedFolders);
+  }
+
+  /** Canonicalize one existing or prospective path and confine it to this user's managed root. */
+  function managedPathFor(userId: number, candidate: string): string | null {
+    const managed = db.getManagedWorkspace(userId);
+    if (managed === null) return null;
+    const root = canonicalCandidate(managed.path);
+    const canonical = canonicalCandidate(candidate);
+    if (root === null || canonical === null || !pathWithin(root, canonical)) return null;
+    return canonical;
+  }
+
+  /** Resolve a browser-supplied relative path inside one subuser's managed root. */
+  function managedFilePathFor(
+    userId: number,
+    relativePath: string,
+  ): { root: string; target: string; relative: string } | null {
+    const segments = managedFileSegments(relativePath);
+    if (segments === null) return null;
+    const managed = db.getManagedWorkspace(userId);
+    if (managed === null) return null;
+    const root = canonicalCandidate(managed.path);
+    if (root === null) return null;
+    const target = canonicalCandidate(path.join(root, ...segments));
+    if (target === null || !pathWithin(root, target)) return null;
+    return {
+      root,
+      target,
+      relative: path.relative(root, target).split(path.sep).join('/'),
+    };
+  }
+
+  /** Create upload subdirectories one level at a time without following links. */
+  async function ensureManagedUploadDirectory(
+    root: string,
+    baseDirectory: string,
+    segments: readonly string[],
+  ): Promise<string> {
+    let current = baseDirectory;
+    for (const segment of segments) {
+      const candidate = path.join(current, segment);
+      let info;
+      try {
+        info = await lstat(candidate);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        try {
+          await mkdir(candidate, { mode: 0o700 });
+        } catch (mkdirError) {
+          if ((mkdirError as NodeJS.ErrnoException).code !== 'EEXIST') throw mkdirError;
+        }
+        info = await lstat(candidate);
+      }
+      if (info.isSymbolicLink() || !info.isDirectory()) {
+        const error = new Error('上传目录包含符号链接或非目录项目');
+        error.name = 'ManagedFilePathError';
+        throw error;
+      }
+      const canonical = await realpath(candidate);
+      if (!pathWithin(root, canonical)) {
+        const error = new Error('上传目录越出专属文件夹');
+        error.name = 'ManagedFilePathError';
+        throw error;
+      }
+      current = canonical;
+    }
+    return current;
+  }
+
+  /** Limit a successful directory-list response to the authenticated user's private root. */
+  function restrictManagedDirectoryListing(value: unknown, userId: number): unknown {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return value;
+    const envelope = value as Record<string, unknown>;
+    const result = envelope.result;
+    if (result === null || typeof result !== 'object' || Array.isArray(result)) return value;
+    const resultRecord = result as Record<string, unknown>;
+    if (resultRecord.ok !== true) return value;
+    const listing = resultRecord.value;
+    if (listing === null || typeof listing !== 'object' || Array.isArray(listing)) {
+      throw new Error('host.listDirectory response has no listing');
+    }
+
+    const row = listing as Record<string, unknown>;
+    const managed = db.getManagedWorkspace(userId);
+    const root = managed === null ? null : canonicalCandidate(managed.path);
+    const listedPath = typeof row.path === 'string' ? canonicalCandidate(row.path) : null;
+    if (
+      root === null ||
+      listedPath === null ||
+      !pathWithin(root, listedPath) ||
+      !Array.isArray(row.crumbs) ||
+      !Array.isArray(row.entries)
+    ) {
+      throw new Error('host.listDirectory response escaped the managed workspace');
+    }
+
+    const user = db.getUserListRowById(userId);
+    const title = user === null ? path.basename(root) : `${user.username} · 专属工作区`;
+    const crumbs = row.crumbs.filter((entry): entry is Record<string, unknown> =>
+      entry !== null && typeof entry === 'object' && !Array.isArray(entry) && typeof (entry as Record<string, unknown>).path === 'string');
+    const rootIndex = crumbs.findIndex((entry) => {
+      const canonical = canonicalCandidate(entry.path as string);
+      return canonical !== null && pathWithin(root, canonical) && pathWithin(canonical, root);
+    });
+    if (rootIndex < 0) throw new Error('host.listDirectory response omitted the managed root crumb');
+
+    row.home = root;
+    row.path = listedPath;
+    row.crumbs = crumbs.slice(rootIndex).map((entry, index) => index === 0
+      ? { ...entry, name: title, path: root, hidden: false }
+      : entry);
+    row.entries = row.entries.filter((entry) => {
+      if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return false;
+      const entryPath = (entry as Record<string, unknown>).path;
+      if (typeof entryPath !== 'string') return false;
+      const canonical = canonicalCandidate(entryPath);
+      return canonical !== null && pathWithin(root, canonical);
+    });
+    return value;
   }
 
   /** 从会话 cookie 解析完整用户（含角色）；无会话/失效返回 null */
@@ -1194,6 +1416,219 @@ export function createGatewayServer(
     res.json({ ok: true, me: { id: me.userId, username: me.username, role: me.role }, users });
   });
 
+  /** Authenticate access to the caller's private host-managed directory. */
+  const managedFilesAuth = (req: Request, res: Response, write = false) => {
+    const me = apiAuth(req, res);
+    if (me === null) return null;
+    if (me.role !== 'user' || db.getManagedWorkspace(me.userId) === null) {
+      res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '当前账号没有专属宿主机文件夹' });
+      return null;
+    }
+    const permissions = effectivePermissions(me.userId);
+    if (permissions.banned) {
+      res.status(403).json({ ok: false, code: 'BANNED', error: '账号已被封禁' });
+      return null;
+    }
+    if (write && !permissions.allow_upload) {
+      res.status(403).json({ ok: false, code: 'NO_UPLOAD', error: '当前账号没有上传权限' });
+      return null;
+    }
+    return { me };
+  };
+
+  // ── 子账号专属宿主机文件夹 ──────────────────────────────────
+  // 浏览器只交换相对路径；服务端逐次解析现有祖先和符号链接，并把所有操作
+  // 约束在该账号的 managed workspace 内。管理员没有隐式跨账号入口。
+  app.get('/gateway/api/managed-files', (req, res) => {
+    const access = managedFilesAuth(req, res);
+    if (access === null) return;
+    const relativePath = typeof req.query.path === 'string' ? req.query.path : '';
+    const resolved = managedFilePathFor(access.me.userId, relativePath);
+    if (resolved === null) {
+      res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '目录越出专属文件夹' });
+      return;
+    }
+    let directory;
+    try {
+      directory = statSync(resolved.target);
+    } catch {
+      res.status(404).json({ ok: false, code: 'NOT_FOUND', error: '目录不存在' });
+      return;
+    }
+    if (!directory.isDirectory()) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: '目标不是目录' });
+      return;
+    }
+
+    const rows = readdirSync(resolved.target, { withFileTypes: true });
+    const entries = rows
+      .slice(0, MANAGED_FILE_LIST_MAX_ENTRIES)
+      .flatMap((entry) => {
+        if (entry.isSymbolicLink() || entry.name.startsWith('.dsh-upload-')) return [];
+        const childRelative = resolved.relative === '' ? entry.name : `${resolved.relative}/${entry.name}`;
+        const child = managedFilePathFor(access.me.userId, childRelative);
+        if (child === null) return [];
+        try {
+          const info = statSync(child.target);
+          if (!info.isDirectory() && !info.isFile()) return [];
+          return [{
+            name: entry.name,
+            path: child.relative,
+            kind: info.isDirectory() ? 'directory' as const : 'file' as const,
+            bytes: info.isFile() ? info.size : null,
+            modifiedAt: info.mtime.toISOString(),
+          }];
+        } catch {
+          return [];
+        }
+      })
+      .sort((left, right) => {
+        if (left.kind !== right.kind) return left.kind === 'directory' ? -1 : 1;
+        return left.name.localeCompare(right.name);
+      });
+    const segments = resolved.relative === '' ? [] : resolved.relative.split('/');
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      ok: true,
+      path: resolved.relative,
+      parent: segments.length === 0 ? null : segments.slice(0, -1).join('/'),
+      entries,
+      truncated: rows.length > MANAGED_FILE_LIST_MAX_ENTRIES,
+    });
+  });
+
+  app.get('/gateway/api/managed-files/download', (req, res) => {
+    const access = managedFilesAuth(req, res);
+    if (access === null) return;
+    const relativePath = typeof req.query.path === 'string' ? req.query.path : '';
+    const resolved = managedFilePathFor(access.me.userId, relativePath);
+    if (resolved === null || resolved.relative === '') {
+      res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '文件越出专属文件夹' });
+      return;
+    }
+    let info;
+    try {
+      info = statSync(resolved.target);
+    } catch {
+      res.status(404).json({ ok: false, code: 'NOT_FOUND', error: '文件不存在' });
+      return;
+    }
+    if (!info.isFile()) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: '目标不是普通文件' });
+      return;
+    }
+    const name = path.basename(resolved.target);
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(name)}`);
+    res.setHeader('Content-Length', String(info.size));
+    if (req.method === 'HEAD') {
+      res.end();
+      return;
+    }
+    const stream = createReadStream(resolved.target);
+    stream.on('error', () => {
+      if (!res.headersSent) res.status(500).json({ ok: false, code: 'INTERNAL', error: '读取失败' });
+      else res.destroy();
+    });
+    stream.pipe(res);
+  });
+
+  app.put('/gateway/api/managed-files/upload', async (req, res) => {
+    const access = managedFilesAuth(req, res, true);
+    if (access === null) return;
+    const relativeDirectory = typeof req.query.path === 'string' ? req.query.path : '';
+    const relativeUploadPath = typeof req.query.relativePath === 'string'
+      ? req.query.relativePath
+      : typeof req.query.name === 'string' ? req.query.name : '';
+    const uploadSegments = managedFileSegments(relativeUploadPath);
+    if (uploadSegments === null || uploadSegments.length === 0) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: '上传相对路径无效' });
+      return;
+    }
+    const directory = managedFilePathFor(access.me.userId, relativeDirectory);
+    if (directory === null) {
+      res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '目录越出专属文件夹' });
+      return;
+    }
+    try {
+      if (!statSync(directory.target).isDirectory()) {
+        res.status(400).json({ ok: false, code: 'INVALID', error: '目标不是目录' });
+        return;
+      }
+    } catch {
+      res.status(404).json({ ok: false, code: 'NOT_FOUND', error: '目录不存在' });
+      return;
+    }
+    const declaredRaw = req.headers['content-length'];
+    const declared = typeof declaredRaw === 'string' ? Number(declaredRaw) : NaN;
+    if (Number.isFinite(declared) && declared > MANAGED_FILE_UPLOAD_MAX_BYTES) {
+      req.resume();
+      res.status(413).json({ ok: false, code: 'FILE_TOO_LARGE', error: '单个文件不能超过 256 MiB' });
+      return;
+    }
+
+    const name = uploadSegments.at(-1)!;
+    let uploadDirectory: string;
+    try {
+      uploadDirectory = await ensureManagedUploadDirectory(
+        directory.root,
+        directory.target,
+        uploadSegments.slice(0, -1),
+      );
+    } catch (error) {
+      if (error instanceof Error && error.name === 'ManagedFilePathError') {
+        res.status(403).json({ ok: false, code: 'FORBIDDEN', error: error.message });
+      } else {
+        res.status(500).json({ ok: false, code: 'INTERNAL', error: '创建上传目录失败' });
+      }
+      return;
+    }
+    const destinationRelative = [directory.relative, ...uploadSegments].filter(Boolean).join('/');
+    const destination = managedFilePathFor(access.me.userId, destinationRelative);
+    if (destination === null || path.dirname(destination.target) !== uploadDirectory) {
+      res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '文件越出专属文件夹' });
+      return;
+    }
+    const temporary = path.join(uploadDirectory, `.dsh-upload-${randomBytes(16).toString('hex')}`);
+    let bytes = 0;
+    const limiter = new Transform({
+      transform(chunk: Buffer, _encoding, callback) {
+        bytes += chunk.length;
+        if (bytes > MANAGED_FILE_UPLOAD_MAX_BYTES) {
+          const error = new Error('单个文件不能超过 256 MiB');
+          error.name = 'ManagedFileTooLargeError';
+          callback(error);
+          return;
+        }
+        callback(null, chunk);
+      },
+    });
+    try {
+      await pipeline(req, limiter, createWriteStream(temporary, { flags: 'wx', mode: 0o600 }));
+      await link(temporary, destination.target);
+      db.audit('managed_file_uploaded', {
+        username: access.me.username,
+        detail: JSON.stringify({ path: destination.relative, bytes }),
+      });
+      res.status(201).json({ ok: true, file: { name, path: destination.relative, bytes } });
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (!res.headersSent && !res.writableEnded) {
+        if (code === 'EEXIST') {
+          res.status(409).json({ ok: false, code: 'FILE_EXISTS', error: '同名文件已存在' });
+        } else if (error instanceof Error && error.name === 'ManagedFileTooLargeError') {
+          res.status(413).json({ ok: false, code: 'FILE_TOO_LARGE', error: error.message });
+        } else {
+          res.status(500).json({ ok: false, code: 'INTERNAL', error: '上传失败' });
+        }
+      }
+    } finally {
+      await unlink(temporary).catch(() => undefined);
+    }
+  });
+
   // ── 远程文件下载（Issue #4）──────────────────────────────────
   // 经网关远程访问时，点击对话里的“生成文件”标签不再在服务器容器里执行
   // xdg-open（无桌面环境 → spawn xdg-open ENOENT），而是下载到当前浏览器。
@@ -1315,10 +1750,13 @@ export function createGatewayServer(
       res.status(400).json({ ok: false, code: 'FORBIDDEN', error: '不能修改主用户权限' });
       return;
     }
-    const allowedFolders = stringArray(body.allowedFolders);
+    const requestedFolders = stringArray(body.allowedFolders);
     // 空字符串、当前目录和根目录会被 folderAllowed 归一为“全盘允许”，与 UI 的
     // “允许的工作区”语义相反；显式拒绝，管理员应使用空数组表示不限制。
-    if (allowedFolders.some((folder) => {
+    // UI 用精确的单元素 __deny__ 列表表示关闭全部工作区；它是权限模型已经支持
+    // 的 fail-closed 值。与其他条目混用仍按非法输入拒绝，避免歧义。
+    const deniesAllWorkspaces = requestedFolders.length === 1 && requestedFolders[0] === '__deny__';
+    if (!deniesAllWorkspaces && requestedFolders.some((folder) => {
       const trimmed = folder.trim().replace(/\\/g, '/');
       return (
         trimmed === '' ||
@@ -1334,6 +1772,23 @@ export function createGatewayServer(
       res.status(400).json({ ok: false, code: 'INVALID', error: '允许的工作区不能包含空路径、当前目录或根目录' });
       return;
     }
+    if (!deniesAllWorkspaces && requestedFolders.some((folder) => {
+      const owner = db.managedWorkspaceOwnerForPath(folder);
+      return owner !== null && owner !== userId;
+    })) {
+      res.status(400).json({ ok: false, code: 'FORBIDDEN', error: '不能把其他子用户的专属工作区分配给该用户' });
+      return;
+    }
+    // 专属工作区属于账号基础能力，权限页不能将它关闭。空数组仍保留旧版“不限制
+    // 普通宿主目录”的语义；跨用户专属目录由 pathAllowedFor 的所有权检查另行拒绝。
+    const managedWorkspace = db.getManagedWorkspace(userId);
+    const allowedFolders = managedWorkspace === null || requestedFolders.length === 0
+      ? requestedFolders
+      : requestedFolders.some((folder) => normalizePath(folder) === normalizePath(managedWorkspace.path))
+        ? requestedFolders
+        : deniesAllWorkspaces
+          ? [managedWorkspace.path]
+          : [...requestedFolders, managedWorkspace.path];
     // 0 归一为 null（=不限）：避免"每日 0 分钟"被误当作"首次使用即封禁"
     const rawToken = nullableInt(body.hourlyTokenLimit);
     const rawMinutes = nullableInt(body.dailyMinutesLimit);
@@ -1684,6 +2139,18 @@ export function createGatewayServer(
         res.status(404).json({ ok: false, error: 'not found' });
         return;
       }
+      // 远程网关是多用户入口，任何浏览器（包括 Cookie 已过期的旧缓存页面）
+      // 都不能通过第三方 desktop-launcher 关闭全体用户共用的 dsh 进程。
+      // 必须在认证重定向之前拒绝，否则 fetch 跟随 302 得到登录页 200 后会误判
+      // 关机成功，并继续执行第三方的空白页跳转。
+      if (req.method === 'POST' && gatePath === '/api/dsh-desktop-launcher/shutdown') {
+        res.status(403).json({
+          ok: false,
+          code: 'REMOTE_SHUTDOWN_DISABLED',
+          error: 'Remote shutdown is disabled; use account logout instead.',
+        });
+        return;
+      }
       const user = sessionOf(req);
       if (!user) {
         // 重定向兼容层：记录原始 URL，登录后跳回
@@ -1724,6 +2191,8 @@ export function createGatewayServer(
       (req as Req).dshpwUser = user.userId;
       if (row.role !== 'admin') {
         const perms = effectivePermissions(user.userId);
+        const managedWorkspace = db.getManagedWorkspace(user.userId);
+        if (managedWorkspace !== null) (req as Req).dshpwManagedWorkspaceRoot = managedWorkspace.path;
         const lang = langOf(req);
         if (perms.banned) {
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.banned')));
@@ -1747,7 +2216,15 @@ export function createGatewayServer(
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.noUpload')));
           return;
         }
-        if (isWorkspaceRestricted(perms.allowed_folders) && isWorkspaceWrite(requestPath)) {
+        const managedWorkspaceCreate = WORKSPACE_CREATE_RE.test(requestPath) && managedWorkspace !== null;
+        if (isWorkspaceWrite(requestPath) && !managedWorkspaceCreate) {
+          res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.workspaceDenied')));
+          return;
+        }
+        if (
+          (HOST_LIST_DIRECTORY_RE.test(requestPath) || HOST_CREATE_DIRECTORY_RE.test(requestPath)) &&
+          managedWorkspace === null
+        ) {
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.workspaceDenied')));
           return;
         }
@@ -1912,6 +2389,72 @@ export function createGatewayServer(
     upstreamRes.on('error', onError);
   }
 
+  /** Refresh active workspace/session membership directly from the trusted upstream registry. */
+  function refreshWorkspaceAccessSnapshot(): Promise<void> {
+    if (workspaceSnapshotRefresh !== null) return workspaceSnapshotRefresh;
+    const payload = Buffer.from(JSON.stringify({
+      type: 'client-request',
+      rpcId: `dshpw-workspaces-${randomBytes(12).toString('hex')}`,
+      method: 'workspace.list',
+      payload: {},
+    }), 'utf8');
+    const pending = new Promise<void>((resolve, reject) => {
+      const request = http.request(
+        {
+          hostname: upstreamHost,
+          port: upstreamPort,
+          path: '/api/workspace.list',
+          method: 'POST',
+          agent: upstreamAgent,
+          headers: {
+            accept: 'application/json',
+            'accept-encoding': 'identity',
+            'content-type': 'application/json',
+            'content-length': String(payload.length),
+          },
+          timeout: 5000,
+        },
+        (response) => {
+          if ((response.statusCode ?? 500) < 200 || (response.statusCode ?? 500) >= 300) {
+            response.resume();
+            reject(new Error(`workspace.list upstream status ${String(response.statusCode ?? 0)}`));
+            return;
+          }
+          const chunks: Buffer[] = [];
+          let size = 0;
+          response.on('data', (chunk: Buffer) => {
+            size += chunk.length;
+            if (size > MAX_BUFFER_BYTES) {
+              response.destroy(new OversizeResponseError());
+              return;
+            }
+            chunks.push(chunk);
+          });
+          response.on('end', () => {
+            try {
+              const raw = Buffer.concat(chunks);
+              const decoded = String(response.headers['content-encoding'] ?? '').includes('gzip')
+                ? gunzipBounded(raw)
+                : raw;
+              replaceWorkspaceAccessSnapshot(JSON.parse(decoded.toString('utf8')));
+              resolve();
+            } catch (error) {
+              reject(error);
+            }
+          });
+          response.on('error', reject);
+        },
+      );
+      request.on('timeout', () => request.destroy(new Error('workspace.list upstream timeout')));
+      request.on('error', reject);
+      request.end(payload);
+    }).finally(() => {
+      if (workspaceSnapshotRefresh === pending) workspaceSnapshotRefresh = null;
+    });
+    workspaceSnapshotRefresh = pending;
+    return pending;
+  }
+
   /**
    * F-26：向 dsh 注入会话沙盒（loopback + 内部密钥，fire-and-forget）。
    * 受限子用户（sandbox_mode 非空）建会话后，dsh 默认给 workspace-write 沙盒——
@@ -2015,6 +2558,37 @@ export function createGatewayServer(
         const contentType = String(upstreamRes.headers['content-type'] ?? '');
         const encoding = String(upstreamRes.headers['content-encoding'] ?? '');
 
+        // In customer model selectors, the Codex provider exposes only the
+        // three supported GPT-5.6 routes. Other providers remain untouched.
+        // Both catalogs are filtered; malformed successes fail closed.
+        if (
+          reqAs.dshpwPerms !== undefined &&
+          req.method === 'POST' &&
+          MODEL_CATALOG_RE.test(proxyPath)
+        ) {
+          bufferUpstream(upstreamRes, res, (raw) => {
+            try {
+              const decoded = encoding.includes('gzip') ? gunzipBounded(raw) : raw;
+              const filtered = filterCustomerModelCatalogResponse(JSON.parse(decoded.toString('utf8')));
+              if (filtered === null) {
+                res.status(502).type('text/plain').send('502 Upstream response unprocessable');
+                return;
+              }
+              const out = Buffer.from(JSON.stringify(filtered), 'utf8');
+              const respHeaders = headersForRewrittenBody(upstreamRes.headers);
+              respHeaders['content-length'] = String(out.length);
+              if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+              if (!res.writableEnded) res.end(out);
+            } catch (error) {
+              const message = error instanceof OversizeResponseError
+                ? '502 Upstream response too large'
+                : '502 Upstream response unprocessable';
+              if (!res.headersSent) res.status(502).type('text/plain').send(message);
+            }
+          });
+          return;
+        }
+
         // ── HTML 响应：缓冲 + 注入兼容脚本（crypto.randomUUID polyfill 等） ──
         if (contentType.includes('text/html')) {
           bufferUpstream(upstreamRes, res, (raw) => {
@@ -2083,6 +2657,36 @@ export function createGatewayServer(
           return;
         }
 
+        // ── host.listDirectory 响应：子用户只看到本人专属根目录及其内容 ──
+        if (
+          req.method === 'POST' &&
+          HOST_LIST_DIRECTORY_RE.test(proxyPath) &&
+          reqAs.dshpwUser !== undefined &&
+          reqAs.dshpwManagedWorkspaceRoot !== undefined
+        ) {
+          bufferUpstream(upstreamRes, res, (raw) => {
+            try {
+              let body = raw;
+              const enc = String(upstreamRes.headers['content-encoding'] ?? '');
+              if (enc.includes('gzip')) body = gunzipBounded(body);
+              const parsed = JSON.parse(body.toString('utf8'));
+              const restricted = restrictManagedDirectoryListing(parsed, reqAs.dshpwUser!);
+              const out = Buffer.from(JSON.stringify(restricted), 'utf8');
+              const respHeaders = headersForRewrittenBody(upstreamRes.headers);
+              respHeaders['content-length'] = String(out.length);
+              if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+              if (!res.writableEnded) res.end(out);
+            } catch (error) {
+              if (error instanceof OversizeResponseError) {
+                if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response too large');
+                return;
+              }
+              if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response unprocessable');
+            }
+          });
+          return;
+        }
+
         // ── workspace.list 响应：收集 id→path 缓存 + 受限子用户过滤白名单外的工作区 ──
         if (req.method === 'POST' && /^\/api\/workspace[.\/]list$/.test(proxyPath)) {
           bufferUpstream(upstreamRes, res, (raw) => {
@@ -2091,10 +2695,8 @@ export function createGatewayServer(
               const enc = String(upstreamRes.headers['content-encoding'] ?? '');
               if (enc.includes('gzip')) body = gunzipBounded(body);
               const parsed = JSON.parse(body.toString('utf8'));
-              // 先缓存全量 id→path（供 session.create 用 workspaceId 时解析路径）
-              collectIdPathPairs(parsed, workspacePathById);
-              // 缓存会话 cwd：工作区 path → 其 sessionIds（供会话作用域 RPC 的 cwd 校验）
-              collectSessionCwdFromWorkspaces(parsed, sessionCwdById);
+              // 原子替换当前工作区与活动会话快照；已删除工作区/会话不得残留在授权缓存。
+              replaceWorkspaceAccessSnapshot(parsed);
               const outBody = reqAs.dshpwPerms !== undefined
                 ? filterByPathField(
                     parsed,
@@ -2152,6 +2754,7 @@ export function createGatewayServer(
                   ? reqCwd
                   : collectSessionCwd(parsed).get(sessionId);
                 if (cwd) sessionCwdById.set(sessionId, cwd);
+                activeWorkspaceSessionIds.add(sessionId);
                 if (reqAs.dshpwPerms !== undefined && reqAs.dshpwPerms.sandbox_mode !== null) {
                   applySandboxToSession(sessionId, reqAs.dshpwPerms.sandbox_mode);
                 }
@@ -2183,39 +2786,45 @@ export function createGatewayServer(
           /^\/api\/session[.\/]list$/.test(proxyPath)
         ) {
           bufferUpstream(upstreamRes, res, (raw) => {
-            try {
-              let body = raw;
-              const enc = String(upstreamRes.headers['content-encoding'] ?? '');
-              if (enc.includes('gzip')) body = gunzipBounded(body);
-              const parsed = JSON.parse(body.toString('utf8'));
-              // 先收集 sessionId→cwd 缓存（过滤前的原始响应，含受限前创建的旧目录会话），
-              // 供会话作用域 RPC（history/prompt 等）做 cwd 白名单校验
-              collectSessionCwd(parsed, sessionCwdById);
+            void refreshWorkspaceAccessSnapshot().then(() => {
+              try {
+                let body = raw;
+                const enc = String(upstreamRes.headers['content-encoding'] ?? '');
+                if (enc.includes('gzip')) body = gunzipBounded(body);
+                const parsed = JSON.parse(body.toString('utf8'));
+                const listedSessionCwds = collectSessionCwd(parsed);
+                for (const id of activeWorkspaceSessionIds) {
+                  const cwd = listedSessionCwds.get(id);
+                  if (cwd !== undefined) sessionCwdById.set(id, cwd);
+                }
 
-              // 子用户按工作区开关过滤：关闭工作区后，其会话一并从侧栏消失，
-              // 不产生「未分组」孤儿项。
-              const perms = reqAs.dshpwPerms!;
-              const cwdAllowed = (cwd: string) => pathAllowedFor(reqAs.dshpwUser!, cwd, perms.allowed_folders);
-              const disabled = new Set(perms.disabled_sessions);
-              const archived = collectArchivedSessionIds(parsed);
-              const filtered = filterSessionItems(parsed, (id) => !disabled.has(id) && !archived.has(id), cwdAllowed);
-              const out = Buffer.from(JSON.stringify(filtered), 'utf8');
-              const respHeaders = headersForRewrittenBody(upstreamRes.headers);
-              respHeaders['content-length'] = String(out.length);
-              if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
-              if (!res.writableEnded) res.end(out);
-            } catch (error) {
-              // 该分支仅处理子用户列表：任何解析/过滤异常都 fail-closed 502，
-              // 绝不把未过滤的全量列表回放给子用户（fail-open 泄露面）
-              if (!res.headersSent) {
-                const msg =
-                  error instanceof OversizeResponseError
+                // 子用户只看到当前活动工作区明确持有的会话。仅 cwd 相同但已从
+                // workspace.sessionIds 删除的会话不得以“未分组”形式重新出现。
+                const perms = reqAs.dshpwPerms!;
+                const cwdAllowed = (cwd: string) => pathAllowedFor(reqAs.dshpwUser!, cwd, perms.allowed_folders);
+                const disabled = new Set(perms.disabled_sessions);
+                const archived = collectArchivedSessionIds(parsed);
+                const filtered = filterSessionItems(
+                  parsed,
+                  (id) => activeWorkspaceSessionIds.has(id) && !disabled.has(id) && !archived.has(id),
+                  cwdAllowed,
+                );
+                const out = Buffer.from(JSON.stringify(filtered), 'utf8');
+                const respHeaders = headersForRewrittenBody(upstreamRes.headers);
+                respHeaders['content-length'] = String(out.length);
+                if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+                if (!res.writableEnded) res.end(out);
+              } catch (error) {
+                if (!res.headersSent) {
+                  const msg = error instanceof OversizeResponseError
                     ? '502 Upstream response too large'
                     : '502 Upstream response unprocessable';
-                res.status(502).type('text/plain').send(msg);
+                  res.status(502).type('text/plain').send(msg);
+                }
               }
-              return;
-            }
+            }).catch(() => {
+              if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response unprocessable');
+            });
           });
           return;
         }
@@ -2307,12 +2916,20 @@ export function createGatewayServer(
       if (!res.writableEnded) upstreamReq.destroy();
     });
     // 受限子用户的请求体缓冲检查（尽力而为）：
-    //   1) 文件夹白名单：session.create/fork 的 cwd/workspaceId 必须在授权目录内
+    //   1) 文件夹白名单：会话目录及子用户目录浏览/创建必须在授权根内
     //   2) 沙盒权限：settings.mutate 试图把 defaultPreset 切到高于授权级别 → 403
+    const needsManagedWorkspaceCheck =
+      reqAs.dshpwManagedWorkspaceRoot !== undefined &&
+      req.method === 'POST' &&
+      (
+        HOST_LIST_DIRECTORY_RE.test(proxyPath) ||
+        HOST_CREATE_DIRECTORY_RE.test(proxyPath) ||
+        WORKSPACE_CREATE_RE.test(proxyPath)
+      );
     const needsFolderCheck =
       reqAs.dshpwPerms !== undefined &&
       (req.method === 'POST' || req.method === 'PUT' || (req.method === 'DELETE' && isAionuiPanel(proxyPath))) &&
-      (WORKSPACE_ENDPOINT_RE.test(proxyPath) || isAionuiPanel(proxyPath));
+      (needsManagedWorkspaceCheck || WORKSPACE_ENDPOINT_RE.test(proxyPath) || isAionuiPanel(proxyPath));
     const needsSandboxCheck =
       reqAs.dshpwPerms !== undefined &&
       reqAs.dshpwPerms.sandbox_mode !== null &&
@@ -2426,7 +3043,36 @@ export function createGatewayServer(
 
         if (needsFolderCheck) {
           let targetPath: string | null = null;
-          if (isAionuiPanel(proxyPath)) {
+          if (needsManagedWorkspaceCheck) {
+            targetPath = extractPathFromBody(bodyObj);
+            if (targetPath === null && HOST_LIST_DIRECTORY_RE.test(proxyPath)) {
+              targetPath = reqAs.dshpwManagedWorkspaceRoot!;
+            }
+            const canonical = targetPath === null ? null : managedPathFor(reqAs.dshpwUser!, targetPath);
+            if (canonical === null || !setRpcPayloadPath(bodyObj, canonical)) {
+              upstreamReq.destroy();
+              res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+              return;
+            }
+            if (HOST_CREATE_DIRECTORY_RE.test(proxyPath)) {
+              const name = rpcPayloadOf(bodyObj)?.name;
+              if (
+                typeof name !== 'string' ||
+                name.trim() === '' ||
+                name === '.' ||
+                name === '..' ||
+                /[/\\]/.test(name) ||
+                managedPathFor(reqAs.dshpwUser!, path.join(canonical, name)) === null
+              ) {
+                upstreamReq.destroy();
+                res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+                return;
+              }
+            }
+            targetPath = canonical;
+            forwardBody = Buffer.from(JSON.stringify(bodyObj), 'utf8');
+            upstreamReq.setHeader('content-length', String(forwardBody.length));
+          } else if (isAionuiPanel(proxyPath)) {
             // aionui-panel 文件树：root 是工作区路径，path 是 root 下的相对文件路径
             targetPath = aionuiRootFrom(req.method, proxyPath, parsedUrl.searchParams, bodyObj);
             // F-17b：提取不到 root（DELETE 无 query/body、异常编码等）→ fail-closed，
@@ -2439,11 +3085,22 @@ export function createGatewayServer(
           } else {
             targetPath = extractPathFromBody(bodyObj);
             if (targetPath === null) {
-              const wid = extractWorkspaceId(bodyObj);
-              if (wid !== null) targetPath = workspacePathById.get(wid) ?? null;
-              // 走到这里仍为 null = 既无路径字段、也无 workspaceId 缓存命中（含空 body /
-              // 缓存 miss）→ 一律 fail-closed：不能跳过白名单校验后透传，否则可创建到
-              // 白名单外的工作区
+              const workspaceId = extractWorkspaceId(bodyObj);
+              if (workspaceId !== null) {
+                targetPath = workspacePathById.get(workspaceId) ?? null;
+                if (targetPath === null) {
+                  try {
+                    await refreshWorkspaceAccessSnapshot();
+                  } catch {
+                    upstreamReq.destroy();
+                    res.status(502).type('text/plain').send('502 Upstream response unprocessable');
+                    return;
+                  }
+                  targetPath = workspacePathById.get(workspaceId) ?? null;
+                }
+              }
+              // 走到这里仍为 null = 既无路径字段、也无刷新后的 workspaceId 命中（含空 body）
+              // → 一律 fail-closed：不能跳过白名单校验后透传，否则可创建到白名单外的工作区
               if (targetPath === null) {
                 upstreamReq.destroy();
                 res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
@@ -2500,11 +3157,19 @@ export function createGatewayServer(
 
         // 会话访问校验：逐会话关闭优先；其余必须仍位于已开启工作区。
         if (needsOwnershipCheck && bodyObj !== null) {
+          try {
+            await refreshWorkspaceAccessSnapshot();
+          } catch {
+            upstreamReq.destroy();
+            res.status(502).type('text/plain').send('502 Upstream response unprocessable');
+            return;
+          }
           const sessionId = extractSessionId(bodyObj) ?? parsedUrl.searchParams.get('sessionId');
           const perms = reqAs.dshpwPerms!;
           const cwd = sessionId === null ? undefined : sessionCwdById.get(sessionId);
           if (
             sessionId === null ||
+            !activeWorkspaceSessionIds.has(sessionId) ||
             perms.disabled_sessions.includes(sessionId) ||
             cwd === undefined ||
             !pathAllowedFor(reqAs.dshpwUser!, cwd, perms.allowed_folders)

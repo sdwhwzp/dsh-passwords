@@ -28,6 +28,29 @@ const WORKSPACES_JSON = JSON.stringify({
   ok: true,
   data: [{ id: 'ws-1', path: '/workspaces/a' }],
 });
+const MODELS_RESPONSE = {
+  type: 'server-response',
+  rpcId: 'models-1',
+  result: {
+    ok: true,
+    value: {
+      groups: [
+        {
+          id: 'codex',
+          name: 'ChatGPT (Codex)',
+          models: [
+            { id: 'gpt-5.6-sol', name: 'GPT-5.6-Sol' },
+            { id: 'gpt-5.6-terra', name: 'GPT-5.6-Terra' },
+            { id: 'gpt-5.6-luna', name: 'GPT-5.6-Luna' },
+            { id: 'gpt-5.5', name: 'GPT-5.5' },
+          ],
+        },
+        { id: 'deepseek-official', name: 'DeepSeek', models: [{ id: 'deepseek-v4', name: 'DeepSeek V4' }] },
+      ],
+      failures: [],
+    },
+  },
+};
 
 let tempDir: string;
 let db: Database;
@@ -36,6 +59,7 @@ let upstream: http.Server;
 let gateway: http.Server;
 let gatewayPort = 0;
 let cookie = '';
+let customerCookie = '';
 /** 会话 JWT 明文（Cookie Chaos 回归测试用：构造 Unicode 前缀的伪同名 cookie） */
 let tokenValue = '';
 /** 上游最后一次收到的请求头（F-15 回归测试用：验证网关 cookie 不被透传） */
@@ -55,6 +79,10 @@ function startMockUpstream(): Promise<http.Server> {
       } else if ((req.url ?? '').startsWith('/api/workspace.list')) {
         res.writeHead(200, { 'content-type': 'application/json' });
         res.write(badJson ? 'not-json{' : WORKSPACES_JSON);
+        res.end();
+      } else if (/^\/api\/(?:llm|session)[.\/]models/.test(req.url ?? '')) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.write(badJson ? '{"result":{"ok":true,"value":{"groups":[]}}}' : JSON.stringify(MODELS_RESPONSE));
         res.end();
       } else {
         res.writeHead(200, { 'content-type': 'application/json' });
@@ -113,6 +141,7 @@ before(async () => {
   db = new Database(path.join(tempDir, 'test.db'), createFieldCrypto('testkey', 'testkey'));
   db.init(); // 建表（构造函数不建表）
   const user = db.createUser('admin', '$2a$10$dummyhashdummyhashdummyhashdu', 'admin');
+  const customer = db.createUser('customer', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
 
   upstream = await startMockUpstream();
   const upstreamPort = (upstream.address() as { port: number }).port;
@@ -149,6 +178,11 @@ before(async () => {
   });
   tokenValue = token;
   cookie = `dsh_gateway_token=${token}`;
+  customerCookie = `dsh_gateway_token=${jwt.sign({
+    sub: String(customer.id),
+    username: customer.username,
+    cv: 0,
+  }, config.jwtSecret, { expiresIn: '12h' })}`;
 });
 
 after(() => {
@@ -194,6 +228,45 @@ test('流式透传路径（session.list，管理员）：保留 chunked，不带
   assert.ok(!names.includes('content-length'), '透传路径不得出现 content-length');
   const parsed = JSON.parse(r.body);
   assert.equal(parsed.ok, true);
+});
+
+test('管理员模型目录保持完整，子用户只过滤 Codex 的旧模型', async () => {
+  const admin = await gatewayReq('POST', '/api/llm.models', { 'content-type': 'application/json' });
+  assert.equal(admin.status, 200);
+  assert.deepEqual(JSON.parse(admin.body), MODELS_RESPONSE);
+
+  for (const endpoint of ['/api/llm.models', '/api/session.models']) {
+    const customer = await gatewayReq('POST', endpoint, {
+      cookie: customerCookie,
+      'content-type': 'application/json',
+    });
+    assert.equal(customer.status, 200);
+    assertNoClTe(customer.rawHeaders);
+    const value = JSON.parse(customer.body).result.value;
+    assert.deepEqual(value.groups.map((group: { id: string; models: Array<{ id: string }> }) => ({
+      id: group.id,
+      models: group.models.map(model => model.id),
+    })), [
+      {
+        id: 'codex',
+        models: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
+      },
+      {
+        id: 'deepseek-official',
+        models: ['deepseek-v4'],
+      },
+    ]);
+  }
+});
+
+test('子用户模型目录解析失败时拒绝响应，不泄露未过滤目录', async () => {
+  const r = await gatewayReq('POST', '/api/llm.models', {
+    cookie: customerCookie,
+    'content-type': 'application/json',
+    'x-test-mode': 'bad-json',
+  });
+  assert.equal(r.status, 502);
+  assert.equal(r.body, '502 Upstream response unprocessable');
 });
 
 test('JSON 解析失败回退路径：不得同时出现 CL+TE，body 原样透传', async () => {

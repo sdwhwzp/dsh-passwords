@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { homedir } from 'node:os';
 import path from 'node:path';
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -57,21 +58,8 @@ export interface PlatformConfig {
     /** 对浏览器展示的完整 ws(s) 地址；留空时按当前访问主机与端口生成。 */
     publicUrl: string;
   };
-  /** Synology WebDAV authentication endpoint. TLS verification is mandatory in production. */
-  webdav: {
-    url: string;
-    insecureSkipVerify: boolean;
-  };
-  /** MySQL credential ledger. Secret values are read from systemd credentials at use time. */
-  mysql: {
-    host: string;
-    port: number;
-    database: string;
-    user: string;
-    passwordCredential: string;
-    masterKeyCredential: string;
-    keyVersion: string;
-  };
+  /** 宿主机上为子用户自动创建的专属工作区根目录。 */
+  managedWorkspaceRoot: string;
   /** 远程设置补丁（settings host 模式 + 白名单）管理配置；补丁强制启用，无开关 */
   patch: {
     /** dsh 安装根目录（@deepseek-ai/dsh 所在位置）；留空自动探测 npm root -g */
@@ -103,11 +91,10 @@ export function loadConfig(): PlatformConfig {
     readEnv('MCP_INTERNAL_SECRET', '') ||
     createHash('sha256').update('dshpw-internal:' + setupKey).digest('hex');
 
-  const dbPath = readEnv(
-    'MCP_DB_PATH',
-    // 默认基于模块目录而非 cwd：无论从哪个目录运行都指向同一数据库，
-    // 与 .env 的模块相对解析语义保持一致（否则 systemd/CLI/调试目录
-    // 会各自开一个新库，表现为“配置改了不生效/数据丢了”）
+  const dbPath = resolveEnvRelativePath(
+    readEnv('MCP_DB_PATH', ''),
+    envFilePath(),
+    // 默认基于模块目录而非 cwd：无论从哪个目录运行都指向同一数据库。
     path.resolve(moduleDir, '..', 'data', 'platform.db'),
   );
 
@@ -152,13 +139,6 @@ export function loadConfig(): PlatformConfig {
       ? localWorkspacePortNum
       : Math.min(gatewayPort + 1, 65535);
 
-  const insecureSkipVerify = ['1', 'true', 'yes'].includes(
-    readEnv('MCP_WEBDAV_INSECURE_SKIP_VERIFY', '').toLowerCase(),
-  );
-  if (insecureSkipVerify && process.env.NODE_ENV === 'production') {
-    throw new Error('生产环境禁止 MCP_WEBDAV_INSECURE_SKIP_VERIFY：请先修复群晖证书或配置受信内部 CA');
-  }
-
   return {
     setupKey,
     dbPath,
@@ -196,19 +176,11 @@ export function loadConfig(): PlatformConfig {
       port: localWorkspacePort,
       publicUrl: readEnv('MCP_LOCAL_WORKSPACE_PUBLIC_URL', ''),
     },
-    webdav: {
-      url: readEnv('MCP_WEBDAV_URL', 'https://192.168.10.47:4006'),
-      insecureSkipVerify,
-    },
-    mysql: {
-      host: readEnv('MCP_MYSQL_HOST', '127.0.0.1'),
-      port: Number(readEnv('MCP_MYSQL_PORT', '3306')) || 3306,
-      database: readEnv('MCP_MYSQL_DATABASE', 'dsh_passwords'),
-      user: readEnv('MCP_MYSQL_USER', 'dsh_passwords'),
-      passwordCredential: readEnv('MCP_MYSQL_PASSWORD_CREDENTIAL', 'mysql-password'),
-      masterKeyCredential: readEnv('MCP_WEBDAV_MASTER_KEY_CREDENTIAL', 'webdav-master-key'),
-      keyVersion: readEnv('MCP_WEBDAV_KEY_VERSION', 'v1'),
-    },
+    managedWorkspaceRoot: resolveEnvRelativePath(
+      readEnv('MCP_MANAGED_WORKSPACE_ROOT', ''),
+      envFilePath(),
+      path.join(homedir(), 'dsh-user-workspaces'),
+    ),
     patch: {
       dshRoot: readEnv('MCP_DSH_ROOT', ''),
       restartService,
@@ -219,6 +191,18 @@ export function loadConfig(): PlatformConfig {
 /** 当前生效的 .env 文件路径（与 loadConfig 的读取路径保持一致） */
 function envFilePath(): string {
   return process.env.DSH_PASSWORDS_ENV_FILE?.trim() || path.join(moduleDir, '..', '.env');
+}
+
+/**
+ * 配置中的相对文件路径必须相对承载它的 .env，而不是进程 cwd。
+ * dsh Host 与它拉起的网关使用不同 WorkingDirectory；若按 cwd 解析，二者会
+ * 打开不同 SQLite 文件，退出/重启后就会表现为账号丢失或密钥不匹配。
+ */
+export function resolveEnvRelativePath(configured: string, envFile: string, fallback: string): string {
+  const value = configured.trim();
+  if (value === '') return path.resolve(fallback);
+  if (path.isAbsolute(value)) return path.normalize(value);
+  return path.resolve(path.dirname(path.resolve(envFile)), value);
 }
 
 /**

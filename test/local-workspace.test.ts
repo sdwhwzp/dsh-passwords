@@ -18,6 +18,7 @@ import { test } from 'node:test';
 import { WebSocket, WebSocketServer } from 'ws';
 import { Database } from '../src/db.js';
 import { createFieldCrypto } from '../src/encrypt.js';
+import { localWorkspacePrincipalAllowed } from '../src/local-workspace-hub.js';
 
 interface CompanionHarness {
   child: ChildProcess;
@@ -27,6 +28,28 @@ interface CompanionHarness {
   temp: string;
   output(): string;
 }
+
+test('共享会话中的本机工作区工具只接受配对所有者 principal', () => {
+  assert.equal(localWorkspacePrincipalAllowed(undefined, 7), false);
+  assert.equal(localWorkspacePrincipalAllowed({
+    source: 'other-gateway',
+    id: '7',
+    username: 'owner',
+    role: 'user',
+  }, 7), false);
+  assert.equal(localWorkspacePrincipalAllowed({
+    source: 'dsh-passwords',
+    id: '8',
+    username: 'other',
+    role: 'user',
+  }, 7), false);
+  assert.equal(localWorkspacePrincipalAllowed({
+    source: 'dsh-passwords',
+    id: '7',
+    username: 'owner',
+    role: 'user',
+  }, 7), true);
+});
 
 test('本机助手只在授权目录执行文件操作，默认拒绝 Shell', async (context) => {
   const harness = await startCompanion(false);
@@ -98,6 +121,87 @@ test('本机助手显式启用后在授权目录启动 Shell', async (context) =
   assert.equal(value.timedOut, false);
 });
 
+test('Windows 本机助手通过受控 Office RPC 读写 Word 且限制在授权目录', async (context) => {
+  const fixture = mkdtempSync(path.join(tmpdir(), 'dsh-local-office-'));
+  const fakePowerShell = path.join(fixture, 'fake-powershell');
+  const requestLog = path.join(fixture, 'requests.jsonl');
+  writeFileSync(fakePowerShell, `#!/usr/bin/env node
+const fs = require('node:fs');
+let source = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => { source += chunk; });
+process.stdin.on('end', () => {
+  const request = JSON.parse(source);
+  fs.appendFileSync(process.env.DSH_TEST_OFFICE_REQUEST_LOG, JSON.stringify(request) + '\\n');
+  if (request.action === 'status') {
+    process.stdout.write(JSON.stringify({ ok: true, value: { platform: 'win32', office: true, wps: true, preferred: 'office' } }));
+    return;
+  }
+  if (request.action === 'read_word') {
+    process.stdout.write(JSON.stringify({ ok: true, value: {
+      provider: 'office', progId: 'Word.Application', text: '测试内容', truncated: false,
+      paragraphCount: 1, tableCount: 0, paragraphs: [{ index: 1, text: '测试内容' }], tables: [],
+    } }));
+    return;
+  }
+  if (request.create) fs.writeFileSync(request.workPath, 'fake-docx');
+  for (const operation of request.operations) {
+    if (operation.type === 'export_pdf') fs.writeFileSync(operation.outputPath, 'fake-pdf');
+  }
+  process.stdout.write(JSON.stringify({ ok: true, value: {
+    provider: 'office', progId: 'Word.Application', created: request.create, operationsApplied: request.operations.length,
+  } }));
+});
+`);
+  chmodSync(fakePowerShell, 0o755);
+  const harness = await startCompanion(false, false, {
+    DSH_LOCAL_WORKSPACE_TEST_WINDOWS: '1',
+    DSH_LOCAL_WORKSPACE_TEST_POWERSHELL: fakePowerShell,
+    DSH_TEST_OFFICE_REQUEST_LOG: requestLog,
+  });
+  context.after(async () => {
+    await stopCompanion(harness);
+    rmSync(fixture, { recursive: true, force: true });
+  });
+
+  const status = await request(harness.socket, 'office', { action: 'status' });
+  assert.equal(status.ok, true, harness.output());
+  assert.deepEqual(status.value, { platform: 'win32', office: true, wps: true, preferred: 'office' });
+
+  const created = await request(harness.socket, 'office', {
+    action: 'edit_word',
+    path: '报告.docx',
+    create: true,
+    operations: [
+      { type: 'append_paragraph', text: '含有 \" 和 $() 的安全文本', style: 'Title' },
+      { type: 'set_header', text: '山东梯智物联有限公司' },
+      { type: 'export_pdf', outputPath: '导出/报告.pdf' },
+    ],
+  });
+  assert.equal(created.ok, true, harness.output());
+  assert.equal(readFileSync(path.join(harness.root, '报告.docx'), 'utf8'), 'fake-docx');
+  assert.equal(readFileSync(path.join(harness.root, '导出/报告.pdf'), 'utf8'), 'fake-pdf');
+  assert.deepEqual((created.value as { pdfPaths: string[] }).pdfPaths, ['导出/报告.pdf']);
+
+  const read = await request(harness.socket, 'office', { action: 'read_word', path: '报告.docx' });
+  assert.equal(read.ok, true, harness.output());
+  assert.equal((read.value as { text: string }).text, '测试内容');
+
+  const escaped = await request(harness.socket, 'office', {
+    action: 'edit_word',
+    path: '../越界.docx',
+    create: true,
+    operations: [{ type: 'append_paragraph', text: 'blocked' }],
+  });
+  assert.equal(escaped.ok, false);
+  assert.equal(escaped.code, 'PATH_OUTSIDE_ROOT');
+
+  const logged = readFileSync(requestLog, 'utf8').trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
+  const editRequest = logged.find((value) => value.action === 'edit_word') as { operations: Array<Record<string, unknown>> } | undefined;
+  assert.equal(editRequest?.operations[0]?.text, '含有 \" 和 $() 的安全文本');
+  assert.equal(path.isAbsolute(String(editRequest?.operations[2]?.outputPath)), true);
+});
+
 test('Windows 双击模式可解析网页配对命令并保存配置', async (context) => {
   const harness = await startCompanion(false, true);
   context.after(() => stopCompanion(harness));
@@ -156,7 +260,11 @@ test('本机工作区令牌、所有权与撤销持久化', () => {
   }
 });
 
-async function startCompanion(allowShell: boolean, interactive = false): Promise<CompanionHarness> {
+async function startCompanion(
+  allowShell: boolean,
+  interactive = false,
+  extraEnv: NodeJS.ProcessEnv = {},
+): Promise<CompanionHarness> {
   const temp = mkdtempSync(path.join(tmpdir(), 'dsh-local-companion-'));
   const rootInput = path.join(temp, 'workspace');
   const config = interactive ? path.join(temp, '.dsh-local-workspace', 'config.json') : path.join(temp, 'config.json');
@@ -195,12 +303,15 @@ async function startCompanion(allowShell: boolean, interactive = false): Promise
     {
       cwd: path.resolve(import.meta.dirname, '..'),
       stdio: [interactive ? 'pipe' : 'ignore', 'pipe', 'pipe'],
-      env: interactive ? {
+      env: {
         ...process.env,
-        HOME: temp,
-        USERPROFILE: temp,
-        DSH_LOCAL_WORKSPACE_FORCE_WIZARD: '1',
-      } : process.env,
+        ...(interactive ? {
+          HOME: temp,
+          USERPROFILE: temp,
+          DSH_LOCAL_WORKSPACE_FORCE_WIZARD: '1',
+        } : {}),
+        ...extraEnv,
+      },
     },
   );
   child.stdout?.on('data', (chunk: Buffer) => {
@@ -271,7 +382,7 @@ let requestSequence = 0;
 
 function request(
   socket: WebSocket,
-  operation: 'read' | 'write' | 'edit' | 'glob' | 'grep' | 'bash',
+  operation: 'read' | 'write' | 'edit' | 'glob' | 'grep' | 'bash' | 'office',
   args: Record<string, unknown>,
 ): Promise<{ ok: boolean; value?: unknown; code?: string; error?: string }> {
   const id = `request-${String(++requestSequence)}`;

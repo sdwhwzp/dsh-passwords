@@ -27,7 +27,7 @@ if exist "%DEST%" (
   echo [dsh-passwords] Reinstall: delete it first, but back up .env and data\ inside.
   exit /b 1
 )
-git clone --depth 1 https://github.com/slywalker2006/dsh-passwords.git "%DEST%"
+git clone --depth 1 https://github.com/sdwhwzp/dsh-passwords.git "%DEST%"
 if errorlevel 1 exit /b 1
 cd /d "%DEST%"
 set "SCRIPT_DIR=%CD%\"

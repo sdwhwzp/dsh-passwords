@@ -78,6 +78,43 @@ function startMockUpstream(): Promise<http.Server> {
         res.end(gzipBomb);
         return;
       }
+      if ((req.url ?? '').startsWith('/api/workspace.list')) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          type: 'server-response',
+          rpcId: 'workspace-list',
+          result: {
+            ok: true,
+            value: {
+              items: [{
+                workspaceId: 'ws-active',
+                path: '/workspaces/a',
+                title: 'active',
+                sessionIds: ['s-active'],
+              }],
+              archivedSessionIds: [],
+            },
+          },
+        }));
+        return;
+      }
+      if ((req.url ?? '').startsWith('/api/session.list')) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          type: 'server-response',
+          rpcId: 'session-list',
+          result: {
+            ok: true,
+            value: {
+              items: [
+                { sessionId: 's-active', cwd: '/workspaces/a' },
+                { sessionId: 's-removed', cwd: '/workspaces/a' },
+              ],
+            },
+          },
+        }));
+        return;
+      }
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ ok: true, method: req.method, url: req.url }));
     });
@@ -244,6 +281,45 @@ test('H-1b：gzip 高压缩比炸弹（解压后 70MiB）→ 502（maxOutputLeng
     '{}',
   );
   assert.equal(r.status, 502);
+});
+
+test('子账号只看到活动工作区成员，已移除同目录会话无法列表或直读', async () => {
+  db.setPermissions(subuserId, {
+    allowedFolders: ['/workspaces/a'],
+    hourlyTokenLimit: null,
+    dailyMinutesLimit: null,
+    monthlyBudgetMicros: 0,
+    allowUpload: true,
+    allowGitDownload: false,
+    banned: false,
+    sandboxMode: null,
+    disabledSessions: [],
+  });
+
+  const listed = await gatewayReq('POST', '/api/session.list', {}, subuserCookie, '{}');
+  assert.equal(listed.status, 200);
+  const body = JSON.parse(listed.body) as { result: { value: { items: Array<{ sessionId: string }> } } };
+  assert.deepEqual(body.result.value.items.map((item) => item.sessionId), ['s-active']);
+
+  upstreamUrls.length = 0;
+  const removed = await gatewayReq(
+    'POST',
+    '/api/session.history',
+    {},
+    subuserCookie,
+    JSON.stringify({ sessionId: 's-removed' }),
+  );
+  assert.equal(removed.status, 403);
+  assert.ok(!upstreamUrls.includes('/api/session.history'), '已移除会话请求不得转发上游');
+
+  const active = await gatewayReq(
+    'POST',
+    '/api/session.history',
+    {},
+    subuserCookie,
+    JSON.stringify({ sessionId: 's-active' }),
+  );
+  assert.equal(active.status, 200, '活动且已授权会话保持可用');
 });
 
 test('M-5b：since 超过最新消息 id（DB 重建后）返回 reset 信号 + 全量列表', async () => {
@@ -451,6 +527,27 @@ test('登出 CSRF：无 Origin（非浏览器/旧客户端）登出放行（302�
   assert.equal(r.status, 302);
 });
 
+test('远程桌面启动器不得关闭共享 dsh 服务', async () => {
+  upstreamUrls.length = 0;
+  const authenticated = await gatewayReq(
+    'POST',
+    '/api/dsh-desktop-launcher/shutdown',
+    { origin: `http://127.0.0.1:${gatewayPort}` },
+    adminCookie,
+  );
+  assert.equal(authenticated.status, 403);
+  assert.match(authenticated.body, /REMOTE_SHUTDOWN_DISABLED/);
+  const anonymous = await gatewayReq(
+    'POST',
+    '/api/dsh-desktop-launcher/shutdown',
+    { origin: `http://127.0.0.1:${gatewayPort}` },
+    '',
+  );
+  assert.equal(anonymous.status, 403, '无 Cookie/过期 Cookie 页面也不得跟随 302 后误判关机成功');
+  assert.match(anonymous.body, /REMOTE_SHUTDOWN_DISABLED/);
+  assert.deepEqual(upstreamUrls, [], '关机请求不得转发给上游 dsh');
+});
+
 // ── M-1：setup 竞态原子化 ─────────────────────────────────────
 
 test('M-1：setupInitialAdmin 只允许成功一次，重复调用返回 null', () => {
@@ -514,6 +611,29 @@ test('M-13：allowedFolders 含根目录 → 400', async () => {
   assert.equal(r.status, 400);
 });
 
+test('M-13：allowedFolders 精确禁止全部工作区 → 200', async () => {
+  const r = await gatewayReq(
+    'POST',
+    '/gateway/api/permissions',
+    {},
+    adminCookie,
+    JSON.stringify({ userId: subuserId, allowedFolders: ['__deny__'] }),
+  );
+  assert.equal(r.status, 200);
+  assert.deepEqual(db.getPermissions(subuserId)?.allowed_folders, ['__deny__']);
+});
+
+test('M-13：禁止全部工作区哨兵不能与路径混用', async () => {
+  const r = await gatewayReq(
+    'POST',
+    '/gateway/api/permissions',
+    {},
+    adminCookie,
+    JSON.stringify({ userId: subuserId, allowedFolders: ['__deny__', '/workspaces/a'] }),
+  );
+  assert.equal(r.status, 400);
+});
+
 test('M-13：allowedFolders 合法绝对路径 → 200', async () => {
   const r = await gatewayReq(
     'POST',
@@ -523,6 +643,60 @@ test('M-13：allowedFolders 合法绝对路径 → 200', async () => {
     JSON.stringify({ userId: subuserId, allowedFolders: ['/workspaces/a'] }),
   );
   assert.equal(r.status, 200);
+});
+
+test('M-13b：宿主机专属工作区始终保留给所有者且不能分配给其他子用户', async () => {
+  const ownPath = path.join(tempDir, 'managed', `u${String(subuserId)}`);
+  const otherPath = path.join(tempDir, 'managed', `u${String(thirdId)}`);
+  db.setManagedWorkspace(subuserId, ownPath);
+  db.setManagedWorkspace(thirdId, otherPath);
+  db.setPermissions(subuserId, {
+    allowedFolders: [ownPath], hourlyTokenLimit: null, dailyMinutesLimit: null, monthlyBudgetMicros: 0,
+    allowUpload: true, allowGitDownload: true, banned: false, sandboxMode: 'workspace-write', disabledSessions: [],
+  });
+  try {
+    const own = await gatewayReq(
+      'GET',
+      `/aionui-panel/list?root=${encodeURIComponent(ownPath)}`,
+      {},
+      subuserCookie,
+    );
+    assert.equal(own.status, 200);
+
+    const crossUser = await gatewayReq(
+      'GET',
+      `/aionui-panel/list?root=${encodeURIComponent(otherPath)}`,
+      {},
+      subuserCookie,
+    );
+    assert.equal(crossUser.status, 403);
+
+    const assignOther = await gatewayReq(
+      'POST',
+      '/gateway/api/permissions',
+      {},
+      adminCookie,
+      JSON.stringify({ userId: subuserId, allowedFolders: [otherPath] }),
+    );
+    assert.equal(assignOther.status, 400);
+
+    const closeAll = await gatewayReq(
+      'POST',
+      '/gateway/api/permissions',
+      {},
+      adminCookie,
+      JSON.stringify({ userId: subuserId, allowedFolders: ['__deny__'] }),
+    );
+    assert.equal(closeAll.status, 200);
+    assert.deepEqual(db.getPermissions(subuserId)?.allowed_folders, [ownPath]);
+  } finally {
+    db.deleteManagedWorkspace(subuserId);
+    db.deleteManagedWorkspace(thirdId);
+    db.setPermissions(subuserId, {
+      allowedFolders: ['__deny__'], hourlyTokenLimit: null, dailyMinutesLimit: null, monthlyBudgetMicros: 0,
+      allowUpload: true, allowGitDownload: false, banned: false, sandboxMode: null, disabledSessions: [],
+    });
+  }
 });
 
 // ── L-4：CSR 含 CN + SAN（RFC 5280 结构验证，非浅层字节存在性） ──

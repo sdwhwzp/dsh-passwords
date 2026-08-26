@@ -24,6 +24,8 @@ Listed in [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek
 
 - One **owner** (created at first-time setup) + any number of **subusers**, each with their own login
 - All account management happens in a card on dsh's settings page — no SSH needed: change passwords, change usernames, create/delete subusers
+- Creating a subuser also creates and registers a private host workspace (default `~/dsh-user-workspaces/u<user-id>`) with an initial `workspace-write` sandbox; existing subusers are backfilled on the first startup after upgrade
+- Subusers can open **Password Gate → Private host folder** to browse their own managed directory, download files, and upload local files or whole folders into the current directory. Folder structure is retained (browser folder selection does not report empty directories), and relative-path authorization prevents access to other accounts or host directories
 - A **Sign out** button beside the current identity immediately revokes the server-side session and clears the cookie after confirmation
 - The owner manages all subusers; subusers can only change themselves
 - Changing a password immediately invalidates all old sessions; every login and failure is logged — one command shows who signed in when
@@ -37,8 +39,9 @@ The owner can configure, per subuser, from the settings page:
 - **DM-by-default messages**: subuser messages go to the owner by default; broadcasting is owner-only and must be explicitly chosen
 - **Hourly token limit** and **daily usage-time limit**: requests are rejected once the cap is hit
 - **Monthly model-spend allowance**: stored as integer CNY micros with ¥0.01 admin precision; shows used, remaining and an 80% warning, and rejects the next model step at 100%
+- **Customer model scope**: under the ChatGPT (Codex) provider, subuser selectors show only GPT-5.6-Sol, GPT-5.6-Terra, and GPT-5.6-Luna; models from other providers remain available, while the server rejects other Codex models for subusers and leaves the owner unrestricted
 - **Sandbox level**: read-only / workspace-write / full access; when a subuser's AI tries to escalate beyond its level, the gateway forces the approval to "reject"
-- **Upload / git-download toggles** and **ban subusers**
+- **Upload toggle** (including private-folder uploads), **git-download toggle**, and **ban subusers**
 
 ### 4️⃣ Collaboration
 
@@ -46,38 +49,18 @@ The owner can configure, per subuser, from the settings page:
 
 ### 5️⃣ Local workspaces
 
-- Each user can pair one or more folders from their own computer as independent workspaces without uploading files to the dsh server
-- dsh `read`, `write`, `edit`, `glob`, and `grep` operations run through the companion against the original files in the authorized folder
-- Shell is off by default; `bash` runs on the user's computer only after that user explicitly adds `--allow-shell`
+- Every signed-in user can pair one or more folders from their own computer as independent workspaces without uploading those files to the dsh server
+- dsh `read`, `write`, `edit`, `glob`, and `grep` operations act on the original authorized folder through the local companion
+- The Windows EXE enables `--allow-shell` automatically, including restored workspaces; non-Windows-EXE command-line mode keeps Shell off until the user adds it explicitly
+- Windows workspaces register `word_native_status`, `word_native_read`, and `word_native_edit`: they prefer Microsoft Word installed on the customer computer and fall back to WPS Writer without any `@univerjs-pro/*` dependency
 
-## Synology WebDAV login and spend synchronization
+## Identity and spend synchronization
 
-This branch keeps SQLite as the sole configuration source for users, permissions, allowances and audit data, while delegating ordinary-user authentication to Synology WebDAV:
+Owners and subusers always sign in with local accounts and bcrypt passwords stored in this project's SQLite database. The gateway removes browser-supplied identity headers and creates a 30-second HMAC assertion for upstream requests; Harness verifies it and durably attaches the principal to each message, model step and tool execution.
 
-1. The local administrator continues to use the dsh-passwords bcrypt credential and remains the recovery entrance when Synology or MySQL is unavailable.
-2. An ordinary login sends `PROPFIND Depth: 0` to `https://192.168.10.47:4006`. Success creates or links the local user by username; a new user starts with no workspace access and a ¥0 monthly allowance.
-3. Only a successful login writes the WebDAV password to MySQL under AES-256-GCM and then issues the dsh session. The password never enters SQLite, logs, model context or tool output.
-4. The gateway removes browser-supplied identity headers and creates a 30-second HMAC assertion for each upstream request. Harness verifies it and durably attaches the principal to each message, step and tool execution; other plugins do not read the JWT key.
-5. Every model step checks bans, hourly tokens, daily time and the personal monthly allowance together; any failure rejects the step. A model call already in flight may finish, so the final amount can exceed the allowance slightly.
+Every model step checks bans, hourly tokens, daily time and the personal monthly allowance together; any failure rejects the step. When a customer submits a question after exhausting an allowance, the conversation explicitly shows the amount used, the limit, that the question was not sent to the model, and that the administrator must increase the allowance. A model call already in flight may finish, so the final amount can exceed the allowance slightly. `dsh-spend` accounts by `(sessionId, turn, step)` idempotently. Natural months use `Asia/Shanghai`; changing an allowance never removes history, and administrators have no personal amount cap by default. The plugin registers the current account's allowance resolver with `dsh-spend`, so subusers see their own remaining CNY allowance in the Spend hover preview and overview.
 
-`dsh-spend` accounts by `(sessionId, turn, step)` idempotently. Natural months always use `Asia/Shanghai`; changing an allowance never removes or resets history. Administrators have no personal amount cap by default. Legacy anonymous sessions remain compatible, but personal-spend queries and NAS tools reject anonymous calls.
-
-### MySQL and systemd credentials
-
-Create the database and a least-privilege MySQL user first; `webdav_credentials` is migrated idempotently. The service must provide the MySQL password and a 32-byte WebDAV master key with systemd `LoadCredential=`:
-
-```ini
-[Service]
-Environment=NODE_ENV=production
-LoadCredential=mysql-password:/etc/dsh-secrets/mysql-password
-LoadCredential=webdav-master-key:/etc/dsh-secrets/webdav-master-key
-```
-
-The `.env` file stores only the MySQL address, username, credential filenames and key version; see [.env.example](.env.example). Before SQLite migration, startup creates one `data/backups/platform-YYYY-MM-DD.db` snapshot per Shanghai calendar day. MySQL and SQLite migrations are repeatable.
-
-### Synology TLS prerequisite
-
-The certificate currently served on port 4006 is expired and its name does not match the IP address. Production must replace it, trust an internal CA, or implement certificate pinning first. `MCP_WEBDAV_INSECURE_SKIP_VERIFY=1` is for non-production integration only: it exposes every logging-in user's WebDAV password to a network attacker, and the process refuses it when `NODE_ENV=production`.
+External file services and their accounts, passwords and databases are managed by their own standalone plugins and are outside dsh-passwords sign-in and configuration.
 
 ## Screenshots
 
@@ -104,10 +87,10 @@ The certificate currently served on port 4006 is expired and its name does not m
 
 ```bash
 # Linux / macOS — Option A: download and install directly
-curl -fsSL https://raw.githubusercontent.com/slywalker2006/dsh-passwords/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/sdwhwzp/dsh-passwords/main/install.sh | bash
 
 # Linux / macOS — Option B: clone first, then install
-git clone https://github.com/slywalker2006/dsh-passwords
+git clone https://github.com/sdwhwzp/dsh-passwords
 cd dsh-passwords
 bash install.sh
 ```
@@ -118,12 +101,20 @@ bash install.sh
 
 ```bash
 npm install -g dsh-passwords
-dsh-passwords install     # generates a random SETUP_KEY, registers the plugin and applies the patch (one-click equivalent)
+dsh-passwords install     # generates SETUP_KEY, restores the plugin stack, and applies the patch
 ```
 
 (`dsh-passwords --version` prints the version; `dsh-passwords serve-gateway` runs the gateway manually.)
 
-The installer checks for prebuilt files, installing dependencies and building only when they are missing. It then generates `SETUP_KEY`, registers the plugin, and applies the remote-settings patch.
+The installer checks for prebuilt files, installing dependencies and building only when they are missing. It then generates `SETUP_KEY`, restores the recorded web-profile plugin stack, and applies the remote-settings patch.
+
+### Automatic plugin-stack restore
+
+`scripts/profile-plugins.json` is the versioned cross-machine deployment manifest. `dsh-passwords install` idempotently merges its NPM/Git sources, bundle order, Git build permissions, and required profile patches into `~/.dsh/profiles/web`, then runs one `pnpm install`. Existing local `link:` development sources and custom plugins outside the manifest are preserved; retired aggregate packages explicitly named by the manifest are migrated automatically.
+
+The default stack installs `dshmarket@1.16.2`, `@linxin666/dsh-web-all` from the `dev` branch of your `sdwhwzp/dsh-web` repository, the `dev` branches of `dsh-spend` and `dsh-plugin-subscriptions`, and the current `dsh-passwords`. The installer removes the retired `@linxin666/dsh-web-ui-all` dependency and bundle. When `dsh-web` and `dsh-passwords` share a parent directory, it links and builds the local aggregate together with every workspace package so DSH can resolve each loader from the profile root and local development remains direct. The subscriptions entry enforces `github:sdwhwzp/dsh-plugin-subscriptions#dev`, preventing a fresh host from silently selecting the NPM stable release.
+
+`dsh-shandong-tizhi-brand` and `dsh-nas-webdav` are also recorded, but currently only have local source trees and no remotely fetchable branch. Before deploying them on another host, set `DSH_PLUGIN_BRAND_SPEC` and `DSH_PLUGIN_NAS_SPEC` to accessible NPM, Git, or `link:` sources. Without those variables the installer reports and skips those optional plugins while restoring the rest of the stack.
 
 At the end it prints the `SETUP_KEY` for first-time setup and writes it to `setup-key.txt` in the install directory. The file is deleted after setup succeeds; the active keys are kept as independent values in `.env`.
 
@@ -137,24 +128,28 @@ Remember to open ports **80 and 443** in both the server firewall **and** your c
 
 ## Local workspace companion
 
-Use the companion when dsh runs on a server while source files stay on each user's computer. The companion makes an outbound connection, so user computers do not need an inbound port. Once paired, the folder appears as a workspace in the dsh sidebar.
+The companion is for deployments where dsh runs on a server while files remain on each user's computer. The user's computer initiates the connection, so it needs no inbound port. Once paired, the folder appears as a workspace in the dsh sidebar.
 
-Windows users do not need to install Node.js:
+Windows users do not need Node.js:
 
-1. Sign in to dsh, open **Settings → Plugins → Local workspace**, download the Windows one-click companion, and generate a pairing command
-2. Double-click `山东梯智物联AI本机助手.exe`, then paste the full command from the web page into the Chinese setup wizard
-3. Enter or drag in the folder to authorize; leave Shell disabled by default
-4. Keep the companion window open. After the first successful connection, it saves the device token and folder; later, double-click the same EXE to reconnect automatically
+1. Sign in to dsh, expand **Choose a local folder** in the lower-left corner, and download `山东梯智物联AI本机助手.exe` from its fallback section (it is also available under Local workspace in Settings)
+2. Put the EXE somewhere permanent and double-click it once. It registers the web-launch protocol for the current Windows user, without administrator access or prompts for a server address or folder
+3. Return to dsh, click **Choose a local folder** in the lower-left corner, and select the folder in the native Windows picker. The server address and one-time launch ticket are handled in the background
+4. Keep the companion window open. Once connected, the folder appears in the lower-left panel; click **Open conversation** to create or reuse its blank session and show the composer. Credentials are saved per folder, and later double-clicking the same EXE reconnects every authorized folder
 
-The generated EXE is currently unsigned, so Windows may show a SmartScreen warning. Before distributing it to customers, sign it with a valid Shandong Tizhi IoT Co., Ltd. code-signing certificate and publish its SHA-256 checksum so users can verify the publisher and file.
+The current EXE is unsigned, so Windows may display a SmartScreen warning. Before production distribution, sign it with a valid company code-signing certificate and publish its SHA-256 checksum.
 
-On macOS / Linux, install Node.js 22.5+ and then run `npm install -g github:sdwhwzp/dsh-passwords#dev`. Generate a pairing command, replace the folder placeholder, and run it, for example: `dsh-local-workspace --server ws://192.168.1.10:3082 --pair <pairing-code> --folder "/home/user/projects/demo"`.
+The Windows EXE enables `--allow-shell` automatically for one-click selection and restored workspaces. PowerShell runs as the current Windows user and may access files outside the authorized folder. The customer UI exposes only the Windows one-click flow; it does not show a server address, approval code, or legacy pairing command.
 
-The Windows and command-line companions share the default config at `~/.dsh-local-workspace/config.json`. For multiple folders, use a separate config per folder, such as `dsh-local-workspace --config ~/.dsh-local-workspace/project-b.json --server ... --pair ... --folder ...`, and pass the same `--config` when reconnecting.
+Windows local workspaces also expose native Word automation. `word_native_read` reads body text, paragraphs, and tables. `word_native_edit` creates documents or applies a batch of find/replace, paragraph insertion/deletion/formatting, tables, headers, footers, images, page breaks, and PDF exports. The companion tries `Word.Application` first and WPS `kwps.Application` second. Arguments reach a fixed PowerShell script as JSON over stdin instead of command interpolation; every document, image, and export path must stay under the authorized folder. The document is saved only after the complete batch succeeds, and macro automation is disabled while opening it.
 
-The companion port defaults to the gateway port plus one. If the dsh web gateway uses `3081`, the companion uses `3082`. Allow that port through the LAN firewall. For NAT, reverse proxies, or incorrect browser-derived addresses, set `MCP_LOCAL_WORKSPACE_PUBLIC_URL=wss://your-domain:port`.
+Office RPC requires local-companion protocol v2. After upgrading the server plugin, download and run the new EXE again; an older companion is rejected with an unsupported-protocol message.
 
-File operations accept only paths inside the authorized folder and re-check resolved symlinks. The device token is stored only on the user computer; the server database stores a one-way hash. `--allow-shell` is an explicit higher-privilege option: the shell runs as the current OS user and may access files outside the authorized folder. Plain `ws://` is for trusted LANs only; use HTTPS/WSS across untrusted networks.
+The default config file is `~/.dsh-local-workspace/config.json`. Each folder selected by the Windows one-click flow gets its own `~/.dsh-local-workspace/profiles/<workspace-id>.json`, and double-clicking the companion restores them together. For multiple CLI folders, use a different config file for each one, such as `--config ~/.dsh-local-workspace/project-b.json`.
+
+The companion port defaults to the gateway port plus one. If the dsh web gateway uses `3081`, the companion uses `3082`. Allow it through the server firewall. Behind NAT or a reverse proxy, or when the browser-derived address is incorrect, set `MCP_LOCAL_WORKSPACE_PUBLIC_URL=wss://your-domain:port`.
+
+The one-click web entry issues a random 256-bit launch ticket bound to the signed-in user; it expires after two minutes, can be consumed once, and is never written to companion configuration or logs. The real high-entropy token is delivered over the existing WebSocket, stays on the user's computer, and is stored by the server only as a one-way hash. File operations accept only paths within the authorized folder and re-check resolved symlinks. `--allow-shell` is a high-privilege option enabled by the packaged Windows EXE for new connections and saved profiles. The shell runs as the current OS user and may access files outside the authorized folder. Plain `ws://` is only for trusted LANs; use HTTPS/WSS across untrusted networks.
 
 Maintainers can run `npm run build:windows-assistant` to create `release/山东梯智物联AI本机助手.exe`. The repository's `Build Windows Local Workspace Assistant` workflow also builds and uploads the same artifact on a Windows runner.
 
@@ -222,6 +217,7 @@ After logging in to dsh, open **Settings → Plugins** to find the "dsh-password
 | **Change username** | Yourself; the owner can change anyone's | Sign in with the new username afterwards |
 | **Subuser management** | Owner only | Create/delete subusers (subusers can sign in but have no admin rights) |
 | **Subuser permissions** | Owner only | Workspace switches, per-session checkboxes, hourly token limit, daily time limit, sandbox level, upload/git-download toggles, ban |
+| **Local workspaces** | All signed-in users | Download the Windows companion, inspect online state, and revoke their own local workspaces |
 | **Chat / messages** | All signed-in users | Chat button in the bottom-left corner, with tags (issue/pull request/discussion/announcement/question); subusers DM the owner by default, broadcasting is owner-only; every account can hide its own chat entry in Settings |
 
 - **Owner** = the account created at first-time setup; everything added later is a **subuser**.
@@ -233,8 +229,9 @@ After logging in to dsh, open **Settings → Plugins** to find the "dsh-password
 |---|---|---|
 | `SETUP_KEY` | auto-generated by the installer | First-time setup key. After setup succeeds, it is rotated and the JWT/internal/database keys are frozen independently. Keep `.env`; `setup-key.txt` is deleted automatically |
 | `MCP_JWT_SECRET` | derived from SETUP_KEY before first-time setup | Session signing key. It is frozen as an independent value after setup; changing it invalidates existing sign-ins |
-| `MCP_DB_PATH` | `./data/platform.db` | Database file (SQLite, created automatically — no MySQL needed) |
+| `MCP_DB_PATH` | `./data/platform.db` | Account/permission SQLite file; relative paths resolve from the `.env` directory |
 | `MCP_DB_ENC_KEY` | auto-generated by the installer | Data-at-rest encryption key, frozen after setup. **Never change it for an existing database**; back up `.env` with the database |
+| `MCP_MANAGED_WORKSPACE_ROOT` | `~/dsh-user-workspaces` | Root for private host workspaces. New/backfilled accounts normally use stable `u<user-id>` children; a random suffix is added when a retained directory already exists so old data is never assigned to a new account. It cannot be inside the database data directory; relative paths resolve from `.env` |
 | `MCP_GATEWAY_HOST` | `0.0.0.0` | Gateway listen address |
 | `MCP_GATEWAY_PORT` | `443` on first installer setup; `8080` when unset | Gateway port |
 | `MCP_GATEWAY_UPSTREAM` | `http://127.0.0.1:3080` | dsh web address (the plugin points it at dsh's actual port automatically — usually leave as-is) |
@@ -246,7 +243,7 @@ After logging in to dsh, open **Settings → Plugins** to find the "dsh-password
 | `MCP_GATEWAY_TLS_CERT` / `MCP_GATEWAY_TLS_KEY` | empty | When both are set, your own certificate is used (takes priority over auto HTTPS) |
 | `MCP_GATEWAY_PUBLIC_HOST` | empty | Public IP/domain used for redirects (prevents Host-header reflection) |
 | `MCP_LOCAL_WORKSPACE_HOST` | `0.0.0.0` | Local companion WebSocket listen address |
-| `MCP_LOCAL_WORKSPACE_PORT` | gateway port + 1 | Local companion port; allow it through the LAN firewall |
+| `MCP_LOCAL_WORKSPACE_PORT` | gateway port + 1 | Local companion port; allow it through the server firewall |
 | `MCP_LOCAL_WORKSPACE_PUBLIC_URL` | empty | Full `ws://` or `wss://` URL used in pairing commands; set it explicitly behind NAT/reverse proxies |
 | `MCP_DSH_ROOT` | auto-detected | dsh install directory (where `@deepseek-ai/dsh` lives); set manually if detection fails |
 | `MCP_DSH_RESTART_SERVICE` | `dsh-web` | systemd service to restart after a patch reload; an explicit empty value disables auto-restart |
@@ -267,10 +264,13 @@ dsh-local-workspace                           # reconnect with the saved local d
 
 - **The login page keeps showing "First-time setup"?** The user table is empty (fresh or wiped database). Enter the `SETUP_KEY` as prompted to create the owner account again.
 - **Forgot the owner password?** Stop the service and run `node -e "const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync('data/platform.db');db.exec('DELETE FROM users;')"`, then restart and redo first-time setup.
+- **Does deleting a subuser delete their host files?** No. The workspace registration and account access are revoked, but that account's `u<user-id>` directory (or its collision-safe suffixed form) under `MCP_MANAGED_WORKSPACE_ROOT` is retained until an administrator archives or removes it manually.
 - **dsh's console shows error code 30 / 31 and the gate didn't start?** See the error-code table under "Automatic HTTPS" above. After fixing, restarting dsh pulls the gate up again.
 - **Port 443 fails to bind (non-root user)?** On Linux, ports below 1024 need root: start dsh as root/sudo, or set `MCP_GATEWAY_PORT` to a high port (e.g. 8443) and forward traffic yourself.
 - **The local companion cannot connect?** Confirm the dsh console shows the local-companion listener and allow `MCP_LOCAL_WORKSPACE_PORT` through the server firewall. A web gateway on `3081` defaults the companion to `3082`; set `MCP_LOCAL_WORKSPACE_PUBLIC_URL` across NAT.
-- **dsh fails to start with `duplicate loader entry id`?** You used `dsh plugin add` in the profile. It reconciles ALL dependencies declaring `dsh.bundle` into the bundles layer, which crashes dsh when they overlap with already-installed plugins. Uninstall dsh-passwords and register precisely with `node scripts/register-plugin.mjs` (it appends only this plugin).
+- **The local workspace is online but has no composer?** Expand **Choose a local folder** in the lower-left corner and click **Open conversation** beside the online folder. `¥0` disables model calls; after submitting a question, the customer sees an explicit exhausted-allowance notice in the conversation.
+- **Nothing opens after clicking “Choose a local folder”?** Expand **Companion did not open?**, download the EXE, and double-click it once to register the protocol, then retry on the original page. Do not move or delete the registered EXE; if you move it, double-click it again at the new location. The web flow never opens `about:blank`, so the current conversation remains intact.
+- **dsh fails to start with `duplicate loader entry id`?** You used `dsh plugin add` in the profile. It reconciles ALL dependencies declaring `dsh.bundle` into the bundles layer, which crashes dsh when they overlap with already-installed plugins. Use `node scripts/register-plugin.mjs` to sync `scripts/profile-plugins.json` precisely; it appends only the bundles named by the manifest and preserves all other configuration.
 - **npm fails installing dsh (allow-scripts / node-pty)?** Newer npm blocks install scripts. Allow them first, then reinstall: `npm config set allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user` followed by `npm install -g @deepseek-ai/dsh` again (this project itself has no such issue — it's dsh's dependencies that run native builds).
 - **`dsh-passwords install` reports TS5058 after an npm `--prefix` install?** Upgrade to `dsh-passwords@2.5.4`. It correctly detects runtime dependencies hoisted to `<prefix>/node_modules` and no longer falls back to a source build.
 - **dsh reports `crypto.randomUUID is not a function`?** An older gateway build lacks the HTML injection compat layer — update the code and **hard-refresh the browser** (Ctrl+Shift+R).
@@ -283,10 +283,10 @@ dsh-local-workspace                           # reconnect with the saved local d
 
 > Windows users: use `install.bat` instead. This section uses Linux as the example; the steps are equivalent.
 
-1. `git clone https://github.com/slywalker2006/dsh-passwords && cd dsh-passwords`
+1. `git clone https://github.com/sdwhwzp/dsh-passwords && cd dsh-passwords`
 2. `npm install && npm run build`
 3. `cp .env.example .env`, replace `SETUP_KEY` with a random string (`openssl rand -hex 24`)
-4. Register the plugin: `node scripts/register-plugin.mjs` (equivalent to adding `link:$(pwd)` to the dependencies and `dsh.profile.bundles` of `~/.dsh/profiles/web/package.json`, then `pnpm install`. **Don't use `dsh plugin add`** — see the FAQ)
+4. Restore the plugin stack: `node scripts/register-plugin.mjs` (merges the dependencies, bundles, build permissions, and profile patches from `scripts/profile-plugins.json`, then runs `pnpm install`. **Don't use `dsh plugin add`** — see the FAQ)
 5. Apply the patch: `node dist/cli.js patch` (if the dsh directory isn't found, set `MCP_DSH_ROOT=/path/to/@deepseek-ai/dsh`)
 
 Then as usual: start dsh → the gate starts automatically → open `https://<your-host>` to finish first-time setup.

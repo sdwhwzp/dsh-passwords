@@ -8,12 +8,9 @@
 // （网关页面按页面语言、dsh 设置卡片按 dsh 语言本地化）。
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { randomUUID } from 'node:crypto';
 import type { PlatformConfig } from './config.js';
-import { Database } from './db.js';
+import { Database, type UserListRow } from './db.js';
 import { t, type Lang } from './i18n.js';
-import { verifyWebDavLogin, WebDavAuthenticationError } from './webdav-auth.js';
-import type { WebDavCredentialStore } from './webdav-credentials.js';
 
 const BCRYPT_ROUNDS = 10;
 const TOKEN_TTL = '12h';
@@ -107,8 +104,6 @@ export class AuthService {
   constructor(
     private config: PlatformConfig,
     private db: Database,
-    private webdavCredentials?: WebDavCredentialStore,
-    private verifyWebDav: typeof verifyWebDavLogin = verifyWebDavLogin,
   ) {}
 
   /** 平台是否已初始化（存在至少一个用户） */
@@ -197,56 +192,12 @@ export class AuthService {
     }
 
     // 2) 凭据校验（统一错误信息，避免用户名枚举；时序上用户不存在也空跑 bcrypt）
-    let user = await this.db.getUserByUsername(username);
-    let valid = false;
-    if (user?.role === 'admin' || this.webdavCredentials === undefined) {
-      // Local administrators are the emergency recovery entrance. The
-      // optional fallback keeps offline database/unit-test tooling usable.
-      if (user) valid = await bcrypt.compare(password, user.password_hash);
-      else await bcrypt.compare(password, DUMMY_HASH);
-    } else {
-      let webdavVerified = false;
-      try {
-        const normalized = assertUsername(username);
-        await this.verifyWebDav(this.config, normalized, password);
-        webdavVerified = true;
-        if (user === null) {
-          // The placeholder is deliberately unrelated to the WebDAV password:
-          // ordinary users can never authenticate through the local hash.
-          const placeholder = await bcrypt.hash(`webdav-only:${randomUUID()}`, BCRYPT_ROUNDS);
-          try {
-            user = this.db.createUser(normalized, placeholder, 'user');
-            this.db.setPermissions(user.id, {
-              allowedFolders: ['__deny__'],
-              hourlyTokenLimit: null,
-              dailyMinutesLimit: null,
-              monthlyBudgetMicros: 0,
-              allowUpload: true,
-              allowGitDownload: false,
-              banned: false,
-              sandboxMode: null,
-              disabledSessions: [],
-            });
-          } catch (error) {
-            // Concurrent successful first logins may race on username_hash.
-            user = this.db.getUserByUsername(normalized);
-            if (user === null) throw error;
-          }
-        }
-        const permissions = this.db.getPermissions(user.id);
-        if (permissions?.banned === true) throw new WebDavAuthenticationError('invalid');
-        await this.webdavCredentials.save(user.id, user.username, password);
-        valid = true;
-      } catch (error) {
-        if ((error instanceof WebDavAuthenticationError && error.kind === 'unavailable') || webdavVerified) {
-          await this.db.audit(webdavVerified ? 'credential_store_unavailable' : 'webdav_unavailable', {
-            username, ip, userAgent: meta.userAgent,
-          });
-          throw new AuthError('WEBDAV_UNAVAILABLE', {}, 503);
-        }
-        valid = false;
-      }
-    }
+    const user = await this.db.getUserByUsername(username);
+    // 所有角色都只校验本插件 SQLite 中的 bcrypt 密码；外部文件插件
+    // 的账号体系不参与 dsh 登录。
+    const valid = user
+      ? await bcrypt.compare(password, user.password_hash)
+      : await bcrypt.compare(password, DUMMY_HASH).then(() => false);
     if (!user || !valid) {
       // 0.5) 记录 IP 级失败（跨用户名累计，防密码喷洒）；达阈值 → 该 IP 全局节流
       const ipCount = this.db.recordIpFailure(ip, IP_WINDOW_MS);
@@ -399,6 +350,7 @@ export class AuthService {
     caller: AuthedUser,
     username: string,
     password: string,
+    provision: (user: UserListRow) => Promise<void>,
     meta: RequestMeta = {},
   ): Promise<void> {
     if (caller.role !== 'admin') throw new AuthError('FORBIDDEN_ADD_USER', {}, 403);
@@ -410,7 +362,8 @@ export class AuthService {
     const pw = assertPassword(password);
     const hash = await bcrypt.hash(pw, BCRYPT_ROUNDS);
     const user = await this.db.createUser(name, hash, 'user');
-    // 新子用户默认关闭全部工作区；主用户在权限面板中逐个滑动开启。
+    // 先 fail-closed；宿主机专属工作区创建并注册成功后，provision 再原子地
+    // 替换成该目录与 workspace-write。失败时删除刚创建的账号，允许管理员重试。
     this.db.setPermissions(user.id, {
       allowedFolders: ['__deny__'],
       hourlyTokenLimit: null,
@@ -422,6 +375,22 @@ export class AuthService {
       sandboxMode: null,
       disabledSessions: [],
     });
+    try {
+      await provision({
+        id: user.id,
+        username: user.username,
+        role: user.role,
+        created_at: user.created_at,
+        last_login_at: user.last_login_at,
+      });
+    } catch (error) {
+      try {
+        this.db.deleteUser(user.id);
+      } catch (rollbackError) {
+        throw new AggregateError([error, rollbackError], '子用户工作区创建失败，且账号回滚失败');
+      }
+      throw error;
+    }
     await this.db.audit('subuser_created', {
       username: name,
       ip: meta.ip,
@@ -446,7 +415,6 @@ export class AuthService {
     if (targetUser.role === 'admin') {
       throw new AuthError('CANNOT_REMOVE_ADMIN', {}, 400);
     }
-    await this.webdavCredentials?.delete?.(targetUser.id);
     await this.db.deleteUser(targetUser.id);
     this.db.clearLoginAttemptsOf(targetUser.username);
     await this.db.audit('subuser_removed', {

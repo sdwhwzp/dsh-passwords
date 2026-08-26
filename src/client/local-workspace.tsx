@@ -1,4 +1,4 @@
-/** Settings panel for pairing and revoking user-side local workspace companions. */
+/** Settings panel for downloading the Windows companion and revoking local workspaces. */
 
 import { createElement as h, useEffect, useState } from 'react';
 
@@ -11,14 +11,6 @@ interface WorkspaceView {
   online: boolean;
   createdAt: string;
   lastSeenAt: string;
-}
-
-interface PairingResult {
-  code: string;
-  expiresAt: string;
-  port: number;
-  secure: boolean;
-  publicUrl: string;
 }
 
 interface Props {
@@ -43,8 +35,6 @@ async function api<T>(url: string, body?: unknown): Promise<T> {
 export function LocalWorkspacePanel(props: Props) {
   const { t, busy, setBusy, setError, setNotice } = props;
   const [workspaces, setWorkspaces] = useState<WorkspaceView[]>([]);
-  const [command, setCommand] = useState('');
-  const [expiresAt, setExpiresAt] = useState('');
 
   const refresh = () => {
     void api<{ workspaces: WorkspaceView[] }>('/api/dsh-passwords/local-workspace/list')
@@ -57,25 +47,6 @@ export function LocalWorkspacePanel(props: Props) {
     const timer = window.setInterval(refresh, 10_000);
     return () => window.clearInterval(timer);
   }, []);
-
-  const pair = () => {
-    setBusy(true);
-    setError('');
-    setNotice('');
-    void api<{ pairing: PairingResult }>('/api/dsh-passwords/local-workspace/pair', {})
-      .then(({ pairing }) => {
-        const server = pairing.publicUrl !== ''
-          ? pairing.publicUrl
-          : `${pairing.secure ? 'wss' : 'ws'}://${window.location.hostname}:${String(pairing.port)}`;
-        setCommand(
-          `dsh-local-workspace --server ${shellQuote(server)} --pair ${shellQuote(pairing.code)} --folder ${shellQuote(t('localFolderPlaceholder'))}`,
-        );
-        setExpiresAt(new Date(pairing.expiresAt).toLocaleTimeString());
-        setNotice(t('localPairReady'));
-      })
-      .catch((error: unknown) => setError(error instanceof Error ? error.message : String(error)))
-      .finally(() => setBusy(false));
-  };
 
   const revoke = (workspace: WorkspaceView) => {
     if (!window.confirm(t('localRevokeConfirm', { name: workspace.workspaceName }))) return;
@@ -90,18 +61,11 @@ export function LocalWorkspacePanel(props: Props) {
       .finally(() => setBusy(false));
   };
 
-  const copy = () => {
-    void navigator.clipboard.writeText(command)
-      .then(() => setNotice(t('localCopied')))
-      .catch(() => setError(t('localCopyFailed')));
-  };
-
   return h(
     'div',
     { className: 'dshpw-section' },
     h('div', { className: 'dshpw-section-head' },
       h('span', { className: 'dshpw-label' }, t('localTitle')),
-      h('button', { className: 'dshpw-btn', disabled: busy, onClick: pair }, t('localPair')),
     ),
     h('div', { className: 'dshpw-hint' }, t('localHint')),
     h(
@@ -118,22 +82,7 @@ export function LocalWorkspacePanel(props: Props) {
       }, t('localWindowsDownload')),
     ),
     h('div', { className: 'dshpw-hint' }, t('localWindowsUnsigned')),
-    h(
-      'div',
-      { className: 'dshpw-local-command' },
-      h('small', { className: 'dshpw-hint' }, t('localInstallHint')),
-      h('code', null, t('localInstallCommand')),
-    ),
     h('div', { className: 'dshpw-hint' }, t('localShellWarning')),
-    command !== ''
-      ? h(
-          'div',
-          { className: 'dshpw-local-command' },
-          h('code', null, command),
-          h('button', { className: 'dshpw-btn', disabled: busy, onClick: copy }, t('localCopy')),
-          h('small', { className: 'dshpw-hint' }, t('localExpires', { time: expiresAt })),
-        )
-      : null,
     workspaces.length === 0
       ? h('div', { className: 'dshpw-hint' }, t('localEmpty'))
       : h(
@@ -151,8 +100,4 @@ export function LocalWorkspacePanel(props: Props) {
           )),
         ),
   );
-}
-
-function shellQuote(value: string): string {
-  return `"${value.replace(/["\\$`]/g, '\\$&')}"`;
 }

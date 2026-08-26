@@ -306,7 +306,7 @@ export function folderAllowed(path: string, allowedFolders: string[]): boolean {
 
 /**
  * 递归过滤 JSON 里路径字段不在白名单的对象（session.list 用 field='cwd'，workspace.list 用 field='path'）：
- * 只对数组元素中带该路径字段的对象做路径判定，不允许的直接丢弃；其余字段原样递归保留。
+ * 只对数组元素中带该路径字段的对象做白名单判定，白名单外的直接丢弃；其余字段原样递归保留。
  * depth 上限 8：防上游投毒深嵌套 JSON 导致栈溢出 DoS（与同文件其他递归函数口径一致）。
  */
 export function filterByPathField(
@@ -817,6 +817,14 @@ export function filterSessionItems(
         if (typeof cwd !== 'string' || cwd.length === 0 || !cwdAllowed(cwd)) {
           continue;
         }
+      }
+      // The session row itself is the authorization unit. Once it passes,
+      // preserve its nested projections verbatim: recursively applying the
+      // generic depth guard would replace valid deep arrays (for example
+      // permissions.options) with null and crash the client composer.
+      if (hasSessionId) {
+        out.push(item);
+        continue;
       }
       out.push(filterSessionItems(item, keep, cwdAllowed, depth + 1));
     }

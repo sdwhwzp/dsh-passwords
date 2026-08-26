@@ -26,14 +26,28 @@ import { createFieldCrypto } from './encrypt.js';
 import { AuthService, AuthError, assertNoSqlInjection, type AuthedUser, type RequestMeta } from './auth.js';
 import { findDshRoot, patchStatus } from './patch.js';
 import { isDisplayableDshSession, isDisplayableDshSurface, todayLocal } from './permissions.js';
-import { LocalWorkspaceHub } from './local-workspace-hub.js';
+import {
+  DEVICE_APPROVAL_ERROR,
+  LocalWorkspaceHub,
+} from './local-workspace-hub.js';
+import { ManagedWorkspaceProvisioner } from './managed-workspace.js';
 import { RequestPrincipalService } from './principal.js';
-import { WebDavCredentialService } from './webdav-credentials.js';
 import type { AuthenticatedPrincipal } from './principal.js';
 import { backupSqliteBeforeMigration } from './db-backup.js';
+import { createMonthlyBudgetResolver } from './spend-budget.js';
+import {
+  dailyTimeQuotaError,
+  hourlyTokenQuotaError,
+  monthlySpendQuotaError,
+  spendCheckUnavailableError,
+} from './quota-notice.js';
+import { CUSTOMER_MODEL_IDS, customerModelAllowed } from './model-policy.js';
 
 interface SpendAccounting {
   reconcile(): Promise<void>;
+  registerBudgetResolver(
+    resolve: (principal: AuthenticatedPrincipal) => number | null | undefined,
+  ): () => void;
   budgetStatus(
     principal: AuthenticatedPrincipal,
     monthlyBudgetMicros: number | null,
@@ -87,11 +101,11 @@ function readCookie(cookieHeader: string | undefined, cookieName: string): strin
   return null;
 }
 
-function writeJson(res: ServerResponse, status: number, body: unknown): void {
+function writeJson(res: ServerResponse, status: number, body: unknown, cacheControl = 'no-store'): void {
   const text = JSON.stringify(body);
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
-    'cache-control': 'no-store',
+    'cache-control': cacheControl,
   });
   res.end(text);
 }
@@ -326,7 +340,6 @@ export function apply(ctx: Context): void {
     cfg.setupKey !== '' && cfg.setupKey !== 'change-me-to-a-strong-random-key';
   if (configured) {
     new RequestPrincipalService(ctx, cfg);
-    new WebDavCredentialService(ctx, cfg);
   }
   /** patch/reload 冷却（10 分钟一次，防认证后横向 DoS） */
   const PATCH_RELOAD_COOLDOWN_MS = 10 * 60 * 1000;
@@ -345,7 +358,15 @@ export function apply(ctx: Context): void {
       auth = null;
     }
   }
+
   const localWorkspaceHub = db === null ? null : new LocalWorkspaceHub(ctx, db, cfg);
+  const managedWorkspaces = db === null ? null : new ManagedWorkspaceProvisioner(db, cfg);
+  let userMutationTail: Promise<void> = Promise.resolve();
+  const mutateUser = <T>(operation: () => Promise<T>): Promise<T> => {
+    const result = userMutationTail.then(operation, operation);
+    userMutationTail = result.then(() => undefined, () => undefined);
+    return result;
+  };
   const localWorkspaceReady = localWorkspaceHub === null
     ? Promise.reject(new Error('本机助手服务不可用：数据库未初始化'))
     : localWorkspaceHub.start();
@@ -374,11 +395,26 @@ export function apply(ctx: Context): void {
       };
     });
   }
+  if (managedWorkspaces !== null) {
+    ctx.inject(['workspaceRegistry'], (scope) => {
+      let active = true;
+      void managedWorkspaces.restore(scope.workspaceRegistry).catch((error: unknown) => {
+        if (active) console.error('[dsh-passwords] 恢复子用户宿主机工作区失败:', error);
+      });
+      return () => {
+        active = false;
+      };
+    });
+  }
 
   // Every model step is authorized against the durable message owner. Legacy
   // anonymous sessions remain usable, but authenticated users fail closed if
   // accounting is unavailable; local administrators are intentionally unlimited.
   if (db !== null) {
+    const budgetDb = db;
+    ctx.inject(['spendAccounting'], (scope) =>
+      scope.spendAccounting.registerBudgetResolver(createMonthlyBudgetResolver(budgetDb)));
+
     ctx.on('agent/pre-step', async (payload, next) => {
       // The released dsh-agent typings predate the optional principal field;
       // the local harness carries it on this same durable event contract.
@@ -406,35 +442,60 @@ export function apply(ctx: Context): void {
       if (usage !== null) {
         if (permissions.daily_minutes_limit !== null && usage.active_seconds >= permissions.daily_minutes_limit * 60) {
           db!.audit('daily_time_exhausted', { username: user.username });
-          return { kind: 'reject' } as const;
+          throw dailyTimeQuotaError(permissions.daily_minutes_limit);
         }
         const windowStart = usage.hourly_window_start === null ? NaN : new Date(usage.hourly_window_start).getTime();
         const inCurrentWindow = Number.isFinite(windowStart) && Date.now() - windowStart < 3_600_000;
         if (permissions.hourly_token_limit !== null && inCurrentWindow && usage.hourly_tokens >= permissions.hourly_token_limit) {
           db!.audit('hourly_tokens_exhausted', { username: user.username });
-          return { kind: 'reject' } as const;
+          throw hourlyTokenQuotaError(usage.hourly_tokens, permissions.hourly_token_limit);
         }
       }
       const accounting = ctx.get('spendAccounting');
       if (accounting === undefined) {
         db!.audit('budget_check_unavailable', { username: user.username });
-        return { kind: 'reject' } as const;
+        throw spendCheckUnavailableError();
       }
+      let status: ReturnType<SpendAccounting['budgetStatus']>;
       try {
         await accounting.reconcile();
-        const status = accounting.budgetStatus(principal, permissions.monthly_budget_micros);
-        if (status.exhausted) {
-          db!.audit('monthly_budget_exhausted', {
-            username: user.username,
-            detail: JSON.stringify({ usedMicros: status.usedMicros, budgetMicros: permissions.monthly_budget_micros }),
-          });
-          return { kind: 'reject' } as const;
-        }
+        status = accounting.budgetStatus(principal, permissions.monthly_budget_micros);
       } catch {
         db!.audit('budget_check_unavailable', { username: user.username });
-        return { kind: 'reject' } as const;
+        throw spendCheckUnavailableError();
+      }
+      if (status.exhausted) {
+        db!.audit('monthly_budget_exhausted', {
+          username: user.username,
+          detail: JSON.stringify({ usedMicros: status.usedMicros, budgetMicros: permissions.monthly_budget_micros }),
+        });
+        throw monthlySpendQuotaError(status.usedMicros, permissions.monthly_budget_micros ?? 0);
       }
       return next();
+    });
+
+    // The catalog filter is a usability control; this request hook is the
+    // authorization control and also covers crafted RPC calls or stale clients.
+    ctx.on('agent/request', async (payload, next) => {
+      const config = await next();
+      const principal = (payload as typeof payload & { principal?: AuthenticatedPrincipal }).principal;
+      if (principal === undefined) return config;
+      if (principal.source !== 'dsh-passwords' || !/^[1-9][0-9]*$/.test(principal.id)) {
+        throw new Error('无法验证当前账号的模型权限，请重新登录后再试。');
+      }
+      const user = db!.getUserById(Number(principal.id));
+      if (user === null || user.username !== principal.username || user.role !== principal.role) {
+        throw new Error('无法验证当前账号的模型权限，请重新登录后再试。');
+      }
+      if (user.role === 'admin') return config;
+      if (customerModelAllowed(config.provider, config.model)) return config;
+      db!.audit('customer_model_denied', {
+        username: user.username,
+        detail: JSON.stringify({ provider: config.provider, model: config.model }),
+      });
+      throw new Error(
+        `该子账号在 ChatGPT 服务商下仅可使用 ${[...CUSTOMER_MODEL_IDS].join('、')}，请先切换模型后重试。`,
+      );
     });
   }
 
@@ -581,7 +642,8 @@ export function apply(ctx: Context): void {
             const principal: AuthenticatedPrincipal = {
               source: 'dsh-passwords', id: String(user.id), username: user.username, role: user.role,
             };
-            const budget = user.role === 'admin' ? null : db!.getPermissions(user.id)?.monthly_budget_micros ?? 0;
+            const permissions = db!.getPermissions(user.id);
+            const budget = user.role === 'admin' ? null : permissions === null ? 0 : permissions.monthly_budget_micros;
             return { userId: user.id, ...accounting.budgetStatus(principal, budget) };
           });
           writeJson(res, 200, { ok: true, budgets });
@@ -659,7 +721,26 @@ export function apply(ctx: Context): void {
           const username = typeof body.username === 'string' ? body.username : '';
           const password = typeof body.password === 'string' ? body.password : '';
           assertNoSqlInjection(username, 'username');
-          await auth!.addSubUser(caller, username, password, metaOf(req));
+          const registry = ctx.get('workspaceRegistry');
+          if (registry === undefined || managedWorkspaces === null) {
+            throw new AuthError('WORKSPACE_UNAVAILABLE', {}, 503);
+          }
+          await mutateUser(() =>
+            auth!.addSubUser(
+              caller,
+              username,
+              password,
+              async (user) => {
+                try {
+                  await managedWorkspaces.provisionNewUser(registry, user);
+                } catch (error) {
+                  console.error('[dsh-passwords] 创建子用户宿主机工作区失败:', error);
+                  throw new AuthError('WORKSPACE_PROVISION_FAILED', {}, 500);
+                }
+              },
+              metaOf(req),
+            ),
+          );
           writeJson(res, 200, { ok: true });
         } catch (error) {
           failJson(res, error);
@@ -677,8 +758,37 @@ export function apply(ctx: Context): void {
           const body = await readJsonBody(req);
           const target = typeof body.target === 'string' ? body.target : '';
           assertNoSqlInjection(target, 'target');
-          const targetUser = db!.getUserByUsername(target);
-          await auth!.removeUser(caller, target, metaOf(req));
+          if (caller.role !== 'admin') throw new AuthError('FORBIDDEN_REMOVE_USER', {}, 403);
+          const targetUser = await mutateUser(async () => {
+            const existingUser = db!.getUserByUsername(target.trim());
+            const registry = ctx.get('workspaceRegistry');
+            let managedUnregistered: Awaited<ReturnType<ManagedWorkspaceProvisioner['unregisterUser']>> = [];
+            if (existingUser !== null && db!.getManagedWorkspace(existingUser.id) !== null) {
+              if (registry === undefined || managedWorkspaces === null) {
+                throw new AuthError('WORKSPACE_UNAVAILABLE', {}, 503);
+              }
+              managedUnregistered = await managedWorkspaces.unregisterUser(registry, existingUser.id);
+            }
+            try {
+              await auth!.removeUser(caller, target, metaOf(req));
+            } catch (error) {
+              if (
+                managedUnregistered.length > 0 &&
+                existingUser !== null &&
+                registry !== undefined &&
+                managedWorkspaces !== null &&
+                db!.getUserById(existingUser.id) !== null
+              ) {
+                try {
+                  await managedWorkspaces.restoreUser(registry, existingUser, managedUnregistered);
+                } catch (restoreError) {
+                  throw new AggregateError([error, restoreError], '删除子用户失败，且工作区注册恢复失败');
+                }
+              }
+              throw error;
+            }
+            return existingUser;
+          });
           if (targetUser) {
             localWorkspaceHub?.disconnectUser(targetUser.id);
             await invalidateGatewaySessions(cfg, targetUser.id);
@@ -745,6 +855,49 @@ export function apply(ctx: Context): void {
     },
     {
       kind: 'exact',
+      path: '/api/dsh-passwords/local-workspace/info',
+      handler: async (req, res) => {
+        const caller = guard(req, res);
+        if (!caller) return;
+        if (!requireMethod(req, res, 'GET')) return;
+        try {
+          await localWorkspaceReady;
+          writeJson(res, 200, { ok: true, ...localWorkspaceHub!.connectionInfo() });
+        } catch (error) {
+          failJson(res, error);
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/api/dsh-passwords/local-workspace/launch',
+      handler: async (req, res) => {
+        const caller = guard(req, res);
+        if (!caller) return;
+        if (!requireMethod(req, res, 'POST')) return;
+        try {
+          const body = await readJsonBody(req);
+          if (Object.keys(body).length !== 0) {
+            writeJson(res, 400, { ok: false, code: 'INVALID', error: '启动请求不接受参数' });
+            return;
+          }
+          await localWorkspaceReady;
+          writeJson(
+            res,
+            200,
+            {
+              ok: true,
+              launch: localWorkspaceHub!.createLaunch(caller.userId),
+            },
+            'private, no-store',
+          );
+        } catch (error) {
+          failJson(res, error);
+        }
+      },
+    },
+    {
+      kind: 'exact',
       path: '/api/dsh-passwords/local-workspace/pair',
       handler: async (req, res) => {
         const caller = guard(req, res);
@@ -753,6 +906,33 @@ export function apply(ctx: Context): void {
         try {
           await localWorkspaceReady;
           writeJson(res, 200, { ok: true, pairing: localWorkspaceHub!.createPairing(caller.userId) });
+        } catch (error) {
+          failJson(res, error);
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/api/dsh-passwords/local-workspace/approve',
+      handler: async (req, res) => {
+        const caller = guard(req, res);
+        if (!caller) return;
+        if (!requireMethod(req, res, 'POST')) return;
+        try {
+          await localWorkspaceReady;
+          const body = await readJsonBody(req);
+          const approved = await localWorkspaceHub!.approve(body.code, caller.userId);
+          if (!approved) {
+            // Invalid, expired, consumed and rate-limited codes intentionally share
+            // one status/code/message so this endpoint cannot enumerate live devices.
+            writeJson(res, 400, {
+              ok: false,
+              code: 'DEVICE_APPROVAL_FAILED',
+              error: DEVICE_APPROVAL_ERROR,
+            });
+            return;
+          }
+          writeJson(res, 200, { ok: true });
         } catch (error) {
           failJson(res, error);
         }
@@ -789,9 +969,13 @@ export function apply(ctx: Context): void {
             return;
           }
           const revoked = await localWorkspaceHub!.revoke(caller.userId, id);
-          writeJson(res, revoked ? 200 : 404, revoked
-            ? { ok: true }
-            : { ok: false, code: 'NOT_FOUND', error: '本机工作区不存在' });
+          writeJson(
+            res,
+            revoked ? 200 : 404,
+            revoked
+              ? { ok: true }
+              : { ok: false, code: 'NOT_FOUND', error: '本机工作区不存在' },
+          );
         } catch (error) {
           failJson(res, error);
         }

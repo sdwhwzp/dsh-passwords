@@ -4,27 +4,42 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { ToolDefinition, ToolResult } from '@deepseek-ai/dsh-tools';
 import type { WorkspaceRegistry } from '@deepseek-ai/dsh-workspace';
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomInt, randomUUID } from 'node:crypto';
 import { mkdir, readFile } from 'node:fs/promises';
 import http from 'node:http';
+import type { IncomingMessage } from 'node:http';
 import https from 'node:https';
 import path from 'node:path';
 import { WebSocketServer, WebSocket, type RawData } from 'ws';
 import type { PlatformConfig } from './config.js';
 import { Database, type LocalWorkspaceRow } from './db.js';
+import type { AuthenticatedPrincipal } from './principal.js';
 import {
   LOCAL_WORKSPACE_MAX_MESSAGE_BYTES,
+  buildLocalWorkspaceLaunchUri,
+  displayDeviceUserCode,
+  normalizeDeviceUserCode,
   parseHello,
   parseResponse,
+  type LocalWorkspaceDeviceHello,
+  type LocalWorkspaceHello,
   type LocalWorkspaceOperation,
   type LocalWorkspaceRequest,
   type LocalWorkspaceResponse,
 } from './local-workspace-protocol.js';
 
 const PAIRING_TTL_MS = 10 * 60 * 1_000;
+export const LOCAL_WORKSPACE_LAUNCH_TTL_MS = 2 * 60 * 1_000;
 const AUTH_TIMEOUT_MS = 10_000;
 const DEFAULT_RPC_TIMEOUT_MS = 45_000;
 const MAX_RPC_TIMEOUT_MS = 620_000;
+export const DEVICE_APPROVAL_TTL_MS = 10 * 60 * 1_000;
+export const DEVICE_PENDING_GLOBAL_LIMIT = 256;
+export const DEVICE_PENDING_PER_IP_LIMIT = 5;
+export const DEVICE_APPROVAL_FAILURE_LIMIT = 5;
+export const DEVICE_APPROVAL_ERROR = '设备确认码无效或已过期';
+const DEVICE_APPROVAL_FAILURE_WINDOW_MS = 10 * 60 * 1_000;
+const DEVICE_APPROVAL_ERROR_CODE = 'DEVICE_APPROVAL_FAILED';
 
 interface PairingGrant {
   userId: number;
@@ -45,10 +60,38 @@ interface CompanionConnection {
   pending: Map<string, PendingRequest>;
 }
 
+interface PendingDevice {
+  code: string;
+  expiresAt: number;
+  hello: LocalWorkspaceDeviceHello;
+  ip: string;
+  socket: WebSocket;
+  timer: NodeJS.Timeout;
+  rejectExtraMessage: (data: RawData, isBinary: boolean) => void;
+  activate: (connection: CompanionConnection) => void;
+}
+
+interface ApprovalFailures {
+  count: number;
+  windowStartedAt: number;
+}
+
+interface AuthenticationSuccess {
+  connection: CompanionConnection;
+  token?: string;
+  provisionalOwnerId?: number;
+}
+
+interface ProvisionedWorkspace {
+  workspace: LocalWorkspaceRow;
+  token: string;
+}
+
 export interface LocalWorkspaceView {
   id: string;
   deviceName: string;
   workspaceName: string;
+  workspacePath: string;
   platform: string;
   shellEnabled: boolean;
   online: boolean;
@@ -64,6 +107,30 @@ export interface PairingResult {
   publicUrl: string;
 }
 
+export interface LocalWorkspaceConnectionInfo {
+  port: number;
+  secure: boolean;
+  publicUrl: string;
+}
+
+export interface LocalWorkspaceLaunch {
+  uri: string;
+  expiresAt: string;
+  connection: LocalWorkspaceConnectionInfo;
+}
+
+/** Injectable policy seams keep expiry, collision and cap behavior deterministic in tests. */
+export interface LocalWorkspaceHubOptions {
+  now?: () => number;
+  launchTicketTtlMs?: number;
+  deviceCode?: () => string;
+  deviceApprovalTtlMs?: number;
+  pendingGlobalLimit?: number;
+  pendingPerIpLimit?: number;
+  approvalFailureLimit?: number;
+  approvalFailureWindowMs?: number;
+}
+
 class RemoteOperationError extends Error {
   constructor(message: string, readonly code: string) {
     super(message);
@@ -73,8 +140,20 @@ class RemoteOperationError extends Error {
 
 export class LocalWorkspaceHub {
   private readonly pairing = new Map<string, PairingGrant>();
+  private readonly launchTickets = new Map<string, PairingGrant>();
+  private readonly pendingDevices = new Map<string, PendingDevice>();
+  private readonly pendingDeviceBySocket = new Map<WebSocket, string>();
+  private readonly approvalFailures = new Map<number, ApprovalFailures>();
   private readonly connections = new Map<string, CompanionConnection>();
   private readonly placeholderRoot: string;
+  private readonly now: () => number;
+  private readonly launchTicketTtlMs: number;
+  private readonly deviceCode: () => string;
+  private readonly deviceApprovalTtlMs: number;
+  private readonly pendingGlobalLimit: number;
+  private readonly pendingPerIpLimit: number;
+  private readonly approvalFailureLimit: number;
+  private readonly approvalFailureWindowMs: number;
   private server: http.Server | https.Server | null = null;
   private websocketServer: WebSocketServer | null = null;
   private secure = false;
@@ -84,8 +163,20 @@ export class LocalWorkspaceHub {
     private readonly ctx: Context,
     private readonly db: Database,
     private readonly config: PlatformConfig,
+    options: LocalWorkspaceHubOptions = {},
   ) {
     this.placeholderRoot = path.join(path.dirname(config.dbPath), 'local-workspaces');
+    this.now = options.now ?? Date.now;
+    this.launchTicketTtlMs = positiveInteger(options.launchTicketTtlMs, LOCAL_WORKSPACE_LAUNCH_TTL_MS);
+    this.deviceCode = options.deviceCode ?? (() => String(randomInt(0, 1_000_000)).padStart(6, '0'));
+    this.deviceApprovalTtlMs = positiveInteger(options.deviceApprovalTtlMs, DEVICE_APPROVAL_TTL_MS);
+    this.pendingGlobalLimit = positiveInteger(options.pendingGlobalLimit, DEVICE_PENDING_GLOBAL_LIMIT);
+    this.pendingPerIpLimit = positiveInteger(options.pendingPerIpLimit, DEVICE_PENDING_PER_IP_LIMIT);
+    this.approvalFailureLimit = positiveInteger(options.approvalFailureLimit, DEVICE_APPROVAL_FAILURE_LIMIT);
+    this.approvalFailureWindowMs = positiveInteger(
+      options.approvalFailureWindowMs,
+      DEVICE_APPROVAL_FAILURE_WINDOW_MS,
+    );
   }
 
   /** Start the companion endpoint and install agent lifecycle routing. */
@@ -124,7 +215,7 @@ export class LocalWorkspaceHub {
       maxPayload: LOCAL_WORKSPACE_MAX_MESSAGE_BYTES,
       perMessageDeflate: false,
     });
-    this.websocketServer.on('connection', (socket) => this.accept(socket));
+    this.websocketServer.on('connection', (socket, request) => this.accept(socket, request));
     await new Promise<void>((resolve, reject) => {
       const server = this.server;
       if (server === null) return reject(new Error('local workspace server unavailable'));
@@ -157,19 +248,112 @@ export class LocalWorkspaceHub {
     }
   }
 
+  /** Public connection metadata for the authenticated browser; contains no pairing secret. */
+  connectionInfo(): LocalWorkspaceConnectionInfo {
+    const address = this.server?.address();
+    return {
+      port: address !== null && typeof address === 'object' ? address.port : this.config.localWorkspace.port,
+      secure: this.secure,
+      publicUrl: this.config.localWorkspace.publicUrl,
+    };
+  }
+
+  /**
+   * Issue one short-lived launch ticket for an authenticated user. Only the
+   * newest ticket for that user remains valid, bounding memory and preventing
+   * stale browser clicks from creating an unexpected workspace.
+   */
+  createLaunch(userId: number): LocalWorkspaceLaunch {
+    if (!Number.isSafeInteger(userId) || userId < 1 || this.db.getUserById(userId) === null) {
+      throw new Error('launch ticket user is invalid');
+    }
+    const now = this.now();
+    this.pruneLaunchTickets(now);
+    for (const [ticket, grant] of this.launchTickets) {
+      if (grant.userId === userId) this.launchTickets.delete(ticket);
+    }
+    let ticket: string;
+    do {
+      ticket = randomBytes(32).toString('base64url');
+    } while (this.launchTickets.has(ticket));
+    const expiresAt = now + this.launchTicketTtlMs;
+    this.launchTickets.set(ticket, { userId, expiresAt });
+    return {
+      uri: buildLocalWorkspaceLaunchUri(ticket),
+      expiresAt: new Date(expiresAt).toISOString(),
+      connection: this.connectionInfo(),
+    };
+  }
+
   /** Create one one-time pairing secret for the authenticated browser user. */
   createPairing(userId: number): PairingResult {
     this.prunePairing();
     const code = randomBytes(32).toString('base64url');
-    const expiresAt = Date.now() + PAIRING_TTL_MS;
+    const expiresAt = this.now() + PAIRING_TTL_MS;
     this.pairing.set(code, { userId, expiresAt });
+    const connection = this.connectionInfo();
     return {
       code,
       expiresAt: new Date(expiresAt).toISOString(),
-      port: this.config.localWorkspace.port,
-      secure: this.secure,
-      publicUrl: this.config.localWorkspace.publicUrl,
+      ...connection,
     };
+  }
+
+  /**
+   * Atomically claim one short device code for the authenticated browser user.
+   * Expected failures deliberately collapse to `false`; neither this return value
+   * nor the HTTP route ever contains the long-lived device token.
+   */
+  async approve(code: unknown, userId: number): Promise<boolean> {
+    const now = this.now();
+    this.prunePendingDevices(now);
+    this.pruneApprovalFailures(now);
+    if (!Number.isSafeInteger(userId) || userId < 1 || this.approvalLimited(userId, now)) return false;
+
+    const normalized = normalizeDeviceUserCode(code);
+    const pending = normalized === null ? undefined : this.pendingDevices.get(normalized);
+    if (
+      pending === undefined
+      || pending.expiresAt <= now
+      || pending.socket.readyState !== WebSocket.OPEN
+    ) {
+      this.recordApprovalFailure(userId, now);
+      return false;
+    }
+
+    // Delete before the first await: concurrent approvals and retries can never
+    // claim the same six-digit code twice.
+    this.removePendingDevice(pending, false);
+    let provisioned: ProvisionedWorkspace | null = null;
+    let connection: CompanionConnection | null = null;
+    try {
+      provisioned = await this.provisionNewWorkspace(pending.socket, pending.hello, userId);
+      if (pending.socket.readyState !== WebSocket.OPEN) throw new Error('device disconnected during approval');
+      connection = this.publishConnection(pending.socket, provisioned.workspace);
+      const authenticated: AuthenticationSuccess = { connection, token: provisioned.token };
+      pending.activate(authenticated.connection);
+      if (!await this.announceReadyConfirmed(authenticated)) {
+        throw new Error('device disconnected before token delivery');
+      }
+      this.approvalFailures.delete(userId);
+      return true;
+    } catch (error) {
+      if (connection !== null && this.connections.get(connection.workspace.id) === connection) {
+        this.connections.delete(connection.workspace.id);
+        this.rejectPending(connection, new Error('device approval failed'));
+      }
+      if (provisioned !== null) {
+        await this.rollbackProvisionalWorkspace(userId, provisioned.workspace);
+      }
+      // Do not interpolate the error, hello fields, user code, or generated token into logs.
+      console.error(
+        '[dsh-passwords] 本机助手设备确认失败（内部错误类型）:',
+        error instanceof Error ? `${error.name}:${safeApprovalErrorStage(error.message)}` : 'UnknownError',
+      );
+      this.sendDeviceApprovalError(pending.socket);
+      pending.socket.close(1008, 'device approval failed');
+      return false;
+    }
   }
 
   /** List only the caller's paired folders. */
@@ -178,6 +362,7 @@ export class LocalWorkspaceHub {
       id: workspace.id,
       deviceName: workspace.device_name,
       workspaceName: workspace.workspace_name,
+      workspacePath: workspace.placeholder_path,
       platform: workspace.platform,
       shellEnabled: workspace.shell_enabled,
       online: this.connections.has(workspace.id),
@@ -202,6 +387,13 @@ export class LocalWorkspaceHub {
 
   /** Disconnect every live companion owned by a deleted user. */
   disconnectUser(userId: number): void {
+    for (const [code, grant] of this.pairing) {
+      if (grant.userId === userId) this.pairing.delete(code);
+    }
+    for (const [ticket, grant] of this.launchTickets) {
+      if (grant.userId === userId) this.launchTickets.delete(ticket);
+    }
+    this.approvalFailures.delete(userId);
     for (const connection of this.connections.values()) {
       if (connection.workspace.user_id === userId) connection.socket.close(1008, 'user removed');
     }
@@ -212,6 +404,13 @@ export class LocalWorkspaceHub {
     if (this.disposed) return;
     this.disposed = true;
     this.pairing.clear();
+    this.launchTickets.clear();
+    this.approvalFailures.clear();
+    for (const pending of [...this.pendingDevices.values()]) {
+      this.removePendingDevice(pending, false);
+      pending.socket.terminate();
+    }
+    this.pendingDeviceBySocket.clear();
     for (const connection of this.connections.values()) {
       this.rejectPending(connection, new Error('local workspace hub disposed'));
       connection.socket.terminate();
@@ -221,6 +420,8 @@ export class LocalWorkspaceHub {
     const server = this.server;
     this.websocketServer = null;
     this.server = null;
+    // Includes sockets that connected but never delivered a first frame.
+    for (const socket of websocketServer?.clients ?? []) socket.terminate();
     if (websocketServer !== null) {
       await new Promise<void>((resolve) => websocketServer.close(() => resolve()));
     }
@@ -229,24 +430,49 @@ export class LocalWorkspaceHub {
     }
   }
 
-  private accept(socket: WebSocket): void {
+  private accept(socket: WebSocket, request: IncomingMessage): void {
     socket.binaryType = 'nodebuffer';
     const authTimer = setTimeout(() => socket.close(1008, 'authentication timeout'), AUTH_TIMEOUT_MS);
     let connection: CompanionConnection | null = null;
+
+    const activate = (authenticated: CompanionConnection) => {
+      connection = authenticated;
+      socket.on('message', (next, binary) => this.receive(authenticated, next, binary));
+    };
 
     const firstMessage = (data: RawData, isBinary: boolean) => {
       if (isBinary) {
         socket.close(1003, 'text frames only');
         return;
       }
-      void this.authenticate(socket, rawDataText(data))
-        .then((authenticated) => {
+      let provisional: AuthenticationSuccess | null = null;
+      void this.authenticate(socket, rawDataText(data), peerKey(request), activate)
+        .then(async (authenticated) => {
           clearTimeout(authTimer);
-          connection = authenticated;
-          socket.on('message', (next, binary) => this.receive(connection!, next, binary));
+          if (authenticated === null) return;
+          activate(authenticated.connection);
+          if (authenticated.token === undefined) {
+            this.announceReady(authenticated);
+            return;
+          }
+          provisional = authenticated;
+          if (!await this.announceReadyConfirmed(authenticated)) {
+            throw new Error('device disconnected before token delivery');
+          }
+          provisional = null;
         })
-        .catch((error: unknown) => {
+        .catch(async (error: unknown) => {
           clearTimeout(authTimer);
+          if (connection !== null && this.connections.get(connection.workspace.id) === connection) {
+            this.connections.delete(connection.workspace.id);
+            this.rejectPending(connection, new Error('local workspace authentication failed'));
+          }
+          if (provisional?.provisionalOwnerId !== undefined) {
+            await this.rollbackProvisionalWorkspace(
+              provisional.provisionalOwnerId,
+              provisional.connection.workspace,
+            );
+          }
           const message = error instanceof Error ? error.message : String(error);
           this.send(socket, { type: 'error', code: 'AUTH_FAILED', error: message });
           socket.close(1008, message.slice(0, 120));
@@ -256,6 +482,7 @@ export class LocalWorkspaceHub {
     socket.once('message', firstMessage);
     socket.once('close', () => {
       clearTimeout(authTimer);
+      this.removePendingDeviceForSocket(socket);
       if (connection === null) return;
       if (this.connections.get(connection.workspace.id) === connection) {
         this.connections.delete(connection.workspace.id);
@@ -267,53 +494,187 @@ export class LocalWorkspaceHub {
     });
   }
 
-  private async authenticate(socket: WebSocket, raw: string): Promise<CompanionConnection> {
+  private async authenticate(
+    socket: WebSocket,
+    raw: string,
+    ip: string,
+    activate: (connection: CompanionConnection) => void,
+  ): Promise<AuthenticationSuccess | null> {
     const hello = parseHello(raw);
-    let workspace: LocalWorkspaceRow;
-    let newToken: string | undefined;
+    if (hello.type === 'device') {
+      this.beginDeviceApproval(socket, hello, ip, activate);
+      return null;
+    }
+    if (hello.type === 'launch') {
+      const grant = this.consumeLaunchTicket(hello.ticket);
+      const provisioned = await this.provisionNewWorkspace(socket, hello, grant.userId);
+      return {
+        connection: this.publishConnection(socket, provisioned.workspace),
+        token: provisioned.token,
+        provisionalOwnerId: grant.userId,
+      };
+    }
     if (hello.type === 'pair') {
       const grant = this.consumePairing(hello.code);
-      if (this.db.getLocalWorkspace(hello.workspaceId) !== null) throw new Error('workspaceId 已配对，请使用已保存令牌恢复');
-      const token = randomBytes(32).toString('base64url');
-      workspace = this.db.createLocalWorkspace({
-        id: hello.workspaceId,
-        userId: grant.userId,
-        token,
-        deviceName: hello.deviceName,
-        workspaceName: hello.workspaceName,
-        remoteRoot: hello.root,
-        placeholderPath: this.placeholderPath(grant.userId, hello.workspaceId),
-        platform: hello.platform,
-        shellEnabled: hello.shellEnabled,
-      });
-      newToken = token;
-    } else {
-      const authenticated = this.db.authenticateLocalWorkspace(hello.token);
-      if (authenticated === null || authenticated.id !== hello.workspaceId) throw new Error('设备令牌无效或已撤销');
-      this.db.touchLocalWorkspace(authenticated.id, {
-        deviceName: hello.deviceName,
-        workspaceName: hello.workspaceName,
-        remoteRoot: hello.root,
-        platform: hello.platform,
-        shellEnabled: hello.shellEnabled,
-      });
-      workspace = this.db.getLocalWorkspace(authenticated.id) ?? authenticated;
+      const provisioned = await this.provisionNewWorkspace(socket, hello, grant.userId);
+      return {
+        connection: this.publishConnection(socket, provisioned.workspace),
+        token: provisioned.token,
+        provisionalOwnerId: grant.userId,
+      };
     }
+
+    const authenticated = this.db.authenticateLocalWorkspace(hello.token);
+    if (authenticated === null || authenticated.id !== hello.workspaceId) throw new Error('设备令牌无效或已撤销');
+    this.db.touchLocalWorkspace(authenticated.id, {
+      deviceName: hello.deviceName,
+      workspaceName: hello.workspaceName,
+      remoteRoot: hello.root,
+      platform: hello.platform,
+      shellEnabled: hello.shellEnabled,
+    });
+    const workspace = this.db.getLocalWorkspace(authenticated.id) ?? authenticated;
     await mkdir(workspace.placeholder_path, { recursive: true, mode: 0o700 });
     const registry = this.ctx.get('workspaceRegistry');
     if (registry !== undefined) await this.ensureWorkspaceRegistered(registry, workspace);
+    if (socket.readyState !== WebSocket.OPEN) throw new Error('device disconnected during authentication');
+    return { connection: this.publishConnection(socket, workspace) };
+  }
 
+  private beginDeviceApproval(
+    socket: WebSocket,
+    hello: LocalWorkspaceDeviceHello,
+    ip: string,
+    activate: (connection: CompanionConnection) => void,
+  ): void {
+    const now = this.now();
+    this.prunePendingDevices(now);
+    const duplicateWorkspace = [...this.pendingDevices.values()].some(
+      (pending) => pending.hello.workspaceId === hello.workspaceId,
+    );
+    const pendingForIp = [...this.pendingDevices.values()].filter((pending) => pending.ip === ip).length;
+    if (
+      this.disposed
+      || socket.readyState !== WebSocket.OPEN
+      || this.db.getLocalWorkspace(hello.workspaceId) !== null
+      || duplicateWorkspace
+      || this.pendingDevices.size >= this.pendingGlobalLimit
+      || pendingForIp >= this.pendingPerIpLimit
+    ) {
+      this.sendDeviceApprovalError(socket);
+      socket.close(1008, 'device approval unavailable');
+      return;
+    }
+
+    let code: string;
+    try {
+      code = this.nextDeviceCode();
+    } catch {
+      this.sendDeviceApprovalError(socket);
+      socket.close(1013, 'device approval unavailable');
+      return;
+    }
+    const expiresAt = now + this.deviceApprovalTtlMs;
+    const rejectExtraMessage = () => socket.close(1008, 'awaiting device approval');
+    const timer = setTimeout(() => this.expirePendingDevice(code), this.deviceApprovalTtlMs);
+    timer.unref?.();
+    const pending: PendingDevice = {
+      code,
+      expiresAt,
+      hello,
+      ip,
+      socket,
+      timer,
+      rejectExtraMessage,
+      activate,
+    };
+    this.pendingDevices.set(code, pending);
+    this.pendingDeviceBySocket.set(socket, code);
+    socket.on('message', rejectExtraMessage);
+    this.send(socket, {
+      type: 'device-code',
+      code: displayDeviceUserCode(code),
+      expiresAt: new Date(expiresAt).toISOString(),
+    });
+  }
+
+  private async provisionNewWorkspace(
+    socket: WebSocket,
+    hello: LocalWorkspaceHello,
+    userId: number,
+  ): Promise<ProvisionedWorkspace> {
+    if (this.db.getLocalWorkspace(hello.workspaceId) !== null) {
+      throw new Error('workspaceId 已配对，请使用已保存令牌恢复');
+    }
+    const placeholderPath = this.placeholderPath(userId, hello.workspaceId);
+    await mkdir(placeholderPath, { recursive: true, mode: 0o700 });
+    if (socket.readyState !== WebSocket.OPEN) throw new Error('device disconnected during approval');
+    const token = randomBytes(32).toString('base64url');
+    const workspace = this.db.createLocalWorkspace({
+      id: hello.workspaceId,
+      userId,
+      token,
+      deviceName: hello.deviceName,
+      workspaceName: hello.workspaceName,
+      remoteRoot: hello.root,
+      placeholderPath,
+      platform: hello.platform,
+      shellEnabled: hello.shellEnabled,
+    });
+    try {
+      const registry = this.ctx.get('workspaceRegistry');
+      if (registry !== undefined) await this.ensureWorkspaceRegistered(registry, workspace);
+      if (socket.readyState !== WebSocket.OPEN) throw new Error('device disconnected during approval');
+      return { workspace, token };
+    } catch (error) {
+      await this.rollbackProvisionalWorkspace(userId, workspace);
+      throw error;
+    }
+  }
+
+  private async rollbackProvisionalWorkspace(userId: number, workspace: LocalWorkspaceRow): Promise<void> {
+    this.db.deleteProvisionalLocalWorkspace(userId, workspace.id);
+    const registry = this.ctx.get('workspaceRegistry');
+    if (registry === undefined) return;
+    const registered = await registry.resolveByPath(workspace.placeholder_path).catch(() => undefined);
+    if (registered !== undefined) await registry.delete(registered.id).catch(() => undefined);
+  }
+
+  private publishConnection(socket: WebSocket, workspace: LocalWorkspaceRow): CompanionConnection {
     const previous = this.connections.get(workspace.id);
     if (previous !== undefined) previous.socket.close(1008, 'replaced by a new connection');
     const connection: CompanionConnection = { socket, workspace, pending: new Map() };
     this.connections.set(workspace.id, connection);
-    this.send(socket, {
+    return connection;
+  }
+
+  private announceReady(authenticated: AuthenticationSuccess): boolean {
+    return this.send(authenticated.connection.socket, this.readyMessage(authenticated));
+  }
+
+  private announceReadyConfirmed(authenticated: AuthenticationSuccess): Promise<boolean> {
+    const socket = authenticated.connection.socket;
+    if (socket.readyState !== WebSocket.OPEN) return Promise.resolve(false);
+    const serialized = JSON.stringify(this.readyMessage(authenticated));
+    return new Promise((resolve) => {
+      try {
+        // ws uses `undefined` in typings but some runtimes invoke successful
+        // callbacks with `null`; both mean the frame was accepted for delivery.
+        socket.send(serialized, (error) => resolve(error === undefined || error === null));
+      } catch {
+        resolve(false);
+      }
+    });
+  }
+
+  private readyMessage(authenticated: AuthenticationSuccess): Record<string, unknown> {
+    const workspace = authenticated.connection.workspace;
+    return {
       type: 'ready',
       workspaceId: workspace.id,
       workspacePath: workspace.placeholder_path,
-      ...(newToken === undefined ? {} : { token: newToken }),
-    });
-    return connection;
+      ...(authenticated.token === undefined ? {} : { token: authenticated.token }),
+    };
   }
 
   private receive(connection: CompanionConnection, data: RawData, isBinary: boolean): void {
@@ -375,7 +736,7 @@ export class LocalWorkspaceHub {
     agent.ctx.systemPrompt.section({
       name: 'remote-local-workspace',
       order: 95,
-      text: 'This session workspace is on the user’s paired computer. read, write, edit, glob, grep, and bash operate there through the local companion. Paths are relative to the selected local folder. If the companion is offline, stop and ask the user to start dsh-local-workspace.',
+      text: `This session workspace is on the user’s paired computer. read, write, edit, glob, grep, and bash operate there through the local companion.${workspace.platform === 'win32' ? ' word_native_read and word_native_edit use the installed Microsoft Word or WPS Writer on that computer.' : ''} Paths are relative to the selected local folder. If the companion is offline, stop and ask the user to start dsh-local-workspace.`,
     });
   }
 
@@ -400,11 +761,107 @@ export class LocalWorkspaceHub {
     return grant;
   }
 
+  private consumeLaunchTicket(ticket: string): PairingGrant {
+    this.pruneLaunchTickets(this.now());
+    const grant = this.launchTickets.get(ticket);
+    if (grant === undefined) throw new Error('启动票据无效或已过期');
+    // Consume synchronously before any filesystem/database await.
+    this.launchTickets.delete(ticket);
+    return grant;
+  }
+
   private prunePairing(): void {
-    const now = Date.now();
+    const now = this.now();
     for (const [code, grant] of this.pairing) {
       if (grant.expiresAt <= now) this.pairing.delete(code);
     }
+  }
+
+  private pruneLaunchTickets(now: number): void {
+    for (const [ticket, grant] of this.launchTickets) {
+      if (grant.expiresAt <= now) this.launchTickets.delete(ticket);
+    }
+  }
+
+  private nextDeviceCode(): string {
+    for (let attempt = 0; attempt < 32; attempt++) {
+      const code = this.deviceCode();
+      if (!/^[0-9]{6}$/.test(code)) throw new Error('device code generator returned an invalid value');
+      if (!this.pendingDevices.has(code)) return code;
+    }
+    throw new Error('device code space is temporarily unavailable');
+  }
+
+  private expirePendingDevice(code: string): void {
+    const pending = this.pendingDevices.get(code);
+    if (pending === undefined) return;
+    const remaining = pending.expiresAt - this.now();
+    if (remaining > 0) {
+      pending.timer = setTimeout(() => this.expirePendingDevice(code), remaining);
+      pending.timer.unref?.();
+      return;
+    }
+    this.removePendingDevice(pending, true);
+  }
+
+  private prunePendingDevices(now = this.now()): void {
+    for (const pending of [...this.pendingDevices.values()]) {
+      if (pending.expiresAt <= now || pending.socket.readyState !== WebSocket.OPEN) {
+        this.removePendingDevice(pending, pending.socket.readyState === WebSocket.OPEN);
+      }
+    }
+  }
+
+  private removePendingDeviceForSocket(socket: WebSocket): void {
+    const code = this.pendingDeviceBySocket.get(socket);
+    if (code === undefined) return;
+    const pending = this.pendingDevices.get(code);
+    if (pending !== undefined) this.removePendingDevice(pending, false);
+    else this.pendingDeviceBySocket.delete(socket);
+  }
+
+  private removePendingDevice(pending: PendingDevice, close: boolean): void {
+    if (this.pendingDevices.get(pending.code) !== pending) return;
+    this.pendingDevices.delete(pending.code);
+    if (this.pendingDeviceBySocket.get(pending.socket) === pending.code) {
+      this.pendingDeviceBySocket.delete(pending.socket);
+    }
+    clearTimeout(pending.timer);
+    pending.socket.off('message', pending.rejectExtraMessage);
+    if (close && pending.socket.readyState === WebSocket.OPEN) {
+      this.sendDeviceApprovalError(pending.socket);
+      pending.socket.close(1008, 'device approval expired');
+    }
+  }
+
+  private approvalLimited(userId: number, now: number): boolean {
+    const entry = this.approvalFailures.get(userId);
+    return entry !== undefined
+      && now - entry.windowStartedAt < this.approvalFailureWindowMs
+      && entry.count >= this.approvalFailureLimit;
+  }
+
+  private recordApprovalFailure(userId: number, now: number): void {
+    const entry = this.approvalFailures.get(userId);
+    if (entry === undefined || now - entry.windowStartedAt >= this.approvalFailureWindowMs) {
+      this.approvalFailures.set(userId, { count: 1, windowStartedAt: now });
+      return;
+    }
+    entry.count = Math.min(entry.count + 1, this.approvalFailureLimit);
+  }
+
+  private pruneApprovalFailures(now: number): void {
+    for (const [userId, entry] of this.approvalFailures) {
+      if (now - entry.windowStartedAt >= this.approvalFailureWindowMs) this.approvalFailures.delete(userId);
+    }
+  }
+
+  private sendDeviceApprovalError(socket: WebSocket): void {
+    this.send(socket, {
+      type: 'error',
+      code: DEVICE_APPROVAL_ERROR_CODE,
+      error: DEVICE_APPROVAL_ERROR,
+    });
   }
 
   private placeholderPath(userId: number, workspaceId: string): string {
@@ -427,8 +884,10 @@ export class LocalWorkspaceHub {
     }
   }
 
-  private send(socket: WebSocket, message: unknown): void {
-    if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
+  private send(socket: WebSocket, message: unknown): boolean {
+    if (socket.readyState !== WebSocket.OPEN) return false;
+    socket.send(JSON.stringify(message));
+    return true;
   }
 }
 
@@ -439,9 +898,36 @@ type RemoteRequest = (
   timeoutMs?: number,
 ) => Promise<unknown>;
 
+/**
+ * A local companion belongs to exactly one dsh-passwords principal.  Sessions
+ * may be shared, so the session cwd alone is never sufficient authorization:
+ * every tool call must carry the durable owner of the model step that emitted
+ * it.  Legacy/anonymous calls deliberately fail closed for remote files.
+ */
+export function localWorkspacePrincipalAllowed(
+  principal: AuthenticatedPrincipal | undefined,
+  userId: number,
+): boolean {
+  return principal?.source === 'dsh-passwords' && principal.id === String(userId);
+}
+
 function remoteToolDefinitions(workspace: LocalWorkspaceRow, request: RemoteRequest): ToolDefinition[] {
   const pathArg = (value: unknown, name = 'file_path') => remotePath(workspace.placeholder_path, requireStringField(value, name));
   const textOutput = (text: string) => ({ type: 'text' as const, text });
+  const executeRemote = (
+    exec: { readonly signal: AbortSignal },
+    operation: LocalWorkspaceOperation,
+    args: Record<string, unknown>,
+    timeoutMs?: number,
+  ): Promise<unknown> => {
+    // Released dsh-tools typings predate principal; the local harness carries
+    // it on this same immutable execution contract.
+    const principal = (exec as typeof exec & { readonly principal?: AuthenticatedPrincipal }).principal;
+    if (!localWorkspacePrincipalAllowed(principal, workspace.user_id)) {
+      throw new RemoteOperationError('当前账号无权访问此本机工作区', 'FORBIDDEN');
+    }
+    return request(operation, args, exec.signal, timeoutMs);
+  };
   const read: ToolDefinition = {
     name: 'read',
     description: 'Read a UTF-8 text file from the user’s paired local workspace and return line-numbered content.',
@@ -469,11 +955,11 @@ function remoteToolDefinitions(workspace: LocalWorkspaceRow, request: RemoteRequ
     isConcurrencySafe: () => true,
     async execute(args, exec) {
       const value = args as Record<string, unknown>;
-      return await request('read', {
+      return await executeRemote(exec, 'read', {
         path: pathArg(value.file_path),
         ...(value.offset === undefined ? {} : { offset: value.offset }),
         ...(value.limit === undefined ? {} : { limit: value.limit }),
-      }, exec.signal);
+      });
     },
   };
   const write: ToolDefinition = {
@@ -494,10 +980,10 @@ function remoteToolDefinitions(workspace: LocalWorkspaceRow, request: RemoteRequ
     },
     async execute(args, exec) {
       const value = args as Record<string, unknown>;
-      return await request('write', {
+      return await executeRemote(exec, 'write', {
         path: pathArg(value.file_path),
         content: requireStringField(value.content, 'content'),
-      }, exec.signal);
+      });
     },
     presentCall(args) {
       const value = args as { file_path?: unknown; content?: unknown };
@@ -530,12 +1016,12 @@ function remoteToolDefinitions(workspace: LocalWorkspaceRow, request: RemoteRequ
     },
     async execute(args, exec) {
       const value = args as Record<string, unknown>;
-      return await request('edit', {
+      return await executeRemote(exec, 'edit', {
         path: pathArg(value.file_path),
         oldString: requireStringField(value.old_string, 'old_string'),
         newString: requireStringField(value.new_string, 'new_string'),
         replaceAll: value.replace_all === true,
-      }, exec.signal);
+      });
     },
     presentCall(args) {
       const value = args as { file_path?: unknown; old_string?: unknown; new_string?: unknown };
@@ -565,10 +1051,10 @@ function remoteToolDefinitions(workspace: LocalWorkspaceRow, request: RemoteRequ
     isConcurrencySafe: () => true,
     async execute(args, exec) {
       const value = args as Record<string, unknown>;
-      return await request('glob', {
+      return await executeRemote(exec, 'glob', {
         pattern: requireStringField(value.pattern, 'pattern'),
         ...(value.path === undefined ? {} : { path: pathArg(value.path, 'path') }),
-      }, exec.signal);
+      });
     },
   };
   const grep: ToolDefinition = {
@@ -600,11 +1086,11 @@ function remoteToolDefinitions(workspace: LocalWorkspaceRow, request: RemoteRequ
     isConcurrencySafe: () => true,
     async execute(args, exec) {
       const value = args as Record<string, unknown>;
-      return await request('grep', {
+      return await executeRemote(exec, 'grep', {
         pattern: requireStringField(value.pattern, 'pattern'),
         ...(value.path === undefined ? {} : { path: pathArg(value.path, 'path') }),
         ...(value.include === undefined ? {} : { include: requireStringField(value.include, 'include') }),
-      }, exec.signal);
+      });
     },
   };
   const bash: ToolDefinition = {
@@ -657,11 +1143,11 @@ function remoteToolDefinitions(workspace: LocalWorkspaceRow, request: RemoteRequ
     async execute(args, exec) {
       const value = args as Record<string, unknown>;
       const timeoutMs = typeof value.timeoutMs === 'number' ? value.timeoutMs : undefined;
-      return await request('bash', {
+      return await executeRemote(exec, 'bash', {
         command: requireStringField(value.command, 'command'),
         ...(timeoutMs === undefined ? {} : { timeoutMs }),
         ...(value.workdir === undefined ? {} : { workdir: pathArg(value.workdir, 'workdir') }),
-      }, exec.signal, (timeoutMs ?? 120_000) + 10_000);
+      }, (timeoutMs ?? 120_000) + 10_000);
     },
     presentCall(args) {
       const value = args as { command?: unknown; description?: unknown; workdir?: unknown };
@@ -679,7 +1165,207 @@ function remoteToolDefinitions(workspace: LocalWorkspaceRow, request: RemoteRequ
       return { card: 'terminal', output: block.text };
     },
   };
-  return [read, write, edit, glob, grep, bash];
+  const tools = [read, write, edit, glob, grep, bash];
+  if (workspace.platform !== 'win32') return tools;
+
+  const providerSchema = { type: 'string', enum: ['auto', 'office', 'wps'] };
+  const wordStatus: ToolDefinition = {
+    name: 'word_native_status',
+    description: 'Detect Microsoft Word and WPS Writer automation on the user’s paired Windows computer. Prefer Microsoft Word when both are available.',
+    parameters: objectSchema([], {}),
+    output: {
+      schema: objectSchema(['platform', 'office', 'wps', 'preferred'], {
+        platform: { type: 'string', enum: ['win32'] },
+        office: { type: 'boolean' },
+        wps: { type: 'boolean' },
+        preferred: { oneOf: [{ type: 'string', enum: ['office', 'wps'] }, { type: 'null' }] },
+      }),
+      render: (_args, value) => {
+        const status = value as { office: boolean; wps: boolean; preferred: string | null };
+        return [textOutput(`Microsoft Word: ${status.office ? 'available' : 'unavailable'}\nWPS Writer: ${status.wps ? 'available' : 'unavailable'}\nPreferred: ${status.preferred ?? 'none'}`)];
+      },
+    },
+    isConcurrencySafe: () => true,
+    async execute(_args, exec) {
+      return await executeRemote(exec, 'office', { action: 'status' }, 190_000);
+    },
+  };
+  const wordRead: ToolDefinition = {
+    name: 'word_native_read',
+    description: 'Read text, paragraphs, and tables from an existing Word document using Microsoft Word or WPS Writer on the paired Windows computer.',
+    parameters: objectSchema(['file_path'], {
+      file_path: { type: 'string', description: 'Word path relative to the paired local workspace.' },
+      provider: providerSchema,
+      max_chars: { type: 'integer', minimum: 1, maximum: 200000 },
+    }),
+    timeoutMs: 200_000,
+    output: {
+      schema: objectSchema(['path', 'provider', 'progId', 'text', 'truncated', 'paragraphCount', 'tableCount', 'paragraphs', 'tables'], {
+        path: { type: 'string' },
+        provider: { type: 'string', enum: ['office', 'wps'] },
+        progId: { type: 'string' },
+        text: { type: 'string' },
+        truncated: { type: 'boolean' },
+        paragraphCount: { type: 'integer' },
+        tableCount: { type: 'integer' },
+        paragraphs: {
+          type: 'array',
+          items: objectSchema(['index', 'text'], { index: { type: 'integer' }, text: { type: 'string' } }),
+        },
+        tables: {
+          type: 'array',
+          items: objectSchema(['index', 'rows'], {
+            index: { type: 'integer' },
+            rows: { type: 'array', items: { type: 'array', items: { type: 'string' } } },
+          }),
+        },
+      }),
+      render: (_args, value) => {
+        const result = value as { path: string; text: string; truncated: boolean; provider: string };
+        return [textOutput(`<path>${result.path}</path>\n<type>word</type>\n<provider>${result.provider}</provider>\n<content>\n${result.text}\n</content>${result.truncated ? '\n[content truncated]' : ''}`)];
+      },
+    },
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const value = args as Record<string, unknown>;
+      return await executeRemote(exec, 'office', {
+        action: 'read_word',
+        path: pathArg(value.file_path),
+        ...(value.provider === undefined ? {} : { provider: requireStringField(value.provider, 'provider') }),
+        ...(value.max_chars === undefined ? {} : { maxChars: value.max_chars }),
+      }, 190_000);
+    },
+  };
+  const wordEdit: ToolDefinition = {
+    name: 'word_native_edit',
+    description: 'Create or batch-edit a Word document with installed Microsoft Word or WPS Writer. Supports text replacement, paragraph formatting, tables, headers, footers, images, page breaks, and PDF export. The document is saved only after every requested edit succeeds.',
+    parameters: objectSchema(['file_path', 'operations'], {
+      file_path: { type: 'string', description: 'Word path relative to the paired local workspace.' },
+      provider: providerSchema,
+      create: { type: 'boolean', description: 'Create a new document instead of opening an existing one.' },
+      overwrite: { type: 'boolean', description: 'Allow create mode to replace an existing file.' },
+      timeout_ms: { type: 'integer', minimum: 1000, maximum: 600000 },
+      operations: {
+        type: 'array',
+        minItems: 1,
+        maxItems: 100,
+        items: wordOperationSchema(),
+      },
+    }),
+    timeoutMs: MAX_RPC_TIMEOUT_MS,
+    output: {
+      schema: objectSchema(['path', 'provider', 'progId', 'created', 'operationsApplied', 'pdfPaths'], {
+        path: { type: 'string' },
+        provider: { type: 'string', enum: ['office', 'wps'] },
+        progId: { type: 'string' },
+        created: { type: 'boolean' },
+        operationsApplied: { type: 'integer' },
+        pdfPaths: { type: 'array', items: { type: 'string' } },
+      }),
+      render: (_args, value) => {
+        const result = value as { path: string; provider: string; operationsApplied: number; created: boolean; pdfPaths: string[] };
+        const exports = result.pdfPaths.length === 0 ? '' : `\nPDF: ${result.pdfPaths.join(', ')}`;
+        return [textOutput(`${result.created ? 'created' : 'edited'} ${result.path} with ${result.provider}; ${String(result.operationsApplied)} operation(s) applied${exports}`)];
+      },
+    },
+    async execute(args, exec) {
+      const value = args as Record<string, unknown>;
+      const timeoutMs = typeof value.timeout_ms === 'number' ? value.timeout_ms : 180_000;
+      return await executeRemote(exec, 'office', {
+        action: 'edit_word',
+        path: pathArg(value.file_path),
+        ...(value.provider === undefined ? {} : { provider: requireStringField(value.provider, 'provider') }),
+        create: value.create === true,
+        overwrite: value.overwrite === true,
+        timeoutMs,
+        operations: normalizeRemoteWordOperations(value.operations, pathArg),
+      }, timeoutMs + 10_000);
+    },
+  };
+  return [...tools, wordStatus, wordRead, wordEdit];
+}
+
+function wordOperationSchema(): Record<string, unknown> {
+  return objectSchema(['type'], {
+    type: {
+      type: 'string',
+      enum: [
+        'replace_text',
+        'append_paragraph',
+        'insert_paragraph',
+        'set_paragraph',
+        'delete_paragraph',
+        'add_table',
+        'set_header',
+        'set_footer',
+        'insert_image',
+        'page_break',
+        'export_pdf',
+      ],
+    },
+    find: { type: 'string' },
+    replace: { type: 'string' },
+    replace_all: { type: 'boolean' },
+    match_case: { type: 'boolean' },
+    whole_word: { type: 'boolean' },
+    text: { type: 'string' },
+    paragraph: { type: 'integer', minimum: 1 },
+    after_paragraph: { type: 'integer', minimum: 1 },
+    style: { type: 'string' },
+    alignment: { type: 'string', enum: ['left', 'center', 'right', 'justify'] },
+    bold: { type: 'boolean' },
+    italic: { type: 'boolean' },
+    font_name: { type: 'string' },
+    font_size: { type: 'number', minimum: 1, maximum: 200 },
+    color: { type: 'string', pattern: '^#[0-9A-Fa-f]{6}$' },
+    rows: {
+      type: 'array',
+      minItems: 1,
+      maxItems: 200,
+      items: { type: 'array', minItems: 1, maxItems: 50, items: { type: 'string' } },
+    },
+    header: { type: 'boolean' },
+    image_path: { type: 'string' },
+    width_points: { type: 'number', minimum: 1, maximum: 2000 },
+    height_points: { type: 'number', minimum: 1, maximum: 2000 },
+    output_path: { type: 'string' },
+  });
+}
+
+function normalizeRemoteWordOperations(
+  value: unknown,
+  pathArg: (value: unknown, name?: string) => string,
+): Array<Record<string, unknown>> {
+  if (!Array.isArray(value)) throw new Error('operations must be an array');
+  return value.map((raw) => {
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('each operation must be an object');
+    const operation = raw as Record<string, unknown>;
+    const type = requireStringField(operation.type, 'operation.type');
+    return {
+      type,
+      ...(operation.find === undefined ? {} : { find: requireStringField(operation.find, 'find') }),
+      ...(operation.replace === undefined ? {} : { replace: requireStringField(operation.replace, 'replace') }),
+      ...(operation.replace_all === undefined ? {} : { replaceAll: operation.replace_all }),
+      ...(operation.match_case === undefined ? {} : { matchCase: operation.match_case }),
+      ...(operation.whole_word === undefined ? {} : { wholeWord: operation.whole_word }),
+      ...(operation.text === undefined ? {} : { text: requireStringField(operation.text, 'text') }),
+      ...(operation.paragraph === undefined ? {} : { paragraph: operation.paragraph }),
+      ...(operation.after_paragraph === undefined ? {} : { afterParagraph: operation.after_paragraph }),
+      ...(operation.style === undefined ? {} : { style: requireStringField(operation.style, 'style') }),
+      ...(operation.alignment === undefined ? {} : { alignment: operation.alignment }),
+      ...(operation.bold === undefined ? {} : { bold: operation.bold }),
+      ...(operation.italic === undefined ? {} : { italic: operation.italic }),
+      ...(operation.font_name === undefined ? {} : { fontName: requireStringField(operation.font_name, 'font_name') }),
+      ...(operation.font_size === undefined ? {} : { fontSize: operation.font_size }),
+      ...(operation.color === undefined ? {} : { color: requireStringField(operation.color, 'color') }),
+      ...(operation.rows === undefined ? {} : { rows: operation.rows }),
+      ...(operation.header === undefined ? {} : { header: operation.header }),
+      ...(operation.image_path === undefined ? {} : { imagePath: pathArg(operation.image_path, 'image_path') }),
+      ...(operation.width_points === undefined ? {} : { widthPoints: operation.width_points }),
+      ...(operation.height_points === undefined ? {} : { heightPoints: operation.height_points }),
+      ...(operation.output_path === undefined ? {} : { outputPath: pathArg(operation.output_path, 'output_path') }),
+    };
+  });
 }
 
 function objectSchema(required: string[], properties: Record<string, unknown>): Record<string, unknown> {
@@ -706,4 +1392,22 @@ function rawDataText(data: RawData): string {
   if (Buffer.isBuffer(data)) return data.toString('utf8');
   if (Array.isArray(data)) return Buffer.concat(data).toString('utf8');
   return Buffer.from(data).toString('utf8');
+}
+
+function peerKey(request: IncomingMessage): string {
+  const address = request.socket.remoteAddress;
+  if (address === undefined || address === '') return 'unknown';
+  const withoutZone = address.split('%', 1)[0] ?? address;
+  return withoutZone.startsWith('::ffff:') ? withoutZone.slice(7) : withoutZone.toLowerCase().slice(0, 128);
+}
+
+function positiveInteger(value: number | undefined, fallback: number): number {
+  return value !== undefined && Number.isSafeInteger(value) && value > 0 ? value : fallback;
+}
+
+function safeApprovalErrorStage(message: string): string {
+  if (message === 'device disconnected during approval') return 'socket-before-provision';
+  if (message === 'device disconnected before token delivery') return 'token-delivery';
+  if (message.startsWith('workspaceId ')) return 'workspace-conflict';
+  return 'internal';
 }

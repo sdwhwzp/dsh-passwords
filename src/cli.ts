@@ -28,7 +28,6 @@ import {
   patchStatus,
 } from './patch.js';
 import { t, resolveCliLang } from './i18n.js';
-import { LazyMySqlWebDavCredentialStore } from './webdav-credentials.js';
 import { backupSqliteBeforeMigration } from './db-backup.js';
 
 /** CLI 输出语言：LANG / LC_ALL / LC_MESSAGES 以 en 开头则英文，否则中文 */
@@ -235,8 +234,8 @@ async function boot() {
   backupSqliteBeforeMigration(config.dbPath);
   const db = new Database(config.dbPath, createFieldCrypto(config.dbEncKey, config.setupKey));
   db.init();
-  const webdavCredentials = new LazyMySqlWebDavCredentialStore(config);
-  const auth = new AuthService(config, db, webdavCredentials);
+  // dsh 登录只依赖本插件的本地 SQLite 账号库。
+  const auth = new AuthService(config, db);
 
   // ── 80 端口：301 跳转 + ACME HTTP-01 挑战应答 ──
   // 自动 HTTPS 需要先监听 80（Let's Encrypt 从 80 校验挑战），再签发证书
@@ -383,13 +382,11 @@ async function boot() {
   process.on('SIGINT', () => {
     gateway.close();
     redirect?.close();
-    void webdavCredentials.close();
     process.exit(0);
   });
   process.on('SIGTERM', () => {
     gateway.close();
     redirect?.close();
-    void webdavCredentials.close();
     process.exit(0);
   });
 }

@@ -11,7 +11,9 @@
 import { createElement as h, useEffect, useRef, useState } from 'react';
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots';
 import { publishChatEntryChanged } from './events';
+import { submitLogoutNavigation } from './account-logout';
 import { LocalWorkspacePanel } from './local-workspace';
+import { ManagedFilesPanel } from './managed-files';
 
 export interface UserInfo {
   id: number;
@@ -163,6 +165,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
+
 
   // 改密表单
   const [pwTarget, setPwTarget] = useState('');
@@ -345,26 +348,6 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
     );
   };
 
-  /**
-   * 退出不能使用原生 form：设置卡片可能挂在宿主已有的 form 内，嵌套 form
-   * 会被浏览器重新关联到外层空 action，导致退出后跳到空白地址。先用同源
-   * POST 完成服务端吊销与 Cookie 清除，再显式替换为绝对登录地址。
-   */
-  const logout = () => {
-    if (!window.confirm(t('logoutConfirm'))) return;
-    setBusy(true);
-    setError('');
-    void fetch('/gateway/logout', { method: 'POST', credentials: 'same-origin' })
-      .then((response) => {
-        if (!response.ok) throw new Error(t('logoutFailed'));
-        window.location.replace(new URL('/gateway/login', window.location.origin).href);
-      })
-      .catch((logoutError: unknown) => {
-        setBusy(false);
-        setError(errText(logoutError, trErr));
-      });
-  };
-
   const changePassword = () => {
     if (pwNew !== pwConfirm) return setError(t('pwMismatch'));
     if (!PASSWORD_RE.test(pwNew)) return setError(t('pwPolicy'));
@@ -395,8 +378,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
             // 改名后旧 JWT 已按 credential_version 失效：主动 POST logout 清理服务端
             // 吊销状态，再跳登录页；即使注销请求因重启/网络失败，也必须跳走，
             // 避免用户停留在一个注定失效的设置页。
-            await fetch('/gateway/logout', { method: 'POST', credentials: 'same-origin' }).catch(() => undefined);
-            window.location.assign('/gateway/login');
+            submitLogoutNavigation();
           }
         : undefined,
     );
@@ -520,7 +502,6 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
     patchState.workspaceSearch;
   const patchText =
     patchState === null ? t('patchUnknown') : patchOk ? t('patchOk') : t('patchBad');
-
   const body = h(
     'div',
     { className: 'dshpw-body' },
@@ -533,17 +514,6 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
       isAdmin
         ? h('span', { className: 'dshpw-badge admin' }, t('owner'))
         : h('span', { className: 'dshpw-badge' }, t('subuser')),
-      h(
-        'button',
-        {
-          className: 'dshpw-btn danger dshpw-logout',
-          type: 'button',
-          disabled: busy,
-          onClick: logout,
-          'aria-label': t('logout'),
-        },
-        t('logout'),
-      ),
     ),
     // ── 聊天入口：按当前账号跨设备同步的显示偏好 ──
     h(
@@ -574,6 +544,13 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
       ),
     ),
     h(LocalWorkspacePanel, {
+      t: trErr,
+      busy,
+      setBusy,
+      setError,
+      setNotice,
+    }),
+    data?.me?.role === 'user' && h(ManagedFilesPanel, {
       t: trErr,
       busy,
       setBusy,

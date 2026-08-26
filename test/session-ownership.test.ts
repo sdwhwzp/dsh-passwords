@@ -45,8 +45,9 @@ test('归档枚举源清理：archivedSessionIds 被清空', () => {
   assert.deepEqual(value.workspaces[0].archivedSessionIds, []);
 });
 
-test('工作区过滤：启用目录内默认显示全部活动会话，禁用覆盖逐条关闭', () => {
+test('工作区过滤：只显示活动工作区成员，禁用覆盖逐条关闭', () => {
   const disabled = new Set(['s-off']);
+  const active = new Set(['s-on', 's-off']);
   const value = {
     result: {
       value: [
@@ -58,10 +59,28 @@ test('工作区过滤：启用目录内默认显示全部活动会话，禁用�
   };
   const out = filterSessionItems(
     value,
-    (id) => !disabled.has(id),
+    (id) => active.has(id) && !disabled.has(id),
     (cwd) => cwd === '/workspace/a',
   ) as typeof value;
   assert.deepEqual(out.result.value.map((item) => item.sessionId), ['s-on']);
+});
+
+test('同目录但已从工作区移除的会话不作为未分组项显示', () => {
+  const value = {
+    result: {
+      value: [
+        { sessionId: 's-active', cwd: '/workspace/a' },
+        { sessionId: 's-removed', cwd: '/workspace/a' },
+      ],
+    },
+  };
+  const active = new Set(['s-active']);
+  const out = filterSessionItems(
+    value,
+    (id) => active.has(id),
+    (cwd) => cwd === '/workspace/a',
+  ) as typeof value;
+  assert.deepEqual(out.result.value.map((item) => item.sessionId), ['s-active']);
 });
 
 test('工作区不过滤时 disabledSessions 仍能关闭单独会话', () => {
@@ -74,6 +93,30 @@ test('工作区 cwd 缺失：受限用户 fail-closed 丢弃', () => {
   const value = { result: { value: [{ sessionId: 's-no-cwd' }, { sessionId: 's-ok', cwd: '/workspace/a' }] } };
   const out = filterSessionItems(value, () => true, (cwd) => cwd === '/workspace/a') as typeof value;
   assert.deepEqual(out.result.value.map((item) => item.sessionId), ['s-ok']);
+});
+
+test('已授权会话内的深层投影保持完整', () => {
+  const value = {
+    result: {
+      value: {
+        items: [{
+          sessionId: 's-ok',
+          cwd: '/workspace/a',
+          projections: {
+            values: {
+              permissions: {
+                currentValue: 'workspace-write',
+                options: [{ value: 'workspace-write', name: 'workspace-write' }],
+              },
+              imageLimits: { mediaTypes: ['image/png'] },
+            },
+          },
+        }],
+      },
+    },
+  };
+  const out = filterSessionItems(value, () => true, (cwd) => cwd === '/workspace/a') as typeof value;
+  assert.deepEqual(out, value);
 });
 
 test('collectSessionCwd：只收集有效 cwd', () => {
