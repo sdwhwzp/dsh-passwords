@@ -551,6 +551,7 @@ grep -q 'xlsx' /tmp/dsh-office-preview-client.js
 - 月额度为 0 的子账号提问时收到明确额度不足提示。
 - 子账号刷新 Spend 后只看到自己的调用和金额，不显示订阅计划用量；旧日志中的已认证 `user/message` 能正确回填到该账号。
 - 子账号不能访问 SSH、皮肤管理、共享上传列表或其他账号工作区。
+- 子账号登录后的 WebSocket 实时工作区、会话和归档事件也只包含本账号数据；不会先显示管理员内容再在刷新后消失。
 - 管理员删除子账号后，专属目录及文件仍保留。
 
 ### 10.4 文件和本机工作区
@@ -562,6 +563,7 @@ grep -q 'xlsx' /tmp/dsh-office-preview-client.js
 - Windows 助手可配对、选择目录并显示“打开对话”。
 - 本机工作区只允许访问用户授权的目录。
 - 每个账号绑定 WebDAV 后都能同时看到自己的 `WebDAV` 工作区，并可在其中创建目录和选择子目录。
+- 重启 dsh 后不打开任何浏览器，已绑定账号的 rclone 挂载也会自动恢复；`findmnt -T ~/dsh-user-workspaces/u2/WebDAV` 应显示 `fuse.rclone`。
 - 右侧 File 面板可预览 `.xlsx`；模型可用 `excel_inspect` 和 `excel_read_range` 读取同一文件，不再报 `authenticated principal required`。
 
 ### 10.5 Tailscale 和模型
@@ -613,7 +615,7 @@ grep -q 'conversation.input.bootstrap' \
 
 客户页面必须通过 3081，由 dsh-passwords 写入签名 principal。确认请求没有绕过网关，dsh-passwords Host 插件已挂载，Spend 与 subscriptions 使用当前版本，并检查浏览器是否仍保留旧 bundle。
 
-若会话日志中的 `user/message.data.principal` 存在，但 `turn/start`、`step/start` 和工具执行仍没有 principal，说明服务器仍在运行未原生传播身份的旧 agent-loop。28 必须至少使用 dsh-passwords `2.5.9`、dsh-nas-webdav `0.2.1` 和 dsh-spend `0.4.9` 的兼容组合；只升级其中一个会分别留下额度绕过、WebDAV 工具认证失败或 Spend 归户为空的问题。
+若会话日志中的 `user/message.data.principal` 存在，但 `turn/start`、`step/start` 和工具执行仍没有 principal，说明服务器仍在运行未原生传播身份的旧 agent-loop。28 必须至少使用 dsh-passwords `2.5.10`、dsh-nas-webdav `0.2.2` 和 dsh-spend `0.4.9` 的兼容组合；只升级其中一个会分别留下额度绕过、WebDAV 工具认证失败、重启后挂载为空或 Spend 归户为空的问题。
 
 ### 11.5 子账号显示 ¥0 但仍能调用模型
 
@@ -621,13 +623,17 @@ grep -q 'conversation.input.bootstrap' \
 
 ### 11.6 WebDAV Excel 工具提示 `authenticated principal required`
 
-确认 dsh-nas-webdav 为 `0.2.1` 以上，并与 dsh-passwords 的 principal 兼容修复一起部署。重启后重新登录 3081，再从当前账号的 WebDAV 工作区选择文件。错误仍存在时检查 pre-step 消息是否带 principal；不要让模型改用 Bash、Python 或安装库绕过 WebDAV 凭据隔离。
+确认 dsh-nas-webdav 为 `0.2.2` 以上，并与 dsh-passwords `2.5.10` 的 principal 与账号枚举服务一起部署。重启后重新登录 3081，再从当前账号的 WebDAV 工作区选择文件。错误仍存在时检查 pre-step 消息是否带 principal；不要让模型改用 Bash、Python 或安装库绕过 WebDAV 凭据隔离。
 
-### 11.7 `.xlsx` 显示“不支持预览”
+### 11.7 WebDAV 工作区存在但文件为空
+
+先用 `findmnt -T ~/dsh-user-workspaces/u2/WebDAV` 检查该目录是否真正挂载为 `fuse.rclone`，不要只检查目录是否存在。如果只是普通空目录，确认 dsh-passwords `2.5.10` 和 dsh-nas-webdav `0.2.2` 成对部署，然后重启 dsh；新版会在 Host 启动时枚举已绑定账号并恢复挂载，定时巡检也会继续重试。查看 `pm2 logs dsh-web` 中的 `workspace reconcile failed` 可区分 MySQL、NAS、rclone 和 FUSE 故障。
+
+### 11.8 `.xlsx` 显示“不支持预览”
 
 确认 `@huanlin/dsh-plugin-better-sidebar-plugin-office@0.1.2` 同时存在于 Web Profile dependencies、`dsh.profile.bundles` 和 `node_modules`。直接请求 `/plugins/@huanlin/dsh-plugin-better-sidebar-plugin-office/client.js` 应返回 200，文件应包含 `xlsx`。重启 dsh 后在浏览器强制刷新；Office 预览客户端约 22.4 MB，首次加载会比文本预览慢。
 
-### 11.8 插件 loader 失败或页面白屏
+### 11.9 插件 loader 失败或页面白屏
 
 ```bash
 pm2 logs dsh-web --lines 200
@@ -637,7 +643,7 @@ node /home/tzwl3/apps/dsh-runtime/current/node_modules/@deepseek-ai/dsh/lib/bin.
 
 检查 Profile 的 link 目标存在、所有插件已构建 `lib/` 或 `dist/`、`package.json` 的客户端导出存在、启动清单的 `rev` 与实际文件内容一致。不要同时保留已停用的 `@linxin666/dsh-web-ui-all` 和新的 `@linxin666/dsh-web-all`。
 
-### 11.9 插件管理器提示 `dsh CLI not found on PATH`
+### 11.10 插件管理器提示 `dsh CLI not found on PATH`
 
 启动 PM2、Doctor 和插件管理操作时统一加入：
 
@@ -647,11 +653,11 @@ export PATH=/home/tzwl3/.local/opt/node-v22.21.1-linux-x64/bin:/home/tzwl3/.loca
 
 不要依赖交互式 Shell 才有的 PATH。
 
-### 11.10 自建 Qwen 模型无响应
+### 11.11 自建 Qwen 模型无响应
 
 比较 `~/.dsh/settings.yaml` 的模型 ID 和 `http://100.64.0.2:8080/v1/models`。当前服务别名是 `qwen3.8-27b-uncensored-q4`，旧别名 `qwen3.8-27b-q4` 需要更新。再检查 Tailscale、kmMac 端口、llama-server 日志和 64K 上下文的并发占用。
 
-### 11.11 kmMac 在线但模型进程没有恢复
+### 11.12 kmMac 在线但模型进程没有恢复
 
 当前 timer 只处理 Tailscale 在线状态变化。检查：
 
@@ -664,7 +670,7 @@ cat /home/tzwl3/.local/state/kmMac-model-monitor/status
 
 需要强制重试时先把状态改为 `failed`，再启动 service。长期方案是在监控脚本中增加 8080、8081、8082 健康探测。
 
-### 11.12 MySQL 登录失败或账号消失
+### 11.13 MySQL 登录失败或账号消失
 
 确认驱动为 MySQL、主机和库名正确、28 能连接 192.168.10.95:3306，并检查 `.env` 的用户和密码。SQLite 和 MySQL 不会自动互相迁移；驱动切错会表现为进入另一个空账号库。
 
@@ -688,10 +694,11 @@ rg -n '(PASSWORD|SECRET|TOKEN|AUTH_KEY|API_KEY)=.+|BEGIN .*PRIVATE KEY' \
 | 组件 | 当前目标 |
 |---|---|
 | runtime | `/home/tzwl3/apps/dsh-runtime/releases/deploy-28-20260826-conversation-bootstrap-all-copies` |
-| plugins | `/home/tzwl3/apps/dsh-plugins/releases/20260827-3ff3e15-5007b5c-9c55954-principal-office` |
+| plugins | `/home/tzwl3/apps/dsh-plugins/releases/20260827-a6ea992-2653b52-tenant-events-webdav-restore` |
 | dsh-web | `/home/tzwl3/apps/dsh-web/releases/20260827-092833-footer-chat-drag` |
 | conversation bundle | SHA-1 `2440832da50b0eb887ac0ff05b1e4462f9109123` |
 | dsh-passwords client bundle | SHA-1 `881b7f21b8a3fe48dbf1bff8f7d4f5f2f23f033d` |
+| dsh-nas-webdav client bundle | SHA-1 `6fa1f333a1b76b241756eee42568292e0c0ee782` |
 | Office preview client bundle | SHA-1 `48cc39dc0df93b99e287c1889cf6096552b90cb6` |
 | Web Profile 回滚备份 | `/home/tzwl3/.dsh/profile-backups/20260827-office-preview-principal` |
 
@@ -704,3 +711,11 @@ rg -n '(PASSWORD|SECRET|TOKEN|AUTH_KEY|API_KEY)=.+|BEGIN .*PRIVATE KEY' \
 本次部署同时上线 dsh-passwords `5007b5c`、dsh-nas-webdav `3ff3e15`、dsh-spend `9c55954` 和 Office viewer `0.1.2`。新插件发布目录经独立构建后原子切换，旧目录未覆盖；Web Profile 在安装 Office 依赖前备份到本节上方记录的回滚目录。dsh-passwords 的跨机器插件清单已包含 Office viewer，并将 dsh-web 默认部署分支改为 `master`。
 
 部署验证结果：dsh-passwords 构建通过，principal、插件清单、额度相关定向测试 11/11；dsh-nas-webdav 35/35；dsh-spend 21/21；并发全量测试中曾有 3 个 Windows 本机助手模拟连接超时，单独重跑对应文件 7/7 通过。运行态 PM2 为 online，3080 返回 200，3081 未登录返回 302，Office client 返回 200 且包含 XLSX viewer，近期日志没有 plugin loader、principal 或 Spend 错误。
+
+## 15. 2026-08-27 子账号实时隔离与 WebDAV 挂载恢复记录
+
+本次故障有两个独立原因。工作区和会话的 HTTP 列表已经按子账号过滤，但 Host 的 WebSocket 实时事件仍会原样转发，因此管理员工作区或会话可能先进入子账号内存，刷新后才被干净基线覆盖。WebDAV 另一侧只会对浏览器主动请求过的账号建立 rclone 挂载，进程重启后持久凭据仍在，但内存活动集合为空，所以页面看到的只是一个普通空目录。
+
+修复由 dsh-passwords `2.5.10` 提供：子账号的 `/api/events.host` 与 `/api/events.mux` 在网关终止，每帧按工作区路径、会话归属、禁用列表和归档集合过滤，未知全局事件默认丢弃；同时 `managedUserWorkspace.listPrincipals()` 只向受信 Host 插件提供当前账号身份。dsh-nas-webdav `0.2.2` 在启动和定时巡检时遍历这些账号，只为已绑定的账号恢复独立挂载，单个账号失败不阻塞其他账号。对应提交为 dsh-passwords `a6ea992` 和 dsh-nas-webdav `2653b52`。
+
+部署使用新的不可变发布目录 `20260827-a6ea992-2653b52-tenant-events-webdav-restore`，原子切换 `current` 后重启 PM2。服务器内定向回归为 dsh-passwords 27/27、dsh-nas-webdav 36/36；运行态验证为 3080=200、3081 匿名=302、PM2 online。`wzp` 的 WebDAV 已自动恢复为 `fuse.rclone` 并列出 7 个根目录条目；使用 90 秒临时诊断 JWT 调用 3081 时，工作区仅有 `u2`、`u2/测试`和 `u2/WebDAV`，归档 ID 为 0，Mux 收到 3 帧且外账号会话帧为 0，WebDAV 浏览接口返回 200 与 7 个条目。
