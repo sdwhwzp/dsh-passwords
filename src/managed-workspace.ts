@@ -48,6 +48,16 @@ export class ManagedUserWorkspaceProvider {
     if (info.isSymbolicLink() || !info.isDirectory()) return undefined;
     return realpath(managed.path);
   }
+
+  /** Return current account identities so dependent services can restore durable per-account resources. */
+  async listPrincipals(): Promise<AuthenticatedPrincipal[]> {
+    return this.db.listUsers().map((user) => ({
+      source: 'dsh-passwords',
+      id: String(user.id),
+      username: user.username,
+      role: user.role,
+    }));
+  }
 }
 
 /** Publish account-private workspace resolution without exposing the user database. */

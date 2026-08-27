@@ -17,6 +17,7 @@ import zlib from 'node:zlib';
 import { URL } from 'node:url';
 import dns from 'node:dns';
 import express, { type Request, type Response } from 'express';
+import WebSocket, { WebSocketServer } from 'ws';
 import type { PlatformConfig } from './config.js';
 import { hardenSecretsAfterSetup } from './config.js';
 import { AuthService, AuthError, type RequestMeta } from './auth.js';
@@ -65,6 +66,7 @@ import { findDshRoot, applyRemotePatch, restartDshWeb } from './patch.js';
 import { t, resolveGatewayLang, type Lang } from './i18n.js';
 import { signedPrincipalHeaders } from './principal.js';
 import { filterCustomerModelCatalogResponse } from './model-policy.js';
+import { filterTenantEventEnvelope } from './tenant-events.js';
 
 /** 网关内部扩展请求：权限执行时把用户/权限附在 req 上，供后续中间件与代理读取 */
 type Req = Request & {
@@ -798,7 +800,50 @@ export function createGatewayServer(
   // 权限撤销后仍能按 sessionId 直读旧目录会话必须封堵
   const sessionCwdById = new Map<string, string>();
   let activeWorkspaceSessionIds = new Set<string>();
+  let accountedWorkspaceSessionIds = new Set<string>();
+  const workspaceSessionIdsById = new Map<string, Set<string>>();
+  let archivedWorkspaceSessionIds = new Set<string>();
   let workspaceSnapshotRefresh: Promise<void> | null = null;
+
+  function collectWorkspaceRows(
+    value: unknown,
+    out: Array<{ workspaceId: string; path: string; sessionIds: string[] }> = [],
+    depth = 0,
+  ): Array<{ workspaceId: string; path: string; sessionIds: string[] }> {
+    if (depth > 8 || value === null || typeof value !== 'object') return out;
+    if (Array.isArray(value)) {
+      for (const item of value) collectWorkspaceRows(item, out, depth + 1);
+      return out;
+    }
+    const row = value as Record<string, unknown>;
+    if (
+      typeof row.workspaceId === 'string' &&
+      typeof row.path === 'string' &&
+      Array.isArray(row.sessionIds)
+    ) {
+      out.push({
+        workspaceId: row.workspaceId,
+        path: row.path,
+        sessionIds: row.sessionIds.filter((id): id is string => typeof id === 'string'),
+      });
+    }
+    for (const child of Object.values(row)) collectWorkspaceRows(child, out, depth + 1);
+    return out;
+  }
+
+  function rebuildActiveWorkspaceSessions(): void {
+    const accounted = new Set<string>();
+    for (const sessionIds of workspaceSessionIdsById.values()) {
+      for (const sessionId of sessionIds) accounted.add(sessionId);
+    }
+    accountedWorkspaceSessionIds = accounted;
+    activeWorkspaceSessionIds = new Set(
+      [...accounted].filter((sessionId) => !archivedWorkspaceSessionIds.has(sessionId)),
+    );
+    for (const sessionId of sessionCwdById.keys()) {
+      if (!accounted.has(sessionId)) sessionCwdById.delete(sessionId);
+    }
+  }
 
   /** Replace all workspace-derived authorization state with one current registry snapshot. */
   function replaceWorkspaceAccessSnapshot(value: unknown): void {
@@ -806,11 +851,61 @@ export function createGatewayServer(
     const nextSessionCwds = collectSessionCwdFromWorkspaces(value);
     workspacePathById.clear();
     for (const [id, workspacePath] of nextWorkspacePaths) workspacePathById.set(id, workspacePath);
-    activeWorkspaceSessionIds = new Set(nextSessionCwds.keys());
-    for (const id of sessionCwdById.keys()) {
-      if (!activeWorkspaceSessionIds.has(id)) sessionCwdById.delete(id);
+    workspaceSessionIdsById.clear();
+    const workspaceRows = collectWorkspaceRows(value);
+    for (const row of workspaceRows) {
+      workspaceSessionIdsById.set(row.workspaceId, new Set(row.sessionIds));
     }
+    archivedWorkspaceSessionIds = collectArchivedSessionIds(value);
+    rebuildActiveWorkspaceSessions();
     for (const [id, cwd] of nextSessionCwds) sessionCwdById.set(id, cwd);
+    for (const row of workspaceRows) {
+      for (const sessionId of row.sessionIds) sessionCwdById.set(sessionId, row.path);
+    }
+  }
+
+  /** Apply a committed Host frame to the authorization snapshot before filtering it. */
+  function observeHostEventEnvelope(value: unknown): void {
+    if (value === null || typeof value !== 'object') return;
+    const envelope = value as Record<string, unknown>;
+    if (envelope.payload === null || typeof envelope.payload !== 'object') return;
+    const payload = envelope.payload as Record<string, unknown>;
+    if (payload.type === 'host/workspace-changed') {
+      const workspace = payload.workspace;
+      if (workspace === null || typeof workspace !== 'object') return;
+      const row = workspace as Record<string, unknown>;
+      if (
+        typeof row.workspaceId !== 'string' ||
+        typeof row.path !== 'string' ||
+        !Array.isArray(row.sessionIds)
+      ) return;
+      const sessionIds = row.sessionIds.filter((id): id is string => typeof id === 'string');
+      workspacePathById.set(row.workspaceId, row.path);
+      workspaceSessionIdsById.set(row.workspaceId, new Set(sessionIds));
+      rebuildActiveWorkspaceSessions();
+      for (const sessionId of sessionIds) sessionCwdById.set(sessionId, row.path);
+      return;
+    }
+    if (payload.type === 'host/workspace-removed' && typeof payload.workspaceId === 'string') {
+      workspacePathById.delete(payload.workspaceId);
+      workspaceSessionIdsById.delete(payload.workspaceId);
+      rebuildActiveWorkspaceSessions();
+      return;
+    }
+    if (payload.type === 'host/archived-sessions-changed' && Array.isArray(payload.archivedSessionIds)) {
+      archivedWorkspaceSessionIds = new Set(
+        payload.archivedSessionIds.filter((id): id is string => typeof id === 'string'),
+      );
+      rebuildActiveWorkspaceSessions();
+      return;
+    }
+    if (
+      payload.type === 'host/session-added' &&
+      typeof payload.sessionId === 'string' &&
+      typeof payload.cwd === 'string'
+    ) {
+      sessionCwdById.set(payload.sessionId, payload.cwd);
+    }
   }
 
   /**
@@ -2807,6 +2902,7 @@ export function createGatewayServer(
                   ? reqCwd
                   : collectSessionCwd(parsed).get(sessionId);
                 if (cwd) sessionCwdById.set(sessionId, cwd);
+                accountedWorkspaceSessionIds.add(sessionId);
                 activeWorkspaceSessionIds.add(sessionId);
                 if (reqAs.dshpwPerms !== undefined && reqAs.dshpwPerms.sandbox_mode !== null) {
                   applySandboxToSession(sessionId, reqAs.dshpwPerms.sandbox_mode);
@@ -3299,6 +3395,124 @@ export function createGatewayServer(
   server.requestTimeout = 60_000;
   server.maxConnections = 512;
 
+  const tenantWebSockets = new WebSocketServer({
+    noServer: true,
+    perMessageDeflate: false,
+    maxPayload: 16 * 1024 * 1024,
+  });
+
+  function rejectUpgrade(socket: Duplex, status: 403 | 404 | 502 | 503): void {
+    const reason = status === 403
+      ? 'Forbidden'
+      : status === 404
+        ? 'Not Found'
+        : status === 502
+          ? 'Bad Gateway'
+          : 'Service Unavailable';
+    socket.end(`HTTP/1.1 ${String(status)} ${reason}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+  }
+
+  function proxyTenantEventWebSocket(
+    req: IncomingMessage,
+    socket: Duplex,
+    head: Buffer,
+    fwdPath: string,
+    userId: number,
+  ): void {
+    tenantWebSockets.handleUpgrade(req, socket, head, (downstream) => {
+      const wsProtocol = upstream.protocol === 'https:' ? 'wss:' : 'ws:';
+      const upstreamUrl = `${wsProtocol}//${upstreamHost}:${String(upstreamPort)}${fwdPath}`;
+      const upstreamWebSocket = new WebSocket(upstreamUrl, {
+        perMessageDeflate: false,
+        maxPayload: 16 * 1024 * 1024,
+        headers: { Origin: `${upstream.protocol}//${upstreamHost}:${String(upstreamPort)}` },
+      });
+      let closed = false;
+      const closeBoth = (code = 1011, reason = 'event downlink unavailable') => {
+        if (closed) return;
+        closed = true;
+        if (downstream.readyState === WebSocket.OPEN) downstream.close(code, reason);
+        else if (downstream.readyState === WebSocket.CONNECTING) downstream.terminate();
+        if (upstreamWebSocket.readyState === WebSocket.OPEN) upstreamWebSocket.close(code, reason);
+        else if (upstreamWebSocket.readyState === WebSocket.CONNECTING) upstreamWebSocket.terminate();
+      };
+
+      downstream.once('message', () => closeBoth(1008, 'downlink only'));
+      downstream.once('error', () => closeBoth());
+      downstream.once('close', () => closeBoth(1000, 'client closed'));
+      upstreamWebSocket.once('error', () => closeBoth());
+      upstreamWebSocket.once('close', () => closeBoth(1000, 'upstream closed'));
+      upstreamWebSocket.on('message', (data, isBinary) => {
+        if (isBinary) {
+          closeBoth(1003, 'text frames required');
+          return;
+        }
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(data.toString());
+        } catch {
+          closeBoth(1007, 'invalid event frame');
+          return;
+        }
+
+        const currentUser = db.getUserById(userId);
+        if (currentUser === null || currentUser.role === 'admin') {
+          closeBoth(1008, 'account unavailable');
+          return;
+        }
+        const perms = effectivePermissions(userId);
+        if (perms.banned) {
+          closeBoth(1008, 'account unavailable');
+          return;
+        }
+        const payload = parsed !== null && typeof parsed === 'object'
+          ? (parsed as Record<string, unknown>).payload
+          : undefined;
+        const payloadRecord = payload !== null && typeof payload === 'object'
+          ? payload as Record<string, unknown>
+          : undefined;
+        const removedWorkspaceId = payloadRecord?.type === 'host/workspace-removed' &&
+          typeof payloadRecord.workspaceId === 'string'
+          ? payloadRecord.workspaceId
+          : undefined;
+        const removedWorkspacePath = removedWorkspaceId === undefined
+          ? undefined
+          : workspacePathById.get(removedWorkspaceId);
+
+        // New workspace/session/archive state must be authoritative for the frame being filtered.
+        observeHostEventEnvelope(parsed);
+        const disabled = new Set(perms.disabled_sessions);
+        const ownsSession = (sessionId: string) => {
+          const cwd = sessionCwdById.get(sessionId);
+          return accountedWorkspaceSessionIds.has(sessionId) &&
+            !disabled.has(sessionId) &&
+            cwd !== undefined &&
+            pathAllowedFor(userId, cwd, perms.allowed_folders);
+        };
+        const filtered = filterTenantEventEnvelope(parsed, {
+          workspacePathAllowed: (candidate) => pathAllowedFor(userId, candidate, perms.allowed_folders),
+          workspaceIdAllowed: (workspaceId) => {
+            const candidate = workspaceId === removedWorkspaceId
+              ? removedWorkspacePath
+              : workspacePathById.get(workspaceId);
+            return candidate !== undefined && pathAllowedFor(userId, candidate, perms.allowed_folders);
+          },
+          sessionOwned: ownsSession,
+          sessionVisible: (sessionId) =>
+            ownsSession(sessionId) && activeWorkspaceSessionIds.has(sessionId),
+          newSessionVisible: (sessionId, cwd) =>
+            !disabled.has(sessionId) &&
+            !archivedWorkspaceSessionIds.has(sessionId) &&
+            pathAllowedFor(userId, cwd, perms.allowed_folders),
+        });
+        if (filtered === undefined || downstream.readyState !== WebSocket.OPEN) return;
+        downstream.send(JSON.stringify(filtered), (error) => {
+          if (error !== undefined) closeBoth();
+        });
+      });
+    });
+  }
+
   // ── 内存结构周期性清理（防长期运行缓慢积累） ───────────────────
   // sessionCache / revokedTokens / usageThrottle / usageReportThrottle /
   // setupAttempts / msgRate 都以 token / IP / userId 为键，平时按需淘汰，
@@ -3372,6 +3586,7 @@ export function createGatewayServer(
     const token = readCookie(req.headers.cookie, COOKIE_NAME);
     let authed = false;
     let userRole: string | null = null;
+    let authedUserId: number | null = null;
     if (token && !isTokenRevoked(token)) {
       try {
         const user = auth.verifyToken(token);
@@ -3381,6 +3596,7 @@ export function createGatewayServer(
           if (!perms.banned) {
             authed = true;
             userRole = row.role;
+            authedUserId = row.id;
           }
         }
       } catch {
@@ -3388,15 +3604,13 @@ export function createGatewayServer(
       }
     }
     if (!authed) {
-      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-      socket.destroy();
+      socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
       return;
     }
 
     // P1-1：internal 端点不接受外部 WS 升级（仅限网关→dsh 本机 HTTP 调用）
     if (gatePath.startsWith('/api/dsh-passwords/internal/')) {
-      socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
-      socket.destroy();
+      rejectUpgrade(socket, 404);
       return;
     }
     // WebSocket 仅是 dsh 的服务器→客户端事件下行通道；客户端消息是协议违规。
@@ -3408,14 +3622,27 @@ export function createGatewayServer(
       gatePath === '/aionui-panel/events' ||
       gatePath.startsWith('/aionui-panel/events/');
     if (!allowedWsPath) {
-      socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
-      socket.destroy();
+      rejectUpgrade(socket, 404);
       return;
     }
     // P1-3：WS 升级路径级权限——admin-only 端点对非 admin 拒绝
     if (userRole !== 'admin' && isAdminOnlyPluginEndpoint(req.method ?? 'GET', gatePath)) {
-      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-      socket.destroy();
+      rejectUpgrade(socket, 403);
+      return;
+    }
+
+    // The Host event streams are process-global. Restricted accounts terminate
+    // at the gateway so every workspace/session frame can be ownership-filtered.
+    if (
+      userRole !== 'admin' &&
+      authedUserId !== null &&
+      (gatePath === '/api/events.mux' || gatePath === '/api/events.host')
+    ) {
+      void refreshWorkspaceAccessSnapshot().then(() => {
+        if (!socket.destroyed) proxyTenantEventWebSocket(req, socket, head, fwdPath, authedUserId!);
+      }).catch(() => {
+        if (!socket.destroyed) rejectUpgrade(socket, 503);
+      });
       return;
     }
 
@@ -3446,6 +3673,11 @@ export function createGatewayServer(
     socket.on('error', () => upstreamSocket.destroy());
     socket.on('close', () => upstreamSocket.destroy());
     upstreamSocket.on('close', () => socket.destroy());
+  });
+
+  server.on('close', () => {
+    for (const client of tenantWebSockets.clients) client.terminate();
+    tenantWebSockets.close();
   });
 
   return server;

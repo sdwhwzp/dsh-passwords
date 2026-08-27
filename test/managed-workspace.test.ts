@@ -115,6 +115,11 @@ test('principal workspace provider resolves private roots and rejects stale or f
     );
     const provider = new ManagedUserWorkspaceProvider(env.db, env.config);
 
+    assert.deepEqual(await provider.listPrincipals(), [
+      { source: 'dsh-passwords', id: '1', username: 'admin', role: 'admin' },
+      { source: 'dsh-passwords', id: String(created.id), username: 'alice', role: 'user' },
+    ]);
+
     assert.equal(await provider.resolve({
       source: 'dsh-passwords', id: String(created.id), username: 'alice', role: 'user',
     }), userRoot);
