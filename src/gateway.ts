@@ -50,7 +50,7 @@ import {
   findStringField,
   SESSION_SCOPED_RE,
   extractSessionId,
-  stripArchivedSessionIds,
+  filterArchivedSessionIds,
   collectArchivedSessionIds,
   filterOwnedSessionIds,
   filterSessionItems,
@@ -2237,13 +2237,19 @@ export function createGatewayServer(
               const outBody = reqAs.dshpwUser !== undefined
                 ? filterByPathFieldWithPredicate(parsed, 'path', workspaceVisible)
                 : parsed;
-              // F-25：子用户（含 allowedFolders=[] 全部允许）只能看到被授权的会话——
-              // 清空 archivedSessionIds 枚举源，并把活动 sessionIds 按逐会话禁用过滤
+              // F-25：子用户（含 allowedFolders=[] 全部允许）只能看到被授权的会话。
+              // DSH 归档后会保留 sessionIds 中的计数槽，由 archivedSessionIds 告诉前端
+              // 隐藏；若两者都删掉，session.list 中的完整条目会掉入「未分组」。
+              // 因此保留可见工作区的归档槽，但只下发当前用户可见且未禁用的归档 ID。
               if (reqAs.dshpwPerms !== undefined) {
-                stripArchivedSessionIds(outBody);
                 const disabled = new Set(reqAs.dshpwPerms.disabled_sessions);
                 const archived = collectArchivedSessionIds(parsed);
-                filterOwnedSessionIds(outBody, (id) => !disabled.has(id) && !archived.has(id));
+                const visibleSessionIds = new Set(collectSessionCwdFromWorkspaces(outBody).keys());
+                filterArchivedSessionIds(
+                  outBody,
+                  (id) => archived.has(id) && visibleSessionIds.has(id) && !disabled.has(id),
+                );
+                filterOwnedSessionIds(outBody, (id) => !disabled.has(id));
               }
               const out = Buffer.from(JSON.stringify(outBody), 'utf8');
               const respHeaders = headersForRewrittenBody(upstreamRes.headers);

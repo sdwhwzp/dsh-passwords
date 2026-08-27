@@ -28,6 +28,27 @@ const WORKSPACES_JSON = JSON.stringify({
   ok: true,
   data: [{ id: 'ws-1', path: '/workspaces/a' }],
 });
+const ARCHIVED_WORKSPACES_JSON = JSON.stringify({
+  rpcId: 'workspace-list-archive-regression',
+  result: {
+    ok: true,
+    value: {
+      items: [
+        {
+          workspaceId: 'ws-visible',
+          path: '/workspaces/a',
+          sessionIds: ['s-active', 's-archived', 's-disabled'],
+        },
+        {
+          workspaceId: 'ws-hidden',
+          path: '/workspaces/b',
+          sessionIds: ['s-other-user'],
+        },
+      ],
+      archivedSessionIds: ['s-archived', 's-other-user', 's-disabled'],
+    },
+  },
+});
 
 let tempDir: string;
 let db: Database;
@@ -54,7 +75,13 @@ function startMockUpstream(): Promise<http.Server> {
         res.end(HTML_BODY.slice(20));
       } else if ((req.url ?? '').startsWith('/api/workspace.list')) {
         res.writeHead(200, { 'content-type': 'application/json' });
-        res.write(badJson ? 'not-json{' : WORKSPACES_JSON);
+        res.write(
+          badJson
+            ? 'not-json{'
+            : req.headers['x-test-mode'] === 'archived-sessions'
+              ? ARCHIVED_WORKSPACES_JSON
+              : WORKSPACES_JSON,
+        );
         res.end();
       } else {
         res.writeHead(200, { 'content-type': 'application/json' });
@@ -329,6 +356,58 @@ test('workspace.list JSON 改写路径：只有 content-length，无 transfer-en
   assert.ok(!names.includes('transfer-encoding'), '改写路径不得带 transfer-encoding');
   const parsed = JSON.parse(r.body);
   assert.deepEqual(parsed.data[0], { id: 'ws-1', path: '/workspaces/a' });
+});
+
+test('workspace.list：子用户归档会话保留工作区槽且不会掉入未分组', async () => {
+  const subUser = db.createUser('archive-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: ['/workspaces/a'],
+    hourlyTokenLimit: null,
+    dailyMinutesLimit: null,
+    allowUpload: true,
+    allowGitDownload: true,
+    allowWorkspaceCreate: false,
+    banned: false,
+    sandboxMode: null,
+    disabledSessions: ['s-disabled'],
+  });
+  const subToken = jwt.sign(
+    { sub: String(subUser.id), username: subUser.username, cv: 0 },
+    'test-secret',
+    { expiresIn: '12h' },
+  );
+  const originalCookie = cookie;
+  cookie = `dsh_gateway_token=${subToken}`;
+  try {
+    const response = await gatewayReq(
+      'POST',
+      '/api/workspace.list',
+      { 'content-type': 'application/json', 'x-test-mode': 'archived-sessions' },
+      '{}',
+    );
+    assert.equal(response.status, 200);
+    const value = (JSON.parse(response.body) as {
+      result: {
+        value: {
+          items: Array<{ path: string; sessionIds: string[] }>;
+          archivedSessionIds: string[];
+        };
+      };
+    }).result.value;
+    assert.deepEqual(value.items.map((item) => item.path), ['/workspaces/a']);
+    assert.deepEqual(
+      value.items[0].sessionIds,
+      ['s-active', 's-archived'],
+      '归档会话保留在工作区计数槽中，由 archivedSessionIds 负责隐藏',
+    );
+    assert.deepEqual(
+      value.archivedSessionIds,
+      ['s-archived'],
+      '只下发当前子用户可见且未禁用的归档 ID',
+    );
+  } finally {
+    cookie = originalCookie;
+  }
 });
 
 test('流式透传路径（session.list，管理员）：保留 chunked，不带 content-length', async () => {

@@ -5,6 +5,8 @@ import {
   SESSION_SCOPED_RE,
   extractSessionId,
   stripArchivedSessionIds,
+  filterArchivedSessionIds,
+  filterOwnedSessionIds,
   filterSessionItems,
   collectSessionCwd,
   collectSessionCwdFromWorkspaces,
@@ -34,6 +36,44 @@ test('F-25：stripArchivedSessionIds 清空 archivedSessionIds 数组', () => {
   assert.equal(changed, true);
   assert.deepEqual(obj.workspaces[0].archivedSessionIds, []);
   assert.equal(obj.keep, 'x');
+});
+
+test('F-25：子用户保留可见归档槽，归档会话不掉入未分组', () => {
+  const obj = {
+    result: {
+      value: {
+        items: [
+          {
+            workspaceId: 'w1',
+            path: '/root/11',
+            // DSH 归档契约：s-archived 归档后仍保留在 sessionIds 中。
+            sessionIds: ['s-active', 's-archived', 's-disabled'],
+          },
+        ],
+        archivedSessionIds: ['s-archived', 's-other-user', 's-disabled'],
+      },
+    },
+  };
+  const disabled = new Set(['s-disabled']);
+  const archived = new Set(obj.result.value.archivedSessionIds);
+  const visibleSessionIds = new Set(collectSessionCwdFromWorkspaces(obj).keys());
+
+  filterArchivedSessionIds(
+    obj,
+    (id) => archived.has(id) && visibleSessionIds.has(id) && !disabled.has(id),
+  );
+  filterOwnedSessionIds(obj, (id) => !disabled.has(id));
+
+  assert.deepEqual(
+    obj.result.value.items[0].sessionIds,
+    ['s-active', 's-archived'],
+    '归档会话必须保留工作区计数槽，仅移除被禁用会话',
+  );
+  assert.deepEqual(
+    obj.result.value.archivedSessionIds,
+    ['s-archived'],
+    '归档列表只暴露当前用户可见的归档 ID',
+  );
 });
 
 test('F-25：filterSessionItems 只保留自己拥有的会话（sessionId+cwd 条目）', () => {
