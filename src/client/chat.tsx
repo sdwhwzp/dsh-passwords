@@ -29,7 +29,7 @@ interface Me {
 const PRESET_TAGS = ['issue', 'pr', 'discussion', 'announcement', 'question'] as const;
 const POLL_MS = 4000;
 
-// ── 聊天入口悬浮钮：中键拖动可移动（left/top 定位，localStorage 持久化）──
+// ── 聊天入口悬浮钮：鼠标或触摸拖动（left/top 定位，localStorage 持久化）──
 const FAB_SIZE = 36;
 const FAB_DEFAULT_BOTTOM = 116; // 原 CSS 默认 bottom
 const FAB_STORAGE_KEY = 'dshpw_fab_pos';
@@ -37,6 +37,18 @@ const FAB_STORAGE_KEY = 'dshpw_fab_pos';
 function defaultFabPos(): { left: number; top: number } {
   const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
   return { left: 14, top: Math.max(0, vh - FAB_SIZE - FAB_DEFAULT_BOTTOM) };
+}
+
+/** 根据指针位移计算悬浮按钮位置，并限制在当前视口内。 */
+export function fabPositionAfterDrag(
+  base: { left: number; top: number },
+  delta: { x: number; y: number },
+  viewport: { width: number; height: number },
+): { left: number; top: number } {
+  return {
+    left: Math.min(Math.max(0, base.left + delta.x), Math.max(0, viewport.width - FAB_SIZE)),
+    top: Math.min(Math.max(0, base.top + delta.y), Math.max(0, viewport.height - FAB_SIZE)),
+  };
 }
 
 /** 标签显示：canonical key 走 i18n，旧标签兼容映射，未知标签原样回退 */
@@ -148,10 +160,14 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
   // 发送请求期间用户可能继续编辑；失败回滚只允许覆盖未发生新编辑的草稿
   const draftRevisionRef = useRef(0);
 
-  // ── 中键拖动 FAB：位置 state + ref（拖动用 ref 避免重挂监听器）──
+  // ── 指针拖动 FAB：位置 state + ref ──
   const fabPosRef = useRef(defaultFabPos());
   const [fabPos, setFabPosState] = useState(fabPosRef.current);
+  const [dragging, setDragging] = useState(false);
+  const suppressClickRef = useRef(false);
   const dragRef = useRef<{
+    pointerId: number;
+    button: number;
     startX: number;
     startY: number;
     baseLeft: number;
@@ -255,55 +271,13 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
     }
   }, []);
 
-  // 中键按下开始拖动（window 级监听一次挂载，拖动状态走 ref）
-  useEffect(() => {
-    if (chatEntry !== 'on') return;
-    const onMove = (e: MouseEvent) => {
-      const d = dragRef.current;
-      if (!d) return;
-      const dx = e.clientX - d.startX;
-      const dy = e.clientY - d.startY;
-      if (!d.moved && Math.abs(dx) + Math.abs(dy) > 3) d.moved = true;
-      const vw = window.innerWidth;
-      const vh = window.innerHeight;
-      const next = {
-        left: Math.min(Math.max(0, d.baseLeft + dx), Math.max(0, vw - FAB_SIZE)),
-        top: Math.min(Math.max(0, d.baseTop + dy), Math.max(0, vh - FAB_SIZE)),
-      };
-      d.lastPos = next;
-      fabPosRef.current = next;
-      setFabPosState(next);
-    };
-    const onUp = () => {
-      const d = dragRef.current;
-      if (!d) return;
-      dragRef.current = null;
-      // 触发一次 re-render：dragging 由 dragRef.current !== null 在渲染时派生，
-      // 不 setState 的话 mouseup 后组件停留在最后一次 mousemove 的 dragging=true，
-      // FAB 的 hover 过渡动画不会恢复（直到下一次任意 state 变化，如 4 秒轮询）
-      setFabPosState((p) => ({ ...p }));
-      // 实际拖动过才持久化（纯点击不落盘）；未拖动视为中键点击，无副作用
-      if (d.moved && d.lastPos) {
-        try {
-          localStorage.setItem(FAB_STORAGE_KEY, JSON.stringify(d.lastPos));
-        } catch {
-          // 存储不可用（隐私模式等）：位置本次会话有效即可
-        }
-      }
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    return () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
-  }, [chatEntry]);
-
-  const onFabMouseDown = (e: React.MouseEvent<HTMLButtonElement>) => {
-    if (e.button !== 1) return; // 仅中键
-    // 阻止中键默认行为（浏览器 autoscroll 滚动模式）
-    e.preventDefault();
+  const onFabPointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
+    if (!e.isPrimary || (e.button !== 0 && e.button !== 1)) return;
+    if (e.button === 1) e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
     dragRef.current = {
+      pointerId: e.pointerId,
+      button: e.button,
       startX: e.clientX,
       startY: e.clientY,
       baseLeft: fabPosRef.current.left,
@@ -311,10 +285,43 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
       moved: false,
       lastPos: null,
     };
+    setDragging(true);
   };
 
-  // 拖动进行中：禁用 hover 放大等过渡动画，避免位置跟随抖动
-  const dragging = dragRef.current !== null;
+  const onFabPointerMove = (e: React.PointerEvent<HTMLButtonElement>) => {
+    const d = dragRef.current;
+    if (!d || d.pointerId !== e.pointerId) return;
+    const dx = e.clientX - d.startX;
+    const dy = e.clientY - d.startY;
+    if (!d.moved && Math.abs(dx) + Math.abs(dy) > 3) d.moved = true;
+    if (!d.moved) return;
+    const next = fabPositionAfterDrag(
+      { left: d.baseLeft, top: d.baseTop },
+      { x: dx, y: dy },
+      { width: window.innerWidth, height: window.innerHeight },
+    );
+    d.lastPos = next;
+    fabPosRef.current = next;
+    setFabPosState(next);
+  };
+
+  const finishFabDrag = (pointerId: number, cancelled: boolean) => {
+    const d = dragRef.current;
+    if (!d || d.pointerId !== pointerId) return;
+    dragRef.current = null;
+    setDragging(false);
+    suppressClickRef.current = !cancelled && d.button === 0 && d.moved;
+    if (suppressClickRef.current) {
+      window.setTimeout(() => { suppressClickRef.current = false; }, 0);
+    }
+    if (!cancelled && d.moved && d.lastPos) {
+      try {
+        localStorage.setItem(FAB_STORAGE_KEY, JSON.stringify(d.lastPos));
+      } catch {
+        // 存储不可用（隐私模式等）：位置本次会话有效即可
+      }
+    }
+  };
 
   useEffect(() => {
     openRef.current = open;
@@ -529,8 +536,18 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
         style={{ left: fabPos.left, top: fabPos.top, bottom: 'auto' }}
         aria-label={t('chat.open')}
         title={`${t('chat.open')} · ${t('chat.dragHint')}`}
-        onClick={openPanel}
-        onMouseDown={onFabMouseDown}
+        onClick={(e) => {
+          if (suppressClickRef.current) {
+            e.preventDefault();
+            suppressClickRef.current = false;
+            return;
+          }
+          openPanel();
+        }}
+        onPointerDown={onFabPointerDown}
+        onPointerMove={onFabPointerMove}
+        onPointerUp={(e) => finishFabDrag(e.pointerId, false)}
+        onPointerCancel={(e) => finishFabDrag(e.pointerId, true)}
         onAuxClick={(e) => {
           if (e.button === 1) e.preventDefault();
         }}
@@ -694,7 +711,7 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
 
 // ── 聊天面板样式：跟随 dsh 设计令牌，主题自动适配 ───────────────
 const CHAT_CSS = `
-.dshpw-chat-fab{position:fixed;z-index:2147483000;width:36px;height:36px;border-radius:50%;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.18);transition:transform .18s,box-shadow .18s,background .18s;pointer-events:auto;animation:dshpwFabIn .4s cubic-bezier(.34,1.56,.64,1)}
+.dshpw-chat-fab{position:fixed;z-index:2147483000;width:36px;height:36px;border-radius:50%;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);display:flex;align-items:center;justify-content:center;cursor:grab;touch-action:none;box-shadow:0 2px 8px rgba(0,0,0,.18);transition:transform .18s,box-shadow .18s,background .18s;pointer-events:auto;animation:dshpwFabIn .4s cubic-bezier(.34,1.56,.64,1)}
 .dshpw-chat-fab.dragging{transition:none;cursor:grabbing;opacity:.85}
 .dshpw-chat-fab:hover{transform:scale(1.05);background:var(--dsw-alias-interactive-bg-hover);box-shadow:0 4px 12px rgba(0,0,0,.25)}
 .dshpw-chat-fab:active{transform:scale(.88)}

@@ -121,7 +121,7 @@ export const zh = {
   subHint: '创建后会自动分配一个可写的宿主机专属工作区；子用户没有用户管理权限。',
   // 聊天 / 留言
   'chat.open': '打开聊天',
-  'chat.dragHint': '中键按住可拖动位置',
+  'chat.dragHint': '鼠标或触摸拖动可移动位置',
   'chat.title': '消息与留言',
   'chat.close': '关闭',
   'chat.send': '发送',
@@ -310,7 +310,7 @@ export const en: Record<keyof typeof zh, string> = {
   subHint: 'Each new subuser receives a writable private host workspace and has no user-management permission.',
   // Chat / messages
   'chat.open': 'Open chat',
-  'chat.dragHint': 'Hold middle mouse button to drag',
+  'chat.dragHint': 'Drag with a mouse or touch to move',
   'chat.title': 'Messages',
   'chat.close': 'Close',
   'chat.send': 'Send',

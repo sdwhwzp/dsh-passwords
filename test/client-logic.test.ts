@@ -2,7 +2,7 @@
 // 这两个函数是聊天合并与权限保存的核心逻辑，覆盖边界防回归。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mergeById } from '../src/client/chat.tsx';
+import { fabPositionAfterDrag, mergeById } from '../src/client/chat.tsx';
 import { parseLimit } from '../src/client/card.tsx';
 
 type Msg = Parameters<typeof mergeById>[0];
@@ -40,6 +40,17 @@ test('mergeById：保留最近 200 条（截断最旧）', () => {
   assert.equal(out.length, 200);
   assert.equal(out[0].id, 2);
   assert.equal(out[out.length - 1].id, 201);
+});
+
+test('消息气泡拖动位置跟随指针并限制在视口内', () => {
+  assert.deepEqual(
+    fabPositionAfterDrag({ left: 14, top: 100 }, { x: 30, y: -20 }, { width: 320, height: 240 }),
+    { left: 44, top: 80 },
+  );
+  assert.deepEqual(
+    fabPositionAfterDrag({ left: 14, top: 100 }, { x: -100, y: 500 }, { width: 320, height: 240 }),
+    { left: 0, top: 204 },
+  );
 });
 
 // ── parseLimit（权限限额输入解析） ────────────────────────────
