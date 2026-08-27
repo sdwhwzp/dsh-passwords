@@ -763,7 +763,7 @@ export function isWorkspaceDirectoryCreate(pathname: string): boolean {
   return /^\/api\/host[.\/]createDirectory(?:[.\/]|$)/.test(pathname);
 }
 
-/** 当前 dsh 已提供的删除/重命名端点；移动、归档、导入暂不纳入子用户权限。 */
+/** 当前 dsh 已提供的删除/重命名端点；移动、导入暂不纳入子用户权限。 */
 export function isWorkspaceDeleteOrRename(pathname: string): boolean {
   return /^\/api\/workspace[.\/](remove|delete|rename|update)([.\/]|$)/.test(pathname);
 }
@@ -773,7 +773,7 @@ export function isWorkspaceWrite(pathname: string): boolean {
   return (
     isWorkspaceCreate(pathname) ||
     isWorkspaceDeleteOrRename(pathname) ||
-    /^\/api\/workspace[.\/](import|move|archiveSession|insertBefore|insertSessionBefore|materialize|adopt)([.\/]|$)/.test(pathname)
+    /^\/api\/workspace[.\/](import|move|insertBefore|insertSessionBefore|materialize|adopt)([.\/]|$)/.test(pathname)
   );
 }
 
@@ -789,7 +789,7 @@ export const WORKSPACE_ENDPOINT_RE = /^\/api\/session[.\/](create)([.\/]|$)/;
  * 子用户必须启用其所在工作区，且该会话未被管理员单独关闭。
  * create 无源会话、list 单独做工作区/会话过滤，均不在此列。
  */
-export const SESSION_SCOPED_RE = /^\/api\/session[.\/](history|prompt|respond|archive|delete|rename|retitle|title|resume|fork|truncate|export)([.\/]|$)/;
+export const SESSION_SCOPED_RE = /^\/api\/(?:session[.\/](?:history|prompt|respond|archive|delete|rename|retitle|title|resume|fork|truncate|export)|workspace[.\/]archiveSession)([.\/]|$)/;
 
 /** 递归查找请求体里的 sessionId（typert wire 字段）；找不到返回 null */
 export function extractSessionId(value: unknown, depth = 0): string | null {
@@ -844,24 +844,49 @@ export function collectArchivedSessionIds(value: unknown, out: Set<string> = new
 }
 
 /**
+ * 递归过滤 archivedSessionIds，只保留当前用户可见的归档会话。
+ *
+ * DSH 的归档契约会把归档会话继续保留在工作区 sessionIds 中，以便取消归档时
+ * 恢复原位置；前端依靠 archivedSessionIds 把这些会话从普通分组中隐藏。因此
+ * 不能简单清空 archivedSessionIds 后再从 sessionIds 删除归档项，否则完整的
+ * session.list 条目会被前端当成「未分组」会话。
+ */
+export function filterArchivedSessionIds(
+  value: unknown,
+  keep: (id: string) => boolean,
+  depth = 0,
+): boolean {
+  if (depth > 8 || value === null || typeof value !== 'object') return false;
+  const obj = value as Record<string, unknown>;
+  let changed = false;
+  if (Array.isArray(obj.archivedSessionIds)) {
+    const original = obj.archivedSessionIds;
+    const filtered = original.filter(
+      (id): id is string => typeof id === 'string' && keep(id),
+    );
+    if (
+      filtered.length !== original.length ||
+      filtered.some((id, index) => id !== original[index])
+    ) {
+      obj.archivedSessionIds = filtered;
+      changed = true;
+    }
+  }
+  for (const key of Object.keys(obj)) {
+    const nested = obj[key];
+    if (nested !== null && typeof nested === 'object') {
+      if (filterArchivedSessionIds(nested, keep, depth + 1)) changed = true;
+    }
+  }
+  return changed;
+}
+
+/**
  * 递归清空 archivedSessionIds 数组（F-25 枚举源：workspace.list 把他人会话 ID
  * 直接漏给受限子用户）。返回是否有改动。
  */
 export function stripArchivedSessionIds(value: unknown, depth = 0): boolean {
-  if (depth > 8 || value === null || typeof value !== 'object') return false;
-  const obj = value as Record<string, unknown>;
-  let changed = false;
-  if (Array.isArray(obj.archivedSessionIds) && obj.archivedSessionIds.length > 0) {
-    obj.archivedSessionIds = [];
-    changed = true;
-  }
-  for (const key of Object.keys(obj)) {
-    const v = obj[key];
-    if (v !== null && typeof v === 'object') {
-      if (stripArchivedSessionIds(v, depth + 1)) changed = true;
-    }
-  }
-  return changed;
+  return filterArchivedSessionIds(value, () => false, depth);
 }
 
 /**
