@@ -9,7 +9,7 @@ import { AuthService } from '../src/auth.js';
 import type { PlatformConfig } from '../src/config.js';
 import { Database } from '../src/db.js';
 import { createFieldCrypto } from '../src/encrypt.js';
-import { ManagedWorkspaceProvisioner } from '../src/managed-workspace.js';
+import { ManagedUserWorkspaceProvider, ManagedWorkspaceProvisioner } from '../src/managed-workspace.js';
 
 class FakeWorkspaceRegistry {
   readonly workspaces: Array<{
@@ -98,6 +98,43 @@ test('new subuser receives a private registered workspace with workspace-write p
     const permissions = env.db.getPermissions(user.id)!;
     assert.deepEqual(permissions.allowed_folders, [workspacePath]);
     assert.equal(permissions.sandbox_mode, 'workspace-write');
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test('principal workspace provider resolves private roots and rejects stale or forged identities', async () => {
+  const env = await harness();
+  try {
+    const created = env.db.createUser('alice', await bcrypt.hash('UserPassword1!', 4), 'user');
+    const registry = new FakeWorkspaceRegistry();
+    const provisioner = new ManagedWorkspaceProvisioner(env.db, env.config);
+    const userRoot = await provisioner.provisionNewUser(
+      registry as unknown as WorkspaceRegistry,
+      env.db.getUserListRowById(created.id)!,
+    );
+    const provider = new ManagedUserWorkspaceProvider(env.db, env.config);
+
+    assert.equal(await provider.resolve({
+      source: 'dsh-passwords', id: String(created.id), username: 'alice', role: 'user',
+    }), userRoot);
+    assert.equal(await provider.resolve({
+      source: 'dsh-passwords', id: String(created.id), username: 'mallory', role: 'user',
+    }), undefined);
+    assert.equal(await provider.resolve({
+      source: 'other', id: String(created.id), username: 'alice', role: 'user',
+    }), undefined);
+    await rm(userRoot, { recursive: true, force: true });
+    assert.equal(await provider.resolve({
+      source: 'dsh-passwords', id: String(created.id), username: 'alice', role: 'user',
+    }), undefined);
+
+    const adminRoot = await provider.resolve({
+      source: 'dsh-passwords', id: '1', username: 'admin', role: 'admin',
+    });
+    assert.equal(adminRoot, path.join(await realpath(env.config.managedWorkspaceRoot), 'admin-u1'));
+    assert.equal((await stat(adminRoot!)).isDirectory(), true);
+    if (process.platform !== 'win32') assert.equal((await stat(adminRoot!)).mode & 0o777, 0o700);
   } finally {
     await env.cleanup();
   }

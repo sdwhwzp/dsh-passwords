@@ -25,6 +25,7 @@ Listed in [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek
 - One **owner** (created at first-time setup) + any number of **subusers**, each with their own login
 - All account management happens in a card on dsh's settings page — no SSH needed: change passwords, change usernames, create/delete subusers
 - Creating a subuser also creates and registers a private host workspace (default `~/dsh-user-workspaces/u<user-id>`) with an initial `workspace-write` sandbox; existing subusers are backfilled on the first startup after upgrade
+- A principal-validated private-root service lets standalone storage plugins mount each account's own remote directory below its managed root without accepting or exposing another account's path
 - Subusers can open **Folder management** above Workspaces in the sidebar to browse their own managed directory, download or delete files, recursively delete folders, and upload local files or whole folders into the current directory. Folder structure is retained (browser folder selection does not report empty directories), and relative-path authorization prevents access to other accounts or host directories
 - A **Sign out** button beside the current identity immediately revokes the server-side session and clears the cookie after confirmation
 - The owner manages all subusers; subusers can only change themselves

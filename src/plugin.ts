@@ -30,7 +30,7 @@ import {
   DEVICE_APPROVAL_ERROR,
   LocalWorkspaceHub,
 } from './local-workspace-hub.js';
-import { ManagedWorkspaceProvisioner } from './managed-workspace.js';
+import { ManagedWorkspaceProvisioner, registerManagedUserWorkspace } from './managed-workspace.js';
 import { registerRequestPrincipal } from './principal.js';
 import type { AuthenticatedPrincipal } from './principal.js';
 import { backupSqliteBeforeMigration } from './db-backup.js';
@@ -361,6 +361,7 @@ export function apply(ctx: Context): void {
 
   const localWorkspaceHub = db === null ? null : new LocalWorkspaceHub(ctx, db, cfg);
   const managedWorkspaces = db === null ? null : new ManagedWorkspaceProvisioner(db, cfg);
+  if (db !== null) registerManagedUserWorkspace(ctx, db, cfg);
   let userMutationTail: Promise<void> = Promise.resolve();
   const mutateUser = <T>(operation: () => Promise<T>): Promise<T> => {
     const result = userMutationTail.then(operation, operation);
