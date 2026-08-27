@@ -10,7 +10,7 @@
 // 远程设置补丁：强制启用，网关启动时自动应用（幂等）——
 // dsh 升级覆盖文件后，重启网关就会自动重打，无需手动操作。
 // 也可手动：node dist/cli.js patch [status]
-import { loadConfig } from './config.js';
+import { databaseTarget, loadConfig } from './config.js';
 import { Database } from './db.js';
 import { AuthService } from './auth.js';
 import { createGatewayServer, createRedirectServer } from './gateway.js';
@@ -96,7 +96,7 @@ function runAudit(argv: string[]): void {
     }
   }
   const config = loadConfig();
-  const db = new Database(config.dbPath, createFieldCrypto(config.dbEncKey, config.setupKey));
+  const db = new Database(databaseTarget(config), createFieldCrypto(config.dbEncKey, config.setupKey));
   db.init();
   const rows = db.listAuditLogs(limit);
   if (rows.length === 0) {
@@ -231,10 +231,10 @@ async function boot() {
     console.error(`[dsh-passwords] ${tr('cli.patchSyncFailed')}:`, error);
   }
 
-  backupSqliteBeforeMigration(config.dbPath);
-  const db = new Database(config.dbPath, createFieldCrypto(config.dbEncKey, config.setupKey));
+  if (config.database.driver === 'sqlite') backupSqliteBeforeMigration(config.database.path);
+  const db = new Database(databaseTarget(config), createFieldCrypto(config.dbEncKey, config.setupKey));
   db.init();
-  // dsh 登录只依赖本插件的本地 SQLite 账号库。
+  // dsh authentication uses the repository selected in the protected environment file.
   const auth = new AuthService(config, db);
 
   // ── 80 端口：301 跳转 + ACME HTTP-01 挑战应答 ──
@@ -328,7 +328,10 @@ async function boot() {
     console.error(
       `[dsh-passwords] ${tr('cli.gatewayListening', { mode: tlsOn ? 'HTTPS' : 'HTTP' })}: ${tlsOn ? 'https' : 'http'}://${config.gateway.host}:${config.gateway.port} → ${tr('cli.upstream')} ${config.gateway.upstream}`,
     );
-    console.error(`[dsh-passwords] ${tr('cli.db')}: ${config.dbPath}`);
+    const databaseLabel = config.database.driver === 'sqlite'
+      ? config.database.path
+      : `mysql://${config.database.host}:${String(config.database.port)}/${config.database.database}`;
+    console.error(`[dsh-passwords] ${tr('cli.db')}: ${databaseLabel}`);
     if (!tlsOn) {
       // 显式关闭自动 HTTPS 才走得到这里：给出醒目危险提示
       console.error(`[dsh-passwords] ${tr('cli.httpWarning')}`);

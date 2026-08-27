@@ -105,7 +105,7 @@ test('全局入口包含一键按钮、下载与首次使用说明', () => {
   assert.match(source, /t\('localGuideReopen'\)/);
 });
 
-test('通过新会话 Hero 控制行注册且 launch 响应经过校验后才导航', () => {
+test('通过选择模式旁的新会话控制行注册且 launch 响应经过校验后才导航', () => {
   const indexSource = readFileSync(path.join(root, 'src/client/index.tsx'), 'utf8');
   const launcherSource = readFileSync(path.join(root, 'src/client/local-workspace-launcher.tsx'), 'utf8');
   const launchUriSource = readFileSync(path.join(root, 'src/client/local-workspace-launch-uri.ts'), 'utf8');
@@ -113,10 +113,11 @@ test('通过新会话 Hero 控制行注册且 launch 响应经过校验后才导
   assert.match(indexSource, /ctx\.slots\.inject\('conversation\.input\.bootstrap'/);
   assert.match(indexSource, /name: 'conversation\.input\.bootstrap'/);
   assert.match(indexSource, /id: 'dsh-passwords-local-workspace-launcher'/);
+  assert.match(indexSource, /dshpw-local-launcher-seat\{position:relative;display:inline-flex/);
+  assert.doesNotMatch(indexSource, /id: 'dsh-passwords-local-workspace-sidebar'/);
   assert.match(indexSource, /ctx\.workspaces\.connectWorkspace\(workspace\.workspaceId\)/);
   assert.match(indexSource, /ctx\.sessions\.open\(sessionId\)/);
   assert.match(indexSource, /order: 30/);
-  assert.doesNotMatch(indexSource, /dshpw-local-launcher-popover/);
   assert.doesNotMatch(launcherSource, /querySelector|MutationObserver/);
   assert.match(launcherSource, /IconProjectAddOutline16/);
   assert.match(launcherSource, /onClick: onSummaryClick/);

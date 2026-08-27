@@ -9,6 +9,11 @@
 #   dsh web --patch ./cordis.yml
 # 或把本文件内容合并进 ~/.dsh/profiles/web/cordis.patch.yml
 
+# Connection 在请求处理期间读取 requestPrincipal；显式注入可让它访问由
+# dsh-passwords 发布到 Host 根作用域的身份验证服务。
+- id: connection
+  inject: [webRuntime, requestPrincipal]
+
 # ── 目录选择固定为「应用内浏览对话框」 ──────────────────────────
 # dsh 默认挂 -auto 选择器：loopback 绑定 + 有显示会话时判定为 native
 # （浏览器原生目录选择器）——远程经网关访问时 pickDirectory 会失败。

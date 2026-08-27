@@ -6,7 +6,7 @@ import http, { type IncomingMessage, type IncomingHttpHeaders } from 'node:http'
 import https from 'node:https';
 import { createSecureContext } from 'node:tls';
 import { readFileSync, readdirSync, statSync, createReadStream, createWriteStream, realpathSync } from 'node:fs';
-import { link, lstat, mkdir, realpath, unlink } from 'node:fs/promises';
+import { link, lstat, mkdir, realpath, rm, unlink } from 'node:fs/promises';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -80,6 +80,7 @@ type Req = Request & {
 const HOST_LIST_DIRECTORY_RE = /^\/api\/host[.\/]listDirectory$/;
 const HOST_CREATE_DIRECTORY_RE = /^\/api\/host[.\/]createDirectory$/;
 const WORKSPACE_CREATE_RE = /^\/api\/workspace[.\/]create$/;
+const WORKSPACE_DELETE_RE = /^\/api\/workspace[.\/]delete$/;
 const MODEL_CATALOG_RE = /^\/api\/(?:llm|session)[.\/]models$/;
 const MANAGED_FILE_UPLOAD_MAX_BYTES = 256 * 1024 * 1024;
 const MANAGED_FILE_LIST_MAX_ENTRIES = 1_000;
@@ -1535,6 +1536,55 @@ export function createGatewayServer(
     stream.pipe(res);
   });
 
+  app.delete('/gateway/api/managed-files', async (req, res) => {
+    const access = managedFilesAuth(req, res, true);
+    if (access === null) return;
+    const relativePath = typeof req.query.path === 'string' ? req.query.path : '';
+    const segments = managedFileSegments(relativePath);
+    const resolved = managedFilePathFor(access.me.userId, relativePath);
+    if (segments === null || segments.length === 0 || resolved === null || resolved.relative === '') {
+      res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '不能删除专属文件夹根目录或越权路径' });
+      return;
+    }
+
+    const lexicalTarget = path.join(resolved.root, ...segments);
+    let info;
+    try {
+      info = await lstat(lexicalTarget);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        res.status(404).json({ ok: false, code: 'NOT_FOUND', error: '文件或文件夹不存在' });
+      } else {
+        res.status(500).json({ ok: false, code: 'INTERNAL', error: '读取删除目标失败' });
+      }
+      return;
+    }
+    if (info.isSymbolicLink()) {
+      res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '不能删除符号链接' });
+      return;
+    }
+    if (!info.isFile() && !info.isDirectory()) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: '只能删除普通文件或文件夹' });
+      return;
+    }
+
+    const kind = info.isDirectory() ? 'directory' as const : 'file' as const;
+    try {
+      await rm(resolved.target, { recursive: kind === 'directory', force: false });
+      db.audit('managed_file_deleted', {
+        username: access.me.username,
+        detail: JSON.stringify({ path: resolved.relative, kind }),
+      });
+      res.json({ ok: true, deleted: { path: resolved.relative, kind } });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        res.status(404).json({ ok: false, code: 'NOT_FOUND', error: '文件或文件夹不存在' });
+      } else {
+        res.status(500).json({ ok: false, code: 'INTERNAL', error: '删除失败' });
+      }
+    }
+  });
+
   app.put('/gateway/api/managed-files/upload', async (req, res) => {
     const access = managedFilesAuth(req, res, true);
     if (access === null) return;
@@ -2216,8 +2266,10 @@ export function createGatewayServer(
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.noUpload')));
           return;
         }
-        const managedWorkspaceCreate = WORKSPACE_CREATE_RE.test(requestPath) && managedWorkspace !== null;
-        if (isWorkspaceWrite(requestPath) && !managedWorkspaceCreate) {
+        const managedWorkspaceMutation = managedWorkspace !== null && (
+          WORKSPACE_CREATE_RE.test(requestPath) || WORKSPACE_DELETE_RE.test(requestPath)
+        );
+        if (isWorkspaceWrite(requestPath) && !managedWorkspaceMutation) {
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.workspaceDenied')));
           return;
         }
@@ -2929,7 +2981,12 @@ export function createGatewayServer(
     const needsFolderCheck =
       reqAs.dshpwPerms !== undefined &&
       (req.method === 'POST' || req.method === 'PUT' || (req.method === 'DELETE' && isAionuiPanel(proxyPath))) &&
-      (needsManagedWorkspaceCheck || WORKSPACE_ENDPOINT_RE.test(proxyPath) || isAionuiPanel(proxyPath));
+      (
+        needsManagedWorkspaceCheck ||
+        WORKSPACE_DELETE_RE.test(proxyPath) ||
+        WORKSPACE_ENDPOINT_RE.test(proxyPath) ||
+        isAionuiPanel(proxyPath)
+      );
     const needsSandboxCheck =
       reqAs.dshpwPerms !== undefined &&
       reqAs.dshpwPerms.sandbox_mode !== null &&
@@ -3114,6 +3171,14 @@ export function createGatewayServer(
           ) {
             upstreamReq.destroy();
             res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+            return;
+          }
+          if (
+            WORKSPACE_DELETE_RE.test(proxyPath) &&
+            (targetPath === null || managedPathFor(reqAs.dshpwUser!, targetPath) === null)
+          ) {
+            upstreamReq.destroy();
+            res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.workspaceDenied')));
             return;
           }
           // 记录本次判定出的目标目录，供 session.create/fork 响应回调登记 sessionId→cwd 缓存

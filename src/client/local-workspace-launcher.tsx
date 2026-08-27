@@ -1,4 +1,4 @@
-/** New-session Hero action that opens the signed-in user's local workspace companion. */
+/** New-session control-row action that opens the signed-in user's local workspace companion. */
 
 import { Fragment, createElement as h, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { IconProjectAddOutline16 } from '@deepseek-ai/dsh-client-ui-primitives';

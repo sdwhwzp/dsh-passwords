@@ -47,6 +47,7 @@ async function runScenario(
     root: string;
     child: string;
     outside: string;
+    shared: string;
     escapedLink: string | null;
     upstreamCalls: Array<{ method: string; payload: Record<string, unknown> }>;
     request(method: string, payload: Record<string, unknown>): Promise<GatewayResponse>;
@@ -55,11 +56,14 @@ async function runScenario(
   const tempDir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-managed-browser-'));
   const rootPath = path.join(tempDir, 'managed', 'u2');
   const outsidePath = path.join(tempDir, 'outside');
+  const sharedPath = path.join(tempDir, 'shared');
   mkdirSync(path.join(rootPath, 'projects'), { recursive: true });
   mkdirSync(outsidePath, { recursive: true });
+  mkdirSync(sharedPath, { recursive: true });
   const root = realpathSync(rootPath);
   const child = path.join(root, 'projects');
   const outside = realpathSync(outsidePath);
+  const shared = realpathSync(sharedPath);
   const escapedLink = process.platform === 'win32' ? null : path.join(root, 'escaped-link');
   if (escapedLink !== null) symlinkSync(outside, escapedLink, 'dir');
 
@@ -69,7 +73,7 @@ async function runScenario(
   const user = db.createUser('subuser', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setManagedWorkspace(user.id, root);
   db.setPermissions(user.id, {
-    allowedFolders: [root],
+    allowedFolders: [root, shared],
     hourlyTokenLimit: null,
     dailyMinutesLimit: null,
     monthlyBudgetMicros: 0,
@@ -81,6 +85,7 @@ async function runScenario(
   });
 
   const upstreamCalls: Array<{ method: string; payload: Record<string, unknown> }> = [];
+  let createdWorkspacePath: string | null = null;
   const upstream = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on('data', (chunk: Buffer) => chunks.push(chunk));
@@ -128,6 +133,7 @@ async function runScenario(
 
       if (envelope.method === 'workspace.create') {
         const workspacePath = String(envelope.payload.path);
+        createdWorkspacePath = workspacePath;
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(rpcResponse(envelope.rpcId, {
           workspace: {
@@ -140,6 +146,32 @@ async function runScenario(
           },
           created: true,
         }));
+        return;
+      }
+
+      if (envelope.method === 'workspace.list') {
+        const workspaces = [
+          ...(createdWorkspacePath === null ? [] : [{
+            workspaceId: 'workspace-created',
+            path: createdWorkspacePath,
+            title: path.basename(createdWorkspacePath),
+            sessionIds: [],
+          }]),
+          {
+            workspaceId: 'workspace-outside',
+            path: outside,
+            title: path.basename(outside),
+            sessionIds: [],
+          },
+          {
+            workspaceId: 'workspace-shared',
+            path: shared,
+            title: path.basename(shared),
+            sessionIds: [],
+          },
+        ];
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(rpcResponse(envelope.rpcId, { workspaces, archivedSessionIds: [] }));
         return;
       }
 
@@ -215,7 +247,7 @@ async function runScenario(
     });
 
   try {
-    await run({ root, child, outside, escapedLink, upstreamCalls, request });
+    await run({ root, child, outside, shared, escapedLink, upstreamCalls, request });
   } finally {
     await close(gateway);
     await close(upstream);
@@ -241,7 +273,7 @@ test('directory picker opens at the private root and hides host ancestors and es
   });
 });
 
-test('subuser can create and adopt a child folder but cannot leave the private root', async () => {
+test('subuser can create, adopt, and remove a private workspace registration but cannot leave the private root', async () => {
   await runScenario(async ({ root, outside, escapedLink, upstreamCalls, request }) => {
     const created = await request('host.createDirectory', { path: root, name: 'fresh' });
     assert.equal(created.status, 200, String(created.body));
@@ -264,7 +296,18 @@ test('subuser can create and adopt a child folder but cannot leave the private r
       assert.equal((await request('workspace.create', { path: escapedLink })).status, 403);
       assert.equal((await request('session.create', { cwd: escapedLink })).status, 403);
     }
-    assert.equal((await request('workspace.delete', { workspaceId: 'workspace-created' })).status, 403);
     assert.equal(upstreamCalls.length, callsBeforeDenials);
+
+    const deleted = await request('workspace.delete', { workspaceId: 'workspace-created' });
+    assert.equal(deleted.status, 200, String(deleted.body));
+    assert.equal(upstreamCalls.filter((call) => call.method === 'workspace.delete').length, 1);
+
+    const deleteCallsBeforeOutside = upstreamCalls.filter((call) => call.method === 'workspace.delete').length;
+    assert.equal((await request('workspace.delete', { workspaceId: 'workspace-outside' })).status, 403);
+    assert.equal((await request('workspace.delete', { workspaceId: 'workspace-shared' })).status, 403);
+    assert.equal(
+      upstreamCalls.filter((call) => call.method === 'workspace.delete').length,
+      deleteCallsBeforeOutside,
+    );
   });
 });

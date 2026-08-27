@@ -20,7 +20,7 @@ import { createReadStream, existsSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadConfig, type PlatformConfig } from './config.js';
+import { databaseTarget, loadConfig, type PlatformConfig } from './config.js';
 import { Database, type UserListRow } from './db.js';
 import { createFieldCrypto } from './encrypt.js';
 import { AuthService, AuthError, assertNoSqlInjection, type AuthedUser, type RequestMeta } from './auth.js';
@@ -31,7 +31,7 @@ import {
   LocalWorkspaceHub,
 } from './local-workspace-hub.js';
 import { ManagedWorkspaceProvisioner } from './managed-workspace.js';
-import { RequestPrincipalService } from './principal.js';
+import { registerRequestPrincipal } from './principal.js';
 import type { AuthenticatedPrincipal } from './principal.js';
 import { backupSqliteBeforeMigration } from './db-backup.js';
 import { createMonthlyBudgetResolver } from './spend-budget.js';
@@ -339,7 +339,7 @@ export function apply(ctx: Context): void {
   const configured =
     cfg.setupKey !== '' && cfg.setupKey !== 'change-me-to-a-strong-random-key';
   if (configured) {
-    new RequestPrincipalService(ctx, cfg);
+    registerRequestPrincipal(ctx, cfg);
   }
   /** patch/reload 冷却（10 分钟一次，防认证后横向 DoS） */
   const PATCH_RELOAD_COOLDOWN_MS = 10 * 60 * 1000;
@@ -348,8 +348,8 @@ export function apply(ctx: Context): void {
   let auth: AuthService | null = null;
   if (configured) {
     try {
-      backupSqliteBeforeMigration(cfg.dbPath);
-      db = new Database(cfg.dbPath, createFieldCrypto(cfg.dbEncKey, cfg.setupKey));
+      if (cfg.database.driver === 'sqlite') backupSqliteBeforeMigration(cfg.database.path);
+      db = new Database(databaseTarget(cfg), createFieldCrypto(cfg.dbEncKey, cfg.setupKey));
       db.init();
       auth = new AuthService(cfg, db);
     } catch (error) {

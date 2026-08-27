@@ -1,4 +1,4 @@
-// SQLite 数据层：Node 内置 node:sqlite（零外部数据库依赖）
+// Account and quota repository with SQLite and MySQL storage drivers.
 // 表结构：users / platform_settings / audit_logs / login_attempts
 //
 // 静态加密（见 src/encrypt.ts）：
@@ -10,10 +10,16 @@
 //
 // 性能：预处理语句按 SQL 文本缓存（每个代理请求都要查询会话，
 // 避免逐请求重复编译 SQL 的开销）。
-import { DatabaseSync, type StatementSync } from 'node:sqlite';
+import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import type { FieldCrypto } from './encrypt.js';
+import {
+  MysqlSyncConnection,
+  type MysqlConnectionOptions,
+  type SqlConnection,
+  type SqlStatement,
+} from './mysql-sync.js';
 
 type UserRole = 'admin' | 'user';
 
@@ -204,6 +210,102 @@ CREATE TABLE IF NOT EXISTS managed_workspaces (
 
 `;
 
+const MYSQL_SCHEMA = `
+CREATE TABLE IF NOT EXISTS users (
+  id                 INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  username           TEXT NOT NULL,
+  username_hash      VARCHAR(128),
+  password_hash      VARCHAR(255) NOT NULL,
+  role               VARCHAR(16) NOT NULL DEFAULT 'user',
+  credential_version INT NOT NULL DEFAULT 0,
+  created_at         DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  last_login_at      DATETIME(3),
+  UNIQUE KEY idx_users_hash (username_hash)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE IF NOT EXISTS platform_settings (
+  k VARCHAR(191) PRIMARY KEY,
+  v TEXT NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  event_type VARCHAR(191) NOT NULL,
+  username   TEXT,
+  ip         TEXT,
+  user_agent TEXT,
+  detail     MEDIUMTEXT,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  KEY idx_audit_created (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE IF NOT EXISTS login_attempts (
+  id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  username_hash VARCHAR(128) NOT NULL,
+  ip_hash       VARCHAR(128) NOT NULL,
+  failed_count  INT NOT NULL DEFAULT 0,
+  locked_until  DATETIME(3),
+  updated_at    DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  UNIQUE KEY idx_login_identity (username_hash, ip_hash)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE IF NOT EXISTS ip_throttle (
+  ip_hash         VARCHAR(128) PRIMARY KEY,
+  failed_count    INT NOT NULL DEFAULT 0,
+  window_started  DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  throttled_until DATETIME(3),
+  updated_at      DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE IF NOT EXISTS user_permissions (
+  user_id               INT UNSIGNED PRIMARY KEY,
+  allowed_folders       MEDIUMTEXT,
+  hourly_token_limit    BIGINT,
+  daily_minutes_limit   INT,
+  monthly_budget_micros BIGINT NOT NULL DEFAULT 0,
+  allow_upload          TINYINT NOT NULL DEFAULT 1,
+  allow_git_download    TINYINT NOT NULL DEFAULT 0,
+  banned                TINYINT NOT NULL DEFAULT 0,
+  sandbox_mode          VARCHAR(64),
+  disabled_sessions     MEDIUMTEXT NOT NULL,
+  updated_at            DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE IF NOT EXISTS user_usage (
+  user_id             INT UNSIGNED NOT NULL,
+  day                 CHAR(10) NOT NULL,
+  first_seen_at       DATETIME(3),
+  last_active_at      DATETIME(3),
+  active_seconds      INT NOT NULL DEFAULT 0,
+  hourly_window_start DATETIME(3),
+  hourly_tokens       BIGINT NOT NULL DEFAULT 0,
+  PRIMARY KEY (user_id, day)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE IF NOT EXISTS messages (
+  id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  sender_id    INT UNSIGNED NOT NULL,
+  recipient_id INT UNSIGNED,
+  content      MEDIUMTEXT NOT NULL,
+  tags         MEDIUMTEXT NOT NULL,
+  created_at   DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  KEY idx_messages_created (id DESC)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE IF NOT EXISTS local_workspaces (
+  id               VARCHAR(200) PRIMARY KEY,
+  user_id          INT UNSIGNED NOT NULL,
+  token_hash       VARCHAR(128) NOT NULL UNIQUE,
+  device_name      TEXT NOT NULL,
+  workspace_name   TEXT NOT NULL,
+  remote_root      TEXT NOT NULL,
+  placeholder_path VARCHAR(768) NOT NULL UNIQUE,
+  platform         VARCHAR(64) NOT NULL,
+  shell_enabled    TINYINT NOT NULL DEFAULT 0,
+  created_at       DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  last_seen_at     DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  revoked_at       DATETIME(3),
+  KEY idx_local_workspaces_user (user_id, revoked_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE IF NOT EXISTS managed_workspaces (
+  user_id    INT UNSIGNED PRIMARY KEY,
+  path       VARCHAR(768) NOT NULL UNIQUE,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+`;
+
 /** 安全解析 JSON 字符串数组（权限目录 / 留言标签）；损坏时返回空数组 */
 function parseJsonArray(raw: string | null): string[] {
   if (!raw) return [];
@@ -261,20 +363,28 @@ function looksLikeCipher(s: string): boolean {
 }
 
 export class Database {
-  private db: DatabaseSync;
+  private db: SqlConnection;
   private crypto: FieldCrypto;
+  private readonly mysql: boolean;
+  private readonly setupLockName: string | null;
   /** 预处理语句缓存：按 SQL 文本复用，避免每次请求重复编译 */
-  private stmts = new Map<string, StatementSync>();
+  private stmts = new Map<string, SqlStatement>();
 
-  constructor(dbPath: string, crypto: FieldCrypto) {
-    mkdirSync(path.dirname(dbPath), { recursive: true });
-    this.db = new DatabaseSync(dbPath);
+  constructor(target: string | MysqlConnectionOptions, crypto: FieldCrypto) {
+    this.mysql = typeof target !== 'string';
+    this.setupLockName = typeof target === 'string' ? null : `dsh-passwords:${target.database}:initial-admin`;
+    if (typeof target === 'string') {
+      mkdirSync(path.dirname(target), { recursive: true });
+      this.db = new DatabaseSync(target) as unknown as SqlConnection;
+    } else {
+      this.db = new MysqlSyncConnection(target);
+    }
     this.crypto = crypto;
-    // 网关进程与 dsh 插件进程共享同一个库文件：写锁竞争时等待而不是立刻报错
-    this.db.exec('PRAGMA busy_timeout = 5000');
+    // SQLite 下网关进程与 dsh 插件进程共享一个文件，写锁竞争时等待而不是立刻报错。
+    if (!this.mysql) this.db.exec('PRAGMA busy_timeout = 5000');
   }
 
-  private stmt(sql: string): StatementSync {
+  private stmt(sql: string): SqlStatement {
     let s = this.stmts.get(sql);
     if (!s) {
       s = this.db.prepare(sql);
@@ -283,7 +393,13 @@ export class Database {
     return s;
   }
 
-  /** 显式释放 SQLite 文件句柄（测试/一次性工具使用；常驻服务由进程退出回收）。 */
+  /** Convert an application ISO instant to the active driver's timestamp representation. */
+  private dateTime(value: string | Date): string {
+    const iso = value instanceof Date ? value.toISOString() : new Date(value).toISOString();
+    return this.mysql ? iso.slice(0, 23).replace('T', ' ') : iso;
+  }
+
+  /** 显式释放数据库连接（测试/一次性工具使用；常驻服务由进程退出回收）。 */
   close(): void {
     this.stmts.clear();
     this.db.close();
@@ -291,6 +407,15 @@ export class Database {
 
   /** 建表（幂等）+ 旧明文数据一次性迁移为密文 */
   init(): void {
+    if (this.mysql) {
+      this.db.exec(MYSQL_SCHEMA);
+      this.migrateRoles();
+      this.migrateUsers();
+      this.migrateAuditLogs();
+      this.setSetting('mysql_schema_version', '1');
+      this.setSetting('enc_migrated_v1', '1');
+      return;
+    }
     // 删除内容清零，防止已删除的明文残留在空闲页可被文件扫描恢复
     this.db.exec('PRAGMA secure_delete = ON');
     this.db.exec(SCHEMA);
@@ -313,23 +438,30 @@ export class Database {
 
   // ── 迁移：role / credential_version 列补齐 + 首个用户升级为主用户 ──
   private migrateRoles(): void {
-    const cols = this.stmt('PRAGMA table_info(users)').all() as { name: string }[];
-    if (!cols.some((c) => c.name === 'role')) {
-      this.db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'");
-    }
-    if (!cols.some((c) => c.name === 'credential_version')) {
-      this.db.exec('ALTER TABLE users ADD COLUMN credential_version INTEGER NOT NULL DEFAULT 0');
+    if (!this.mysql) {
+      const cols = this.stmt('PRAGMA table_info(users)').all() as { name: string }[];
+      if (!cols.some((c) => c.name === 'role')) {
+        this.db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'");
+      }
+      if (!cols.some((c) => c.name === 'credential_version')) {
+        this.db.exec('ALTER TABLE users ADD COLUMN credential_version INTEGER NOT NULL DEFAULT 0');
+      }
     }
     // 若库中还没有主用户（老数据迁移/异常状态），把最早创建的账号提为主用户；
     // 其余账号保持子用户角色。判断只看 role 字段，与账号叫什么名字无关。
     const hasAdmin = this.stmt("SELECT 1 FROM users WHERE role = 'admin' LIMIT 1").get();
     if (!hasAdmin) {
-      this.db.exec("UPDATE users SET role = 'admin' WHERE id = (SELECT MIN(id) FROM users)");
+      if (this.mysql) {
+        this.db.exec("UPDATE users SET role = 'admin' WHERE id = (SELECT first_id FROM (SELECT MIN(id) AS first_id FROM users) AS first_user)");
+      } else {
+        this.db.exec("UPDATE users SET role = 'admin' WHERE id = (SELECT MIN(id) FROM users)");
+      }
     }
   }
 
   // ── 迁移：user_permissions 补后续版本列（均可重复执行） ─────────────────
   private migratePermissions(): void {
+    if (this.mysql) return;
     const cols = this.stmt('PRAGMA table_info(user_permissions)').all() as { name: string }[];
     if (!cols.some((c) => c.name === 'sandbox_mode')) {
       this.db.exec('ALTER TABLE user_permissions ADD COLUMN sandbox_mode TEXT');
@@ -344,14 +476,16 @@ export class Database {
 
   // ── 迁移：users.username 明文 → 密文 + username_hash ──────────
   private migrateUsers(): boolean {
-    const cols = this.stmt('PRAGMA table_info(users)').all() as { name: string }[];
-    if (!cols.some((c) => c.name === 'username_hash')) {
-      this.db.exec('ALTER TABLE users ADD COLUMN username_hash TEXT');
+    if (!this.mysql) {
+      const cols = this.stmt('PRAGMA table_info(users)').all() as { name: string }[];
+      if (!cols.some((c) => c.name === 'username_hash')) {
+        this.db.exec('ALTER TABLE users ADD COLUMN username_hash TEXT');
+      }
+      // 索引必须在列存在之后创建（旧库无此列时不能在建表阶段引用它）
+      this.db.exec(
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_users_hash ON users(username_hash) WHERE username_hash IS NOT NULL',
+      );
     }
-    // 索引必须在列存在之后创建（旧库无此列时不能在建表阶段引用它）
-    this.db.exec(
-      'CREATE UNIQUE INDEX IF NOT EXISTS idx_users_hash ON users(username_hash) WHERE username_hash IS NOT NULL',
-    );
     const rows = this.stmt('SELECT id, username, username_hash FROM users').all() as {
       id: number;
       username: string;
@@ -430,6 +564,7 @@ export class Database {
 
   // ── 迁移：login_attempts 明文 username/ip → HMAC 散列 ─────────
   private migrateLoginAttempts(): boolean {
+    if (this.mysql) return false;
     const cols = this.stmt('PRAGMA table_info(login_attempts)').all() as { name: string }[];
     if (cols.some((c) => c.name === 'username_hash')) return false; // 已迁移
     const rows = this.stmt(
@@ -576,6 +711,12 @@ export class Database {
 
   /** 原子地创建首个主用户；并发 setup 时仅一个调用能成功。 */
   setupInitialAdmin(username: string, passwordHash: string): UserRow | null {
+    if (this.setupLockName !== null) {
+      const lock = this.stmt('SELECT GET_LOCK(?, 10) AS acquired').get(this.setupLockName) as
+        | { acquired: number }
+        | undefined;
+      if (Number(lock?.acquired) !== 1) throw new Error('获取 MySQL 首次配置锁超时');
+    }
     this.db.exec('BEGIN IMMEDIATE');
     try {
       if (this.countUsers() > 0) {
@@ -589,6 +730,10 @@ export class Database {
     } catch (error) {
       this.db.exec('ROLLBACK');
       throw error;
+    } finally {
+      if (this.setupLockName !== null) {
+        this.stmt('SELECT RELEASE_LOCK(?) AS released').get(this.setupLockName);
+      }
     }
   }
 
@@ -609,7 +754,7 @@ export class Database {
   }
 
   deleteUser(id: number): void {
-    // 无外键约束（SQLite 未开 FK），关联行需手动级联清理：
+    // 两种驱动均未声明外键约束，关联行需手动级联清理：
     // 权限、用量、留言（发件人/收件人）以及登录失败记录。
     const user = this.getUserById(id);
     this.db.exec('BEGIN IMMEDIATE');
@@ -678,9 +823,12 @@ export class Database {
       this.auditInsertCount++;
       if (this.auditInsertCount % Database.AUDIT_PRUNE_EVERY === 0) {
         try {
-          this.stmt('DELETE FROM audit_logs WHERE id <= (SELECT MAX(id) - ? FROM audit_logs)').run(
+          const threshold = this.stmt('SELECT MAX(id) - ? AS id FROM audit_logs').get(
             Database.AUDIT_MAX_ROWS,
-          );
+          ) as { id: number | null } | undefined;
+          if (threshold?.id !== null && threshold?.id !== undefined) {
+            this.stmt('DELETE FROM audit_logs WHERE id <= ?').run(threshold.id);
+          }
         } catch (error) {
           // 修剪失败（磁盘满/数据库锁）：记录告警——表会持续增长，不能静默
           console.warn('[dsh-passwords] 审计日志修剪失败（表可能持续增长）:', String(error));
@@ -737,7 +885,7 @@ export class Database {
   /** 锁定该用户名在所有 IP 上的失败记录（分布式爆破兜底） */
   lockAllAttemptsByUsername(username: string, until: Date): void {
     this.stmt("UPDATE login_attempts SET locked_until = ?, updated_at = datetime('now') WHERE username_hash = ?").run(
-      until.toISOString(),
+      this.dateTime(until),
       this.crypto.lookupHash(username),
     );
   }
@@ -748,7 +896,7 @@ export class Database {
        ON CONFLICT(username_hash, ip_hash) DO UPDATE SET
          locked_until = excluded.locked_until,
          updated_at = datetime('now')`,
-    ).run(this.crypto.lookupHash(username), this.crypto.lookupHash(ip), until.toISOString());
+    ).run(this.crypto.lookupHash(username), this.crypto.lookupHash(ip), this.dateTime(until));
   }
 
   resetLoginAttempts(username: string, ip: string): void {
@@ -785,7 +933,7 @@ export class Database {
     if (!existing) {
       this.stmt("INSERT INTO ip_throttle (ip_hash, failed_count, window_started, updated_at) VALUES (?, 1, ?, datetime('now'))").run(
         hash,
-        now.toISOString(),
+        this.dateTime(now),
       );
       return 1;
     }
@@ -794,7 +942,7 @@ export class Database {
     if (windowExpired || throttleExpired) {
       this.stmt(
         "UPDATE ip_throttle SET failed_count = 1, window_started = ?, throttled_until = NULL, updated_at = datetime('now') WHERE ip_hash = ?",
-      ).run(now.toISOString(), hash);
+      ).run(this.dateTime(now), hash);
       return 1;
     }
     this.stmt("UPDATE ip_throttle SET failed_count = failed_count + 1, updated_at = datetime('now') WHERE ip_hash = ?").run(hash);
@@ -804,7 +952,7 @@ export class Database {
   /** 节流该 IP：窗口内失败达阈值后设置过期时间（期间拒绝一切登录尝试） */
   throttleIp(ip: string, until: Date): void {
     this.stmt('UPDATE ip_throttle SET throttled_until = ?, updated_at = datetime(\'now\') WHERE ip_hash = ?').run(
-      until.toISOString(),
+      this.dateTime(until),
       this.crypto.lookupHash(ip),
     );
   }
@@ -909,11 +1057,12 @@ export class Database {
    * （封顶语义：防止页面挂机把时长无限拉长；配合节流，正常连续使用误差很小）。
    */
   touchUsage(userId: number, day: string, nowIso: string): UsageRow {
+    const nowDatabase = this.dateTime(nowIso);
     const existing = this.getUsage(userId, day);
     if (!existing) {
       this.stmt(
         'INSERT INTO user_usage (user_id, day, first_seen_at, last_active_at, active_seconds, hourly_window_start, hourly_tokens) VALUES (?, ?, ?, ?, 0, ?, 0)',
-      ).run(userId, day, nowIso, nowIso, nowIso);
+      ).run(userId, day, nowDatabase, nowDatabase, nowDatabase);
       return this.getUsage(userId, day)!;
     }
     let delta = 0;
@@ -926,17 +1075,18 @@ export class Database {
     }
     this.stmt(
       'UPDATE user_usage SET last_active_at = ?, active_seconds = active_seconds + ? WHERE user_id = ? AND day = ?',
-    ).run(nowIso, delta, userId, day);
+    ).run(nowDatabase, delta, userId, day);
     return this.getUsage(userId, day)!;
   }
 
   /** 累计 token 用量（小时窗口起点不在当前窗口时自动重置计数） */
   addTokens(userId: number, day: string, tokens: number, nowIso: string): UsageRow {
+    const nowDatabase = this.dateTime(nowIso);
     const existing = this.getUsage(userId, day);
     if (!existing) {
       this.stmt(
         'INSERT INTO user_usage (user_id, day, first_seen_at, last_active_at, active_seconds, hourly_window_start, hourly_tokens) VALUES (?, ?, ?, ?, 0, ?, ?)',
-      ).run(userId, day, nowIso, nowIso, nowIso, tokens);
+      ).run(userId, day, nowDatabase, nowDatabase, nowDatabase, tokens);
       return this.getUsage(userId, day)!;
     }
     const windowStart = existing.hourly_window_start ?? nowIso;
@@ -944,7 +1094,7 @@ export class Database {
     if (windowAge >= 3600_000) {
       this.stmt(
         'UPDATE user_usage SET hourly_window_start = ?, hourly_tokens = ? WHERE user_id = ? AND day = ?',
-      ).run(nowIso, tokens, userId, day);
+      ).run(nowDatabase, tokens, userId, day);
     } else {
       this.stmt('UPDATE user_usage SET hourly_tokens = hourly_tokens + ? WHERE user_id = ? AND day = ?').run(
         tokens,
@@ -1244,9 +1394,12 @@ export class Database {
     this.messageInsertCount++;
     if (this.messageInsertCount % Database.MESSAGES_PRUNE_EVERY === 0) {
       try {
-        this.stmt('DELETE FROM messages WHERE id <= (SELECT MAX(id) - ? FROM messages)').run(
+        const threshold = this.stmt('SELECT MAX(id) - ? AS id FROM messages').get(
           Database.MESSAGES_MAX_ROWS,
-        );
+        ) as { id: number | null } | undefined;
+        if (threshold?.id !== null && threshold?.id !== undefined) {
+          this.stmt('DELETE FROM messages WHERE id <= ?').run(threshold.id);
+        }
       } catch (error) {
         // 修剪失败（磁盘满/数据库锁）：记录告警——留言表会持续增长，不能静默
         console.warn('[dsh-passwords] 留言修剪失败（表可能持续增长）:', String(error));
@@ -1276,9 +1429,9 @@ export class Database {
 
   /** 登录失败/节流表修剪：防随机用户名+轮换 IP 喷洒让表无界增长 */
   pruneStaleSecurityRows(days = 7): void {
-    const cutoff = `-${Math.max(days, 1)} days`;
-    this.stmt("DELETE FROM login_attempts WHERE updated_at < datetime('now', ?)").run(cutoff);
-    this.stmt("DELETE FROM ip_throttle WHERE updated_at < datetime('now', ?)").run(cutoff);
+    const cutoff = this.dateTime(new Date(Date.now() - Math.max(days, 1) * 24 * 60 * 60 * 1000));
+    this.stmt('DELETE FROM login_attempts WHERE updated_at < ?').run(cutoff);
+    this.stmt('DELETE FROM ip_throttle WHERE updated_at < ?').run(cutoff);
   }
 
 }

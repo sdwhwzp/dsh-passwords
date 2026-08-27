@@ -649,7 +649,7 @@ export function aionuiRootFrom(
   return null;
 }
 
-/** 工作区创建/删除/重命名/归档/移动等写操作（受限子用户直接禁止，防止绕过文件夹白名单） */
+/** 工作区创建/删除/重命名/归档/移动等写操作，由网关按操作与目标目录授权。 */
 export function isWorkspaceWrite(pathname: string): boolean {
   return /^\/api\/workspace[.\/](add|create|import|remove|delete|rename|update|move|archiveSession|insertBefore|insertSessionBefore|materialize|adopt)/.test(pathname);
 }

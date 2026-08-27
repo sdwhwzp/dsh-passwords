@@ -4,10 +4,11 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import bcrypt from 'bcryptjs';
+import { Context } from '@deepseek-ai/cordis';
 import { Database } from '../src/db.js';
 import { createFieldCrypto } from '../src/encrypt.js';
 import { AuthError, AuthService } from '../src/auth.js';
-import { signedPrincipalHeaders, verifyPrincipalHeaders } from '../src/principal.js';
+import { registerRequestPrincipal, signedPrincipalHeaders, verifyPrincipalHeaders } from '../src/principal.js';
 import type { PlatformConfig } from '../src/config.js';
 
 function config(dbPath: string): PlatformConfig {
@@ -26,6 +27,22 @@ test('short-lived principal headers verify and tampering/expiry fail closed', ()
   headers.set('x-dsh-principal-signature', 'tampered');
   assert.throws(() => verifyPrincipalHeaders(headers, 'secret', now));
   assert.throws(() => verifyPrincipalHeaders(new Headers(signed), 'secret', now + 31_000), /expired/);
+});
+
+test('request principal is visible to existing root children and leaves with its plugin', async () => {
+  const root = new Context();
+  const existingConnectionContext = root.extend();
+  const cfg = config('/tmp/principal-provider-test.db');
+  const fiber = root.plugin((ctx) => registerRequestPrincipal(ctx, cfg));
+  await fiber;
+  const signed = signedPrincipalHeaders({ userId: 7, username: 'alice', role: 'user' }, cfg.internalSecret);
+  assert.deepEqual(
+    existingConnectionContext.get('requestPrincipal')?.authenticate(new Request('http://127.0.0.1/api', { headers: signed })),
+    { source: 'dsh-passwords', id: '7', username: 'alice', role: 'user' },
+  );
+  await fiber.dispose();
+  assert.equal(existingConnectionContext.get('requestPrincipal'), undefined);
+  await root.fiber.dispose();
 });
 
 test('ordinary users authenticate only with their local SQLite password', async () => {

@@ -115,6 +115,28 @@ export function ManagedFilesPanel(props: Props) {
       });
   };
 
+  const remove = (entry: ManagedFileEntry) => {
+    const confirmation = entry.kind === 'directory'
+      ? t('managedFilesDeleteConfirmDirectory', { name: entry.name })
+      : t('managedFilesDeleteConfirmFile', { name: entry.name });
+    if (!window.confirm(confirmation)) return;
+    const current = listing?.path ?? '';
+    setBusy(true);
+    setError('');
+    setNotice('');
+    void fetch(`/gateway/api/managed-files?path=${encodeURIComponent(entry.path)}`, {
+      method: 'DELETE',
+      credentials: 'same-origin',
+    })
+      .then((response) => responseJson<{ deleted: { path: string } }>(response))
+      .then(() => {
+        setNotice(t('managedFilesDeleted', { name: entry.name }));
+        load(current);
+      })
+      .catch((error: unknown) => setError(error instanceof Error ? error.message : String(error)))
+      .finally(() => setBusy(false));
+  };
+
   const currentPath = listing?.path === '' || listing === null ? '/' : `/${listing.path}`;
   return h(
     'div',
@@ -190,11 +212,21 @@ export function ManagedFilesPanel(props: Props) {
                   }, `📁 ${entry.name}`)
                 : h('span', { className: 'dshpw-managed-files-name', title: entry.name }, `📄 ${entry.name}`),
               h('span', { className: 'dshpw-hint' }, entry.bytes === null ? '' : formatManagedFileBytes(entry.bytes)),
-              entry.kind === 'file' && h('a', {
-                className: 'dshpw-btn dshpw-download-btn',
-                href: managedFileDownloadUrl(entry.path),
-                download: entry.name,
-              }, t('managedFilesDownload')),
+              h(
+                'div',
+                { className: 'dshpw-managed-files-actions' },
+                entry.kind === 'file' && h('a', {
+                  className: 'dshpw-btn dshpw-download-btn',
+                  href: managedFileDownloadUrl(entry.path),
+                  download: entry.name,
+                }, t('managedFilesDownload')),
+                h('button', {
+                  type: 'button',
+                  className: 'dshpw-btn danger',
+                  disabled: busy,
+                  onClick: () => remove(entry),
+                }, t('managedFilesDelete')),
+              ),
             )),
           )
         : h('div', { className: 'dshpw-hint' }, t('managedFilesEmpty')),

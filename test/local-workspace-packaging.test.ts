@@ -27,7 +27,7 @@ test('本机工作区 CLI、Windows 构建和发布文件均已接入 package', 
   assert.equal(pkg.bugs?.url, 'https://github.com/sdwhwzp/dsh-passwords/issues');
 });
 
-test('本机工作区环境示例和 Windows workflow 完整且不带回 WebDAV/MySQL', () => {
+test('本机工作区环境示例和 Windows workflow 完整且不带回共享 WebDAV/MySQL 配置', () => {
   const env = read('.env.example');
   for (const name of [
     'MCP_LOCAL_WORKSPACE_HOST',

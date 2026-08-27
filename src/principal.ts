@@ -1,4 +1,4 @@
-import { Service, type Context } from '@deepseek-ai/cordis';
+import type { Context } from '@deepseek-ai/cordis';
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { PlatformConfig } from './config.js';
 
@@ -103,17 +103,24 @@ export function verifyPrincipalHeaders(
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
-    requestPrincipal: RequestPrincipalService;
+    requestPrincipal: RequestPrincipalProvider;
   }
 }
 
 /** Trusted Host authentication adapter consumed by client-connection. */
-export class RequestPrincipalService extends Service {
-  constructor(ctx: Context, private readonly config: PlatformConfig) {
-    super(ctx, 'requestPrincipal');
-  }
+export class RequestPrincipalProvider {
+  constructor(private readonly config: PlatformConfig) {}
 
   authenticate(request: Request): AuthenticatedPrincipal | undefined {
     return verifyPrincipalHeaders(request.headers, this.config.internalSecret);
   }
+}
+
+/** Publish authentication at the root so an already-mounted Connection can resolve it. */
+export function registerRequestPrincipal(ctx: Context, config: PlatformConfig): void {
+  const provider = new RequestPrincipalProvider(config);
+  ctx.effect(
+    () => ctx.root.provide('requestPrincipal', provider),
+    'dsh-passwords: root request principal provider',
+  );
 }

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -240,5 +240,54 @@ test('subuser uploads atomically into the selected private directory and cannot 
       '/gateway/api/managed-files/upload?path=&name=blocked.txt',
       Buffer.from('blocked'),
     )).status, 403);
+  });
+});
+
+test('subuser deletes files and non-empty folders without deleting the private root or escaped paths', async () => {
+  await withManagedFiles(async ({ root, outside, db, userId, request }) => {
+    writeFileSync(path.join(root, 'remove.txt'), 'remove me');
+    mkdirSync(path.join(root, 'remove-folder', 'nested'), { recursive: true });
+    writeFileSync(path.join(root, 'remove-folder', 'nested', 'remove.txt'), 'remove me too');
+
+    const fileResponse = await request('DELETE', '/gateway/api/managed-files?path=remove.txt');
+    assert.equal(fileResponse.status, 200, fileResponse.body.toString('utf8'));
+    assert.deepEqual(fileResponse.json<{ deleted: { path: string; kind: string } }>().deleted, {
+      path: 'remove.txt',
+      kind: 'file',
+    });
+    assert.equal(existsSync(path.join(root, 'remove.txt')), false);
+
+    const folderResponse = await request('DELETE', '/gateway/api/managed-files?path=remove-folder');
+    assert.equal(folderResponse.status, 200, folderResponse.body.toString('utf8'));
+    assert.deepEqual(folderResponse.json<{ deleted: { path: string; kind: string } }>().deleted, {
+      path: 'remove-folder',
+      kind: 'directory',
+    });
+    assert.equal(existsSync(path.join(root, 'remove-folder')), false);
+
+    assert.equal((await request('DELETE', '/gateway/api/managed-files?path=')).status, 403);
+    assert.equal(existsSync(root), true);
+    assert.equal((await request('DELETE', '/gateway/api/managed-files?path=..%2Foutside%2Fsecret.txt')).status, 403);
+    assert.equal(readFileSync(path.join(outside, 'secret.txt'), 'utf8'), 'secret');
+    if (process.platform !== 'win32') {
+      assert.equal((await request('DELETE', '/gateway/api/managed-files?path=escape-dir')).status, 403);
+      assert.equal(existsSync(outside), true);
+    }
+
+    writeFileSync(path.join(root, 'permission-blocked.txt'), 'keep');
+    const current = db.getPermissions(userId)!;
+    db.setPermissions(userId, {
+      allowedFolders: current.allowed_folders,
+      hourlyTokenLimit: current.hourly_token_limit,
+      dailyMinutesLimit: current.daily_minutes_limit,
+      monthlyBudgetMicros: current.monthly_budget_micros,
+      allowUpload: false,
+      allowGitDownload: current.allow_git_download,
+      banned: current.banned,
+      sandboxMode: current.sandbox_mode,
+      disabledSessions: current.disabled_sessions,
+    });
+    assert.equal((await request('DELETE', '/gateway/api/managed-files?path=permission-blocked.txt')).status, 403);
+    assert.equal(readFileSync(path.join(root, 'permission-blocked.txt'), 'utf8'), 'keep');
   });
 });

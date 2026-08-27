@@ -12,8 +12,19 @@ import { DshPasswordsSection } from './section';
 import { ChatLauncher } from './chat';
 import { TokenReporter } from './token';
 import { LocalWorkspaceLauncher } from './local-workspace-launcher';
+import { ManagedFilesLauncher } from './managed-files-launcher';
 import { zh, en } from './locales';
 import { AccountLogoutRow, installDesktopLauncherSuppression } from './account-logout';
+
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+  interface SlotMap {
+    'sidebar.workspaces.action': {
+      kind: 'list';
+      scope: 'root';
+      owner: { wide: boolean };
+    };
+  }
+}
 
 /** 卡片样式：全部使用 dsh 设计令牌（--dsw-alias-*），颜色/主题与官方 PluginCard 完全一致 */
 const CSS = `
@@ -91,6 +102,14 @@ select.dshpw-input{height:auto;min-height:36px}
 .dshpw-managed-files-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-primary);font:inherit;text-align:left}
 button.dshpw-managed-files-name{appearance:none;padding:4px;border:0;background:transparent;cursor:pointer}
 button.dshpw-managed-files-name:hover{color:var(--dsw-alias-brand-primary)}
+.dshpw-managed-files-actions{display:flex;align-items:center;justify-content:flex-end;gap:6px}
+.dshpw-sidebar-workspace-action{appearance:none;display:flex;align-items:center;gap:8px;width:100%;height:36px;padding:0 10px;border:0;border-radius:9px;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:20px;text-align:left;cursor:pointer}
+.dshpw-sidebar-workspace-action:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.dshpw-sidebar-workspace-action>svg{flex:none}
+.dshpw-sidebar-workspace-action>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dshpw-sidebar-workspace-action.compact{justify-content:center;width:36px;padding:0;border-radius:10px}
+.dshpw-managed-files-dialog{width:min(900px,calc(100vw - 32px));max-width:900px;max-height:calc(100vh - 32px)}
+.dshpw-managed-files-dialog-content{max-height:calc(100vh - 64px);overflow:auto}
 .dshpw-local-launcher{display:flex;flex-direction:column;gap:7px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-2);font-size:13px;line-height:1.45}
 .dshpw-local-launcher-seat{position:relative;display:inline-flex;min-width:0}
 .dshpw-local-launcher-trigger{display:inline-flex;align-items:center;gap:4px;min-height:28px;max-width:240px;padding:0 8px;border:0;border-radius:16px;list-style:none;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;font-weight:500;line-height:20px;cursor:pointer;white-space:nowrap}
@@ -244,7 +263,7 @@ export function apply(ctx: ClientContext): void {
     ),
   );
 
-  // 新会话 Hero 控制行入口：没有会话或工作区时仍提供首次本机目录选择。
+  // 新会话控制行入口：紧跟 Workspace 和“选择模式”控件。
   ctx.slots.inject('conversation.input.bootstrap', () =>
     ctx.slots.register(
       {
@@ -286,6 +305,21 @@ export function apply(ctx: ClientContext): void {
         }),
       },
       LocalWorkspaceLauncher,
+    ),
+  );
+
+  // 子账号的专属文件管理固定在 Workspace 列表上方。
+  ctx.slots.inject('sidebar.workspaces.action', () =>
+    ctx.slots.register(
+      {
+        name: 'sidebar.workspaces.action',
+        id: 'dsh-passwords-managed-files',
+        key: 'dsh-passwords-managed-files',
+        order: 10,
+        locale: 'dshpw',
+        inject: () => ({}),
+      },
+      ManagedFilesLauncher,
     ),
   );
 

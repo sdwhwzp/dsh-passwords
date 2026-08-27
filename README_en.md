@@ -25,7 +25,7 @@ Listed in [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek
 - One **owner** (created at first-time setup) + any number of **subusers**, each with their own login
 - All account management happens in a card on dsh's settings page — no SSH needed: change passwords, change usernames, create/delete subusers
 - Creating a subuser also creates and registers a private host workspace (default `~/dsh-user-workspaces/u<user-id>`) with an initial `workspace-write` sandbox; existing subusers are backfilled on the first startup after upgrade
-- Subusers can open **Password Gate → Private host folder** to browse their own managed directory, download files, and upload local files or whole folders into the current directory. Folder structure is retained (browser folder selection does not report empty directories), and relative-path authorization prevents access to other accounts or host directories
+- Subusers can open **Folder management** above Workspaces in the sidebar to browse their own managed directory, download or delete files, recursively delete folders, and upload local files or whole folders into the current directory. Folder structure is retained (browser folder selection does not report empty directories), and relative-path authorization prevents access to other accounts or host directories
 - A **Sign out** button beside the current identity immediately revokes the server-side session and clears the cookie after confirmation
 - The owner manages all subusers; subusers can only change themselves
 - Changing a password immediately invalidates all old sessions; every login and failure is logged — one command shows who signed in when
@@ -56,7 +56,9 @@ The owner can configure, per subuser, from the settings page:
 
 ## Identity and spend synchronization
 
-Owners and subusers always sign in with local accounts and bcrypt passwords stored in this project's SQLite database. The gateway removes browser-supplied identity headers and creates a 30-second HMAC assertion for upstream requests; Harness verifies it and durably attaches the principal to each message, model step and tool execution.
+Owners and subusers always sign in with local accounts and bcrypt passwords stored in this project's database. SQLite is the default and MySQL 8 is also supported. The gateway removes browser-supplied identity headers and creates a 30-second HMAC assertion for upstream requests; Harness verifies it and durably attaches the principal to each message, model step and tool execution.
+
+Changing the database driver selects a different repository and does not copy rows from the other driver. Back up `.env` and the database and migrate existing accounts separately in production; a first deployment with an empty database can switch directly.
 
 Every model step checks bans, hourly tokens, daily time and the personal monthly allowance together; any failure rejects the step. When a customer submits a question after exhausting an allowance, the conversation explicitly shows the amount used, the limit, that the question was not sent to the model, and that the administrator must increase the allowance. A model call already in flight may finish, so the final amount can exceed the allowance slightly. `dsh-spend` accounts by `(sessionId, turn, step)` idempotently. Natural months use `Asia/Shanghai`; changing an allowance never removes history, and administrators have no personal amount cap by default. The plugin registers the current account's allowance resolver with `dsh-spend`, so subusers see their own remaining CNY allowance in the Spend hover preview and overview.
 
@@ -132,10 +134,10 @@ The companion is for deployments where dsh runs on a server while files remain o
 
 Windows users do not need Node.js:
 
-1. Sign in to dsh, expand **Choose a local folder** in the lower-left corner, and download `山东梯智物联AI本机助手.exe` from its fallback section (it is also available under Local workspace in Settings)
+1. Sign in to dsh, expand **Choose a local folder** beside the mode selector above the new-conversation input, and download `山东梯智物联AI本机助手.exe` from its fallback section (it is also available under Local workspace in Settings)
 2. Put the EXE somewhere permanent and double-click it once. It registers the web-launch protocol for the current Windows user, without administrator access or prompts for a server address or folder
-3. Return to dsh, click **Choose a local folder** in the lower-left corner, and select the folder in the native Windows picker. The server address and one-time launch ticket are handled in the background
-4. Keep the companion window open. Once connected, the folder appears in the lower-left panel; click **Open conversation** to create or reuse its blank session and show the composer. Credentials are saved per folder, and later double-clicking the same EXE reconnects every authorized folder
+3. Return to dsh, click **Choose a local folder** beside the mode selector above the new-conversation input, and select the folder in the native Windows picker. The server address and one-time launch ticket are handled in the background
+4. Keep the companion window open. Once connected, the entry lists the online folder; click **Open conversation** to create or reuse its blank session and show the composer. Credentials are saved per folder, and later double-clicking the same EXE reconnects every authorized folder
 
 The current EXE is unsigned, so Windows may display a SmartScreen warning. Before production distribution, sign it with a valid company code-signing certificate and publish its SHA-256 checksum.
 
@@ -229,7 +231,12 @@ After logging in to dsh, open **Settings → Plugins** to find the "dsh-password
 |---|---|---|
 | `SETUP_KEY` | auto-generated by the installer | First-time setup key. After setup succeeds, it is rotated and the JWT/internal/database keys are frozen independently. Keep `.env`; `setup-key.txt` is deleted automatically |
 | `MCP_JWT_SECRET` | derived from SETUP_KEY before first-time setup | Session signing key. It is frozen as an independent value after setup; changing it invalidates existing sign-ins |
-| `MCP_DB_PATH` | `./data/platform.db` | Account/permission SQLite file; relative paths resolve from the `.env` directory |
+| `DSH_PASSWORDS_DB_DRIVER` | `sqlite` | Account database driver: `sqlite` or `mysql`. The plugin-specific prefix prevents environment collisions with other plugins in the DSH process |
+| `MCP_DB_PATH` | `./data/platform.db` | SQLite file; relative paths resolve from `.env`. Its parent still stores local ACME and pairing state in MySQL mode |
+| `DSH_PASSWORDS_MYSQL_HOST` / `DSH_PASSWORDS_MYSQL_PORT` | empty / `3306` | MySQL 8 host and port; used only in MySQL mode |
+| `DSH_PASSWORDS_MYSQL_USER` / `DSH_PASSWORDS_MYSQL_PASSWORD` / `DSH_PASSWORDS_MYSQL_DATABASE` | empty | MySQL credentials and database name. Create the database first; use a dedicated database and least-privilege account |
+| `DSH_PASSWORDS_MYSQL_TLS` / `DSH_PASSWORDS_MYSQL_TLS_CA` | `off` / empty | `off`, `required`, or `verify-ca`; `verify-ca` requires a CA file |
+| `DSH_PASSWORDS_MYSQL_QUERY_TIMEOUT_MS` | `15000` | MySQL connection and per-operation timeout, from 1000 to 120000 milliseconds |
 | `MCP_DB_ENC_KEY` | auto-generated by the installer | Data-at-rest encryption key, frozen after setup. **Never change it for an existing database**; back up `.env` with the database |
 | `MCP_MANAGED_WORKSPACE_ROOT` | `~/dsh-user-workspaces` | Root for private host workspaces. New/backfilled accounts normally use stable `u<user-id>` children; a random suffix is added when a retained directory already exists so old data is never assigned to a new account. It cannot be inside the database data directory; relative paths resolve from `.env` |
 | `MCP_GATEWAY_HOST` | `0.0.0.0` | Gateway listen address |
@@ -268,7 +275,7 @@ dsh-local-workspace                           # reconnect with the saved local d
 - **dsh's console shows error code 30 / 31 and the gate didn't start?** See the error-code table under "Automatic HTTPS" above. After fixing, restarting dsh pulls the gate up again.
 - **Port 443 fails to bind (non-root user)?** On Linux, ports below 1024 need root: start dsh as root/sudo, or set `MCP_GATEWAY_PORT` to a high port (e.g. 8443) and forward traffic yourself.
 - **The local companion cannot connect?** Confirm the dsh console shows the local-companion listener and allow `MCP_LOCAL_WORKSPACE_PORT` through the server firewall. A web gateway on `3081` defaults the companion to `3082`; set `MCP_LOCAL_WORKSPACE_PUBLIC_URL` across NAT.
-- **The local workspace is online but has no composer?** Expand **Choose a local folder** in the lower-left corner and click **Open conversation** beside the online folder. `¥0` disables model calls; after submitting a question, the customer sees an explicit exhausted-allowance notice in the conversation.
+- **The local workspace is online but has no composer?** Return to the new-conversation screen, expand **Choose a local folder** beside the mode selector above the input, and click **Open conversation** beside the online folder. `¥0` disables model calls; after submitting a question, the customer sees an explicit exhausted-allowance notice in the conversation.
 - **Nothing opens after clicking “Choose a local folder”?** Expand **Companion did not open?**, download the EXE, and double-click it once to register the protocol, then retry on the original page. Do not move or delete the registered EXE; if you move it, double-click it again at the new location. The web flow never opens `about:blank`, so the current conversation remains intact.
 - **dsh fails to start with `duplicate loader entry id`?** You used `dsh plugin add` in the profile. It reconciles ALL dependencies declaring `dsh.bundle` into the bundles layer, which crashes dsh when they overlap with already-installed plugins. Use `node scripts/register-plugin.mjs` to sync `scripts/profile-plugins.json` precisely; it appends only the bundles named by the manifest and preserves all other configuration.
 - **npm fails installing dsh (allow-scripts / node-pty)?** Newer npm blocks install scripts. Allow them first, then reinstall: `npm config set allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user` followed by `npm install -g @deepseek-ai/dsh` again (this project itself has no such issue — it's dsh's dependencies that run native builds).
