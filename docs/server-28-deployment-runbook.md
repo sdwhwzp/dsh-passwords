@@ -1,6 +1,6 @@
 # 28 服务器部署与运维手册
 
-本文记录 `192.168.10.28` 上 DeepSeek Harness 多用户服务的功能、运行结构、数据位置、部署步骤、验收方法和故障处理。内容依据 2026-08-26 的实际服务器盘点整理，不包含密码、API Key、OAuth Token、Tailscale Auth Key 或数据库口令。
+本文记录 `192.168.10.28` 上 DeepSeek Harness 多用户服务的功能、运行结构、数据位置、部署步骤、验收方法和故障处理。内容依据 2026-08-27 的实际服务器盘点整理，不包含密码、API Key、OAuth Token、Tailscale Auth Key 或数据库口令。
 
 ## 1. 使用范围
 
@@ -55,7 +55,10 @@ DeepSeek Harness Web + Web Profile + 插件
 | PM2 | `6.0.13` |
 | Tailscale | `1.102.3` |
 | dsh | `0.1.1-rc.2`，含本地定制构建 |
-| dsh-passwords | 包版本 `2.5.4`，含包版本发布后的本地定制功能 |
+| dsh-passwords | `2.5.9`，提交 `5007b5c` |
+| dsh-spend | `0.4.9`，提交 `9c55954` |
+| dsh-nas-webdav | `0.2.1`，提交 `3ff3e15` |
+| Office 侧栏预览 | `@huanlin/dsh-plugin-better-sidebar-plugin-office@0.1.2` |
 | dsh-web 插件族 | `0.3.2` |
 | 数据库 | MySQL，`192.168.10.95:3306/dsh_passwords_platform` |
 
@@ -116,6 +119,10 @@ DeepSeek Harness Web + Web Profile + 插件
 
 `dsh-spend` 按 `(sessionId, turn, step)` 幂等归集输入、输出、缓存读取、缓存写入和推理 Token。账本使用人民币微元保存，展示汇率当前按 `USD/CNY = 7.2` 计算；已有计价记录不会因以后改价而变化，未知模型先记为未计价，管理员补价后可回填未计价历史。
 
+28 当前部署的 `dsh-agent-loop@0.1.1-rc.2` 没有把网关已认证 principal 从 `user/message` 继续传给 pre-step、模型请求、工具执行和 turn/step 事件。兼容修复由三个业务插件共同完成：dsh-passwords 从本轮已认证消息恢复身份并执行额度与模型权限检查，dsh-nas-webdav 在同一 agent turn 内为工具调用保留该身份，dsh-spend 从旧日志的 `user/message` 回填 turn/step 归属。身份只来自网关写入的 principal，不读取用户名文本、模型输入或工具参数。升级到已原生传播 principal 的新 agent-loop 后仍须保留并执行这些兼容测试，确认不会重复归户或跨账号复用。
+
+子账号页面显示的“我的剩余额度 ¥0”表示管理员为该账号配置的自然月金额额度确实为 0，不是订阅模型不可用或页面估算值。修复前旧 agent-loop 丢失身份会让额度检查误走匿名兼容路径，因此可能出现 ¥0 仍能调用；修复后该账号下一次提问会在发给模型前收到明确的额度不足提示。2026-08-27 部署验收时，新折叠器从现有会话恢复出子账号 `u2` 的 25 次最终调用和 479,254 Token；首次刷新 Spend 或下一次额度检查会将它们幂等写入账本。
+
 客户可见的三个 ChatGPT 模型当前内部价格如下，单位为每百万 Token：
 
 | 模型 | 输入 USD / CNY | 输出 USD / CNY | 缓存读取 USD / CNY | 缓存写入 USD / CNY |
@@ -149,11 +156,20 @@ DeepSeek Harness Web + Web Profile + 插件
 | `dsh-ssh` | SSH 主机管理、跳板机、命令、PTY、SFTP、上传下载、隧道和集群执行；子账号不能进入运维配置面 |
 | `dsh-tool-describe-image` | 为文本模型提供图片理解，支持本地文件、URL 和附件，调用独立视觉端点 |
 | `dsh-better-sidebar` | 侧栏增强 |
+| `@huanlin/dsh-plugin-better-sidebar-plugin-office` | 为 better-sidebar 提供 `.docx`、`.xlsx` 和 `.pptx` 预览 |
 | `dsh-archive-manager` | 会话归档管理 |
 | `dsh-shandong-tizhi-brand` | 山东梯智物联品牌界面 |
 | `dsh-nas-webdav` | NAS WebDAV 文件服务 |
 
-### 4.6 kmMac 本地模型服务
+### 4.6 WebDAV 工作区、Excel 工具和 Office 预览
+
+每个已登录账号在“设置 → WebDAV”中独立绑定地址、WebDAV 用户名、密码和 TLS 选项。凭据按 `(principal.source, principal.id)` 隔离，密码验证成功后使用 AES-GCM 加密保存在 MySQL，不回显、不写日志，也不进入模型上下文。28 当前使用 `/usr/bin/rclone` 和 FUSE，把每个账号的远端目录挂载到其专属目录下的 `WebDAV` 子目录并注册为工作区；多个账号可同时挂载同一台或不同的 NAS，解绑只卸载当前账号，不影响其他账号或删除 NAS 文件。
+
+模型访问 WebDAV 文件时使用 `webdav_list`、`webdav_read_text`、`excel_inspect`、`excel_read_range`、`excel_apply_changes` 和 `excel_append_rows`。Excel 写入使用精确 ETag 和 `If-Match`，检测到其他客户端已修改时拒绝覆盖。右侧 File 面板的显示能力与模型工具分开：`.xlsx` 的可视预览由 Office 侧栏插件提供，缺少该插件时会显示“此文件类型不支持预览 / 下载查看”，但不代表 Excel 工具本身不可用。
+
+当前 Web Profile 已固定安装 Office 预览 `0.1.2` 并加入 `dsh.profile.bundles`。跨机器安装清单位于 dsh-passwords 的 `scripts/profile-plugins.json`，同时把 dsh-web 来源固定为 `master`；`dev` 只用于跟随上游 fork，不作为客户部署分支。
+
+### 4.7 kmMac 本地模型服务
 
 28 通过 Tailscale 访问 `kmMac`，当前三个端点均通过健康检查：
 
@@ -184,6 +200,8 @@ DeepSeek Harness Web + Web Profile + 插件
 | `/home/tzwl3/.dsh/attachments/` | 对话附件 | 是 |
 | `/home/tzwl3/.dsh/storages/` | 工作区与投影缓存 | 是 |
 | `/home/tzwl3/.dsh/spend-ledger.sqlite*` | Spend 个人账本及 WAL/SHM | 是；复制前先停服务或用 SQLite 在线备份 |
+| `/home/tzwl3/.dsh/credentials/dsh-nas-webdav/` | WebDAV 主密钥引用和凭据服务配置 | 是，敏感 |
+| `/home/tzwl3/.cache/dsh-nas-webdav/` | 各账号 rclone VFS 缓存 | 否；停服务并确认已回写后可重建 |
 | `/home/tzwl3/.dsh/plugins/subscriptions/auth.json` | ChatGPT、Claude、Grok OAuth Token | 是，极敏感，权限 0600 |
 | `/home/tzwl3/.dsh/pet-accounts/` | 按账号隔离的宠物状态 | 是 |
 | `/home/tzwl3/.dsh/task-board/` | 任务看板与调度记录 | 是 |
@@ -242,7 +260,7 @@ MySQL 位于另一台主机且当前 `TLS=off`，只应通过可信局域网或 
 
 ```bash
 sudo apt update
-sudo apt install -y build-essential ca-certificates git curl openssh-client sshpass rsync sqlite3 default-mysql-client
+sudo apt install -y build-essential ca-certificates git curl openssh-client sshpass rsync sqlite3 default-mysql-client rclone fuse3
 ```
 
 安装 Node.js `22.21.1`，将其固定在 `/home/tzwl3/.local/opt/node-v22.21.1-linux-x64/`，然后安装 pnpm 11 和 PM2。所有构建、PM2 启动和运维命令必须使用同一 Node 22 PATH：
@@ -277,8 +295,9 @@ Auth Key 必须从部署环境注入，不得写入脚本或本文。28 应获�
 - `https://github.com/sdwhwzp/dsh-web.git`
 - `https://github.com/sdwhwzp/dsh-spend.git`
 - `https://github.com/sdwhwzp/dsh-plugin-subscriptions.git`
+- `http://gr.gr-iot.cn:30000/deepseek-harness/nas.git`
 
-部署前必须确认这些仓库的改动已经 commit 和 push。服务器当前功能包含尚未用新版本号区分的定制构建；只拉取 `dsh-passwords@2.5.4` 的公开包不能还原文件夹删除、一键本机文件夹、MySQL 和后续权限修复。
+部署前必须确认这些仓库的改动已经 commit 和 push。dsh-web 的客户开发与部署分支是 `master`；同步上游时先更新 fork 的 `dev`，验证后再合并到 `master`。本次 principal、WebDAV 和 Spend 兼容修复分别以 `5007b5c`、`3ff3e15` 和 `9c55954` 为可重复部署基线。
 
 ### 7.4 构建
 
@@ -298,6 +317,10 @@ npm test
 npm pack
 
 cd /path/to/dsh-spend
+npm ci
+npm test
+
+cd /path/to/nas
 npm ci
 npm test
 
@@ -339,20 +362,16 @@ ln -sfn "$release" "$runtime_root/current"
 
 Web Profile 是 28 实际解析插件和浏览器 bundle 的第一来源。只替换 `/home/tzwl3/apps/dsh-runtime/current` 不会自动更新 `~/.dsh/profiles/web/node_modules`。
 
-使用同一运行时的 dsh CLI 安装链接依赖：
+不要对这套 Profile 逐个运行 `dsh plugin add`：该命令可能把所有声明 `dsh.bundle` 的依赖重复加入 bundles，造成 `duplicate loader entry id`。新机器应把 `dsh-web`、`dsh-passwords`、`dsh-spend` 和 `nas` 放在安装清单约定的相邻目录，然后使用 dsh-passwords 的版本化清单同步依赖、bundle、构建授权和 profile patch：
 
 ```bash
 export PATH=/home/tzwl3/.local/opt/node-v22.21.1-linux-x64/bin:/home/tzwl3/.local/bin:$PATH
-DSH=/home/tzwl3/apps/dsh-runtime/current/node_modules/@deepseek-ai/dsh/lib/bin.js
-
-node "$DSH" plugin --profile web add link:/home/tzwl3/apps/dsh-web/current/packages/dsh-web-all
-node "$DSH" plugin --profile web add link:/home/tzwl3/apps/dsh-plugins/current/dsh-passwords
-node "$DSH" plugin --profile web add link:/home/tzwl3/apps/dsh-plugins/current/dsh-spend
-node "$DSH" plugin --profile web add link:/home/tzwl3/apps/dsh-plugins/current/dsh-plugin-subscriptions
-node "$DSH" --profile web --dump-config >/tmp/dsh-web-config.yml
+node /path/to/dsh-passwords/scripts/register-plugin.mjs
+node /home/tzwl3/apps/dsh-runtime/current/node_modules/@deepseek-ai/dsh/lib/bin.js \
+  --profile web --dump-config >/tmp/dsh-web-config.yml
 ```
 
-安装后检查 `~/.dsh/profiles/web/package.json`、`pnpm-lock.yaml`、`cordis.patch.yml` 和 `node_modules` 都指向新发布。不要手工只改 `package.json` 而不更新锁文件和依赖目录。
+该清单会安装 `@huanlin/dsh-plugin-better-sidebar-plugin-office@0.1.2`。安装后检查 `~/.dsh/profiles/web/package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`cordis.patch.yml` 和 `node_modules` 都指向新发布，且 Office 包同时存在于 dependencies 和 `dsh.profile.bundles`。不要手工只改 `package.json` 而不更新锁文件和依赖目录。已有服务器采用独立不可变发布目录时，先备份整套 Profile，再用 `pnpm add --save-exact` 更新依赖和锁文件，并只向 bundles 追加目标插件；验证失败时同时恢复 Profile 备份和 plugins `current` 软链接。
 
 ### 7.7 配置 dsh-passwords 和 MySQL
 
@@ -460,7 +479,7 @@ pm2 stop dsh-web
 backup=/path/to/backup/server-28-$(date +%Y%m%d-%H%M%S)
 mkdir -p "$backup"
 rsync -a /home/tzwl3/.dsh/ "$backup/dsh-home/"
-rsync -a /home/tzwl3/dsh-user-workspaces/ "$backup/dsh-user-workspaces/"
+rsync -a --one-file-system --exclude='u*/WebDAV/' /home/tzwl3/dsh-user-workspaces/ "$backup/dsh-user-workspaces/"
 rsync -a /home/tzwl3/apps/dsh-plugins/current/dsh-passwords/.env "$backup/dsh-passwords.env"
 rsync -a /home/tzwl3/.pm2/dump.pm2 "$backup/pm2-dump.pm2"
 rsync -a /home/tzwl3/.local/bin/kmMac-model-monitor "$backup/"
@@ -519,6 +538,9 @@ grep -q 'conversation.input.bootstrap' \
   /home/tzwl3/.dsh/profiles/web/node_modules/@deepseek-ai/dsh-client-ui-conversation/lib/client.js
 grep -q 'managedFilesDeleteConfirmDirectory' \
   /home/tzwl3/apps/dsh-plugins/current/dsh-passwords/dist/client.js
+curl -fsS http://127.0.0.1:3080/plugins/@huanlin/dsh-plugin-better-sidebar-plugin-office/client.js \
+  >/tmp/dsh-office-preview-client.js
+grep -q 'xlsx' /tmp/dsh-office-preview-client.js
 ```
 
 ### 10.3 登录和权限
@@ -527,6 +549,7 @@ grep -q 'managedFilesDeleteConfirmDirectory' \
 - 子账号可登录，但看不到订阅登录、退出和订阅用量。
 - 子账号的 Codex 模型只有 Sol、Terra、Luna；Claude、Grok、DeepSeek 和自建提供方按各自配置保留。
 - 月额度为 0 的子账号提问时收到明确额度不足提示。
+- 子账号刷新 Spend 后只看到自己的调用和金额，不显示订阅计划用量；旧日志中的已认证 `user/message` 能正确回填到该账号。
 - 子账号不能访问 SSH、皮肤管理、共享上传列表或其他账号工作区。
 - 管理员删除子账号后，专属目录及文件仍保留。
 
@@ -538,6 +561,8 @@ grep -q 'managedFilesDeleteConfirmDirectory' \
 - 空白新对话的“选择模式”旁显示“一键选择本机文件夹”。
 - Windows 助手可配对、选择目录并显示“打开对话”。
 - 本机工作区只允许访问用户授权的目录。
+- 每个账号绑定 WebDAV 后都能同时看到自己的 `WebDAV` 工作区，并可在其中创建目录和选择子目录。
+- 右侧 File 面板可预览 `.xlsx`；模型可用 `excel_inspect` 和 `excel_read_range` 读取同一文件，不再报 `authenticated principal required`。
 
 ### 10.5 Tailscale 和模型
 
@@ -588,7 +613,21 @@ grep -q 'conversation.input.bootstrap' \
 
 客户页面必须通过 3081，由 dsh-passwords 写入签名 principal。确认请求没有绕过网关，dsh-passwords Host 插件已挂载，Spend 与 subscriptions 使用当前版本，并检查浏览器是否仍保留旧 bundle。
 
-### 11.5 插件 loader 失败或页面白屏
+若会话日志中的 `user/message.data.principal` 存在，但 `turn/start`、`step/start` 和工具执行仍没有 principal，说明服务器仍在运行未原生传播身份的旧 agent-loop。28 必须至少使用 dsh-passwords `2.5.9`、dsh-nas-webdav `0.2.1` 和 dsh-spend `0.4.9` 的兼容组合；只升级其中一个会分别留下额度绕过、WebDAV 工具认证失败或 Spend 归户为空的问题。
+
+### 11.5 子账号显示 ¥0 但仍能调用模型
+
+先在账号管理中确认月额度是否确实为 0。若为 0，正常行为是在 pre-step 阶段明确拒绝，调用不会发给模型。若仍能调用，检查 dsh-passwords 是否为 `2.5.9` 以上、请求是否经过 3081，以及会话 `user/message` 是否带网关 principal；不要把匿名兼容会话当成已登录子账号。修复后要继续使用模型，必须由管理员给该账号分配大于 0 的月额度。
+
+### 11.6 WebDAV Excel 工具提示 `authenticated principal required`
+
+确认 dsh-nas-webdav 为 `0.2.1` 以上，并与 dsh-passwords 的 principal 兼容修复一起部署。重启后重新登录 3081，再从当前账号的 WebDAV 工作区选择文件。错误仍存在时检查 pre-step 消息是否带 principal；不要让模型改用 Bash、Python 或安装库绕过 WebDAV 凭据隔离。
+
+### 11.7 `.xlsx` 显示“不支持预览”
+
+确认 `@huanlin/dsh-plugin-better-sidebar-plugin-office@0.1.2` 同时存在于 Web Profile dependencies、`dsh.profile.bundles` 和 `node_modules`。直接请求 `/plugins/@huanlin/dsh-plugin-better-sidebar-plugin-office/client.js` 应返回 200，文件应包含 `xlsx`。重启 dsh 后在浏览器强制刷新；Office 预览客户端约 22.4 MB，首次加载会比文本预览慢。
+
+### 11.8 插件 loader 失败或页面白屏
 
 ```bash
 pm2 logs dsh-web --lines 200
@@ -598,7 +637,7 @@ node /home/tzwl3/apps/dsh-runtime/current/node_modules/@deepseek-ai/dsh/lib/bin.
 
 检查 Profile 的 link 目标存在、所有插件已构建 `lib/` 或 `dist/`、`package.json` 的客户端导出存在、启动清单的 `rev` 与实际文件内容一致。不要同时保留已停用的 `@linxin666/dsh-web-ui-all` 和新的 `@linxin666/dsh-web-all`。
 
-### 11.6 插件管理器提示 `dsh CLI not found on PATH`
+### 11.9 插件管理器提示 `dsh CLI not found on PATH`
 
 启动 PM2、Doctor 和插件管理操作时统一加入：
 
@@ -608,11 +647,11 @@ export PATH=/home/tzwl3/.local/opt/node-v22.21.1-linux-x64/bin:/home/tzwl3/.loca
 
 不要依赖交互式 Shell 才有的 PATH。
 
-### 11.7 自建 Qwen 模型无响应
+### 11.10 自建 Qwen 模型无响应
 
 比较 `~/.dsh/settings.yaml` 的模型 ID 和 `http://100.64.0.2:8080/v1/models`。当前服务别名是 `qwen3.8-27b-uncensored-q4`，旧别名 `qwen3.8-27b-q4` 需要更新。再检查 Tailscale、kmMac 端口、llama-server 日志和 64K 上下文的并发占用。
 
-### 11.8 kmMac 在线但模型进程没有恢复
+### 11.11 kmMac 在线但模型进程没有恢复
 
 当前 timer 只处理 Tailscale 在线状态变化。检查：
 
@@ -625,14 +664,14 @@ cat /home/tzwl3/.local/state/kmMac-model-monitor/status
 
 需要强制重试时先把状态改为 `failed`，再启动 service。长期方案是在监控脚本中增加 8080、8081、8082 健康探测。
 
-### 11.9 MySQL 登录失败或账号消失
+### 11.12 MySQL 登录失败或账号消失
 
 确认驱动为 MySQL、主机和库名正确、28 能连接 192.168.10.95:3306，并检查 `.env` 的用户和密码。SQLite 和 MySQL 不会自动互相迁移；驱动切错会表现为进入另一个空账号库。
 
 ## 12. 上传 Git 前检查
 
-1. 为 dsh-passwords 的定制功能升级版本号，避免不同内容都显示 `2.5.4`。
-2. 将 deepseek-harness、dsh-passwords、dsh-web、dsh-spend 和 dsh-plugin-subscriptions 的部署改动分别 commit 并 push。
+1. 确认 dsh-passwords、dsh-spend 和 dsh-nas-webdav 的包版本与提交号一致，避免同一版本号对应不同内容。
+2. 将 deepseek-harness、dsh-passwords、dsh-web、dsh-spend、nas 和 dsh-plugin-subscriptions 的部署改动分别 commit 并 push。
 3. 在本文记录最终 Git commit 或 release tag；不要把未提交工作树当作可重复部署源。
 4. 检查没有提交 `.env`、`settings.yaml`、`.credentials.yaml`、`auth.json`、`mac.md`、数据库 dump、PM2 dump、SSH 私钥或 Tailscale Auth Key。
 5. 对文档执行敏感词和私钥头检查：
@@ -649,9 +688,19 @@ rg -n '(PASSWORD|SECRET|TOKEN|AUTH_KEY|API_KEY)=.+|BEGIN .*PRIVATE KEY' \
 | 组件 | 当前目标 |
 |---|---|
 | runtime | `/home/tzwl3/apps/dsh-runtime/releases/deploy-28-20260826-conversation-bootstrap-all-copies` |
-| plugins | `/home/tzwl3/apps/dsh-plugins/releases/20260826-managed-file-delete` |
-| dsh-web | `/home/tzwl3/apps/dsh-web/releases/20260825-175050` |
+| plugins | `/home/tzwl3/apps/dsh-plugins/releases/20260827-3ff3e15-5007b5c-9c55954-principal-office` |
+| dsh-web | `/home/tzwl3/apps/dsh-web/releases/20260827-092833-footer-chat-drag` |
 | conversation bundle | SHA-1 `2440832da50b0eb887ac0ff05b1e4462f9109123` |
-| dsh-passwords client bundle | SHA-1 `d40def448ef94ec3ffd3b9a9a9aa9355c28c8ba8` |
+| dsh-passwords client bundle | SHA-1 `881b7f21b8a3fe48dbf1bff8f7d4f5f2f23f033d` |
+| Office preview client bundle | SHA-1 `48cc39dc0df93b99e287c1889cf6096552b90cb6` |
+| Web Profile 回滚备份 | `/home/tzwl3/.dsh/profile-backups/20260827-office-preview-principal` |
 
-这些标识用于确认 2026-08-26 的服务器快照。任何后续构建都应创建新的发布标识和内容哈希，不应复用目录名或把新内容覆盖到旧发布中。
+这些标识用于确认 2026-08-27 的服务器快照。任何后续构建都应创建新的发布标识和内容哈希，不应复用目录名或把新内容覆盖到旧发布中。
+
+## 14. 2026-08-27 principal、Spend 与 Excel 预览部署记录
+
+本次故障表现为 WebDAV Excel 工具报 `authenticated principal required`，子账号 Spend 显示 ¥0 和 0 Token，但同一账号仍能调用模型，右侧 File 面板对 `.xlsx` 只显示下载。排查确认 3081 已把签名 principal 写入 `user/message`，但服务器的旧 agent-loop 没有继续传播该身份；`.xlsx` 预览则是 better-sidebar 缺少独立 Office viewer，不是 WebDAV 或 Excel 解析器故障。
+
+本次部署同时上线 dsh-passwords `5007b5c`、dsh-nas-webdav `3ff3e15`、dsh-spend `9c55954` 和 Office viewer `0.1.2`。新插件发布目录经独立构建后原子切换，旧目录未覆盖；Web Profile 在安装 Office 依赖前备份到本节上方记录的回滚目录。dsh-passwords 的跨机器插件清单已包含 Office viewer，并将 dsh-web 默认部署分支改为 `master`。
+
+部署验证结果：dsh-passwords 构建通过，principal、插件清单、额度相关定向测试 11/11；dsh-nas-webdav 35/35；dsh-spend 21/21；并发全量测试中曾有 3 个 Windows 本机助手模拟连接超时，单独重跑对应文件 7/7 通过。运行态 PM2 为 online，3080 返回 200，3081 未登录返回 302，Office client 返回 200 且包含 XLSX viewer，近期日志没有 plugin loader、principal 或 Spend 错误。
