@@ -19,6 +19,8 @@ test('F-25：SESSION_SCOPED_RE 命中会读取/写入会话的 RPC，但不命�
   }
   assert.equal(SESSION_SCOPED_RE.test('/api/session.create'), false, 'create 无源会话');
   assert.equal(SESSION_SCOPED_RE.test('/api/session.list'), false, 'list 单独过滤');
+  assert.equal(SESSION_SCOPED_RE.test('/api/workspace.archiveSession'), true, 'rc.2 归档会话走 workspace RPC');
+  assert.equal(SESSION_SCOPED_RE.test('/api/workspace/archiveSession'), true, '兼容斜杠风格 workspace RPC');
 });
 
 test('F-25：extractSessionId 提取顶层与嵌套 sessionId', () => {

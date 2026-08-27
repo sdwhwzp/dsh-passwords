@@ -410,6 +410,64 @@ test('workspace.list：子用户归档会话保留工作区槽且不会掉入未
   }
 });
 
+test('workspace.archiveSession：子用户可归档可见会话，但不能归档禁用或越权会话', async () => {
+  const subUser = db.createUser('archive-action-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: ['/workspaces/a'],
+    hourlyTokenLimit: null,
+    dailyMinutesLimit: null,
+    allowUpload: true,
+    allowGitDownload: true,
+    allowWorkspaceCreate: false,
+    banned: false,
+    sandboxMode: null,
+    disabledSessions: ['s-disabled'],
+  });
+  const subToken = jwt.sign(
+    { sub: String(subUser.id), username: subUser.username, cv: 0 },
+    'test-secret',
+    { expiresIn: '12h' },
+  );
+  const originalCookie = cookie;
+  cookie = `dsh_gateway_token=${subToken}`;
+  try {
+    // 先走 workspace.list，模拟真实前端并建立 sessionId -> cwd 归属缓存。
+    const list = await gatewayReq(
+      'POST',
+      '/api/workspace.list',
+      { 'content-type': 'application/json', 'x-test-mode': 'archived-sessions' },
+      '{}',
+    );
+    assert.equal(list.status, 200);
+
+    const allowed = await gatewayReq(
+      'POST',
+      '/api/workspace.archiveSession',
+      { 'content-type': 'application/json' },
+      JSON.stringify({ sessionId: 's-active' }),
+    );
+    assert.equal(allowed.status, 200, '可见且未禁用的会话应允许归档');
+
+    const disabled = await gatewayReq(
+      'POST',
+      '/api/workspace.archiveSession',
+      { 'content-type': 'application/json' },
+      JSON.stringify({ sessionId: 's-disabled' }),
+    );
+    assert.equal(disabled.status, 403, '被管理员禁用的会话不得归档');
+
+    const hidden = await gatewayReq(
+      'POST',
+      '/api/workspace.archiveSession',
+      { 'content-type': 'application/json' },
+      JSON.stringify({ sessionId: 's-other-user' }),
+    );
+    assert.equal(hidden.status, 403, '白名单外的会话不得归档');
+  } finally {
+    cookie = originalCookie;
+  }
+});
+
 test('流式透传路径（session.list，管理员）：保留 chunked，不带 content-length', async () => {
   const r = await gatewayReq('GET', '/api/session.list');
   assert.equal(r.status, 200);

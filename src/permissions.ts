@@ -763,7 +763,7 @@ export function isWorkspaceDirectoryCreate(pathname: string): boolean {
   return /^\/api\/host[.\/]createDirectory(?:[.\/]|$)/.test(pathname);
 }
 
-/** 当前 dsh 已提供的删除/重命名端点；移动、归档、导入暂不纳入子用户权限。 */
+/** 当前 dsh 已提供的删除/重命名端点；移动、导入暂不纳入子用户权限。 */
 export function isWorkspaceDeleteOrRename(pathname: string): boolean {
   return /^\/api\/workspace[.\/](remove|delete|rename|update)([.\/]|$)/.test(pathname);
 }
@@ -773,7 +773,7 @@ export function isWorkspaceWrite(pathname: string): boolean {
   return (
     isWorkspaceCreate(pathname) ||
     isWorkspaceDeleteOrRename(pathname) ||
-    /^\/api\/workspace[.\/](import|move|archiveSession|insertBefore|insertSessionBefore|materialize|adopt)([.\/]|$)/.test(pathname)
+    /^\/api\/workspace[.\/](import|move|insertBefore|insertSessionBefore|materialize|adopt)([.\/]|$)/.test(pathname)
   );
 }
 
@@ -789,7 +789,7 @@ export const WORKSPACE_ENDPOINT_RE = /^\/api\/session[.\/](create)([.\/]|$)/;
  * 子用户必须启用其所在工作区，且该会话未被管理员单独关闭。
  * create 无源会话、list 单独做工作区/会话过滤，均不在此列。
  */
-export const SESSION_SCOPED_RE = /^\/api\/session[.\/](history|prompt|respond|archive|delete|rename|retitle|title|resume|fork|truncate|export)([.\/]|$)/;
+export const SESSION_SCOPED_RE = /^\/api\/(?:session[.\/](?:history|prompt|respond|archive|delete|rename|retitle|title|resume|fork|truncate|export)|workspace[.\/]archiveSession)([.\/]|$)/;
 
 /** 递归查找请求体里的 sessionId（typert wire 字段）；找不到返回 null */
 export function extractSessionId(value: unknown, depth = 0): string | null {
