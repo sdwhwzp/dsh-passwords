@@ -60,6 +60,8 @@ Owners and subusers always sign in with local accounts and bcrypt passwords stor
 
 Changing the database driver selects a different repository and does not copy rows from the other driver. Back up `.env` and the database and migrate existing accounts separately in production; a first deployment with an empty database can switch directly.
 
+In MySQL mode, an invalid connection is replaced after an idle timeout, server restart, or temporary network interruption. Read-only queries outside a transaction are retried once. Interrupted transactions and writes with an unknown result are not replayed, preventing duplicate data changes.
+
 Every model step checks bans, hourly tokens, daily time and the personal monthly allowance together; any failure rejects the step. When a customer submits a question after exhausting an allowance, the conversation explicitly shows the amount used, the limit, that the question was not sent to the model, and that the administrator must increase the allowance. A model call already in flight may finish, so the final amount can exceed the allowance slightly. `dsh-spend` accounts by `(sessionId, turn, step)` idempotently. Natural months use `Asia/Shanghai`; changing an allowance never removes history, and administrators have no personal amount cap by default. The plugin registers the current account's allowance resolver with `dsh-spend`, so subusers see their own remaining CNY allowance in the Spend hover preview and overview.
 
 External file services and their accounts, passwords and databases are managed by their own standalone plugins and are outside dsh-passwords sign-in and configuration.

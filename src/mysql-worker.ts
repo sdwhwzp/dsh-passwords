@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { parentPort, workerData } from 'node:worker_threads';
 import mysql, { type Connection, type Field } from 'mysql2/promise';
+import { MysqlConnectionManager } from './mysql-connection-manager.js';
 import type { MysqlConnectionOptions } from './mysql-sync.js';
 
 interface WorkerRequest {
@@ -16,7 +17,6 @@ interface WorkerMessage {
 
 const HEADER_BYTES = Int32Array.BYTES_PER_ELEMENT * 2;
 const options = workerData as MysqlConnectionOptions;
-let connectionPromise: Promise<Connection> | null = null;
 
 function mysqlSql(sql: string): string {
   return sql
@@ -25,11 +25,6 @@ function mysqlSql(sql: string): string {
     .replace(/datetime\('now'\)/giu, 'UTC_TIMESTAMP(3)')
     .replace(/ON CONFLICT\([^)]*\) DO UPDATE SET/giu, 'ON DUPLICATE KEY UPDATE')
     .replace(/excluded\.([A-Za-z_][A-Za-z0-9_]*)/giu, 'VALUES($1)');
-}
-
-async function connection(): Promise<Connection> {
-  connectionPromise ??= createConnection();
-  return connectionPromise;
 }
 
 async function createConnection(): Promise<Connection> {
@@ -62,28 +57,32 @@ async function createConnection(): Promise<Connection> {
   });
 }
 
+const connections = new MysqlConnectionManager(createConnection);
+
 async function execute(request: WorkerRequest): Promise<unknown> {
-  const db = await connection();
   if (request.operation === 'close') {
-    await db.end();
+    await connections.close();
     return null;
   }
   const sql = mysqlSql(request.sql ?? '');
-  if (request.operation === 'exec') {
-    await db.query(sql);
-    return null;
-  }
-  const [result] = await db.execute(sql, (request.params ?? []) as never[]);
-  if (request.operation === 'run') {
-    const mutation = result as { affectedRows?: number; insertId?: number };
-    return {
-      changes: Number(mutation.affectedRows ?? 0),
-      lastInsertRowid: Number(mutation.insertId ?? 0),
-    };
-  }
-  const rows = result as unknown as Record<string, unknown>[];
-  if (request.operation === 'get') return rows[0];
-  return rows;
+  const kind = request.operation === 'all' || request.operation === 'get' ? 'read' : 'write';
+  return connections.run(sql, kind, async (db) => {
+    if (request.operation === 'exec') {
+      await db.query(sql);
+      return null;
+    }
+    const [result] = await db.execute(sql, (request.params ?? []) as never[]);
+    if (request.operation === 'run') {
+      const mutation = result as { affectedRows?: number; insertId?: number };
+      return {
+        changes: Number(mutation.affectedRows ?? 0),
+        lastInsertRowid: Number(mutation.insertId ?? 0),
+      };
+    }
+    const rows = result as unknown as Record<string, unknown>[];
+    if (request.operation === 'get') return rows[0];
+    return rows;
+  });
 }
 
 function serializeError(error: unknown): { message: string; code?: string } {
