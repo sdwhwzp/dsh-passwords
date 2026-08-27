@@ -31,7 +31,7 @@ import {
   LocalWorkspaceHub,
 } from './local-workspace-hub.js';
 import { ManagedWorkspaceProvisioner, registerManagedUserWorkspace } from './managed-workspace.js';
-import { registerRequestPrincipal } from './principal.js';
+import { AgentTurnPrincipalTracker, registerRequestPrincipal } from './principal.js';
 import type { AuthenticatedPrincipal } from './principal.js';
 import { backupSqliteBeforeMigration } from './db-backup.js';
 import { createMonthlyBudgetResolver } from './spend-budget.js';
@@ -413,13 +413,12 @@ export function apply(ctx: Context): void {
   // accounting is unavailable; local administrators are intentionally unlimited.
   if (db !== null) {
     const budgetDb = db;
+    const stepPrincipals = new AgentTurnPrincipalTracker();
     ctx.inject(['spendAccounting'], (scope) =>
       scope.spendAccounting.registerBudgetResolver(createMonthlyBudgetResolver(budgetDb)));
 
     ctx.on('agent/pre-step', async (payload, next) => {
-      // The released dsh-agent typings predate the optional principal field;
-      // the local harness carries it on this same durable event contract.
-      const principal = (payload as typeof payload & { principal?: AuthenticatedPrincipal }).principal;
+      const principal = stepPrincipals.resolve(payload);
       if (principal === undefined) return next();
       if (principal.source !== 'dsh-passwords' || !/^[1-9][0-9]*$/.test(principal.id)) return { kind: 'reject' } as const;
       const user = db!.getUserById(Number(principal.id));
@@ -479,7 +478,7 @@ export function apply(ctx: Context): void {
     // authorization control and also covers crafted RPC calls or stale clients.
     ctx.on('agent/request', async (payload, next) => {
       const config = await next();
-      const principal = (payload as typeof payload & { principal?: AuthenticatedPrincipal }).principal;
+      const principal = stepPrincipals.resolve(payload);
       if (principal === undefined) return config;
       if (principal.source !== 'dsh-passwords' || !/^[1-9][0-9]*$/.test(principal.id)) {
         throw new Error('无法验证当前账号的模型权限，请重新登录后再试。');

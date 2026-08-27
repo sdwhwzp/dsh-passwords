@@ -8,7 +8,13 @@ import { Context } from '@deepseek-ai/cordis';
 import { Database } from '../src/db.js';
 import { createFieldCrypto } from '../src/encrypt.js';
 import { AuthError, AuthService } from '../src/auth.js';
-import { registerRequestPrincipal, signedPrincipalHeaders, verifyPrincipalHeaders } from '../src/principal.js';
+import {
+  AgentTurnPrincipalTracker,
+  principalFromMessages,
+  registerRequestPrincipal,
+  signedPrincipalHeaders,
+  verifyPrincipalHeaders,
+} from '../src/principal.js';
 import type { PlatformConfig } from '../src/config.js';
 
 function config(dbPath: string): PlatformConfig {
@@ -43,6 +49,18 @@ test('request principal is visible to existing root children and leaves with its
   await fiber.dispose();
   assert.equal(existingConnectionContext.get('requestPrincipal'), undefined);
   await root.fiber.dispose();
+});
+
+test('legacy agent hooks retain the authenticated message principal only within its turn', () => {
+  const principal = { source: 'dsh-passwords', id: '2', username: 'wzp', role: 'user' } as const;
+  const agent = {};
+  const tracker = new AgentTurnPrincipalTracker();
+
+  assert.equal(principalFromMessages([{ role: 'user', principal }]), principal);
+  assert.equal(tracker.resolve({ agent, turn: 7, messages: [{ role: 'user', principal }] }), principal);
+  assert.equal(tracker.resolve({ agent, turn: 7 }), principal);
+  assert.equal(tracker.resolve({ agent, turn: 8 }), undefined);
+  assert.equal(principalFromMessages([{ principal: { source: 'dsh-passwords', id: '2' } }]), undefined);
 });
 
 test('ordinary users authenticate only with their local SQLite password', async () => {

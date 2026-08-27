@@ -9,6 +9,52 @@ export interface AuthenticatedPrincipal {
   role: 'admin' | 'user';
 }
 
+/** Return a structurally complete authenticated principal without inspecting display text. */
+export function authenticatedPrincipal(value: unknown): AuthenticatedPrincipal | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const row = value as Record<string, unknown>;
+  if (typeof row.source !== 'string' || row.source.length === 0) return undefined;
+  if (typeof row.id !== 'string' || row.id.length === 0) return undefined;
+  if (typeof row.username !== 'string' || row.username.length === 0) return undefined;
+  if (row.role !== 'admin' && row.role !== 'user') return undefined;
+  return value as AuthenticatedPrincipal;
+}
+
+/** Resolve a principal carried by an authenticated user message. */
+export function principalFromMessages(messages: unknown): AuthenticatedPrincipal | undefined {
+  if (!Array.isArray(messages)) return undefined;
+  for (const message of messages) {
+    if (message === null || typeof message !== 'object' || Array.isArray(message)) continue;
+    const principal = authenticatedPrincipal((message as Record<string, unknown>).principal);
+    if (principal !== undefined) return principal;
+  }
+  return undefined;
+}
+
+/** Preserve one authenticated owner between pre-step and request hooks on older agent loops. */
+export class AgentTurnPrincipalTracker {
+  private readonly turns = new WeakMap<object, { turn: number; principal?: AuthenticatedPrincipal }>();
+
+  /** Resolve this hook's owner and retain it for later hooks in the same turn. */
+  resolve(payload: unknown): AuthenticatedPrincipal | undefined {
+    if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) return undefined;
+    const row = payload as Record<string, unknown>;
+    const direct = authenticatedPrincipal(row.principal);
+    const principal = direct ?? principalFromMessages(row.messages);
+    const agent = row.agent !== null && typeof row.agent === 'object' ? row.agent : undefined;
+    const turn = typeof row.turn === 'number' && Number.isSafeInteger(row.turn) ? row.turn : undefined;
+    if (agent === undefined || turn === undefined) return principal;
+    if (principal !== undefined) {
+      this.turns.set(agent, { turn, principal });
+      return principal;
+    }
+    const current = this.turns.get(agent);
+    if (current?.turn === turn) return current.principal;
+    this.turns.set(agent, { turn });
+    return undefined;
+  }
+}
+
 interface PrincipalEnvelope extends AuthenticatedPrincipal {
   v: 1;
   iat: number;
