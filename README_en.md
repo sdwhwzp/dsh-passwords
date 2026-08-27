@@ -60,6 +60,8 @@ The owner can configure, per subuser, from the settings page:
 
 Host installs need Node.js 22.5+, a working dsh installation, and git. dsh's model connection is all you need to configure — this plugin requires nothing extra. Docker installs only need Docker Engine or Docker Desktop plus a DeepSeek API key; no Node.js or dsh on the host.
 
+> Version matching: this plugin requires Node.js 22.5+. Use the same or a newer Node major line as your dsh host (official dsh currently runs on Node 22/24) — both processes share the same plugin bundle, and matching Node majors avoids ABI/semantic drift.
+
 ### Install
 
 dsh-passwords offers 5 install methods — pick one for your platform:

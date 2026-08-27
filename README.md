@@ -60,6 +60,8 @@ dsh 自带的网页界面没有登录、没有权限、没有用量控制。放�
 
 宿主机安装需要 Node.js 22.5+、已经装好并能正常运行的 dsh，以及 git。dsh 的模型连接配置好即可，本插件不需要额外配置。Docker 安装只需要 Docker Engine 或 Docker Desktop，外加一个可用的 DeepSeek API key，宿主机不用装 Node.js 和 dsh。
 
+> 版本匹配：本插件要求 Node.js 22.5+；请使用与你的 dsh 宿主相同或更高的 Node 主线版本（官方 dsh 目前运行在 Node 22/24 上），两个进程共享同一套插件 bundle，Node 大版本一致可避免 ABI/语义差异。
+
 ### 安装
 
 dsh-passwords 一共提供 5 种安装方式，按平台选一个就行：
