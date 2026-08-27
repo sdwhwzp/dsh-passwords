@@ -1,15 +1,26 @@
 // dsh 主机侧插件：dsh-passwords 在 dsh 里的"席位"
-//   1. /api/dsh-passwords/* 用户管理路由：改密码、改用户名、
-//      主用户分配/删除子用户。走网关 JWT cookie 鉴权。
+//   1. /api/dsh-passwords/* 用户管理路由：
+//      - GET  /state → 自身信息 + 可见用户列表 + 聊天入口偏好（任何登录用户；
+//        子用户不可见全量用户列表）
+//      - POST /password /username /users /users/remove → 改密码、改用户名、
+//        分配/删除子用户
+//      - POST /chat-enabled → 本人聊天入口偏好开关
+//      走网关 JWT cookie 鉴权。
 //   2. /api/dsh-passwords/patch/* 远程设置补丁路由：
 //      - GET  /patch/status → 补丁当前状态（任何登录用户可看）
 //      - POST /patch/reload → 通知网关重载补丁并重启 dsh 网页服务
 //        （仅主用户可触发，10 分钟冷却；补丁强制启用，无开关）
 //   3. /api/dsh-passwords/update/* 自动更新路由：
 //      - GET  /update/status → 更新状态（当前/最新版本、下载进度、空闲窗、手动命令；任何登录用户可看）
-//      - POST /update/check   → 立即检查 GitHub 并（环境支持时）开始限速下载（仅主用户）
+//      - POST /update/check   → 立即检查 GitHub 最新版本（仅主用户；手动检查不触发下载）
+//      - POST /update/auto    → 设置自动更新开关（仅主用户）
 //      - POST /update/apply   → 立即安装重启（仅主用户，引擎自带 10 分钟冷却；
-//        自动模式为平台连续空闲满 1 小时后网关自动安装重启，无需人工干预）
+//        手动模式未下载完成时先触发下载、需再次点击安装；自动模式为平台连续
+//        空闲满 1 小时后网关自动安装重启，无需人工干预）
+//   4. /api/dsh-passwords/workspaces：工作区路径清单（仅主用户，供子用户白名单
+//      下拉选择）。
+//   5. /api/dsh-passwords/internal/sandbox：网关内部接口（仅 loopback + 内部
+//      密钥），把受限子用户新会话的沙盒降为其真实授权级别。
 //      dsh 升级覆盖补丁后，主用户在设置页点"重载补丁"即可，无需登录服务器。
 import type { Context } from '@deepseek-ai/cordis';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -814,8 +825,14 @@ export function apply(ctx: Context): void {
             }),
           );
           writeJson(res, 200, { ok: true, workspaces });
-        } catch {
-          writeJson(res, 200, { ok: true, workspaces: [] });
+        } catch (error) {
+          // 工作区清单是权限编辑的可信来源；查询失败不能伪装成空清单，
+          // 否则前端会把所有工作区误显示为已关闭并覆盖用户草稿。
+          writeJson(res, 502, {
+            ok: false,
+            code: 'WORKSPACES_UNAVAILABLE',
+            error: error instanceof Error ? error.message : '工作区暂不可用',
+          });
         }
       },
     },

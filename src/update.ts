@@ -232,7 +232,7 @@ export interface UpdateEngineOps {
 
   /** 执行安装命令；返回 {ok, message（错误摘要）}，不得阻塞网关事件循环 */
   runInstall(args: string[], env: NodeJS.ProcessEnv, cwd?: string): Promise<{ ok: boolean; message: string }>;
-  /** 执行 Git/Docker 子进程；不得经过 shell；成功时 message 保留 stdout。 */
+  /** 执行外部子进程（Docker/npm/node 等）；不得经过 shell；成功时 message 保留 stdout。 */
   runCommand(command: string, args: string[], cwd: string, env?: NodeJS.ProcessEnv): Promise<{ ok: boolean; message: string }>;
   /** Docker readiness 重试等待；测试可注入无等待实现。 */
   wait?(ms: number): Promise<void>;

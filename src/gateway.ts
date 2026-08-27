@@ -5,14 +5,14 @@
 import http, { type IncomingMessage, type IncomingHttpHeaders } from 'node:http';
 import https from 'node:https';
 import { createSecureContext } from 'node:tls';
-import { readFileSync, statSync, createReadStream, realpathSync } from 'node:fs';
+import { readFileSync, createReadStream, realpathSync, openSync, fstatSync, closeSync, constants as fsConstants } from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { createHmac, createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { type Duplex, Transform } from 'node:stream';
 import zlib from 'node:zlib';
-import { URL } from 'node:url';
+import { URL, fileURLToPath } from 'node:url';
 import dns from 'node:dns';
 import express, { type Request, type Response } from 'express';
 import type { PlatformConfig } from './config.js';
@@ -50,8 +50,10 @@ import {
   findStringField,
   SESSION_SCOPED_RE,
   extractSessionId,
-  filterArchivedSessionIds,
+  collectSessionIds,
+  replaceArchivedSessionSnapshot,
   collectArchivedSessionIds,
+  filterArchivedSessionIds,
   filterOwnedSessionIds,
   filterSessionItems,
   sandboxPresetRank,
@@ -78,6 +80,8 @@ type Req = Request & {
   /** 会话目录白名单校验用：本次请求判定出的目标工作区路径（session.create/fork 时）；
    *  由 needsFolderCheck 写入，供 session.create 响应回调记录 sessionId→cwd 缓存 */
   dshpwSessionCwd?: string;
+  /** fork 的源会话已通过逐会话授权校验，响应中的新会话可登记到当前用户快照。 */
+  dshpwForkAuthorized?: boolean;
   /** 工作区管理请求通过白名单校验后的目标路径。 */
   dshpwWorkspacePath?: string;
   dshpwWorkspaceCreate?: boolean;
@@ -761,10 +765,38 @@ export function createGatewayServer(
   // workspaceId → 规范路径 映射：从 workspace.list 响应里收集，供 session.create 用 workspaceId 时解析路径
   const workspacePathById = new Map<string, string>();
 
-  // sessionId → cwd 映射：从 session.list/workspace.list/session.create 响应里收集，
+  // dsh rc.8 将归档状态放在全局 workspace registry；session.list 自身经常不带该字段，
+  // 因此在网关实例内保存最近一次可信 workspace.list 快照，避免归档会话掉进 Ungrouped。
+  const archivedSessionSnapshot = new Set<string>();
+  let archivedSessionSnapshotReady = false;
+  let archivedSessionSnapshotRevision = 0;
+  let workspaceListRequestRevision = 0;
+
+  // 普通用户各自独立的会话授权快照：不能用全局 sessionId → cwd 映射，
+  // 否则一个用户的 workspace.list 会给另一个用户的 session RPC 提供授权依据。
+  const userSessionAccess = new Map<number, Map<string, string>>();
+  const userSessionAccessRevision = new Map<number, number>();
+  const userSessionAccessFor = (userId: number): Map<string, string> => userSessionAccess.get(userId) ?? new Map();
+  const userAccessRevisionFor = (userId: number): number => userSessionAccessRevision.get(userId) ?? 0;
+  const replaceUserSessionAccess = (userId: number, access: Map<string, string>, revision: number): void => {
+    if (revision < (userSessionAccessRevision.get(userId) ?? 0)) return;
+    userSessionAccess.set(userId, access);
+    userSessionAccessRevision.set(userId, revision);
+  };
+  const invalidateUserSessionAccess = (userId: number, revision: number): void => {
+    if (revision < (userSessionAccessRevision.get(userId) ?? 0)) return;
+    userSessionAccess.delete(userId);
+    userSessionAccessRevision.set(userId, revision);
+  };
+
+  // sessionId → cwd 映射: 从 session.list/workspace.list/session.create 响应里收集，
   // 供受限子用户的会话作用域 RPC（history/prompt 等）做 cwd 白名单校验——
   // 权限撤销后仍能按 sessionId 直读旧目录会话必须封堵
   const sessionCwdById = new Map<string, string>();
+  const gatewayRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const configuredRoot = process.env.DSH_PASSWORDS_ENV_FILE?.trim()
+    ? path.dirname(path.resolve(process.env.DSH_PASSWORDS_ENV_FILE.trim()))
+    : gatewayRoot;
 
   /**
    * 从 Cookie 校验会话；返回用户或 null（用户已不存在时旧 token 立即失效）。
@@ -1230,6 +1262,10 @@ export function createGatewayServer(
       res.status(401).json({ ok: false, code: 'NOT_AUTHENTICATED', error: '未登录或会话已失效' });
       return null;
     }
+    if (user.role !== 'admin' && effectivePermissions(user.userId).banned) {
+      res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '账号已被封禁' });
+      return null;
+    }
     if (requireAdmin && user.role !== 'admin') {
       res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '仅主用户可操作' });
       return null;
@@ -1268,6 +1304,7 @@ export function createGatewayServer(
           banned: perms.banned,
           sandboxMode: perms.sandbox_mode,
           disabledSessions: perms.disabled_sessions,
+          allowedSessionIds: db.listUserSessionGrants(u.id),
         },
         usage: usage
           ? {
@@ -1291,12 +1328,12 @@ export function createGatewayServer(
   // ── 远程文件下载（Issue #4）──────────────────────────────────
   // 经网关远程访问时，点击对话里的“生成文件”标签不再在服务器容器里执行
   // xdg-open（无桌面环境 → spawn xdg-open ENOENT），而是下载到当前浏览器。
-  // 安全约束：
+  // 安全约束（按执行顺序）：
   //  1. 仅已登录用户（apiAuth）
-  //  2. 子用户只能下载 allowedFolders 白名单内的文件（folderAllowed）
-  //  3. realpath 后再校验，防 ../ 与符号链接逃逸
-  //  4. 仅普通文件（拒绝目录/设备/socket）
-  //  5. 屏蔽敏感路径：DSH 根目录、数据库、data 目录、.env
+  //  2. 规范化 + realpath 后再校验，防 ../ 与符号链接逃逸
+  //  3. 子用户需开启下载开关，且只能下载 allowedFolders 白名单内的文件（folderAllowed）
+  //  4. 屏蔽敏感路径：DSH 根目录、数据库、部署目录（盖 .env/data/dist）、SSH 凭据、OS 系统目录
+  //  5. 仅普通文件（拒绝目录/设备/socket），并锁定 fd 防路径替换后再读取
   //  6. 支持 GET（流式）+ HEAD
   app.get('/gateway/api/download', (req, res) => {
     const me = apiAuth(req, res);
@@ -1318,14 +1355,21 @@ export function createGatewayServer(
       return;
     }
 
-    // 3) 目录白名单（子用户受限时）
-    const perms = effectivePermissions(me.userId);
-    if (!folderAllowed(real, perms.allowed_folders)) {
-      res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '目录越权' });
-      return;
+    // 3) 下载开关与目录白名单：管理员是平台运维者，跳过 tenant folder allowlist，
+    // 但不跳过认证、realpath、敏感路径和普通文件检查。
+    if (me.role !== 'admin') {
+      const perms = effectivePermissions(me.userId);
+      if (!perms.allow_git_download) {
+        res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '未开启文件下载' });
+        return;
+      }
+      if (!folderAllowed(real, perms.allowed_folders)) {
+        res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '目录越权' });
+        return;
+      }
     }
 
-    // 5) 敏感路径屏蔽：DSH_HOME（会话/设置/凭据）、数据库、部署目录（盖 .env/data/dist）、
+    // 4) 敏感路径屏蔽：DSH_HOME（会话/设置/凭据）、数据库、部署目录（盖 .env/data/dist）、
     //    本机 SSH 凭据、OS 系统目录（/etc /proc /sys /dev —— 永不会是工作区文件）
     const dbReal = (() => {
       try {
@@ -1342,6 +1386,8 @@ export function createGatewayServer(
     // 用 findDshRoot 而不是直接读 config.patch.dshRoot，因为它可能是空（自动探测）
     const resolvedDshRoot = findDshRoot(config.patch.dshRoot);
     const sensitiveBases: string[] = [
+      gatewayRoot,
+      configuredRoot,
       dbReal,
       path.dirname(dbReal),
       // 部署目录（dbPath 的 data/ 再上一级）：盖住 .env / dist / scripts
@@ -1358,15 +1404,21 @@ export function createGatewayServer(
       return;
     }
 
-    // 4) 仅普通文件
+    // 5) 打开并锁定文件描述符：后续 HEAD/GET 都从同一个 fd 读取，避免
+    // realpath/stat 之后再次按路径打开时被替换成另一文件。Linux 额外使用
+    // O_NOFOLLOW 拒绝最终组件符号链接；Windows 没有等价的通用 flag。
+    let fd: number;
     let st;
     try {
-      st = statSync(real);
+      const noFollow = process.platform === 'win32' ? 0 : (fsConstants.O_NOFOLLOW ?? 0);
+      fd = openSync(real, fsConstants.O_RDONLY | noFollow);
+      st = fstatSync(fd);
     } catch {
       res.status(404).json({ ok: false, code: 'NOT_FOUND', error: '文件不存在' });
       return;
     }
     if (!st.isFile()) {
+      closeSync(fd);
       res.status(400).json({ ok: false, code: 'INVALID', error: '不是普通文件' });
       return;
     }
@@ -1379,10 +1431,11 @@ export function createGatewayServer(
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(name)}`);
     res.setHeader('Content-Length', String(st.size));
     if (req.method === 'HEAD') {
+      closeSync(fd);
       res.end();
       return;
     }
-    const stream = createReadStream(real);
+    const stream = createReadStream(real, { fd, autoClose: true });
     stream.on('error', () => {
       if (!res.headersSent) res.status(500).json({ ok: false, code: 'INTERNAL', error: '读取失败' });
       else res.destroy();
@@ -1470,6 +1523,22 @@ export function createGatewayServer(
       : [...new Set(submittedWebSocketPaths as string[])];
     const disabledSessions = stringArray(body.disabledSessions, 2000)
       .filter((id) => id.length > 0 && id.length <= 200);
+    if (body.allowedSessionIds !== undefined && !Array.isArray(body.allowedSessionIds)) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: '允许的会话必须是数组' });
+      return;
+    }
+    if (
+      Array.isArray(body.allowedSessionIds) &&
+      (body.allowedSessionIds.length > 2000 || body.allowedSessionIds.some(
+        (id) => typeof id !== 'string' || id.length === 0 || id.length > 200,
+      ))
+    ) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: '允许的会话列表无效' });
+      return;
+    }
+    const allowedSessionIds = body.allowedSessionIds === undefined
+      ? db.listUserSessionGrants(userId)
+      : [...new Set(body.allowedSessionIds as string[])];
     if (allowedWebSocketPaths.some((rule) => !registeredWebSocketPaths.has(rule))) {
       res.status(400).json({ ok: false, code: 'INVALID', error: 'WebSocket 权限必须来自服务器已登记的用户路径' });
       return;
@@ -1491,7 +1560,14 @@ export function createGatewayServer(
       banned,
       sandboxMode,
       disabledSessions,
+      allowedSessionIds,
     });
+    // 权限行与显式 grant 已在数据库层同一事务提交成功后，才失效旧访问快照。
+    // 管理员显式保存（含故意置空=回收全部）后标记已初始化，避免后续被重新种子化。
+    db.markSessionGrantsSeeded(userId);
+    // 工作区白名单、禁用会话、显式 grant 或封禁状态变化后，旧会话授权快照不能继续生效；
+    // 递增全局请求序号，让在此之前发出的 workspace.list 响应也不能恢复旧授权。
+    invalidateUserSessionAccess(userId, ++workspaceListRequestRevision);
     if (quotaChanged) {
       db.resetUsage(userId);
       // 清掉内存节流缓存：否则 15 秒节流可能跳过新记录的创建，配额暂时不生效
@@ -1511,9 +1587,15 @@ export function createGatewayServer(
         banned,
         sandboxMode,
         disabledSessions,
+        allowedSessionIds,
       }),
     });
-    res.json({ ok: true });
+    res.json({
+      ok: true,
+      allowedFolders,
+      allowedSessionIds: db.listUserSessionGrants(userId),
+      disabledSessions,
+    });
   });
 
 
@@ -2113,6 +2195,16 @@ export function createGatewayServer(
     const proxyPath = normalizeDecodedPath(parsedUrl.pathname);
     // 请求上挂的用户/权限（子用户才有）
     const reqAs = req as Req;
+    // 序号在请求发出前分配：并发 workspace.list 返回乱序时，较早请求的旧快照
+    // 不能覆盖较晚请求对应的新状态。
+    const archiveRequestRevision = req.method === 'POST' && /^\/api\/workspace[.\/]list$/.test(proxyPath)
+      ? ++workspaceListRequestRevision
+      : 0;
+    // fork/create 的响应可能在权限修改后才返回；记录请求开始时的用户授权版本，
+    // 这样慢响应不能在管理员撤销权限后把新会话重新写回旧快照。
+    const sessionAccessRequestRevision = reqAs.dshpwUser === undefined
+      ? 0
+      : userAccessRevisionFor(reqAs.dshpwUser);
     const upstreamReq = http.request(
       {
         hostname: upstreamHost,
@@ -2197,7 +2289,9 @@ export function createGatewayServer(
           return;
         }
 
-        // ── workspace 管理响应：创建成功后登记创建者并默认授权全部会话 ──
+        // ── workspace 管理响应：成功后同步工作区登记 ──
+        // 创建 → 登记创建者工作区并加入其目录白名单；重命名/删除同步登记表。
+        // 会话级授权由显式 grant（Issue #19）与 session.create/fork 登记负责。
         if (
           reqAs.dshpwWorkspacePath !== undefined &&
           (upstreamRes.statusCode ?? 500) >= 200 &&
@@ -2216,40 +2310,74 @@ export function createGatewayServer(
 
         // ── workspace.list 响应：收集 id→path 缓存 + 受限子用户过滤白名单外的工作区 ──
         if (req.method === 'POST' && /^\/api\/workspace[.\/]list$/.test(proxyPath)) {
+          const requestRevision = archiveRequestRevision;
           bufferUpstream(upstreamRes, res, (raw) => {
             try {
               let body = raw;
               const enc = String(upstreamRes.headers['content-encoding'] ?? '');
               if (enc.includes('gzip')) body = gunzipBounded(body);
               const parsed = JSON.parse(body.toString('utf8'));
+              // 只有完整、明确的 archivedSessionIds 数组才能更新快照；解析/解压/容量
+              // 异常不得用空集合覆盖旧状态。按请求序号防止较早的慢响应回滚新快照。
+              const nextArchived = new Set<string>();
+              const hasValidArchiveState = replaceArchivedSessionSnapshot(nextArchived, parsed);
+              if (hasValidArchiveState && requestRevision >= archivedSessionSnapshotRevision) {
+                archivedSessionSnapshot.clear();
+                for (const id of nextArchived) archivedSessionSnapshot.add(id);
+                archivedSessionSnapshotReady = true;
+                archivedSessionSnapshotRevision = requestRevision;
+              }
               // 先缓存全量 id→path（供 session.create 用 workspaceId 时解析路径）
               collectIdPathPairs(parsed, workspacePathById);
-              // 缓存会话 cwd：工作区 path → 其 sessionIds（供会话作用域 RPC 的 cwd 校验）
-              collectSessionCwdFromWorkspaces(parsed, sessionCwdById);
-              const restricted =
-                reqAs.dshpwPerms !== undefined && isWorkspaceRestricted(reqAs.dshpwPerms.allowed_folders);
+              // 管理员仍使用全局 cwd 缓存；普通用户只建立自己的可见会话授权快照。
+              if (reqAs.dshpwIsAdmin === true) collectSessionCwdFromWorkspaces(parsed, sessionCwdById);
               const workspaceVisible = (candidate: string): boolean => {
                 if (!folderAllowed(candidate, reqAs.dshpwPerms?.allowed_folders ?? [])) return false;
                 if (reqAs.dshpwUser === undefined || reqAs.dshpwIsAdmin === true) return true;
                 const owners = db.listWorkspaceOwners();
-                return !owners.some((owner) => owner.path === candidate && owner.userId !== reqAs.dshpwUser);
+                const normalizedCandidate = normalizePath(candidate);
+                return !owners.some(
+                  (owner) => normalizePath(owner.path) === normalizedCandidate && owner.userId !== reqAs.dshpwUser,
+                );
               };
               const outBody = reqAs.dshpwUser !== undefined
                 ? filterByPathFieldWithPredicate(parsed, 'path', workspaceVisible)
                 : parsed;
-              // F-25：子用户（含 allowedFolders=[] 全部允许）只能看到被授权的会话。
-              // DSH 归档后会保留 sessionIds 中的计数槽，由 archivedSessionIds 告诉前端
-              // 隐藏；若两者都删掉，session.list 中的完整条目会掉入「未分组」。
-              // 因此保留可见工作区的归档槽，但只下发当前用户可见且未禁用的归档 ID。
+              // F-25/#16：子用户只能看到被授权的会话。dsh rc.8 保留归档会话在
+              // workspace.sessionIds 槽位，并用 archivedSessionIds 另行标记状态；如果
+              // 把归档 ID 从 sessionIds 删除，dsh 会把完整会话错误归入「未分组」。
               if (reqAs.dshpwPerms !== undefined) {
+                if (!hasValidArchiveState && !archivedSessionSnapshotReady) {
+                  if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response unprocessable');
+                  return;
+                }
                 const disabled = new Set(reqAs.dshpwPerms.disabled_sessions);
-                const archived = collectArchivedSessionIds(parsed);
+                const archived = new Set(archivedSessionSnapshot);
                 const visibleSessionIds = new Set(collectSessionCwdFromWorkspaces(outBody).keys());
+                // Issue #19 旧数据迁移：显式会话授权上线前就已获授权工作区的子用户，
+                // 第一次成功拿到 workspace.list 时，把可见工作区内“未禁用”的既有会话一次性
+                // 写入显式授权，保持旧行为；之后新出现的会话不会自动加入授权。归档会话也
+                // 一并授权——归档是展示状态，不是放弃授权的依据（仍保留在工作区槽位）。
+                if (reqAs.dshpwPerms !== undefined && !db.isSessionGrantsSeeded(reqAs.dshpwUser!)) {
+                  const seedIds = [...visibleSessionIds].filter((id) => !disabled.has(id));
+                  db.replaceUserSessionGrants(reqAs.dshpwUser!, seedIds);
+                  db.markSessionGrantsSeeded(reqAs.dshpwUser!);
+                }
+                const grants = new Set(db.listUserSessionGrants(reqAs.dshpwUser!));
+                // 只暴露当前可见工作区中的归档标记，避免借 archivedSessionIds 枚举
+                // 其他用户的会话；归档槽位本身仍保留在 sessionIds。
                 filterArchivedSessionIds(
                   outBody,
-                  (id) => archived.has(id) && visibleSessionIds.has(id) && !disabled.has(id),
+                  (id) => archived.has(id) && visibleSessionIds.has(id) && grants.has(id) && !disabled.has(id),
                 );
-                filterOwnedSessionIds(outBody, (id) => !disabled.has(id));
+                // 普通用户只看到显式 grant 的会话；归档会话仍保留在已授权工作区槽位。
+                filterOwnedSessionIds(outBody, (id) => grants.has(id) && !disabled.has(id));
+                const access = new Map<string, string>();
+                collectSessionCwdFromWorkspaces(outBody, access);
+                for (const [id, cwd] of access) {
+                  if (disabled.has(id)) access.delete(id);
+                }
+                replaceUserSessionAccess(reqAs.dshpwUser!, access, requestRevision);
               }
               const out = Buffer.from(JSON.stringify(outBody), 'utf8');
               const respHeaders = headersForRewrittenBody(upstreamRes.headers);
@@ -2276,8 +2404,9 @@ export function createGatewayServer(
           return;
         }
 
-        // ── session.create / fork 响应：缓存 cwd + 注入真实沙盒（F-26） ──
-        // 响应体不变；新会话是否可见由工作区开关与逐会话禁用覆盖决定。
+        // ── session.create / fork 响应：登记当前用户会话 + 注入真实沙盒（F-26） ──
+        // 响应体不变；已通过目录/源会话校验的新会话写入显式授权（未禁用时），
+        // 其可见性由显式 grant + 工作区白名单 + 逐会话禁用共同决定。
         if (req.method === 'POST' && /^\/api\/session[.\/](create|fork)$/.test(proxyPath)) {
           bufferUpstream(upstreamRes, res, (raw) => {
             try {
@@ -2290,7 +2419,25 @@ export function createGatewayServer(
                 const cwd = typeof reqCwd === 'string' && reqCwd.length > 0
                   ? reqCwd
                   : collectSessionCwd(parsed).get(sessionId);
-                if (cwd) sessionCwdById.set(sessionId, cwd);
+                if (cwd) {
+                  sessionCwdById.set(sessionId, cwd);
+                  if (
+                    reqAs.dshpwIsAdmin !== true &&
+                    reqAs.dshpwPerms !== undefined &&
+                    (reqAs.dshpwSessionCwd !== undefined || reqAs.dshpwForkAuthorized === true) &&
+                    sessionAccessRequestRevision === userAccessRevisionFor(reqAs.dshpwUser)
+                  ) {
+                    const access = new Map(userSessionAccessFor(reqAs.dshpwUser));
+                    if (!reqAs.dshpwPerms.disabled_sessions.includes(sessionId)) {
+                      db.replaceUserSessionGrants(reqAs.dshpwUser, [
+                        ...db.listUserSessionGrants(reqAs.dshpwUser),
+                        sessionId,
+                      ]);
+                      access.set(sessionId, cwd);
+                    }
+                    replaceUserSessionAccess(reqAs.dshpwUser, access, sessionAccessRequestRevision);
+                  }
+                }
                 if (reqAs.dshpwPerms !== undefined && reqAs.dshpwPerms.sandbox_mode !== null) {
                   applySandboxToSession(sessionId, reqAs.dshpwPerms.sandbox_mode);
                 }
@@ -2314,8 +2461,9 @@ export function createGatewayServer(
         }
 
 
-        // ── session.list 响应过滤：工作区授权 + 逐会话禁用覆盖 ──
-        // 子用户只看到已开启工作区里的活动会话；默认全部启用，管理员可逐条关闭。
+        // ── session.list 响应过滤：显式授权快照 + 工作区白名单 + 逐会话禁用 + 归档排除 ──
+        // 子用户只看到授权快照命中（由 workspace.list 建立）、未禁用且未归档的活动会话；
+        // 管理员保持完整视图。
         if (
           reqAs.dshpwPerms !== undefined &&
           req.method === 'POST' &&
@@ -2327,9 +2475,9 @@ export function createGatewayServer(
               const enc = String(upstreamRes.headers['content-encoding'] ?? '');
               if (enc.includes('gzip')) body = gunzipBounded(body);
               const parsed = JSON.parse(body.toString('utf8'));
-              // 先收集 sessionId→cwd 缓存（过滤前的原始响应，含受限前创建的旧目录会话），
-              // 供会话作用域 RPC（history/prompt 等）做 cwd 白名单校验
-              collectSessionCwd(parsed, sessionCwdById);
+              // 管理员需要全局 cwd 映射；普通用户必须使用 workspace.list 建立的
+              // 按用户访问快照，不能从未过滤的 session.list 反向获得授权。
+              if (reqAs.dshpwIsAdmin === true) collectSessionCwd(parsed, sessionCwdById);
 
               // 子用户按工作区开关过滤：关闭工作区后，其会话一并从侧栏消失，
               // 不产生「未分组」孤儿项。
@@ -2338,8 +2486,18 @@ export function createGatewayServer(
                 ? (cwd: string) => folderAllowed(cwd, perms.allowed_folders)
                 : null;
               const disabled = new Set(perms.disabled_sessions);
-              const archived = collectArchivedSessionIds(parsed);
-              const filtered = filterSessionItems(parsed, (id) => !disabled.has(id) && !archived.has(id), cwdAllowed);
+              // workspace.list 是 rc.8 workspace registry 的权威归档来源。
+              // session.list 中同名字段可能来自旧响应，不能无版本覆盖全局快照。
+              const access = userSessionAccessFor(reqAs.dshpwUser!);
+              if (!archivedSessionSnapshotReady || !userSessionAccess.has(reqAs.dshpwUser!)) {
+                if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response unprocessable');
+                return;
+              }
+              const filtered = filterSessionItems(
+                parsed,
+                (id) => access.has(id) && !disabled.has(id) && !archivedSessionSnapshot.has(id),
+                cwdAllowed,
+              );
               const out = Buffer.from(JSON.stringify(filtered), 'utf8');
               const respHeaders = headersForRewrittenBody(upstreamRes.headers);
               respHeaders['content-length'] = String(out.length);
@@ -2454,7 +2612,7 @@ export function createGatewayServer(
     const needsFolderCheck =
       reqAs.dshpwPerms !== undefined &&
       (req.method === 'POST' || req.method === 'PUT' || (req.method === 'DELETE' && isAionuiPanel(proxyPath))) &&
-      ((isWorkspaceRestricted(reqAs.dshpwPerms.allowed_folders) && (WORKSPACE_ENDPOINT_RE.test(proxyPath) || isAionuiPanel(proxyPath))) || workspaceManagementRequest);
+      (WORKSPACE_ENDPOINT_RE.test(proxyPath) || (isWorkspaceRestricted(reqAs.dshpwPerms.allowed_folders) && isAionuiPanel(proxyPath)) || workspaceManagementRequest);
     const needsSandboxCheck =
       reqAs.dshpwPerms !== undefined &&
       reqAs.dshpwPerms.sandbox_mode !== null &&
@@ -2477,10 +2635,10 @@ export function createGatewayServer(
       (req.method === 'POST' || req.method === 'PUT') &&
       /^\/api\/respond$/.test(proxyPath);
     // 会话作用域 RPC（history/prompt/respond/archive/delete/rename/fork 等）
-    // 必须位于已开启工作区且未被管理员逐会话关闭。
+    // 必须命中显式授权快照、位于已开启工作区，且未被管理员逐会话关闭。
     const needsOwnershipCheck =
       reqAs.dshpwPerms !== undefined &&
-      (req.method === 'POST' || req.method === 'PUT') &&
+      (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH' || req.method === 'DELETE') &&
       SESSION_SCOPED_RE.test(proxyPath);
     // ── 第三方插件纵深防御：dsh-ssh 创建/修改/测试主机时，host 为私网/回环地址
     // 一律拒绝（SSRF 封堵——插件源码不在我们控制内，网关拦一层；
@@ -2593,6 +2751,17 @@ export function createGatewayServer(
               }
             }
           }
+          // session.create 即使用户的目录白名单为空（不限目录），仍不可借共享父目录
+          // 或 workspaceId 缓存向其他用户拥有的工作区创建会话。
+          if (targetPath !== null && WORKSPACE_ENDPOINT_RE.test(proxyPath) && !reqAs.dshpwIsAdmin) {
+            const normalizedTarget = normalizePath(targetPath);
+            const owners = db.listWorkspaceOwners();
+            if (owners.some((owner) => normalizePath(owner.path) === normalizedTarget && owner.userId !== reqAs.dshpwUser)) {
+              upstreamReq.destroy();
+              res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.workspaceDenied')));
+              return;
+            }
+          }
           // 新建工作区由专门权限控制：成功后会自动加入创建者白名单，因此不能被
           // 新用户的初始 __deny__ 白名单反向锁死。已有工作区的删除/重命名仍须在白名单内。
           if (targetPath !== null && !isWorkspaceCreate(proxyPath) && !folderAllowed(targetPath, reqAs.dshpwPerms!.allowed_folders)) {
@@ -2667,20 +2836,37 @@ export function createGatewayServer(
           }
         }
 
-        // 会话访问校验：逐会话关闭优先；其余必须仍位于已开启工作区。
+        // 会话访问校验：子用户须命中显式授权快照且位于已开启工作区；逐会话关闭优先。
         if (needsOwnershipCheck && bodyObj !== null) {
-          const sessionId = extractSessionId(bodyObj) ?? parsedUrl.searchParams.get('sessionId');
+          const bodySessionIds = collectSessionIds(bodyObj);
+          const querySessionId = parsedUrl.searchParams.get('sessionId');
+          if (querySessionId !== null) bodySessionIds.add(querySessionId);
           const perms = reqAs.dshpwPerms!;
-          const cwd = sessionId === null ? undefined : sessionCwdById.get(sessionId);
-          if (
-            sessionId === null ||
-            perms.disabled_sessions.includes(sessionId) ||
-            cwd === undefined ||
-            !folderAllowed(cwd, perms.allowed_folders)
-          ) {
+          const access = reqAs.dshpwUser === undefined ? new Map<string, string>() : userSessionAccessFor(reqAs.dshpwUser);
+          const allowed = (sessionId: string): boolean => {
+            const cwd = reqAs.dshpwIsAdmin === true
+              ? sessionCwdById.get(sessionId)
+              : access.get(sessionId);
+            return !perms.disabled_sessions.includes(sessionId) && cwd !== undefined && folderAllowed(cwd, perms.allowed_folders);
+          };
+          if (bodySessionIds.size === 0 || [...bodySessionIds].some((sessionId) => !allowed(sessionId))) {
             upstreamReq.destroy();
             res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
             return;
+          }
+          // 只有已经通过源会话授权的 fork 才能把新 sessionId 登记到当前用户快照。
+          // fork 的 cwd 必须继承已校验的源会话目录，不能信任上游响应里的 cwd，
+          // 否则异常/被投毒的响应可能把新会话写入白名单外目录。
+          if (/^\/api\/session[.\/]fork$/.test(proxyPath)) {
+            const sourceId = [...bodySessionIds][0];
+            const sourceCwd = access.get(sourceId);
+            if (sourceCwd === undefined) {
+              upstreamReq.destroy();
+              res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+              return;
+            }
+            reqAs.dshpwForkAuthorized = true;
+            reqAs.dshpwSessionCwd = sourceCwd;
           }
         }
 

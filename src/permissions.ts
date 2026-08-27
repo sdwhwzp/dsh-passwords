@@ -1,12 +1,18 @@
 // 子用户权限模型 + 网关侧强制执行的纯函数（无 DB/框架依赖，便于复用与测试）。
 //
 // 权限（主用户在设置卡片里为每个子用户配置）：
-//   - allowedFolders    允许打开的工作区/项目文件夹（绝对路径；空数组 = 全部允许）
-//   - hourlyTokenLimit  每小时 token 上限（null = 不限）
-//   - dailyMinutesLimit 每日使用时长上限，分钟（从当天首次使用起算；null = 不限）
-//   - allowUpload       是否允许上传文件
-//   - allowGitDownload  是否允许 git 下载（clone/pull 等）
-//   - banned            是否封禁（封禁后经密码门的请求全部 403）
+//   - allowedFolders         允许打开的工作区/项目文件夹（绝对路径；空数组 = 全部允许，
+//                            __deny__ 哨兵 = 禁止所有）
+//   - hourlyTokenLimit       每小时 token 上限（null = 不限）
+//   - dailyMinutesLimit      每日使用时长上限，分钟（从当天首次使用起算；null = 不限）
+//   - allowUpload            是否允许上传文件
+//   - allowGitDownload       是否允许 git 下载（clone/pull 等）
+//   - allowWorkspaceCreate   是否允许创建/删除/重命名工作区
+//   - allowedWebSocketPaths  授权可访问的 WebSocket 路径（子用户仅能用勾选的子路径）
+//   - allowedSessionIds      显式会话授权（未初始化前自动种子化可见会话；保存后新会话不再自动加入）
+//   - disabledSessions       已授权工作区内逐会话关闭的会话 ID（兼容旧行为）
+//   - sandboxMode            沙盒级别（read-only / workspace-write / danger-full-access）
+//   - banned                 是否封禁（封禁后经密码门的请求全部 403）
 //
 // 说明：folder / upload / git 的网关层拦截是"尽力而为"（基于 dsh 的 HTTP API
 // 路径与请求体字段）。主用户账号不受任何限制。
@@ -30,10 +36,9 @@ export function normalizePath(p: string): string {
 export type WebSocketAccess = 'deny' | 'authenticated';
 
 /**
- * Parse a comma-separated WebSocket path list. Rules are deliberately small:
- * an exact path or a trailing `/*` for explicit descendants. A WebSocket rule
- * is an authority boundary, so malformed input fails startup instead of being
- * silently widened or ignored.
+ * 解析逗号分隔的 WebSocket 路径白名单。规则刻意保持最小：精确路径或尾部
+ * `/*` 表示显式子路径（只匹配其直接下级）。WebSocket 规则是权限边界，
+ * 格式非法的输入直接报错（启动阶段 fail-closed），而不是被静默放宽或忽略。
  */
 export function parseWebSocketAllowlist(raw: string | undefined, envName: string): string[] {
   if (raw === undefined || raw.trim() === '') return [];
@@ -83,11 +88,10 @@ export function webSocketAccessForPath(
   userRole: 'admin' | 'user',
   builtin: boolean,
 ): WebSocketAccess {
-  // Built-in DSH event channels remain available to every authenticated user.
+  // dsh 内置事件通道对所有已认证用户开放
   if (builtin) return 'authenticated';
   if (!configuredRules.some((rule) => matchesWebSocketRule(pathname, rule))) return 'deny';
-  // The owner can use every configured path. Subusers only get paths that the
-  // owner explicitly checked in the settings card.
+  // 主用户可用全部已配置路径；子用户只能用主用户在设置卡片中显式勾选的路径
   if (userRole === 'admin' || grantedRules.some((rule) => matchesWebSocketRule(pathname, rule))) {
     return 'authenticated';
   }
@@ -671,7 +675,6 @@ export function isGitRequest(pathname: string): boolean {
   );
 }
 
-/**
  /** better-sidebar 的宿主侧文件、Git、上传、预览和终端管理面（仅主用户可访问）。 */
  export function isAdminOnlySidebarEndpoint(pathname: string): boolean {
    return pathname === '/sidebar' || pathname.startsWith('/sidebar/');
@@ -789,7 +792,8 @@ export const WORKSPACE_ENDPOINT_RE = /^\/api\/session[.\/](create)([.\/]|$)/;
  * 子用户必须启用其所在工作区，且该会话未被管理员单独关闭。
  * create 无源会话、list 单独做工作区/会话过滤，均不在此列。
  */
-export const SESSION_SCOPED_RE = /^\/api\/(?:session[.\/](?:history|prompt|respond|archive|delete|rename|retitle|title|resume|fork|truncate|export)|workspace[.\/]archiveSession)([.\/]|$)/;
+export const SESSION_SCOPED_RE =
+  /^\/api\/(?:session[.\/](?:history|prompt|respond|archive|delete|rename|retitle|title|resume|fork|truncate|export)|workspace[.\/]archiveSession)([.\/]|$)/;
 
 /** 递归查找请求体里的 sessionId（typert wire 字段）；找不到返回 null */
 export function extractSessionId(value: unknown, depth = 0): string | null {
@@ -801,6 +805,20 @@ export function extractSessionId(value: unknown, depth = 0): string | null {
     if (nested !== null) return nested;
   }
   return null;
+}
+
+/** 收集请求体中的全部 sessionId，避免只校验第一个字段而让第二个目标绕过授权。
+ * 无论值是否符合格式都收集；调用方会让空值/超长值自然无法命中授权快照，fail-closed。 */
+export function collectSessionIds(value: unknown, out: Set<string> = new Set(), depth = 0): Set<string> {
+  if (depth > 6 || value === null || typeof value !== 'object') return out;
+  if (Array.isArray(value)) {
+    for (const item of value) collectSessionIds(item, out, depth + 1);
+    return out;
+  }
+  const obj = value as Record<string, unknown>;
+  if (typeof obj.sessionId === 'string') out.add(obj.sessionId);
+  for (const child of Object.values(obj)) collectSessionIds(child, out, depth + 1);
+  return out;
 }
 
 /**
@@ -826,6 +844,48 @@ export function isDisplayableDshSession(session: unknown): boolean {
 /** sessionQuery.readSurface() 的 current surface 为空时表示空白恢复槽位。 */
 export function isDisplayableDshSurface(events: unknown): boolean {
   return !Array.isArray(events) || events.length > 0;
+}
+
+/** 归档会话快照容量上限：超过时拒绝更新，不能截断后把遗漏会话错误放行。 */
+export const MAX_ARCHIVED_SESSION_IDS = 10_000;
+
+/**
+ * 用上游响应中显式出现的 archivedSessionIds 数组原子替换快照。
+ *
+ * 返回 false 表示找不到合法字段或输入超限，此时 target 保持不变。dsh rc.8 将归档
+ * 状态保存在 workspace registry，因此不能把“字段缺失”误解为“当前没有归档”。
+ */
+export function replaceArchivedSessionSnapshot(target: Set<string>, value: unknown): boolean {
+  const candidate = new Set<string>();
+  let found = false;
+  let oversized = false;
+
+  const visit = (node: unknown, depth: number): void => {
+    if (oversized || depth > 8 || node === null || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      for (const item of node) visit(item, depth + 1);
+      return;
+    }
+    const obj = node as Record<string, unknown>;
+    if (Array.isArray(obj.archivedSessionIds)) {
+      found = true;
+      for (const id of obj.archivedSessionIds) {
+        if (typeof id !== 'string' || id.length === 0 || id.length > 200) continue;
+        candidate.add(id);
+        if (candidate.size > MAX_ARCHIVED_SESSION_IDS) {
+          oversized = true;
+          return;
+        }
+      }
+    }
+    for (const child of Object.values(obj)) visit(child, depth + 1);
+  };
+
+  visit(value, 0);
+  if (!found || oversized) return false;
+  target.clear();
+  for (const id of candidate) target.add(id);
+  return true;
 }
 
 /** 收集全局/工作区 archivedSessionIds，供 workspace.list 同时过滤 sessionIds。 */

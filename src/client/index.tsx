@@ -1,6 +1,7 @@
-// dsh 浏览器侧插件：在设置页"插件"列表里注册 dsh-passwords 卡片。
+// dsh 浏览器侧插件：在设置页注册 dsh-passwords 独立设置分区（settings.section），
+// 分区体内渲染设置卡片（见下方 settings.section 注册）。
 // 卡片内容：
-//   - 远程设置补丁状态 + "重载补丁"按钮（任何登录用户可触发；补丁强制启用）
+//   - 远程设置补丁状态（所有用户可见）+ "重载补丁"按钮（仅主用户可触发；补丁强制启用）
 //   - 用户管理（改密/改名/子用户） → fetch /api/dsh-passwords/*（网关
 //     JWT cookie 鉴权）
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client';
@@ -113,9 +114,9 @@ export function apply(ctx: ClientContext): void {
     return () => el.remove();
   }, 'dsh-passwords: styles');
 
-  // 独立设置分区（参考 @linxin666 的 settings.section 模式）：在设置页左侧导航
-  // 注册 dsh-passwords 一级分区，分区体内渲染注册进 dsh-passwords.plugin.item
-  // 的卡片——设置不再挤在官方"插件"列表里，而是单独成区。
+  // 独立设置分区（settings.section）：在设置页左侧导航注册 dsh-passwords
+  // 一级分区，分区体内渲染注册进 dsh-passwords.plugin.item 的卡片——设置
+  // 不再挤在官方"插件"列表里，而是单独成区。
   ctx.slots.inject('settings.section', () =>
     ctx.slots.register(
       {

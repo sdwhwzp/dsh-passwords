@@ -23,6 +23,7 @@ Listed in the [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deep
 - One owner (created at first-time setup) + any number of subusers, each with their own login
 - All account management happens in a card on dsh's settings page — no SSH needed: change passwords, change usernames, create/delete subusers
 - The owner manages all subusers; subusers can only change themselves
+- The owner is the platform operator: they can inspect all workspaces and sessions and download ordinary non-sensitive files; databases, secrets, `.env`, deployment files, and system paths remain blocked for everyone
 - Changing a password immediately invalidates all old sessions; every login and failure is logged — one command shows who signed in when
 
 ### Permissions & quotas
@@ -30,6 +31,7 @@ Listed in the [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deep
 The owner can configure, per subuser, from the settings page:
 
 - Workspace allowlist: a subuser only sees and opens the folders you assign; sessions inside an allowed workspace can also be toggled individually
+- The gateway keeps archived-session state consistent between workspace and session lists, so archived sessions cannot reappear for subusers in Ungrouped, flat, or search views
 - Hourly token limit and daily usage-time limit: requests are rejected once the cap is hit
 - Sandbox level: read-only / workspace-write / full access; when a subuser's AI tries to escalate beyond its level, the gateway forces the approval to "reject"
 - Upload / git-download toggles and ban subusers

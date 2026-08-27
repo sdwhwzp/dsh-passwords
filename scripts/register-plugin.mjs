@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-// 把 dsh-passwords 注册进 dsh web profile（精确版，install.sh 调用）。
+// 把 dsh-passwords 注册进 dsh web profile（精确版，由安装器 install.mjs、自更新引擎与 Docker bundled 入口调用）。
 //
 // 为什么不用 dsh 自带的 `dsh plugin add`：
 //   它的 reconcile 会把 profile 里【所有】声明 dsh.bundle 的依赖全部加入
-//   bundles 层。若用户之前装过其它独立插件（如 @linxin666 系列，它们同时
-//   又被 dsh-web-ui-all 加载），会触发 duplicate loader entry id，dsh 直接
+//   bundles 层。若用户之前装过其它独立插件（历史遗留的独立安装产物，也在
+//   bundles 层加载），会触发 duplicate loader entry id，dsh 直接
 //   启动失败。本脚本只精确追加 dsh-passwords 一个条目，其余配置不动。
 //
 // 行为（幂等）：

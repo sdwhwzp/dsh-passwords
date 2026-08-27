@@ -1,5 +1,6 @@
 // SQLite 数据层：Node 内置 node:sqlite（零外部数据库依赖）
-// 表结构：users / platform_settings / audit_logs / login_attempts
+// 表结构：users / platform_settings / audit_logs / login_attempts / ip_throttle /
+// user_permissions / user_usage / messages / user_workspaces / user_session_grants
 //
 // 静态加密（见 src/encrypt.ts）：
 //   - users.username         → AES-256-GCM 密文存储；username_hash（HMAC）做等值索引
@@ -168,6 +169,13 @@ CREATE TABLE IF NOT EXISTS user_workspaces (
   PRIMARY KEY (user_id, path)
 );
 CREATE INDEX IF NOT EXISTS idx_user_workspaces_path ON user_workspaces(path);
+CREATE TABLE IF NOT EXISTS user_session_grants (
+  user_id    INTEGER NOT NULL,
+  session_id TEXT NOT NULL,
+  granted_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (user_id, session_id)
+);
+CREATE INDEX IF NOT EXISTS idx_user_session_grants_session ON user_session_grants(session_id);
 
 `;
 
@@ -316,6 +324,11 @@ export class Database {
     }
     if (!cols.some((c) => c.name === 'allowed_websocket_paths')) {
       this.db.exec("ALTER TABLE user_permissions ADD COLUMN allowed_websocket_paths TEXT NOT NULL DEFAULT '[]'");
+    }
+    // Issue #19：显式会话授权上线前的旧数据迁移标记。字段缺失=未初始化；
+    // 已初始化的用户不会因后续新会话自动加入授权。
+    if (!cols.some((c) => c.name === 'session_grants_seeded')) {
+      this.db.exec('ALTER TABLE user_permissions ADD COLUMN session_grants_seeded INTEGER NOT NULL DEFAULT 0');
     }
   }
 
@@ -596,6 +609,7 @@ export class Database {
       }
 
       this.stmt('DELETE FROM user_permissions WHERE user_id = ?').run(id);
+      this.stmt('DELETE FROM user_session_grants WHERE user_id = ?').run(id);
       this.stmt('DELETE FROM user_usage WHERE user_id = ?').run(id);
       this.stmt('DELETE FROM messages WHERE sender_id = ? OR recipient_id = ?').run(id, id);
       this.stmt('DELETE FROM users WHERE id = ?').run(id);
@@ -839,6 +853,7 @@ export class Database {
       banned: boolean;
       sandboxMode: string | null;
       disabledSessions?: string[];
+      allowedSessionIds?: string[];
     },
   ): void {
     // 防御性清洗：空串/当前目录/根目录条目在 folderAllowed 里语义=全盘允许
@@ -850,7 +865,12 @@ export class Database {
       (perms.allowedWebSocketPaths ?? current?.allowed_websocket_paths ?? [])
         .filter((path) => typeof path === 'string' && path.length > 0 && path.length <= 256),
     )].slice(0, 64);
-    this.stmt(
+    const allowedSessionIds = [...new Set(
+      (perms.allowedSessionIds ?? []).filter((id) => typeof id === 'string' && id.length > 0 && id.length <= 200),
+    )].slice(0, 2000);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.stmt(
       `INSERT INTO user_permissions (user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, allow_upload, allow_git_download, allow_workspace_create, allowed_websocket_paths, banned, sandbox_mode, disabled_sessions)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(user_id) DO UPDATE SET
@@ -877,7 +897,64 @@ export class Database {
       perms.banned ? 1 : 0,
       perms.sandboxMode,
       JSON.stringify(disabledSessions),
-    );
+      );
+      if (perms.allowedSessionIds !== undefined) {
+        this.stmt('DELETE FROM user_session_grants WHERE user_id = ?').run(userId);
+        const insertGrant = this.stmt('INSERT INTO user_session_grants (user_id, session_id) VALUES (?, ?)');
+        for (const sessionId of allowedSessionIds) insertGrant.run(userId, sessionId);
+      }
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  // ── 子用户显式会话授权 ──────────────────────────
+  /** 读取用户已被管理员明确授予的会话 ID；空数组表示未授予任何会话。 */
+  listUserSessionGrants(userId: number): string[] {
+    return (
+      this.stmt('SELECT session_id FROM user_session_grants WHERE user_id = ? ORDER BY session_id').all(userId) as {
+        session_id: string;
+      }[]
+    ).map((row) => row.session_id);
+  }
+
+  /** Issue #19 旧数据迁移标记：该用户的显式会话授权是否已初始化。
+   *  未初始化时，网关会在其首次 workspace.list 成功后种子化可见既有会话。 */
+  isSessionGrantsSeeded(userId: number): boolean {
+    const row = this.stmt('SELECT session_grants_seeded FROM user_permissions WHERE user_id = ?').get(userId) as {
+      session_grants_seeded: number;
+    } | undefined;
+    return row?.session_grants_seeded === 1;
+  }
+
+  markSessionGrantsSeeded(userId: number): void {
+    this.stmt(
+      "UPDATE user_permissions SET session_grants_seeded = 1, updated_at = datetime('now') WHERE user_id = ?",
+    ).run(userId);
+  }
+
+  hasUserSessionGrant(userId: number, sessionId: string): boolean {
+    if (typeof sessionId !== 'string' || sessionId.length === 0 || sessionId.length > 200) return false;
+    return this.stmt('SELECT 1 FROM user_session_grants WHERE user_id = ? AND session_id = ?').get(userId, sessionId) !== undefined;
+  }
+
+  /** 原子替换一个用户的全部显式会话授权；任何异常都会保留原集合。 */
+  replaceUserSessionGrants(userId: number, sessionIds: string[]): void {
+    const normalized = [...new Set(
+      sessionIds.filter((id): id is string => typeof id === 'string' && id.length > 0 && id.length <= 200),
+    )].slice(0, 2000);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.stmt('DELETE FROM user_session_grants WHERE user_id = ?').run(userId);
+      const insert = this.stmt('INSERT INTO user_session_grants (user_id, session_id) VALUES (?, ?)');
+      for (const sessionId of normalized) insert.run(userId, sessionId);
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   // ── 子用户创建的工作区 ─────────────────────────

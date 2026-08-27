@@ -7,6 +7,38 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { Database } from '../src/db.js';
 import { createFieldCrypto } from '../src/encrypt.js';
 
+test('Issue #19：显式会话 grant 原子持久化、隔离且拒绝非法 ID', () => {
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-session-grants-'));
+  const dbPath = path.join(tempDir, 'grants.db');
+  const crypto = createFieldCrypto('test-key', 'test-key');
+  const db = new Database(dbPath, crypto);
+  try {
+    db.init();
+    const first = db.createUser('first-user', '$2a$10$dummyhashdummyhashdummyhashdu');
+    const second = db.createUser('second-user', '$2a$10$dummyhashdummyhashdummyhashdu');
+
+    db.replaceUserSessionGrants(first.id, ['s-one', 's-one', '', 'x'.repeat(201), 's-two']);
+    assert.deepEqual(db.listUserSessionGrants(first.id), ['s-one', 's-two']);
+    assert.equal(db.hasUserSessionGrant(first.id, 's-one'), true);
+    assert.equal(db.hasUserSessionGrant(second.id, 's-one'), false, '授权不得跨用户泄露');
+
+    db.replaceUserSessionGrants(first.id, ['s-three']);
+    assert.deepEqual(db.listUserSessionGrants(first.id), ['s-three'], '替换必须移除旧授权');
+    db.close();
+
+    const reopened = new Database(dbPath, crypto);
+    try {
+      reopened.init();
+      assert.deepEqual(reopened.listUserSessionGrants(first.id), ['s-three'], '重启后授权必须持久化');
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    try { db.close(); } catch { /* already closed for reopen assertion */ }
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test('旧 user_permissions 表会迁移 WebSocket 授权列，并保留现有权限', () => {
   const tempDir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-db-'));
   const dbPath = path.join(tempDir, 'legacy.db');

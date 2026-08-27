@@ -90,7 +90,7 @@ function mustRun(command, args, failureMessage, options = {}) {
   process.exit(1);
 }
 
-// ── 0. 当前目录必须是项目目录（壳脚本保证 clone 到正确位置） ──
+// ── 0. 项目根目录必须完整（root 由脚本自身位置定位，不依赖 cwd；壳脚本保证 clone 到正确位置） ──
 const pkgPath = path.join(root, 'package.json');
 if (!existsSync(pkgPath)) {
   err(`未找到 ${pkgPath}，请先下载项目（git clone 或运行 install.bat/install.sh）`);
@@ -164,8 +164,8 @@ if (prebuilt) {
     ? ['ci', '--no-audit', '--no-fund']
     : ['install', '--no-audit', '--no-fund'];
   mustRun('npm', installArgs, '依赖安装失败，请修复 npm 输出后重试');
-  // 发布到 npm 的包不含 tsconfig.json/src，无法编译；依赖装好后应直接用预构建产物。
-  // 仅源码 clone（含 tsconfig.json）才执行编译。
+  // 源码 clone 与 npm 发布包都带 tsconfig.json/src（package.json files 白名单），
+  // 有 tsconfig.json 就执行编译；只有不含它的旧发布物才要求预构建产物必须完整。
   if (existsSync(path.join(root, 'tsconfig.json'))) {
     say('编译…');
     mustRun('npm', ['run', 'build'], '编译失败，请修复错误后重试');

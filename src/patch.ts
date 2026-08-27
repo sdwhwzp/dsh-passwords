@@ -217,7 +217,8 @@ const SEARCH_AUTOFILL_V2_TO =
  * dsh 0.1.0-rc.7+ 移除了主机侧硬编码 WEB_SETTINGS_NAMESPACES 白名单
  * （改用 settings.describe() 动态枚举命名空间），此时无对象可打 →
  * 视为原生支持，无需（也无法）再插 "dsh-passwords"。
- * 旧版 dsh（<=rc.6）仍需要追加白名单，走插入分支。
+ * 旧版 dsh（<=rc.6）仍需要追加白名单，走插入分支；
+ * 当前 rc.8 属 rc.7+ 行为，原生支持，走不到该分支。
  */
 function whitelistPatchApplicable(content: string): boolean {
   return /WEB_SETTINGS_NAMESPACES\s*=/.test(content);
@@ -275,7 +276,7 @@ export function patchStatus(
   try {
     if (wlFile === null) throw new Error('apiproxy bundle not found');
     const w = readFileSync(wlFile, 'utf8');
-    // rc.7+ 已移除 WEB_SETTINGS_NAMESPACES 白名单 → 原生支持，视为已满足
+    // rc.7+（含当前 rc.8）已移除 WEB_SETTINGS_NAMESPACES 白名单 → 原生支持，视为已满足
     whitelist = !whitelistPatchApplicable(w) || hasSettingsNamespace(w, 'dsh-passwords');
   } catch { /* 同上 */ }
   try {
@@ -355,7 +356,7 @@ export function applyRemotePatch(dshRoot: string): 'applied' | 'unchanged' | 'mi
     changed = true;
   }
 
-  // 2) 白名单补齐（仅 rc.6 及以下适用）。rc.7+ 已移除该机制，预检结果为 null。
+  // 2) 白名单补齐（仅 rc.6 及以下适用）。rc.7+（含当前 rc.8）已移除该机制，预检结果为 null。
   if (whitelistPatched !== null) {
     ensureOriginalBackup(wlFile, w, whitelistPatched);
     writeFileSync(wlFile, whitelistPatched);

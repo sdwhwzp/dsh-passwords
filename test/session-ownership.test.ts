@@ -4,8 +4,11 @@ import assert from 'node:assert/strict';
 import {
   SESSION_SCOPED_RE,
   extractSessionId,
+  collectSessionIds,
   stripArchivedSessionIds,
   filterArchivedSessionIds,
+  replaceArchivedSessionSnapshot,
+  MAX_ARCHIVED_SESSION_IDS,
   filterOwnedSessionIds,
   filterSessionItems,
   collectSessionCwd,
@@ -17,16 +20,27 @@ test('F-25：SESSION_SCOPED_RE 命中会读取/写入会话的 RPC，但不命�
     assert.equal(SESSION_SCOPED_RE.test(`/api/session.${m}`), true, `session.${m} 应归属校验`);
     assert.equal(SESSION_SCOPED_RE.test(`/api/session/${m}`), true, `session/${m} 应归属校验`);
   }
+  assert.equal(SESSION_SCOPED_RE.test('/api/workspace.archiveSession'), true, 'workspace.archiveSession 应归属校验');
+  assert.equal(SESSION_SCOPED_RE.test('/api/workspace/archiveSession'), true, 'workspace/archiveSession 应归属校验');
   assert.equal(SESSION_SCOPED_RE.test('/api/session.create'), false, 'create 无源会话');
   assert.equal(SESSION_SCOPED_RE.test('/api/session.list'), false, 'list 单独过滤');
-  assert.equal(SESSION_SCOPED_RE.test('/api/workspace.archiveSession'), true, 'rc.2 归档会话走 workspace RPC');
-  assert.equal(SESSION_SCOPED_RE.test('/api/workspace/archiveSession'), true, '兼容斜杠风格 workspace RPC');
+  assert.equal(SESSION_SCOPED_RE.test('/api/workspace.create'), false, '创建工作区不属于会话作用域');
 });
 
 test('F-25：extractSessionId 提取顶层与嵌套 sessionId', () => {
   assert.equal(extractSessionId({ sessionId: 'session-1', prompt: {} }), 'session-1');
   assert.equal(extractSessionId({ args: { request: { sessionId: 's-2' } } }), 's-2');
   assert.equal(extractSessionId({ id: 'x' }), null, '无 sessionId 返回 null');
+});
+
+test('Issue #16：collectSessionIds 不忽略空或超长 sessionId', () => {
+  const ids = collectSessionIds({
+    sessionId: 's-valid',
+    nested: [{ sessionId: '' }, { sessionId: 'x'.repeat(201) }],
+  });
+  assert.equal(ids.has('s-valid'), true);
+  assert.equal(ids.has(''), true, '空 sessionId 也必须触发 fail-closed 校验');
+  assert.equal(ids.has('x'.repeat(201)), true, '超长 sessionId 也必须触发 fail-closed 校验');
 });
 
 test('F-25：stripArchivedSessionIds 清空 archivedSessionIds 数组', () => {
@@ -76,6 +90,58 @@ test('F-25：子用户保留可见归档槽，归档会话不掉入未分组', (
     ['s-archived'],
     '归档列表只暴露当前用户可见的归档 ID',
   );
+});
+
+test('Issue #16：filterArchivedSessionIds 只保留可见且允许枚举的归档槽位', () => {
+  const obj = {
+    result: {
+      value: {
+        archivedSessionIds: ['s-visible', 's-disabled', 's-other', 7],
+        items: [{
+          id: 'w1',
+          sessionIds: ['s-visible', 's-disabled'],
+          archivedSessionIds: ['s-visible', 's-disabled', 's-other'],
+        }],
+      },
+    },
+  };
+  filterArchivedSessionIds(obj, (id) => id === 's-visible');
+  assert.deepEqual(obj.result.value.archivedSessionIds, ['s-visible']);
+  assert.deepEqual(obj.result.value.items[0].archivedSessionIds, ['s-visible']);
+  assert.deepEqual(obj.result.value.items[0].sessionIds, ['s-visible', 's-disabled'], '归档不应从工作区会话槽位移除');
+});
+
+test('Issue #16：归档快照只接受明确数组，并支持空数组替换旧状态', () => {
+  const snapshot = new Set(['old-archived']);
+  assert.equal(replaceArchivedSessionSnapshot(snapshot, {
+    result: { value: { archivedSessionIds: ['s-archived', 17] } },
+  }), true);
+  assert.deepEqual([...snapshot], ['s-archived']);
+  assert.equal(replaceArchivedSessionSnapshot(snapshot, {
+    result: { value: { archivedSessionIds: [] } },
+  }), true);
+  assert.equal(snapshot.size, 0, '明确空数组必须清除旧归档状态');
+  assert.equal(replaceArchivedSessionSnapshot(snapshot, { result: { value: {} } }), false);
+  assert.equal(snapshot.size, 0, '字段缺失不得改变已有状态');
+});
+
+test('Issue #16：归档快照超量时拒绝更新且保留旧集合', () => {
+  const snapshot = new Set(['keep-me']);
+  const ids = Array.from({ length: MAX_ARCHIVED_SESSION_IDS + 1 }, (_, i) => `s-${i}`);
+  assert.equal(replaceArchivedSessionSnapshot(snapshot, { archivedSessionIds: ids }), false);
+  assert.deepEqual([...snapshot], ['keep-me']);
+});
+
+test('Issue #16：归档快照缺失时 session.list 过滤仍隐藏已归档会话', () => {
+  const snapshot = new Set(['s-archived']);
+  const tree = {
+    result: { value: [
+      { sessionId: 's-active', cwd: '/root/work' },
+      { sessionId: 's-archived', cwd: '/root/work' },
+    ] },
+  };
+  const out = filterSessionItems(tree, (id) => !snapshot.has(id)) as typeof tree;
+  assert.deepEqual((out.result.value as Array<{ sessionId: string }>).map((item) => item.sessionId), ['s-active']);
 });
 
 test('F-25：filterSessionItems 只保留自己拥有的会话（sessionId+cwd 条目）', () => {

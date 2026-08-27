@@ -75,6 +75,7 @@ export interface PermOverview {
       banned: boolean;
       sandboxMode: string | null;
       disabledSessions: string[];
+      allowedSessionIds: string[];
     };
     usage: {
       day: string;
@@ -96,6 +97,7 @@ interface PermDraft {
   banned: boolean;
   sandbox: string;
   disabledSessions: string[];
+  allowedSessionIds: string[];
   webSocketPaths: string[];
 }
 
@@ -255,6 +257,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
                   webSocketPaths: [...(u.permissions.allowedWebSocketPaths ?? [])],
                   sandbox: u.permissions.sandboxMode ?? '',
                   disabledSessions: [...(u.permissions.disabledSessions ?? [])],
+                  allowedSessionIds: [...(u.permissions.allowedSessionIds ?? [])],
                 };
                 if (!(u.id in drafts) || !dirtyUsersRef.current.has(u.id)) {
                   drafts[u.id] = fresh;
@@ -269,8 +272,12 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
               .then((r) => {
                 if (!refreshQueuedRef.current) setWorkspaces(r.workspaces ?? []);
               })
-              .catch(() => {
-                if (!refreshQueuedRef.current) setWorkspaces([]);
+              .catch((e) => {
+                // 工作区清单是权限编辑的可信状态；请求失败不能用空数组覆盖，
+                // 否则页面会把所有工作区误显示为关闭并在下一次保存时丢权限。
+                if (!refreshQueuedRef.current) {
+                  setError(errText(e, trErr));
+                }
               });
           })
           .catch(() => setOverview(null));
@@ -556,20 +563,24 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
     const enabledFolders = enabledFolderSet(draft);
     if (enabled) enabledFolders.add(workspace.path);
     else enabledFolders.delete(workspace.path);
-    const workspaceSessionIds = new Set(workspace.sessions.map((session) => session.id));
     setDraft(userId, {
       folders: enabledFolders.size === 0 ? ['__deny__'] : [...enabledFolders],
-      disabledSessions: draft.disabledSessions.filter((id) => !workspaceSessionIds.has(id)),
     });
   };
 
   const toggleSession = (userId: number, sessionId: string, enabled: boolean) => {
     const draft = permDrafts[userId];
     if (!draft) return;
+    const allowed = new Set(draft.allowedSessionIds);
     const disabled = new Set(draft.disabledSessions);
-    if (enabled) disabled.delete(sessionId);
-    else disabled.add(sessionId);
-    setDraft(userId, { disabledSessions: [...disabled] });
+    if (enabled) {
+      allowed.add(sessionId);
+      disabled.delete(sessionId);
+    } else {
+      allowed.delete(sessionId);
+      disabled.add(sessionId);
+    }
+    setDraft(userId, { allowedSessionIds: [...allowed], disabledSessions: [...disabled] });
   };
 
   const savePermissions = (userId: number) => {
@@ -586,15 +597,13 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
       setError(t('err.INVALID'));
       return;
     }
-    const enabledFolders = enabledFolderSet(d);
-    const liveEnabledSessions = new Set(
-      workspaces
-        .filter((workspace) => enabledFolders.has(workspace.path))
-        .flatMap((workspace) => workspace.sessions.map((session) => session.id)),
-    );
     void run(
       () =>
-        api('/gateway/api/permissions', {
+        api<{
+          allowedFolders?: string[];
+          allowedSessionIds?: string[];
+          disabledSessions?: string[];
+        }>('/gateway/api/permissions', {
           userId,
           allowedFolders: d.folders,
           hourlyTokenLimit: tokenNum,
@@ -605,9 +614,23 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
           allowedWebSocketPaths: d.webSocketPaths,
           banned: d.banned,
           sandboxMode: d.sandbox === '' ? null : d.sandbox,
-          disabledSessions: d.disabledSessions.filter((id) => liveEnabledSessions.has(id)),
-        }).then(() => {
-          // 保存成功：草稿与服务端一致，解除 dirty（后续 30s 刷新可覆盖）
+          disabledSessions: d.disabledSessions,
+          allowedSessionIds: d.allowedSessionIds,
+        }).then((saved: { allowedFolders?: string[]; allowedSessionIds?: string[]; disabledSessions?: string[] }) => {
+          // 先采用服务端规范化结果，再执行刷新；避免保存成功后短暂显示旧草稿。
+          setPermDrafts((prev) => {
+            const current = prev[userId];
+            if (!current) return prev;
+            return {
+              ...prev,
+              [userId]: {
+                ...current,
+                folders: saved.allowedFolders ?? current.folders,
+                allowedSessionIds: saved.allowedSessionIds ?? current.allowedSessionIds,
+                disabledSessions: saved.disabledSessions ?? current.disabledSessions,
+              },
+            };
+          });
           dirtyUsersRef.current.delete(userId);
         }),
       t('permsSaved'),
@@ -1024,7 +1047,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
                                       { className: 'dshpw-session-check', key: session.id },
                                       h('input', {
                                         type: 'checkbox',
-                                        checked: !d.disabledSessions.includes(session.id),
+                                        checked: d.allowedSessionIds.includes(session.id),
                                         disabled: busy,
                                         onChange: (e: { target: { checked: boolean } }) =>
                                           toggleSession(u.id, session.id, e.target.checked),
