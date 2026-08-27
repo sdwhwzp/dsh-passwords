@@ -261,6 +261,22 @@ test('H-2：同源 Origin 写自身插件路由放行', async () => {
 
 // ── H-1：安全过滤分支缓冲超限 fail-closed ─────────────────────
 
+test('子账号登录首屏的 GET 工作区与会话列表默认拒绝管理员数据', async () => {
+  const workspaces = await gatewayReq('GET', '/api/workspace.list', {}, subuserCookie);
+  assert.equal(workspaces.status, 200);
+  const workspaceBody = JSON.parse(workspaces.body) as {
+    result: { value: { items: Array<{ workspaceId: string }> } };
+  };
+  assert.deepEqual(workspaceBody.result.value.items, []);
+
+  const sessions = await gatewayReq('GET', '/api/session.list', {}, subuserCookie);
+  assert.equal(sessions.status, 200);
+  const sessionBody = JSON.parse(sessions.body) as {
+    result: { value: { items: Array<{ sessionId: string }> } };
+  };
+  assert.deepEqual(sessionBody.result.value.items, []);
+});
+
 test('H-1：受限子用户 session.list 响应超 16MiB → 502（不透传未过滤内容）', async () => {
   const r = await gatewayReq(
     'POST',

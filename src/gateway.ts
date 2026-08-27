@@ -2740,7 +2740,8 @@ export function createGatewayServer(
         }
 
         // ── workspace.list 响应：收集 id→path 缓存 + 受限子用户过滤白名单外的工作区 ──
-        if (req.method === 'POST' && /^\/api\/workspace[.\/]list$/.test(proxyPath)) {
+        // 首屏引导使用 GET，后续 RPC 刷新使用 POST；两种传输都必须经过同一过滤。
+        if ((req.method === 'GET' || req.method === 'POST') && /^\/api\/workspace[.\/]list$/.test(proxyPath)) {
           bufferUpstream(upstreamRes, res, (raw) => {
             try {
               let body = raw;
@@ -2834,7 +2835,7 @@ export function createGatewayServer(
         // 子用户只看到已开启工作区里的活动会话；默认全部启用，管理员可逐条关闭。
         if (
           reqAs.dshpwPerms !== undefined &&
-          req.method === 'POST' &&
+          (req.method === 'GET' || req.method === 'POST') &&
           /^\/api\/session[.\/]list$/.test(proxyPath)
         ) {
           bufferUpstream(upstreamRes, res, (raw) => {

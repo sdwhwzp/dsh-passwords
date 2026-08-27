@@ -58,6 +58,8 @@ The owner can configure, per subuser, from the settings page:
 
 Owners and subusers always sign in with local accounts and bcrypt passwords stored in this project's database. SQLite is the default and MySQL 8 is also supported. The gateway removes browser-supplied identity headers and creates a 30-second HMAC assertion for upstream requests; Harness verifies it and durably attaches the principal to each message, model step and tool execution.
 
+Workspace and session lists used by both initial sign-in and later refreshes are filtered on the server for the current subuser. The browser never receives owner data while waiting for client-side hiding.
+
 Changing the database driver selects a different repository and does not copy rows from the other driver. Back up `.env` and the database and migrate existing accounts separately in production; a first deployment with an empty database can switch directly.
 
 In MySQL mode, an invalid connection is replaced after an idle timeout, server restart, or temporary network interruption. Read-only queries outside a transaction are retried once. Interrupted transactions and writes with an unknown result are not replayed, preventing duplicate data changes.
