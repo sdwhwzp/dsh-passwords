@@ -2,20 +2,53 @@
 
 简体中文 | [English](README.md)
 
-Add a server-grade authentication gateway to DeepSeek Harness and turn it into a multi-tenant platform for public deployment.
+<p align="center">
+  <img src="docs/screenshots/white-login.png" alt="dsh-passwords login page" width="420">
+</p>
 
-The stock dsh web UI has no login or access control. Exposed to a network, anyone with the address can use it. dsh-passwords runs a gateway in front of dsh: unauthenticated visitors only see the login page, and every authenticated request is subject to per-account permissions and quotas. Listed in [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek-harness) and [Awesome DSH Plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin).
+<p align="center">
+  <a href="https://github.com/slywalker2006/dsh-passwords/releases/latest"><img src="https://img.shields.io/github/v/release/slywalker2006/dsh-passwords?style=flat-square" alt="Version"></a>
+  &nbsp;
+  <a href="https://github.com/slywalker2006/dsh-passwords/stargazers"><img src="https://img.shields.io/github/stars/slywalker2006/dsh-passwords?style=flat-square" alt="Stars"></a>
+  &nbsp;
+  <a href="https://www.npmjs.com/package/dsh-passwords"><img src="https://img.shields.io/npm/v/dsh-passwords?style=flat-square" alt="npm"></a>
+  &nbsp;
+  <a href="https://www.npmjs.com/package/dsh-passwords"><img src="https://img.shields.io/npm/dm/dsh-passwords?style=flat-square" alt="Downloads"></a>
+  &nbsp;
+  <a href="https://github.com/slywalker2006/dsh-passwords/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/slywalker2006/dsh-passwords/ci.yml?style=flat-square&label=CI" alt="CI"></a>
+  &nbsp;
+  <a href="https://github.com/zhu1090093659/dsh-web"><img src="https://img.shields.io/badge/DSH-0.1.1--rc.2-4c6ef5?style=flat-square&labelColor=454a54" alt="DSH"></a>
+  &nbsp;
+  <img src="https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square" alt="License">
+  &nbsp;
+  <a href="https://dsh-market.com"><img src="https://img.shields.io/badge/Workshop-dsh--market.com-9370db?style=flat-square" alt="dsh-market"></a>
+</p>
+
+<p align="center">
+  <strong>A server-grade authentication gateway that turns DeepSeek Harness into a multi-tenant platform</strong><br>
+  <em>Login · Auto HTTPS · Multi-tenant permissions · Session grants · Audit & encryption · Bilingual UI</em>
+</p>
+
+<div align="center">
+
+[Features](#features) · [Quick start](#quick-start) · [First-run setup](#first-run-setup) · [Automatic HTTPS](#automatic-https) · [Deployment topologies](#deployment-topologies) · [Configuration](#configuration-reference) · [FAQ](#faq) · [Security](#security-and-privacy) · [Contributing](#contributing)
+
+</div>
+
+---
+
+The stock dsh web UI has no login or access control. Exposed to a network, anyone with the address can use it. dsh-passwords runs a gateway in front of dsh: unauthenticated visitors only see the login page, and every authenticated request is subject to per-account permissions and quotas. Listed in [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek-harness), [Awesome DSH Plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) and the [dsh-market.com workshop](https://dsh-market.com).
 
 ## Features
 
-- Login: first-run setup creates the owner account; every later visit goes through the login page; sessions last 12 hours
-- Automatic HTTPS: issues and renews Let's Encrypt certificates, redirects port 80 to 443, zero configuration
-- Multi-tenant: one owner plus any number of subusers; account management lives in the dsh settings page
-- Permissions and quotas: workspace allowlists, per-session toggles, hourly token caps, daily time caps, three sandbox tiers, upload/download switches, ban
-- Explicit session grants: workspace permission no longer implies access to every session; the owner grants sessions individually; archive state stays consistent between workspace and session lists
-- Operator view: the owner sees all workspaces and sessions and can download non-sensitive regular files
-- Auditing and security: login rate limiting and lockout, audit log, SQLite encryption at rest, logout revokes sessions
-- Settings card: patch reload, software updates, account and permission management, in-app messaging, bilingual zh/en UI
+- **Login**: first-run setup creates the owner account; every later visit goes through the login page; sessions last 12 hours
+- **Automatic HTTPS**: issues and renews Let's Encrypt certificates, redirects port 80 to 443, zero configuration
+- **Multi-tenant**: one owner plus any number of subusers; account management lives in the dsh settings page
+- **Permissions and quotas**: workspace allowlists, per-session toggles, hourly token caps, daily time caps, three sandbox tiers, upload/download switches, ban
+- **Session grants**: workspace permission no longer implies access to every session; the owner grants sessions individually; archive state stays consistent between workspace and session lists
+- **Operator view**: the owner sees all workspaces and sessions and can download non-sensitive regular files
+- **Auditing and security**: login rate limiting and lockout, audit log, SQLite encryption at rest, logout revokes sessions
+- **Settings card**: patch reload, software updates, account and permission management, in-app messaging, bilingual zh/en UI
 
 ## Screenshots
 
@@ -184,16 +217,82 @@ curl -s https://address/gateway/readyz       # readiness check, includes databas
 
 ## FAQ
 
-- **The login page keeps showing first-run setup**: the users table is empty; enter the SETUP_KEY to recreate the owner account.
-- **Forgot the owner password**: stop the service, clear the users table and restart: `node -e "const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync('data/platform.db');db.exec('DELETE FROM users;')"`.
-- **Exit codes 30 / 31 / 32**: see "Automatic HTTPS".
-- **Binding 443 fails as non-root**: ports below 1024 require root on Linux; switch to a high `MCP_GATEWAY_PORT`.
-- **dsh reports `duplicate loader entry id`**: `dsh plugin add` adds every bundle-declaring dependency to the bundles layer and conflicts. Uninstall and register precisely with `node scripts/register-plugin.mjs`.
-- **npm install of dsh fails on node-pty builds**: allow install scripts and reinstall: `npm config set allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user`.
-- **Is a stolen database file a problem**: no. Sensitive fields are encrypted or hashed, passwords exist only as bcrypt hashes, and decryption requires the `.env` keys.
-- **Can `MCP_DB_ENC_KEY` be rotated**: no; changing it makes all existing data undecryptable.
-- **Plugin loading is slow**: the gateway force-caches content-hashed static assets for one year; the first visit after an upgrade downloads fully once, later loads are instant.
-- **Access feels slow**: the gateway adds about 1-2ms per request. Check the TLS handshake with `curl -so /dev/null -w "TLS:%{time_appconnect}s\n" https://address/gateway/login`; the bottleneck is usually the network path to the server.
+<details>
+<summary><strong>The login page keeps showing first-run setup</strong></summary>
+
+The users table is empty; enter the SETUP_KEY to recreate the owner account.
+
+</details>
+
+<details>
+<summary><strong>Forgot the owner password</strong></summary>
+
+Stop the service, clear the users table and restart:
+
+```bash
+node -e "const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync('data/platform.db');db.exec('DELETE FROM users;')"
+```
+
+</details>
+
+<details>
+<summary><strong>Exit codes 30 / 31 / 32</strong></summary>
+
+See the table under "Automatic HTTPS".
+
+</details>
+
+<details>
+<summary><strong>Binding 443 fails as non-root</strong></summary>
+
+Ports below 1024 require root on Linux; switch to a high `MCP_GATEWAY_PORT` and forward as needed.
+
+</details>
+
+<details>
+<summary><strong>dsh reports duplicate loader entry id</strong></summary>
+
+`dsh plugin add` adds every bundle-declaring dependency to the bundles layer and conflicts. Uninstall and register precisely with `node scripts/register-plugin.mjs`.
+
+</details>
+
+<details>
+<summary><strong>npm install of dsh fails on node-pty builds</strong></summary>
+
+Allow install scripts and reinstall:
+
+```bash
+npm config set allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user
+```
+
+</details>
+
+<details>
+<summary><strong>Is a stolen database file a problem</strong></summary>
+
+No. Sensitive fields are encrypted or hashed, passwords exist only as bcrypt hashes, and decryption requires the `.env` keys.
+
+</details>
+
+<details>
+<summary><strong>Can MCP_DB_ENC_KEY be rotated</strong></summary>
+
+No; changing it makes all existing data undecryptable.
+
+</details>
+
+<details>
+<summary><strong>Plugin loading is slow / access feels slow</strong></summary>
+
+The gateway force-caches content-hashed static assets for one year; the first visit after an upgrade downloads fully once, later loads are instant. The gateway adds about 1-2ms per request; check the TLS handshake first:
+
+```bash
+curl -so /dev/null -w "TLS:%{time_appconnect}s\n" https://address/gateway/login
+```
+
+The bottleneck is usually the network path to the server.
+
+</details>
 
 ## Manual install
 
@@ -223,6 +322,25 @@ The UI is bilingual zh/en and follows the dsh language setting. The login page h
 ## Version compatibility
 
 Current version 2.6.4, compatible with dsh 0.1.1-rc.2 and dsh 0.1.0-rc.6 and above. The npm package ships prebuilt dist, TypeScript sources and all scripts; the Docker image is built from the same source.
+
+## Contributing
+
+- Issues are welcome for bugs and feature requests; keep PRs focused and include test evidence
+- Run `npm test && npm run build` before submitting; CI runs automatically on Node 22/24
+
+## Contributors
+
+<a href="https://github.com/slywalker2006/dsh-passwords/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=slywalker2006/dsh-passwords" />
+</a>
+
+<div align="center">
+
+**If you find this useful, give it a star.**
+
+[Report an issue](https://github.com/slywalker2006/dsh-passwords/issues) · [Releases](https://github.com/slywalker2006/dsh-passwords/releases) · [npm package](https://www.npmjs.com/package/dsh-passwords) · [Workshop](https://dsh-market.com)
+
+</div>
 
 ## License
 

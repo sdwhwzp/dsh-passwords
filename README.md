@@ -1,21 +1,54 @@
 # dsh-passwords
 
-[English](README_en.md) | 简体中文
+简体中文 | [English](README.en.md)
 
-给 DeepSeek Harness 加一层服务器级认证网关，使其成为可公网部署的多租户平台。
+<p align="center">
+  <img src="docs/screenshots/white-login.png" alt="dsh-passwords 登录页" width="420">
+</p>
 
-dsh 自带的网页界面没有登录与权限控制，公网部署后任何拿到地址的人都能直接使用。dsh-passwords 在 dsh 前面运行一个网关：未登录访问只见到登录页，登录后按账号执行权限与配额控制。项目已收录于 [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek-harness) 与 [Awesome DSH Plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)。
+<p align="center">
+  <a href="https://github.com/slywalker2006/dsh-passwords/releases/latest"><img src="https://img.shields.io/github/v/release/slywalker2006/dsh-passwords?style=flat-square" alt="Version"></a>
+  &nbsp;
+  <a href="https://github.com/slywalker2006/dsh-passwords/stargazers"><img src="https://img.shields.io/github/stars/slywalker2006/dsh-passwords?style=flat-square" alt="Stars"></a>
+  &nbsp;
+  <a href="https://www.npmjs.com/package/dsh-passwords"><img src="https://img.shields.io/npm/v/dsh-passwords?style=flat-square" alt="npm"></a>
+  &nbsp;
+  <a href="https://www.npmjs.com/package/dsh-passwords"><img src="https://img.shields.io/npm/dm/dsh-passwords?style=flat-square" alt="Downloads"></a>
+  &nbsp;
+  <a href="https://github.com/slywalker2006/dsh-passwords/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/slywalker2006/dsh-passwords/ci.yml?style=flat-square&label=CI" alt="CI"></a>
+  &nbsp;
+  <a href="https://github.com/zhu1090093659/dsh-web"><img src="https://img.shields.io/badge/DSH-0.1.1--rc.2-4c6ef5?style=flat-square&labelColor=454a54" alt="DSH"></a>
+  &nbsp;
+  <img src="https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square" alt="License">
+  &nbsp;
+  <a href="https://dsh-market.com"><img src="https://img.shields.io/badge/%E5%88%9B%E6%84%8F%E5%B7%A5%E5%9D%8A-dsh--market.com-9370db?style=flat-square" alt="dsh-market"></a>
+</p>
+
+<p align="center">
+  <strong>给 DeepSeek Harness 加一层服务器级认证网关，使其成为可公网部署的多租户平台</strong><br>
+  <em>登录认证 · 自动 HTTPS · 多租户权限 · 会话授权 · 审计加密 · 中英双语</em>
+</p>
+
+<div align="center">
+
+[功能](#功能) · [快速开始](#快速开始) · [首次配置](#首次配置) · [自动 HTTPS](#自动-https) · [部署拓扑](#部署拓扑) · [配置参考](#配置参考) · [常见问题](#常见问题) · [安全与隐私](#安全与隐私) · [参与贡献](#参与贡献)
+
+</div>
+
+---
+
+dsh 自带的网页界面没有登录与权限控制，公网部署后任何拿到地址的人都能直接使用。dsh-passwords 在 dsh 前面运行一个网关：未登录访问只见到登录页，登录后按账号执行权限与配额控制。项目已收录于 [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek-harness)、[Awesome DSH Plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) 与 [dsh-market.com 创意工坊](https://dsh-market.com)。
 
 ## 功能
 
-- 登录认证：首次配置创建主用户，之后所有访问先过登录页；会话 12 小时有效
-- 自动 HTTPS：向 Let's Encrypt 自动签发并续期证书，80 端口自动跳转 443，无需配置
-- 多租户：一个主用户加任意多个子用户，账号管理全部在 dsh 设置页完成
-- 权限与配额：工作区白名单、逐会话开关、每小时 token 上限、每日时长上限、沙盒三档、上传与下载开关、封禁
-- 会话授权：工作区权限不自动包含其中全部会话，主用户逐会话授予；归档状态在工作区列表与会话列表间保持一致
-- 运维视图：主用户可查看全部工作区与会话，下载非敏感普通文件
-- 审计与安全：登录限流与锁定、审计日志、SQLite 静态加密、登出即吊销会话
-- 设置页卡片：远程设置补丁重载、软件更新、账号与权限管理、站内留言，全部中英双语
+- **登录认证**：首次配置创建主用户，之后所有访问先过登录页；会话 12 小时有效
+- **自动 HTTPS**：向 Let's Encrypt 自动签发并续期证书，80 端口自动跳转 443，无需配置
+- **多租户**：一个主用户加任意多个子用户，账号管理全部在 dsh 设置页完成
+- **权限与配额**：工作区白名单、逐会话开关、每小时 token 上限、每日时长上限、沙盒三档、上传与下载开关、封禁
+- **会话授权**：工作区权限不自动包含其中全部会话，主用户逐会话授予；归档状态在工作区列表与会话列表间保持一致
+- **运维视图**：主用户可查看全部工作区与会话，下载非敏感普通文件
+- **审计与安全**：登录限流与锁定、审计日志、SQLite 静态加密、登出即吊销会话
+- **设置页卡片**：远程设置补丁重载、软件更新、账号与权限管理、站内留言，全部中英双语
 
 ## 界面截图
 
@@ -184,16 +217,82 @@ curl -s https://地址/gateway/readyz       # 就绪检查，含数据库
 
 ## 常见问题
 
-- **登录页一直显示首次配置**：用户表为空，按提示输入 SETUP_KEY 重建主用户。
-- **忘记主用户密码**：停服后删除 users 表并重启：`node -e "const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync('data/platform.db');db.exec('DELETE FROM users;')"`。
-- **错误码 30 / 31 / 32**：见「自动 HTTPS」一节。
-- **非 root 绑定 443 失败**：Linux 下 1024 以下端口需要 root，改用 `MCP_GATEWAY_PORT` 高位端口。
-- **dsh 报 `duplicate loader entry id`**：`dsh plugin add` 会把所有声明 bundle 的依赖加入 bundles 层导致冲突。卸载后改用 `node scripts/register-plugin.mjs` 精确注册。
-- **npm 安装 dsh 报 node-pty 构建错误**：放行安装脚本后重装：`npm config set allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user`。
-- **数据库文件泄露是否有风险**：敏感字段全部加密或散列，密码仅存 bcrypt 哈希，无 `.env` 密钥无法解密。
-- **能否更换 `MCP_DB_ENC_KEY`**：不能，启用后更换将导致历史数据无法解密。
-- **加载插件慢**：网关已对内容哈希命中的静态资源强制一年期 immutable 缓存，升级后首次访问完整下载一次，之后秒进。
-- **访问慢**：网关每请求开销约 1-2ms。用 `curl -so /dev/null -w "TLS:%{time_appconnect}s\n" https://地址/gateway/login` 检查 TLS 握手，通常瓶颈在到服务器的链路延迟。
+<details>
+<summary><strong>登录页一直显示首次配置</strong></summary>
+
+用户表为空，按提示输入 SETUP_KEY 重建主用户。
+
+</details>
+
+<details>
+<summary><strong>忘记主用户密码</strong></summary>
+
+停服后删除 users 表并重启：
+
+```bash
+node -e "const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync('data/platform.db');db.exec('DELETE FROM users;')"
+```
+
+</details>
+
+<details>
+<summary><strong>错误码 30 / 31 / 32</strong></summary>
+
+见「自动 HTTPS」一节的错误码表。
+
+</details>
+
+<details>
+<summary><strong>非 root 绑定 443 失败</strong></summary>
+
+Linux 下 1024 以下端口需要 root，改用 `MCP_GATEWAY_PORT` 高位端口并自行做端口转发。
+
+</details>
+
+<details>
+<summary><strong>dsh 报 duplicate loader entry id</strong></summary>
+
+`dsh plugin add` 会把所有声明 bundle 的依赖加入 bundles 层导致冲突。卸载后改用 `node scripts/register-plugin.mjs` 精确注册。
+
+</details>
+
+<details>
+<summary><strong>npm 安装 dsh 报 node-pty 构建错误</strong></summary>
+
+放行安装脚本后重装：
+
+```bash
+npm config set allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user
+```
+
+</details>
+
+<details>
+<summary><strong>数据库文件泄露是否有风险</strong></summary>
+
+没有。敏感字段全部加密或散列，密码仅存 bcrypt 哈希，无 `.env` 密钥无法解密。
+
+</details>
+
+<details>
+<summary><strong>能否更换 MCP_DB_ENC_KEY</strong></summary>
+
+不能，启用后更换将导致历史数据无法解密。
+
+</details>
+
+<details>
+<summary><strong>加载插件慢 / 访问慢</strong></summary>
+
+网关对内容哈希命中的静态资源强制一年期 immutable 缓存，升级后首次访问完整下载一次，之后秒进。访问慢时网关每请求开销约 1-2ms，先检查 TLS 握手：
+
+```bash
+curl -so /dev/null -w "TLS:%{time_appconnect}s\n" https://地址/gateway/login
+```
+
+通常瓶颈在到服务器的链路延迟。
+
+</details>
 
 ## 手动安装
 
@@ -223,6 +322,25 @@ curl -s https://地址/gateway/readyz       # 就绪检查，含数据库
 ## 版本兼容
 
 当前版本 2.6.4，与 dsh 0.1.1-rc.2 兼容，同样兼容 dsh 0.1.0-rc.6 及以上。npm 包含预构建 dist、TypeScript 源码与全部脚本；Docker 镜像与 npm 包出自同一份源码。
+
+## 参与贡献
+
+- 欢迎 Issue 报告问题与需求，PR 请保持改动聚焦并附测试证据
+- 提交前跑 `npm test && npm run build`，CI 会在 Node 22/24 上自动执行
+
+## 贡献者
+
+<a href="https://github.com/slywalker2006/dsh-passwords/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=slywalker2006/dsh-passwords" />
+</a>
+
+<div align="center">
+
+**觉得有用就点个 Star。**
+
+[报告问题](https://github.com/slywalker2006/dsh-passwords/issues) · [查看 Releases](https://github.com/slywalker2006/dsh-passwords/releases) · [npm 包](https://www.npmjs.com/package/dsh-passwords) · [创意工坊](https://dsh-market.com)
+
+</div>
 
 ## License
 
