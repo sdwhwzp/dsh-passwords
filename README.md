@@ -3,7 +3,7 @@
 简体中文 | [English](README.en.md)
 
 <p align="center">
-  <img src="docs/screenshots/white-login.png" alt="dsh-passwords 登录页" width="420">
+  <img src="docs/banner.jpg" alt="dsh-passwords" width="100%">
 </p>
 
 <p align="center">
