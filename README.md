@@ -2,43 +2,20 @@
 
 [English](README_en.md) | 简体中文
 
-给 DeepSeek Harness（dsh）加一层服务器级网关，把它从本地单机工具升级成能多人远程使用的多租户平台。
+给 DeepSeek Harness 加一层服务器级认证网关，使其成为可公网部署的多租户平台。
 
-dsh 自带的网页界面没有登录、没有权限、没有用量控制。放到服务器上，任何拿到地址的人都能用，还会白白消耗你的模型额度。dsh-passwords 在 dsh 前面挡一层网关：没登录先看登录页；登录后按账号身份做权限与配额控制。安装只需一条命令，无需任何额外配置即可开箱即用。
+dsh 自带的网页界面没有登录与权限控制，公网部署后任何拿到地址的人都能直接使用。dsh-passwords 在 dsh 前面运行一个网关：未登录访问只见到登录页，登录后按账号执行权限与配额控制。项目已收录于 [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek-harness) 与 [Awesome DSH Plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)。
 
-已收录于 [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek-harness) 生态索引（Infrastructure & Development）与 [Awesome DSH Plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) 插件精选列表（Development & Runtime）。
+## 功能
 
-## 功能一览
-
-### 远程连接
-
-- 登录页 + 首次配置页（第一次访问先设主账号，之后谁访问都先过登录页）
-- 登录一次管 12 小时（Cookie 会话，关浏览器也不丢）
-- 自动 HTTPS：装完自动向 Let's Encrypt 申请浏览器信任的证书，零配置、自动续期；80 端口自动跳转 443
-- 登录页自动跟着 dsh 的主题走（dsh 用深色它就深色）
-- 远程浏览器可正常使用 dsh 的全部设置功能（dsh 默认只允许本机浏览器编辑设置，dsh-passwords 自动处理这件事；dsh 升级后若设置页出现异常，设置页卡片里有"重载补丁"一键修复）
-
-### 多用户
-
-- 一个主用户（首次配置创建）+ 任意多个子用户，各自独立账号密码登录
-- 所有账号管理都在 dsh 设置页的卡片里完成，不用 SSH：改密码、改用户名、创建/删除子用户
-- 主用户可管理所有子用户；子用户只能改自己
-- 主用户是平台运维者，可查看全部工作区和会话，并下载非敏感普通文件；数据库、密钥、`.env`、部署目录和系统目录始终禁止下载
-- 改密后旧会话全部立即失效；每次登录/失败都有记录，一条命令就能查谁在什么时候登录过
-
-### 权限与配额
-
-主用户可以在设置页给每个子用户单独配置：
-
-- 工作区白名单：子用户只能打开你指定的文件夹，看不到别的；白名单内还可以逐个会话开关
-- 会话归档状态由网关在工作区列表和会话列表之间保持一致；普通用户的归档会话不会重新出现在未分组、平铺或搜索结果中
-- 每小时 token 上限、每日使用时长上限：到量自动拒绝
-- 沙盒权限：只读 / 可写工作区 / 完全访问，三档可选；子用户的 AI 想越权提权时，网关直接把审批改成「拒绝」
-- 上传 / git 下载开关、封禁子用户
-
-### 协作
-
-- 界面左下角的聊天按钮：主用户和子用户之间留言，可打标签（议题 / 拉取请求 / 讨论 / 公告 / 问题）；子用户消息默认私信给主用户，只有主用户能广播
+- 登录认证：首次配置创建主用户，之后所有访问先过登录页；会话 12 小时有效
+- 自动 HTTPS：向 Let's Encrypt 自动签发并续期证书，80 端口自动跳转 443，无需配置
+- 多租户：一个主用户加任意多个子用户，账号管理全部在 dsh 设置页完成
+- 权限与配额：工作区白名单、逐会话开关、每小时 token 上限、每日时长上限、沙盒三档、上传与下载开关、封禁
+- 会话授权：工作区权限不自动包含其中全部会话，主用户逐会话授予；归档状态在工作区列表与会话列表间保持一致
+- 运维视图：主用户可查看全部工作区与会话，下载非敏感普通文件
+- 审计与安全：登录限流与锁定、审计日志、SQLite 静态加密、登出即吊销会话
+- 设置页卡片：远程设置补丁重载、软件更新、账号与权限管理、站内留言，全部中英双语
 
 ## 界面截图
 
@@ -46,7 +23,7 @@ dsh 自带的网页界面没有登录、没有权限、没有用量控制。放�
 |:---:|:---:|:---:|
 | <img src="docs/screenshots/white-login.png" width="360"> | <img src="docs/screenshots/black-login.png" width="360"> | <img src="docs/screenshots/white-login-en.png" width="360"> |
 
-| dsh 主界面（登录后） | 聊天 / 留言 | 设置页卡片 · 账号管理 |
+| dsh 主界面 · 登录后 | 聊天 / 留言 | 设置页卡片 · 账号管理 |
 |:---:|:---:|:---:|
 | <img src="docs/screenshots/main-ui.png" width="360"> | <img src="docs/screenshots/chat.png" width="360"> | <img src="docs/screenshots/card-front.png" width="360"> |
 
@@ -58,94 +35,29 @@ dsh 自带的网页界面没有登录、没有权限、没有用量控制。放�
 
 ### 前置条件
 
-宿主机安装需要 Node.js 22.5+、已经装好并能正常运行的 dsh，以及 git。dsh 的模型连接配置好即可，本插件不需要额外配置。Docker 安装只需要 Docker Engine 或 Docker Desktop，外加一个可用的 DeepSeek API key，宿主机不用装 Node.js 和 dsh。
-
-> 版本匹配：本插件要求 Node.js 22.5+；请使用与你的 dsh 宿主相同或更高的 Node 主线版本（官方 dsh 目前运行在 Node 22/24 上），两个进程共享同一套插件 bundle，Node 大版本一致可避免 ABI/语义差异。
+宿主机安装需要 Node.js 22.5+、可正常运行的 dsh 和 git。请让本插件与 dsh 宿主使用同一 Node 主线版本，官方 dsh 当前运行在 Node 22/24 上。Docker 安装只需要 Docker Engine 或 Docker Desktop 和一个 DeepSeek API key。
 
 ### 安装
 
-dsh-passwords 一共提供 5 种安装方式，按平台选一个就行：
-
-- Linux / macOS：直接下载安装，或先 clone 再装
-- 任意平台：npm 全局安装
-- Windows：运行 install.bat
-- 任意平台：Docker
-
-宿主机安装（前四种）都会自动完成：装依赖、编译、生成随机 SETUP_KEY、注册为 dsh 插件、应用远程设置补丁。安装器会检查 Node.js 22.5+、dsh 和 git，缺 pnpm 会自动装；已存在 .env 时不覆盖，重复运行安全；只有首次安装才打印并写入 setup-key.txt，已有 .env 时不会再次暴露密钥。Docker 方式在首次启动容器时完成初始化并启动容器内的 dsh 与密码门。
-
-#### 直接下载安装（Linux / macOS）
+五种安装方式，任选其一。宿主机安装会自动完成装依赖、编译、生成 SETUP_KEY、注册 dsh 插件、应用远程设置补丁；已有 `.env` 时不覆盖，重复运行安全。
 
 ```bash
+# 1. Linux / macOS 一键安装
 curl -fsSL https://raw.githubusercontent.com/slywalker2006/dsh-passwords/main/install.sh | bash
-```
 
-默认装到 /opt/dsh-passwords（root）或 $HOME/dsh-passwords（普通用户），想换位置就设环境变量 DSH_PASSWORDS_DIR。目标目录已存在时安装器会报错退出，重装要先删掉旧目录（记得备份里面的 .env 和 data/）。非 root 账户走自动 HTTPS 时，绑定 80/443 需要 sudo。
-
-装完终端会显示 SETUP_KEY，也写在安装目录的 setup-key.txt 里。
-
-首次配置：
-
-1. 记下 SETUP_KEY，然后按平时的方式启动 dsh：`dsh web`。
-2. 浏览器打开 `https://<服务器IP>.sslip.io`，首次访问会自动进入配置页，输入 SETUP_KEY 创建主用户。
-3. 之后所有人访问这个地址都会先过登录页。setup-key.txt 会在首次配置成功后自动删除，.env 里的密钥也会自动固化并轮换。
-
-#### 先 clone 再装（Linux / macOS）
-
-```bash
-git clone https://github.com/slywalker2006/dsh-passwords
-cd dsh-passwords
+# 2. 先 clone 再安装
+git clone https://github.com/slywalker2006/dsh-passwords && cd dsh-passwords
 bash install.sh
-```
 
-装完终端会显示 SETUP_KEY，也写在当前项目目录的 setup-key.txt 里。
-
-首次配置：
-
-1. 记下 SETUP_KEY，然后按平时的方式启动 dsh：`dsh web`。
-2. 浏览器打开 `https://<服务器IP>.sslip.io`，首次访问会自动进入配置页，输入 SETUP_KEY 创建主用户。
-3. 之后所有人访问这个地址都会先过登录页。setup-key.txt 会在首次配置成功后自动删除，.env 里的密钥也会自动固化并轮换。
-
-#### npm 安装（任意平台）
-
-```bash
+# 3. npm 全局安装，适用于任意平台
 npm install -g dsh-passwords
 dsh-passwords install
 ```
 
-装完终端会显示 SETUP_KEY。想再看一眼的话，先跑 `npm root -g` 拿到全局目录，打开里面的 `dsh-passwords/setup-key.txt`。Windows 同理。
-
-首次配置：
-
-1. 记下 SETUP_KEY，然后按平时的方式启动 dsh：`dsh web`。
-2. 浏览器打开 `https://<服务器IP>.sslip.io`，首次访问会自动进入配置页，输入 SETUP_KEY 创建主用户。
-3. 之后所有人访问这个地址都会先过登录页。setup-key.txt 会在首次配置成功后自动删除，.env 里的密钥也会自动固化并轮换。
-
-#### Windows
-
-下载仓库里的 install.bat 双击运行，或者 clone 后在项目目录里跑。默认装到 `%USERPROFILE%\dsh-passwords`，可用 DSH_PASSWORDS_DIR 改位置。装完终端会显示 SETUP_KEY，密钥文件在该目录的 setup-key.txt。Windows 绑 80/443 不需要管理员权限；端口被占用时网关会以错误码 32 提示。
-
-首次配置：
-
-1. 记下 SETUP_KEY，然后按平时的方式启动 dsh：`dsh web`。
-2. 浏览器打开 `https://<服务器IP>.sslip.io`，首次访问会自动进入配置页，输入 SETUP_KEY 创建主用户。
-3. 之后所有人访问这个地址都会先过登录页。setup-key.txt 会在首次配置成功后自动删除，.env 里的密钥也会自动固化并轮换。
-
-#### Docker
-
-镜像名 `skywalker237234/dsh-passwords`，不带标签默认 latest。镜像里已经带好了 dsh 和 dsh-passwords，宿主机不用装 Node.js 和 dsh。
-
-先建一个 .env，填你的 DeepSeek API key：
-
-```env
-DEEPSEEK_API_KEY=your-deepseek-api-key
-MCP_GATEWAY_PUBLIC_HOST=your.domain.example
-```
-
-MCP_GATEWAY_PUBLIC_HOST 可留空；用自己的域名或 `<公网IP>.sslip.io` 时建议填实际访问地址。
-
-启动（示例，参数按需调整）：
+Windows 下载仓库里的 `install.bat` 双击运行。默认安装到 `%USERPROFILE%\dsh-passwords`。
 
 ```bash
+# 4. Docker
 docker run -d \
   --name dsh-passwords \
   --restart unless-stopped \
@@ -156,202 +68,164 @@ docker run -d \
   skywalker237234/dsh-passwords
 ```
 
-容器名、端口映射、卷名都可以按你的环境改。
+`.env` 至少包含 `DEEPSEEK_API_KEY`。`MCP_GATEWAY_PUBLIC_HOST` 建议填实际访问的域名。容器只在回环地址监听 3088，公网访问由 nginx 或 Caddy 终结 TLS 后转发。初始化完成以日志出现 `dsh patch applied; starting dsh` 为准。
 
-等初始化完成，看日志确认：
+说明：
 
-```bash
-docker logs -f dsh-passwords
-```
+- 宿主机安装默认目录为 `/opt/dsh-passwords` 或 `$HOME/dsh-passwords`，用 `DSH_PASSWORDS_DIR` 更改；目标目录已存在时报错退出
+- SETUP_KEY 打印在安装结束时，同时写入安装目录的 `setup-key.txt`
+- Docker 的两个命名卷分别存 dsh profile 与 `.env`、数据库、证书；删除即丢数据
+- 分容器部署时给 dsh 容器加 `MCP_DSH_PATCH_ALLOW_BIND_ALL=1`，让网关容器能访问 dsh web
 
-看到 `dsh patch applied; starting dsh` 后 Ctrl+C 退出，不会停容器。
+### 首次配置
 
-首次配置：
+1. 启动 dsh：`dsh web`。Docker 用户跳过此步，容器内自动启动。
+2. 浏览器打开 `https://<服务器地址>`，首次访问自动进入配置页。
+3. 输入 SETUP_KEY 创建主用户。此后该地址的所有访问都先过登录页。
 
-1. 读容器生成的一次性 SETUP_KEY：`docker exec dsh-passwords cat /data/dsh-passwords/setup-key.txt`。
-2. 用 nginx 或 Caddy 把 80/443 反代到 `http://127.0.0.1:3088`，打开反代后的 HTTPS 地址，输入 SETUP_KEY 创建主用户。
-3. 之后访问该地址会先过登录页。容器内的 dsh 由入口脚本自动启动，不用再执行 `dsh web`。
+首次配置成功后 `setup-key.txt` 自动删除，`.env` 中的密钥自动固化并轮换。
 
-两个命名卷别删：dsh-home 存 dsh profile、依赖和插件配置；dsh-passwords-state 存 .env、SQLite 数据库、证书和初始化状态。删了账号、配置、密钥全没。
-
-> Docker 容器只在宿主机回环地址监听 3088，别把 3088 直接暴露到公网。公网访问由 nginx 或 Caddy 终结 TLS 后转发，防火墙和安全组放行 80/443。
-
-分容器部署（dsh 和密码门各一个容器）时，dsh 默认只绑回环，网关容器访问不到 dsh web。给 dsh 容器加 `MCP_DSH_PATCH_ALLOW_BIND_ALL=1` 可让 dsh web 绑 0.0.0.0（会放宽安全面，仅分容器场景用）。
-
-宿主机安装用 `dsh-passwords --version` 看版本；Docker 用 `docker logs dsh-passwords --tail 100` 看日志。
+Docker 用户需要先用 nginx 或 Caddy 把 80/443 反代到 `http://127.0.0.1:3088`；一次性 SETUP_KEY 用 `docker exec dsh-passwords cat /data/dsh-passwords/setup-key.txt` 读取。
 
 ## 自动 HTTPS
 
-- 默认自动探测服务器公网 IP，用 `<IP>.sslip.io` 域名向 Let's Encrypt 签发 90 天证书；到期前 30 天自动续期（新证书热加载，无需重启），全程零操作
-- 有自己域名：.env 加一行 `MCP_GATEWAY_DOMAIN=你的域名`，域名 A 记录指向服务器即可，证书自动改签域名版
-- 签发失败会拒绝启动（带错误码），绝不会悄悄降级成明文 HTTP；续期失败但旧证书还在有效期内时，继续用旧证书并在后台自动重试
+默认探测公网 IP 并用 `<IP>.sslip.io` 向 Let's Encrypt 签发 90 天证书，到期前 30 天自动续期，新证书热加载。有自己的域名时在 `.env` 加 `MCP_GATEWAY_DOMAIN`。签发失败拒绝启动，不降级明文；续期失败但旧证书仍在有效期内时继续使用并后台重试。
 
-| 错误码 | 含义 | 怎么办 |
+| 错误码 | 含义 | 处理 |
 |---|---|---|
-| 30 | 证书签发失败 | 检查 80/443 是否放行（防火墙 + 云安全组都要开）、80 是否被占用、能否连通 Let's Encrypt |
-| 31 | 拿不到公网 IP/域名 | 服务器没有公网 IP，或探测失败。有域名就设 `MCP_GATEWAY_DOMAIN`；纯内网用走 HTTP 模式 |
-| 32 | 端口被占用 | 换端口（.env 的 `MCP_GATEWAY_PORT`）或释放被占端口 |
+| 30 | 证书签发失败 | 检查 80/443 放行与占用情况，确认能连通 Let's Encrypt |
+| 31 | 拿不到公网 IP 或域名 | 设置 `MCP_GATEWAY_DOMAIN`，或使用 HTTP 模式 |
+| 32 | 端口被占用 | 更换 `MCP_GATEWAY_PORT` 或释放端口 |
 
-> 为什么地址里有个 .sslip.io？浏览器要求证书上的名字和网址一致，而 Let's Encrypt 不给纯 IP 签发证书，`<IP>.sslip.io` 是免费借名服务。直接输裸 IP 的 https:// 仍会提示主机名不匹配，属正常现象——从 80 端口入口进会自动跳到正确地址。
+证书域名使用 `<IP>.sslip.io` 是因为 Let's Encrypt 不给纯 IP 签发证书。直接访问裸 IP 的 https 地址会提示主机名不匹配，从 80 端口入口进入会自动跳转到正确地址。
 
-## 配置方式
+## 部署拓扑
 
-访问和 HTTPS 的配置一共 6 种，按你的网络环境对号入座：
+| 场景 | 做法 |
+|---|---|
+| 公网服务器，80/443 可用 | 默认配置即可，自动 HTTPS |
+| 已有域名证书 | `.env` 填 `MCP_GATEWAY_TLS_CERT` / `MCP_GATEWAY_TLS_KEY`，无需 80 端口 |
+| 已有 nginx / Caddy 反代 | 反代终结 TLS，`.env` 设 `MCP_GATEWAY_AUTO_TLS=0` 与高位端口，网关只监听回环 |
+| Cloudflare | CF 边缘终结 TLS 转发源站，配置同反代 |
+| 纯内网 / 裸 IP 无法开 80 | 使用 HTTP 模式 |
 
-| 场景 | 做法 | 用户看到的 | 需要放行 |
-|---|---|---|---|
-| 公网服务器，80/443 都能开 | 什么都不用做（默认） | HTTPS（自动证书） | 80 + 443 |
-| 有自己的域名证书 | .env 填 `MCP_GATEWAY_TLS_CERT/KEY`，端口随便改 | HTTPS（你的证书） | 只有你的网关端口，80 完全不用 |
-| 机器上已有 nginx/caddy 反代 | 反代在 80/443 用真实证书终结 TLS 并转发到密码门；.env 设 `MCP_GATEWAY_AUTO_TLS=0` + 高位端口，密码门只监听回环 | HTTPS（反代的证书） | 反代管 80/443，密码门零公网暴露 |
-| 域名挂在 Cloudflare | CF 边缘终结 TLS 转发到源站任意端口（配置同反代思路） | HTTPS（CF 证书） | 源站只对 CF 开放 |
-| 无公网 IP / 纯内网 | `scripts/start-http.mjs` 或 .env 设 `AUTO_TLS=0` | HTTP 明文 | 任意端口 |
-| 只有裸 IP 且 80 开不了 | 只能 HTTP（协议限制：http-01 固定走 80，裸 IP 又没有 DNS 可验证） | HTTP 明文 | 任意端口 |
-
-> 补充：http-01 验证只在签发和续期时访问 80 端口（每次几秒钟，约每 60 天一次）；`MCP_GATEWAY_REDIRECT_PORT` 默认就是 80，同时承担证书应答和 301 跳转两件事。
+http-01 验证只在签发与续期时访问 80 端口，约每 60 天一次。
 
 ## HTTP 模式
 
-密码门默认拒绝以明文 HTTP 运行。确实只能内网用、且接受风险的话：
+默认拒绝明文 HTTP。内网环境确需使用时：
 
 ```bash
-node scripts/start-http.mjs [端口]    # 默认 8080，会弹 y/N 确认
+node scripts/start-http.mjs [端口]    # 默认 8080，需确认风险提示
 ```
 
-脚本会先显示明文风险警告，输入 y 才启动。明文 HTTP 下密码与会话 Cookie 可能被网络中间人嗅探——公网部署请优先使用自动 HTTPS（默认模式，无需配置，只有证书实在签不出来时才用 HTTP 模式）。
+或在 `.env` 写入 `MCP_GATEWAY_AUTO_TLS=0` 与 `MCP_GATEWAY_PORT=8080`，dsh 启动时插件以 HTTP 模式拉起网关。
 
-更彻底的做法：.env 里写 `MCP_GATEWAY_AUTO_TLS=0` 和 `MCP_GATEWAY_PORT=8080`，之后 dsh 启动时插件会直接以 HTTP 模式拉起密码门。
+## 设置页卡片
 
-## 设置页里的密码门卡片
+登录后打开设置，能看到「dsh-passwords · 密码门」卡片。
 
-登录 dsh 后，打开设置 → 插件，能看到"dsh-passwords · 密码门"卡片。里面可以：
-
-| 功能 | 谁可用 | 说明 |
+| 功能 | 使用者 | 说明 |
 |---|---|---|
-| 远程设置 + 重载补丁 | 所有登录用户 | 远程设置已应用（强制启用）；dsh 升级后若设置页出现异常，点"重载补丁"一键修复（自动重启网页服务并刷新页面，不用 SSH） |
-| 软件更新 | 状态所有用户可见；操作仅主用户 | 自动检查新版本、自动下载限速 1MiB/s、平台空闲 1 小时后安装重启；Docker 使用 Compose；手动更新分下载和安装两步 |
-| 修改密码 | 本人改自己；主用户可改任何人 | 改密后旧会话全部立即失效，需重新登录 |
-| 修改用户名 | 本人改自己；主用户可改任何人 | 改名后需用新用户名重新登录 |
-| 子用户管理 | 仅主用户 | 创建/删除子用户（子用户可用登录页进入，但没有管理权限） |
-| 子用户权限 | 仅主用户 | 工作区白名单、每小时 token 上限、每日时长上限、沙盒级别、上传/git 下载开关、第三方 WebSocket 路径授权、封禁 |
-| 聊天 / 留言 | 所有登录用户 | 左下角聊天按钮，支持标签（议题/拉取请求/讨论/公告/问题） |
-| 退出登录 | 所有登录用户 | 登出当前账号，回到登录页 |
+| 重载补丁 | 仅主用户 | dsh 升级后设置页异常时一键重打补丁并重启网页服务 |
+| 软件更新 | 状态所有人可见，操作仅主用户 | 自动检查、限速下载、空闲后安装重启，详见下节 |
+| 修改密码 / 用户名 | 本人；主用户可操作任何人 | 改密后旧会话全部失效 |
+| 子用户管理 | 仅主用户 | 创建、删除子用户 |
+| 子用户权限 | 仅主用户 | 工作区白名单、逐会话授权、token 与时长上限、沙盒、上传下载开关、WebSocket 路径授权、封禁 |
+| 聊天 / 留言 | 所有登录用户 | 支持标签；子用户消息默认私信主用户，仅主用户可广播 |
+| 退出登录 | 所有登录用户 | 登出当前账号 |
 
-- 主用户 = 首次配置时创建的那个账号；之后添加的都是子用户。
-- 密码要求与登录页一致：至少 12 位，且大写、小写、数字、符号各至少一位。
+密码要求：至少 12 位，含大写、小写、数字、符号。
 
 ## 软件更新
 
-设置页卡片里有「软件更新」区块，默认自动检查 GitHub 上的新版本：
-
-- GitHub Release 只用于发现版本；包始终从 npm registry 下载，并用该版本 `dist.integrity` 的 sha512 校验，不匹配就丢弃
-- 自动更新开启时：启动后及每 24 小时检查，发现版本后自动限速下载（默认 <=1MiB/s，`MCP_DSH_UPDATE_MAX_BPS` 只能降低），校验完成后等待平台连续空闲 1 小时安装；主用户点「立即安装」可跳过空闲等待
-- 自动更新关闭时：「立即检查」只发现版本；主用户首次点「下载并准备安装」以不限速下载，完成后会提示再次点击「立即安装」，第二次才安装并重启
-- npm 安装使用已校验 tarball。即使从 Git 源码目录运行，也不会修改工作区或调用 Git：新包安装到受保护的部署目录，保留 `.env`、`data/`、数据库、TLS 和 profile，切换完成后后台重启 dsh。Docker 更新不下载 npm tarball，也不会把“服务正在运行”当成版本成功。只有显式配置 `MCP_DSH_DOCKER_SELF_UPDATE=1`、`MCP_DSH_DOCKER_COMPOSE_DIR`、`MCP_DSH_DOCKER_COMPOSE_FILE`、`MCP_DSH_DOCKER_IMAGE`，并向容器授予 Docker CLI/socket 访问时，应用才会写入目标版本覆盖文件，执行 `docker compose pull` → `docker compose up -d`，再校验容器内版本和 `/gateway/readyz`。未满足条件时只显示宿主机手动命令；Docker socket 等同授予容器宿主 Docker 控制权限，请仅在可信部署中启用。
+- 版本发现走 GitHub Release，包始终从 npm registry 下载并按 `dist.integrity` 的 sha512 校验
+- 自动模式：每 24 小时检查，发现新版本后限速下载，平台连续空闲 1 小时后安装重启；主用户可手动跳过等待
+- 手动模式：检查只发现版本，第一次点击触发下载，第二次点击安装重启
+- 安装保留 `.env`、`data/`、数据库、TLS 与 profile，失败自动回滚
+- Docker 更新需显式配置 `MCP_DSH_DOCKER_SELF_UPDATE=1` 与 Compose 相关变量，未配置时只显示宿主机手动命令；Docker socket 等同授予容器宿主控制权限，仅在可信部署启用
 
 ## 配置参考
 
-.env 速查表：
-
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `SETUP_KEY` | 安装脚本自动生成 | 首次配置密钥；首次配置成功后自动轮换，JWT 会话密钥也会固化为独立变量 |
-| `MCP_JWT_SECRET` | 空（从 SETUP_KEY 派生） | 会话签名密钥。生产环境建议独立设置（`openssl rand -hex 32`），SETUP_KEY 泄露时不连带会话伪造 |
-| `MCP_DB_PATH` | `./data/platform.db` | 数据库文件（SQLite 自动建库，不需要 MySQL） |
-| `MCP_DB_ENC_KEY` | 空 | 数据加密密钥。`openssl rand -hex 32` 生成。设了就不能换，换钥匙旧数据全废 |
-| `MCP_GATEWAY_HOST` | `0.0.0.0` | 网关监听地址 |
-| `MCP_GATEWAY_PORT` | `443` | 网关端口 |
-| `MCP_GATEWAY_UPSTREAM` | `http://127.0.0.1:3080` | dsh 网页地址（插件自动指向 dsh 实际端口，一般不用改） |
-| `MCP_GATEWAY_WS_ADMIN_ALLOWLIST` | 空 | 已配置的第三方 WebSocket 路径，逗号分隔；路径会显示在主用户设置页，主用户可为每个子用户逐项勾选授权。支持精确路径和末尾 `/*`。dsh-better-sidebar 可填 `/sidebar/ws/terminal,/sidebar/ws/agent-terminals` |
-| `MCP_GATEWAY_WS_USER_ALLOWLIST` | 空 | 兼容旧配置；其中的路径会与 `MCP_GATEWAY_WS_ADMIN_ALLOWLIST` 合并显示。新配置只需使用上面的变量。 |
-| `MCP_GATEWAY_REDIRECT_PORT` | `80` | 80 端口：ACME 证书验证 + 301 跳转 443 |
-| `MCP_GATEWAY_DOMAIN` | 空 | 自己的域名；留空自动用 `<公网IP>.sslip.io` |
-| `MCP_GATEWAY_AUTO_TLS` | 开 | 留空=自动；`0` 关闭（明文 HTTP，危险） |
-| `MCP_GATEWAY_ACME_EMAIL` | 空 | 证书到期提醒邮箱（可选） |
-| `MCP_GATEWAY_ACME_STAGING` | 关 | `1`=用 LE 测试环境签发（调试用，浏览器不信任） |
-| `MCP_GATEWAY_TLS_CERT` / `MCP_GATEWAY_TLS_KEY` | 空 | 两个都填 = 用你自己的证书（优先于自动 HTTPS） |
-| `MCP_GATEWAY_PUBLIC_HOST` | 空 | 跳转固定用的公网 IP/域名（防 Host 伪造反射） |
-| `MCP_DSH_ROOT` | 自动探测 | dsh 安装目录（`@deepseek-ai/dsh` 所在处），探测不到时手动指定 |
-| `MCP_DSH_RESTART_SERVICE` | `dsh-web` | 重载补丁后自动重启的 dsh systemd 服务名；显式留空不自动重启 |
-| `MCP_DSH_AUTO_UPDATE` | 开 | 部署级自动更新总开关；`0/false/no` 强制关闭（设置页仍可手动检查/安装） |
-| `MCP_DSH_UPDATE_MAX_BPS` | 1MiB/s | 自动更新下载限速（字节/秒，只能低于 1MiB/s） |
-| `MCP_DSH_DOCKER_SELF_UPDATE` | 关 | 显式启用 Docker 应用内更新；需要可信环境、Docker CLI/socket 和版本化 Compose image 配置，默认关闭 |
-| `MCP_DSH_DOCKER_COMPOSE_DIR` | 空 | Docker 自动更新使用的宿主 Compose 文件目录；必须包含 `dsh-passwords` 服务，未配置时不会自动更新 |
-| `MCP_DSH_DOCKER_COMPOSE_FILE` | 空 | Compose 文件名，例如 `compose.yml`；必须是 Compose 目录内的相对路径 |
-| `MCP_DSH_DOCKER_IMAGE` | 空 | 版本化 Docker 镜像仓库名，例如 `skywalker237234/dsh-passwords`；更新时追加目标版本 tag |
-| `MCP_DSH_DOCKER_SOCKET` | `/var/run/docker.sock` | Docker daemon socket 路径；只有明确挂载并授权时才可启用应用内 Docker 更新 |
-| `MCP_DSH_PATCH_ALLOW_BIND_ALL` | 关 | 分容器 Docker 拓扑用：`1` 允许 dsh web 绑 0.0.0.0，让另一容器的网关能访问到 dsh web |
-| `DSH_PASSWORDS_ENV_FILE` | 空 | 手动指定 .env 路径（插件自动传，一般不用填） |
+| `SETUP_KEY` | 安装脚本生成 | 首次配置密钥，配置成功后自动轮换 |
+| `MCP_JWT_SECRET` | 从 SETUP_KEY 派生 | 会话签名密钥，生产环境建议 `openssl rand -hex 32` 独立设置 |
+| `MCP_DB_PATH` | `./data/platform.db` | SQLite 数据库路径 |
+| `MCP_DB_ENC_KEY` | 空 | 字段加密密钥，启用后不可更换；备份数据库必须连同 `.env` |
+| `MCP_GATEWAY_HOST` / `MCP_GATEWAY_PORT` | `0.0.0.0` / `443` | 网关监听地址与端口 |
+| `MCP_GATEWAY_UPSTREAM` | `http://127.0.0.1:3080` | dsh 网页地址，插件自动指向 |
+| `MCP_GATEWAY_WS_ADMIN_ALLOWLIST` | 空 | 可授权给子用户的第三方 WebSocket 路径，支持精确路径与 `/*` 通配 |
+| `MCP_GATEWAY_REDIRECT_PORT` | `80` | ACME 验证与 301 跳转端口 |
+| `MCP_GATEWAY_DOMAIN` | 空 | 自定义域名，留空用 `<公网IP>.sslip.io` |
+| `MCP_GATEWAY_AUTO_TLS` | 开 | `0` 关闭自动 HTTPS |
+| `MCP_GATEWAY_TLS_CERT` / `MCP_GATEWAY_TLS_KEY` | 空 | 自有证书，优先于自动 HTTPS |
+| `MCP_GATEWAY_PUBLIC_HOST` | 空 | 固定跳转地址，防 Host 伪造 |
+| `MCP_GATEWAY_ACME_EMAIL` / `MCP_GATEWAY_ACME_STAGING` | 空 / 关 | 证书提醒邮箱 / LE 测试环境 |
+| `MCP_DSH_ROOT` | 自动探测 | dsh 安装目录 |
+| `MCP_DSH_RESTART_SERVICE` | `dsh-web` | 重载补丁后重启的 systemd 服务名 |
+| `MCP_DSH_AUTO_UPDATE` | 开 | 部署级自动更新总开关 |
+| `MCP_DSH_UPDATE_MAX_BPS` | 1MiB/s | 自动下载限速，只能调低 |
+| `MCP_DSH_DOCKER_SELF_UPDATE` / `_COMPOSE_DIR` / `_COMPOSE_FILE` / `_IMAGE` / `_SOCKET` | 关 / 空 | Docker 应用内更新的启用开关与 Compose 配置 |
+| `MCP_DSH_PATCH_ALLOW_BIND_ALL` | 关 | 分容器拓扑允许 dsh web 绑定 0.0.0.0 |
+| `DSH_PASSWORDS_ENV_FILE` | 空 | 手动指定 `.env` 路径 |
 
 ## 常用命令
 
 ```bash
-node dist/cli.js audit --limit 20        # 看最近 20 条审计日志（自动解密）
-node dist/cli.js patch status            # 看远程设置补丁状态
-node dist/cli.js patch                   # 重载补丁（重新应用 + 重启 dsh-web）
-node dist/cli.js serve-gateway --port 9000   # 手动启动网关并换端口
-node scripts/start-http.mjs 8080         # 明文 HTTP 模式（危险，y/N 确认）
-DSH_PASSWORDS_NO_AUTOSTART=1 dsh web    # 临时禁止密码门自动拉起（调试用）
-curl -s https://你的地址/gateway/healthz   # 存活检查，200
-curl -s https://你的地址/gateway/readyz    # 就绪检查（含数据库），200/503
+node dist/cli.js audit --limit 20        # 最近 20 条审计日志
+node dist/cli.js patch status            # 远程设置补丁状态
+node dist/cli.js patch                   # 重载补丁并重启 dsh-web
+node dist/cli.js serve-gateway --port 9000   # 手动启动网关
+DSH_PASSWORDS_NO_AUTOSTART=1 dsh web     # 禁止网关自动拉起
+curl -s https://地址/gateway/healthz      # 存活检查
+curl -s https://地址/gateway/readyz       # 就绪检查，含数据库
 ```
 
 ## 常见问题
 
-- 登录页一直显示"首次配置"？说明用户表是空的（新库或数据库被清过）。按页面提示输入 SETUP_KEY 重新创建主用户即可。
-- 忘记主用户密码？停服后跑 `node -e "const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync('data/platform.db');db.exec('DELETE FROM users;')"`，重启后重新走首次配置。
-- dsh 控制台报错误码 30 / 31，密码门没起来？见上面「自动 HTTPS」的错误码表。修好后重启 dsh 会自动再拉起。
-- 443 端口绑定失败（非 root 用户）？Linux 上 1024 以下端口需要 root：用 root/sudo 启动 dsh，或把 `MCP_GATEWAY_PORT` 改成高位端口（如 8443）并自行做端口转发。
-- dsh 启动报 `duplicate loader entry id`？你在 profile 里用过 `dsh plugin add`。它会把 profile 里所有声明 `dsh.bundle` 的依赖全部加进 bundles 层，与已装的其它插件重复时 dsh 直接启动失败。卸载 dsh-passwords 后改用 `node scripts/register-plugin.mjs` 精确注册（只追加本插件一个条目）。
-- npm 装 dsh 报 allow-scripts / node-pty 错？npm 新版会拦截安装脚本，先放行再重装：`npm config set allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user`，然后重新 `npm install -g @deepseek-ai/dsh`（本项目自身没这个问题，是 dsh 的依赖要跑原生构建）。
-- dsh 报 `crypto.randomUUID is not a function`？旧版网关没有 HTML 注入兼容层，更新代码后强刷浏览器（Ctrl+Shift+R）。
-- 数据库文件被偷了要紧吗？不要紧。敏感字段全是密文或散列，没有 .env 里的密钥解不开；密码本身只有 bcrypt 哈希，本来就没有明文。
-- 想换 `MCP_DB_ENC_KEY`？不行。这个密钥一旦启用就不能换，换了一切历史数据都解不开。备份数据库时必须连 .env 一起备份。
-- 每次进去都卡在 "Loading plugins…"？这是 dsh 在加载它的 ~30 个插件脚本，而 dsh 对插件/静态资源返回的是 no-cache，浏览器每次都要全部重新下载。网关已对 /assets/* 和带 rev= 的 /plugins/* 强制一年期 immutable 缓存（文件名/rev 都是内容哈希，dsh 更新会自动换新地址）。升级后第一次访问仍会完整下载一次，之后刷新秒进；如果还慢，强刷一次浏览器（Ctrl+Shift+R）让新响应头生效。
-- 访问有点慢？密码门每次请求只花约 1-2ms。先查 TLS 握手：`curl -s -o /dev/null -w "TCP:%{time_connect}s TLS:%{time_appconnect}s\n" https://你的地址/gateway/login`——TLS 那项正常是几十毫秒。TCP 快、TLS 也快但还是慢的话，就是你的网络到服务器的链路延迟，代码解决不了。
+- **登录页一直显示首次配置**：用户表为空，按提示输入 SETUP_KEY 重建主用户。
+- **忘记主用户密码**：停服后删除 users 表并重启：`node -e "const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync('data/platform.db');db.exec('DELETE FROM users;')"`。
+- **错误码 30 / 31 / 32**：见「自动 HTTPS」一节。
+- **非 root 绑定 443 失败**：Linux 下 1024 以下端口需要 root，改用 `MCP_GATEWAY_PORT` 高位端口。
+- **dsh 报 `duplicate loader entry id`**：`dsh plugin add` 会把所有声明 bundle 的依赖加入 bundles 层导致冲突。卸载后改用 `node scripts/register-plugin.mjs` 精确注册。
+- **npm 安装 dsh 报 node-pty 构建错误**：放行安装脚本后重装：`npm config set allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user`。
+- **数据库文件泄露是否有风险**：敏感字段全部加密或散列，密码仅存 bcrypt 哈希，无 `.env` 密钥无法解密。
+- **能否更换 `MCP_DB_ENC_KEY`**：不能，启用后更换将导致历史数据无法解密。
+- **加载插件慢**：网关已对内容哈希命中的静态资源强制一年期 immutable 缓存，升级后首次访问完整下载一次，之后秒进。
+- **访问慢**：网关每请求开销约 1-2ms。用 `curl -so /dev/null -w "TLS:%{time_appconnect}s\n" https://地址/gateway/login` 检查 TLS 握手，通常瓶颈在到服务器的链路延迟。
 
 ## 手动安装
 
-> Windows 用户建议直接用 install.bat；本节以 Linux 为例，步骤等价。
-
 1. `git clone https://github.com/slywalker2006/dsh-passwords && cd dsh-passwords`
 2. `npm install && npm run build`
-3. `cp .env.example .env`，把 SETUP_KEY 改成随机串（`openssl rand -hex 24`）
-4. 注册插件：`node scripts/register-plugin.mjs`（等价于把 `link:$(pwd)` 加进 `~/.dsh/profiles/web/package.json` 的 dependencies 和 `dsh.profile.bundles` 再 pnpm install。不要用 `dsh plugin add`，原因见常见问题）
-5. 应用补丁：`node dist/cli.js patch`（找不到 dsh 目录就用 `MCP_DSH_ROOT=/path/to/@deepseek-ai/dsh` 指定）
+3. `cp .env.example .env`，把 SETUP_KEY 改为 `openssl rand -hex 24` 生成的随机串
+4. `node scripts/register-plugin.mjs` 注册插件
+5. `node dist/cli.js patch` 应用补丁，找不到 dsh 目录时用 `MCP_DSH_ROOT` 指定
 
-之后同样：启动 dsh → 密码门自动拉起 → 打开 `https://<你的地址>` 完成首次配置。
+之后启动 dsh，网关自动拉起，按「首次配置」完成初始化。
 
 ## 安全与隐私
 
-账号密码只存 bcrypt 哈希；用户名、IP、审计记录加密落盘；登录/失败全程审计；证书签发失败拒绝启动（不降级明文）。所有密钥都在你自己的 .env 和数据库里，源码公开不影响安全。
+账号密码只存 bcrypt 哈希；用户名、IP 与审计记录加密落盘；证书签发失败拒绝启动。
 
-- 防暴力破解：连续输错密码锁定，锁定时长随失败轮次退避（1 → 5 → 15 → 60 分钟封顶）；主用户不会被多 IP 轮换全局锁死（仅单 IP 锁定，防账号级 DoS）。
-- 防密码喷洒（IP 级节流）：同一 IP 在 15 分钟内累计 30 次登录失败 → 该 IP 全局节流 30 分钟（跨用户名累计，专门对付"单 IP 轮换多个用户名"的喷洒手法；节流期间不消耗 bcrypt，登录成功自动解除）。NAT/共享出口的大团队若误触发，等 30 分钟自动恢复，无需人工干预。
-- 会话吊销：登出即服务端吊销（该 token 立即失效）；改密/改名后所有旧会话失效。
-- 子用户隔离（第三方插件面）：dsh-ssh（SSH 主机/隧道）、skin-center、modlens、dsh-uploads 列表/删除等运维面端点仅主用户可用；上传/下载按 `allow_upload` / `allowGitDownload` 权限门控，新子用户默认禁 git 下载（含 dsh-uploads 下载等外带通道），主用户按需开启，子用户无法枚举或外带共享存储中的文件。
-- 慢速连接防护：显式请求超时（半开头部 20s 切断）+ 并发连接上限（网关 512 / 跳转端 256），抵御 slowloris 类慢连接耗尽。
-- 路径归一化：门卫从原始 URL 迭代解码（防双重编码）+ 压平斜杠 + WHATWG 归一化做前缀判定，`%2f..%2f` / `%252f..` 等 SPA 壳绕过变体全部拦截。
-- 生产加固建议：
-  1. 首次配置成功后系统会自动删掉 setup-key.txt、把 JWT/内部/字段加密密钥固化成独立 .env 变量、并轮换 SETUP_KEY——无需手动处理；如果你在已初始化的实例上部署（没走首次配置页），才需要手动删一次 setup-key.txt；
-  2. 需要更强隔离时，可在 .env 里显式设置独立的 `MCP_JWT_SECRET`（`openssl rand -hex 32`）与 `MCP_DB_ENC_KEY`——首次配置后这些值已自动固化，手动设置只是换一把新的；
-  3. 建议配 `MCP_DSH_RESTART_SERVICE` 指向正确的 systemd 服务名。
+- 连续失败锁定按轮次退避，1 到 60 分钟封顶；主用户不受多 IP 轮换的全局锁死影响
+- 同一 IP 15 分钟内 30 次失败触发 IP 级节流 30 分钟，应对跨用户名密码喷洒
+- 登出即服务端吊销 token；改密、改名后全部旧会话失效
+- 第三方插件运维面端点仅主用户可用；上传与下载按权限门控，新子用户默认禁用下载
+- 请求超时与并发连接上限抵御 slowloris；路径归一化拦截 `%2f`、双重编码等变体
+- 首次配置成功后自动删除 `setup-key.txt` 并固化独立密钥变量
 
 ## 语言
 
-界面为中英双语，跟随 dsh 的语言设置：
-
-- 登录页 / 首次配置页：跟随 dsh 的语言（设置 → 通用 → 语言），其次跟随浏览器语言；页面右上角有 中文/English 切换，点一下即持久生效。
-- 设置页卡片：跟随 dsh 的语言设置，切换语言即时生效。
-- 命令行（CLI）：跟随 `LANG` / `LC_ALL` 环境变量（`en` 开头即英文）。
+界面中英双语，跟随 dsh 语言设置。登录页右上角可手动切换并持久化，CLI 跟随 `LANG` / `LC_ALL`。
 
 ## 版本兼容
 
-当前版本 dsh-passwords 2.6.2，与 dsh 0.1.1-rc.2 完全兼容（keyed slot、补丁链与 profile 布局均保持对齐），同样兼容 dsh 0.1.0-rc.6 及以上版本。
-
-npm 包带预构建的 dist/、TypeScript 源码、安装注册脚本、Docker 文件、cordis.yml、README 和许可证。Docker 镜像与 npm 2.6.2 使用同一份 src/、dist/ 和 scripts/。
+当前版本 2.6.4，与 dsh 0.1.1-rc.2 兼容，同样兼容 dsh 0.1.0-rc.6 及以上。npm 包含预构建 dist、TypeScript 源码与全部脚本；Docker 镜像与 npm 包出自同一份源码。
 
 ## License
 
-本项目采用 [GNU General Public License v3.0 only](https://www.gnu.org/licenses/gpl-3.0.html)，完整文本见 [LICENSE](LICENSE)。
+[GNU GPL v3.0 only](https://www.gnu.org/licenses/gpl-3.0.html)，完整文本见 [LICENSE](LICENSE)。
 
-本项目是 dsh 的独立扩展，与 DeepSeek 无隶属关系。dsh 本身按它自己的许可证授权。
+本项目是 dsh 的独立扩展，与 DeepSeek 无隶属关系。
