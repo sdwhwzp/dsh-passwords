@@ -1,6 +1,6 @@
 # dsh-passwords
 
-简体中文 | [English](README.en.md)
+[English](README_en.md) | 简体中文
 
 <p align="center">
   <img src="docs/banner.jpg" alt="dsh-passwords" width="100%">
