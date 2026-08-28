@@ -11,6 +11,7 @@
 import { createElement as h, useEffect, useRef, useState } from 'react';
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots';
 import { publishChatEntryChanged } from './events';
+import { api } from './api';
 
 export interface UserInfo {
   id: number;
@@ -31,6 +32,20 @@ export interface PatchState {
   settingsHostMode: boolean;
   whitelist: boolean;
   workspaceSearch: boolean;
+}
+
+export function readPatchState(response: unknown): PatchState | null {
+  if (typeof response !== 'object' || response === null || !('status' in response)) return null;
+  const status = response.status;
+  if (typeof status !== 'object' || status === null ||
+    !('settingsHostMode' in status) || typeof status.settingsHostMode !== 'boolean' ||
+    !('whitelist' in status) || typeof status.whitelist !== 'boolean' ||
+    !('workspaceSearch' in status) || typeof status.workspaceSearch !== 'boolean') return null;
+  return {
+    settingsHostMode: status.settingsHostMode,
+    whitelist: status.whitelist,
+    workspaceSearch: status.workspaceSearch,
+  };
 }
 
 /** /api/dsh-passwords/update/status 的返回（与网关 UpdateStatus 镜像） */
@@ -146,25 +161,6 @@ function SectionHeader(props: { label: React.ReactNode; status?: React.ReactNode
     h('div', { className: 'dshpw-section-title' }, h('span', { className: 'dshpw-label' }, props.label)),
     props.status === undefined ? null : h(StatusPill, { tone: props.tone, children: props.status }),
   );
-}
-
-type ApiError = { error?: string; code?: string };
-
-function api<T>(path: string, body?: unknown): Promise<T> {
-  return fetch(path, {
-    method: body === undefined ? 'GET' : 'POST',
-    headers: body === undefined ? undefined : { 'content-type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  }).then(async (res) => {
-    const data = (await res.json().catch(() => ({}))) as ApiError & T;
-    if (!res.ok) {
-      const err = new Error(data.error || `HTTP ${res.status}`);
-      // 携带服务端稳定错误码：errText 优先按码本地化（跟随 dsh 语言）
-      (err as Error & { code?: string }).code = data.code;
-      throw err;
-    }
-    return data as T;
-  });
 }
 
 /** 错误文案：有 code 走本地词典，未知 code / 无 code 回退服务端文案。
@@ -291,8 +287,8 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
         }
       });
     // patch 状态独立于主链（轻量 + 失败只影响状态展示）
-    api<{ status: PatchState | null }>('/api/dsh-passwords/patch/status')
-      .then((r) => setPatchState(r.status))
+    api<unknown>('/api/dsh-passwords/patch/status')
+      .then((r) => setPatchState(readPatchState(r)))
       .catch(() => setPatchState(null));
     // 更新状态独立拉取（失败只降级为状态未知，不阻塞主链）
     api<{ ok?: boolean; status?: UpdateInfo }>('/api/dsh-passwords/update/status')
