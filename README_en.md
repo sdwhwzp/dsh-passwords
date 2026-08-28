@@ -21,9 +21,15 @@
   &nbsp;
   <img src="https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square" alt="License">
   &nbsp;
+  <a href="https://github.com/awesome-dsh-plugin/awesome-dsh-plugin"><img src="https://img.shields.io/badge/Awesome-DSH%20Plugin-9370db?style=flat-square" alt="Awesome DSH Plugin"></a>
+  &nbsp;
+  <a href="https://github.com/zouyuxuan122/Deepseek-Harness-EAC"><img src="https://img.shields.io/badge/Featured-EAC%20Desktop-0ca678?style=flat-square" alt="Featured on EAC Desktop"></a>
+  &nbsp;
   <a href="https://github.com/0xsline/awesome-deepseek-harness"><img src="https://img.shields.io/badge/Awesome-DeepSeek%20Harness-4c6ef5?style=flat-square" alt="Awesome DeepSeek Harness"></a>
   &nbsp;
-  <a href="https://github.com/awesome-dsh-plugin/awesome-dsh-plugin"><img src="https://img.shields.io/badge/Awesome-DSH%20Plugin-9370db?style=flat-square" alt="Awesome DSH Plugin"></a>
+  <a href="https://github.com/Zhiyuan-Fan/Awesome-DeepSeek-Harness-Plugins"><img src="https://img.shields.io/badge/Featured-Awesome%20Plugins-15aabf?style=flat-square" alt="Featured on Awesome DeepSeek Harness Plugins"></a>
+  &nbsp;
+  <a href="https://github.com/bruc3van/awesome-dsh-plugin"><img src="https://img.shields.io/badge/Featured-DSH%20Catalog-1c7ed6?style=flat-square" alt="Featured on DSH Catalog"></a>
 </p>
 
 <p align="center">
