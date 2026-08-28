@@ -21,7 +21,9 @@
   &nbsp;
   <img src="https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square" alt="License">
   &nbsp;
-  <a href="https://dsh-market.com"><img src="https://img.shields.io/badge/%E5%88%9B%E6%84%8F%E5%B7%A5%E5%9D%8A-dsh--market.com-9370db?style=flat-square" alt="dsh-market"></a>
+  <a href="https://github.com/0xsline/awesome-deepseek-harness"><img src="https://img.shields.io/badge/Awesome-DeepSeek%20Harness-4c6ef5?style=flat-square" alt="Awesome DeepSeek Harness"></a>
+  &nbsp;
+  <a href="https://github.com/awesome-dsh-plugin/awesome-dsh-plugin"><img src="https://img.shields.io/badge/Awesome-DSH%20Plugin-9370db?style=flat-square" alt="Awesome DSH Plugin"></a>
 </p>
 
 <p align="center">
@@ -37,7 +39,7 @@
 
 ---
 
-dsh 自带的网页界面没有登录与权限控制，公网部署后任何拿到地址的人都能直接使用。dsh-passwords 在 dsh 前面运行一个网关：未登录访问只见到登录页，登录后按账号执行权限与配额控制。项目已收录于 [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek-harness)、[Awesome DSH Plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) 与 [dsh-market.com 创意工坊](https://dsh-market.com)。
+dsh 自带的网页界面没有登录与权限控制，公网部署后任何拿到地址的人都能直接使用。dsh-passwords 在 dsh 前面运行一个网关：未登录访问只见到登录页，登录后按账号执行权限与配额控制。项目收录于 [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek-harness#security--governance)（Security & Governance）与 [Awesome DSH Plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin#security--permissions)（Security & Permissions）。
 
 ## 功能
 
@@ -338,7 +340,7 @@ curl -so /dev/null -w "TLS:%{time_appconnect}s\n" https://地址/gateway/login
 
 **觉得有用就点个 Star。**
 
-[报告问题](https://github.com/slywalker2006/dsh-passwords/issues) · [查看 Releases](https://github.com/slywalker2006/dsh-passwords/releases) · [npm 包](https://www.npmjs.com/package/dsh-passwords) · [创意工坊](https://dsh-market.com)
+[报告问题](https://github.com/slywalker2006/dsh-passwords/issues) · [查看 Releases](https://github.com/slywalker2006/dsh-passwords/releases) · [npm 包](https://www.npmjs.com/package/dsh-passwords) · [Awesome 收录](https://github.com/0xsline/awesome-deepseek-harness#security--governance)
 
 </div>
 

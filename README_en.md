@@ -21,7 +21,9 @@
   &nbsp;
   <img src="https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square" alt="License">
   &nbsp;
-  <a href="https://dsh-market.com"><img src="https://img.shields.io/badge/Workshop-dsh--market.com-9370db?style=flat-square" alt="dsh-market"></a>
+  <a href="https://github.com/0xsline/awesome-deepseek-harness"><img src="https://img.shields.io/badge/Awesome-DeepSeek%20Harness-4c6ef5?style=flat-square" alt="Awesome DeepSeek Harness"></a>
+  &nbsp;
+  <a href="https://github.com/awesome-dsh-plugin/awesome-dsh-plugin"><img src="https://img.shields.io/badge/Awesome-DSH%20Plugin-9370db?style=flat-square" alt="Awesome DSH Plugin"></a>
 </p>
 
 <p align="center">
@@ -37,7 +39,7 @@
 
 ---
 
-The stock dsh web UI has no login or access control. Exposed to a network, anyone with the address can use it. dsh-passwords runs a gateway in front of dsh: unauthenticated visitors only see the login page, and every authenticated request is subject to per-account permissions and quotas. Listed in [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek-harness), [Awesome DSH Plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) and the [dsh-market.com workshop](https://dsh-market.com).
+The stock dsh web UI has no login or access control. Exposed to a network, anyone with the address can use it. dsh-passwords runs a gateway in front of dsh: unauthenticated visitors only see the login page, and every authenticated request is subject to per-account permissions and quotas. Listed in [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek-harness#security--governance) (Security & Governance) and [Awesome DSH Plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin#security--permissions) (Security & Permissions).
 
 ## Features
 
@@ -338,7 +340,7 @@ Current version 2.6.4, compatible with dsh 0.1.1-rc.2 and dsh 0.1.0-rc.6 and abo
 
 **If you find this useful, give it a star.**
 
-[Report an issue](https://github.com/slywalker2006/dsh-passwords/issues) · [Releases](https://github.com/slywalker2006/dsh-passwords/releases) · [npm package](https://www.npmjs.com/package/dsh-passwords) · [Workshop](https://dsh-market.com)
+[Report an issue](https://github.com/slywalker2006/dsh-passwords/issues) · [Releases](https://github.com/slywalker2006/dsh-passwords/releases) · [npm package](https://www.npmjs.com/package/dsh-passwords) · [Awesome listings](https://github.com/0xsline/awesome-deepseek-harness#security--governance)
 
 </div>
 
