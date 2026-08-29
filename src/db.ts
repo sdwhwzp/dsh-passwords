@@ -59,6 +59,8 @@ export interface UserPermissionsRow {
   allow_git_download: boolean;
   allow_workspace_create: boolean;
   allowed_websocket_paths: string[];
+  /** NULL = unrestricted; [] = no agent preset is allowed. */
+  allowed_agent_presets: string[] | null;
   banned: boolean;
   sandbox_mode: string | null;
   disabled_sessions: string[];
@@ -134,10 +136,11 @@ CREATE TABLE IF NOT EXISTS user_permissions (
   allowed_folders    TEXT,                          -- JSON 字符串数组（绝对路径）
   hourly_token_limit INTEGER,                       -- NULL = 不限
   daily_minutes_limit INTEGER,                      -- NULL = 不限
-  allow_upload       INTEGER NOT NULL DEFAULT 1,
+  allow_upload       INTEGER NOT NULL DEFAULT 0, -- 是否提升子用户请求体上限到 300 MiB
   allow_git_download INTEGER NOT NULL DEFAULT 0,
   allow_workspace_create INTEGER NOT NULL DEFAULT 0,
   allowed_websocket_paths TEXT NOT NULL DEFAULT '[]', -- 第三方 WebSocket 子用户授权路径
+  allowed_agent_presets TEXT,                         -- NULL = unrestricted；JSON agent preset ID 白名单
   banned             INTEGER NOT NULL DEFAULT 0,
   sandbox_mode       TEXT,                          -- NULL = 不更改；read-only/workspace-write/danger-full-access
   disabled_sessions  TEXT NOT NULL DEFAULT '[]',    -- 已开启工作区内逐会话关闭的 sessionId JSON 数组
@@ -313,6 +316,12 @@ export class Database {
   // ── 迁移：user_permissions 补 sandbox_mode / disabled_sessions 列 ─────────────────
   private migratePermissions(): void {
     const cols = this.stmt('PRAGMA table_info(user_permissions)').all() as { name: string }[];
+    if (!cols.some((c) => c.name === 'allow_upload')) {
+      this.db.exec('ALTER TABLE user_permissions ADD COLUMN allow_upload INTEGER NOT NULL DEFAULT 0');
+    }
+    if (!cols.some((c) => c.name === 'allow_git_download')) {
+      this.db.exec('ALTER TABLE user_permissions ADD COLUMN allow_git_download INTEGER NOT NULL DEFAULT 0');
+    }
     if (!cols.some((c) => c.name === 'sandbox_mode')) {
       this.db.exec('ALTER TABLE user_permissions ADD COLUMN sandbox_mode TEXT');
     }
@@ -324,6 +333,9 @@ export class Database {
     }
     if (!cols.some((c) => c.name === 'allowed_websocket_paths')) {
       this.db.exec("ALTER TABLE user_permissions ADD COLUMN allowed_websocket_paths TEXT NOT NULL DEFAULT '[]'");
+    }
+    if (!cols.some((c) => c.name === 'allowed_agent_presets')) {
+      this.db.exec('ALTER TABLE user_permissions ADD COLUMN allowed_agent_presets TEXT');
     }
     // Issue #19：显式会话授权上线前的旧数据迁移标记。字段缺失=未初始化；
     // 已初始化的用户不会因后续新会话自动加入授权。
@@ -806,7 +818,7 @@ export class Database {
   // ── 子用户权限（网关强制执行） ────────────────────────────
   getPermissions(userId: number): UserPermissionsRow | null {
     const row = this.stmt(
-      'SELECT user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, allow_upload, allow_git_download, allow_workspace_create, allowed_websocket_paths, banned, sandbox_mode, disabled_sessions, updated_at FROM user_permissions WHERE user_id = ?',
+      'SELECT user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, allow_upload, allow_git_download, allow_workspace_create, allowed_websocket_paths, allowed_agent_presets, banned, sandbox_mode, disabled_sessions, updated_at FROM user_permissions WHERE user_id = ?',
     ).get(userId) as
       | {
           user_id: number;
@@ -817,6 +829,7 @@ export class Database {
           allow_git_download: number;
           allow_workspace_create: number;
           allowed_websocket_paths: string | null;
+          allowed_agent_presets: string | null;
           banned: number;
           sandbox_mode: string | null;
           disabled_sessions: string | null;
@@ -833,6 +846,7 @@ export class Database {
       allow_git_download: row.allow_git_download === 1,
       allow_workspace_create: row.allow_workspace_create === 1,
       allowed_websocket_paths: parseJsonArray(row.allowed_websocket_paths),
+      allowed_agent_presets: row.allowed_agent_presets === null ? null : parseJsonArray(row.allowed_agent_presets),
       banned: row.banned === 1,
       sandbox_mode: row.sandbox_mode,
       disabled_sessions: parseJsonArray(row.disabled_sessions),
@@ -850,6 +864,7 @@ export class Database {
       allowGitDownload: boolean;
       allowWorkspaceCreate: boolean;
       allowedWebSocketPaths?: string[];
+      allowedAgentPresets?: string[] | null;
       banned: boolean;
       sandboxMode: string | null;
       disabledSessions?: string[];
@@ -868,11 +883,16 @@ export class Database {
     const allowedSessionIds = [...new Set(
       (perms.allowedSessionIds ?? []).filter((id) => typeof id === 'string' && id.length > 0 && id.length <= 200),
     )].slice(0, 2000);
+    const allowedAgentPresets = perms.allowedAgentPresets === undefined
+      ? current?.allowed_agent_presets ?? null
+      : perms.allowedAgentPresets === null
+        ? null
+        : [...new Set(perms.allowedAgentPresets.filter((id) => typeof id === 'string' && id.length > 0 && id.length <= 200))].slice(0, 256);
     this.db.exec('BEGIN IMMEDIATE');
     try {
       this.stmt(
-      `INSERT INTO user_permissions (user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, allow_upload, allow_git_download, allow_workspace_create, allowed_websocket_paths, banned, sandbox_mode, disabled_sessions)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO user_permissions (user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, allow_upload, allow_git_download, allow_workspace_create, allowed_websocket_paths, allowed_agent_presets, banned, sandbox_mode, disabled_sessions)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(user_id) DO UPDATE SET
          allowed_folders = excluded.allowed_folders,
          hourly_token_limit = excluded.hourly_token_limit,
@@ -881,6 +901,7 @@ export class Database {
          allow_git_download = excluded.allow_git_download,
          allow_workspace_create = excluded.allow_workspace_create,
          allowed_websocket_paths = excluded.allowed_websocket_paths,
+         allowed_agent_presets = excluded.allowed_agent_presets,
          banned = excluded.banned,
          sandbox_mode = excluded.sandbox_mode,
          disabled_sessions = excluded.disabled_sessions,
@@ -894,6 +915,7 @@ export class Database {
       perms.allowGitDownload ? 1 : 0,
       perms.allowWorkspaceCreate ? 1 : 0,
       JSON.stringify(allowedWebSocketPaths),
+      allowedAgentPresets === null ? null : JSON.stringify(allowedAgentPresets),
       perms.banned ? 1 : 0,
       perms.sandboxMode,
       JSON.stringify(disabledSessions),

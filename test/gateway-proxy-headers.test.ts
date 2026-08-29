@@ -301,7 +301,7 @@ test('Issue #13：子用户必须先获得主用户授予的 WebSocket 路径权
       JSON.stringify({
         userId: subUser.id,
         allowedFolders: [],
-        allowedWebSocketPaths: ['/plugin/ws/*', '/sidebar/ws/terminal'],
+        allowedWebSocketPaths: ['/plugin/ws/*'],
       }),
     );
     assert.equal(save.status, 200);
@@ -310,12 +310,14 @@ test('Issue #13：子用户必须先获得主用户授予的 WebSocket 路径权
     assert.equal(overview.status, 200);
     const overviewBody = JSON.parse(overview.body) as {
       availableWebSocketPaths: string[];
+      adminOnlyWebSocketPaths: string[];
       users: Array<{ id: number; permissions: { allowedWebSocketPaths: string[] } }>;
     };
-    assert.deepEqual(overviewBody.availableWebSocketPaths, ['/sidebar/ws/terminal', '/plugin/ws/*']);
+    assert.deepEqual(overviewBody.availableWebSocketPaths, ['/plugin/ws/*']);
+    assert.deepEqual(overviewBody.adminOnlyWebSocketPaths, ['/sidebar/ws/terminal']);
     assert.deepEqual(
       overviewBody.users.find((user) => user.id === subUser.id)?.permissions.allowedWebSocketPaths,
-      ['/plugin/ws/*', '/sidebar/ws/terminal'],
+      ['/plugin/ws/*'],
     );
 
     const afterGrant = await websocketHandshake('/plugin/ws/run', {
@@ -330,7 +332,7 @@ test('Issue #13：子用户必须先获得主用户授予的 WebSocket 路径权
       origin: 'http://127.0.0.1',
       host: '127.0.0.1',
     });
-    assert.match(sidebarAfterGrant.statusLine, /101 Switching Protocols/);
+    assert.match(sidebarAfterGrant.statusLine, /403/);
   } finally {
     cookie = originalCookie;
   }
@@ -528,6 +530,24 @@ test('工作区创建权限关闭时拒绝 rc.2 目录选择器写入', async ()
   } finally {
     cookie = originalCookie;
   }
+});
+
+test('权限保存拒绝非布尔 allowUpload 且缺失字段保留现值', async () => {
+  const subUser = db.createUser('upload-contract', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: [], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
+    banned: false, sandboxMode: null, disabledSessions: [],
+  });
+  const base = { userId: subUser.id, allowedFolders: ['__deny__'], hourlyTokenLimit: null, dailyMinutesLimit: null, allowGitDownload: false, allowWorkspaceCreate: false, banned: false, sandboxMode: null, disabledSessions: [] };
+  const invalid = JSON.stringify({ ...base, allowUpload: 'false' });
+  const invalidResponse = await gatewayReq('POST', '/gateway/api/permissions', { 'content-type': 'application/json', 'content-length': String(Buffer.byteLength(invalid)) }, invalid);
+  assert.equal(invalidResponse.status, 400);
+  assert.equal(db.getPermissions(subUser.id)?.allow_upload, false);
+  const omitted = JSON.stringify(base);
+  const omittedResponse = await gatewayReq('POST', '/gateway/api/permissions', { 'content-type': 'application/json', 'content-length': String(Buffer.byteLength(omitted)) }, omitted);
+  assert.equal(omittedResponse.status, 200, omittedResponse.body);
+  assert.equal(db.getPermissions(subUser.id)?.allow_upload, false);
 });
 
 test('权限保存接受唯一的拒绝全部工作区哨兵', async () => {

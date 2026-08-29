@@ -196,7 +196,8 @@ Passwords require at least 12 characters with upper, lower, digit and symbol.
 | `MCP_DB_ENC_KEY` | empty | Field encryption key; cannot be changed once set. Back up the database together with `.env` |
 | `MCP_GATEWAY_HOST` / `MCP_GATEWAY_PORT` | `0.0.0.0` / `443` | Gateway listen address and port |
 | `MCP_GATEWAY_UPSTREAM` | `http://127.0.0.1:3080` | dsh web address, pointed automatically |
-| `MCP_GATEWAY_WS_ADMIN_ALLOWLIST` | empty | Third-party WebSocket paths grantable to subusers; exact paths and `/*` wildcards |
+| `MCP_GATEWAY_WS_ADMIN_ALLOWLIST` | empty | Third-party WebSocket paths restricted to the owner; exact paths and `/*` wildcards; never shown as subuser grants |
+| `MCP_GATEWAY_WS_USER_ALLOWLIST` | empty | Third-party WebSocket paths the owner may grant per subuser; exact paths and `/*` wildcards |
 | `MCP_GATEWAY_REDIRECT_PORT` | `80` | ACME validation and 301 redirect port |
 | `MCP_GATEWAY_DOMAIN` | empty | Custom domain; empty uses `<public IP>.sslip.io` |
 | `MCP_GATEWAY_AUTO_TLS` | on | `0` disables automatic HTTPS |

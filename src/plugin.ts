@@ -754,6 +754,29 @@ export function apply(ctx: Context): void {
         writeJson(res, status, result.body);
       },
     },
+
+    {
+      kind: 'exact',
+      path: '/api/dsh-passwords/agent-presets',
+      handler: async (req, res) => {
+        const caller = guard(req, res);
+        if (!caller) return;
+        if (!requireMethod(req, res, 'GET')) return;
+        if (caller.role !== 'admin') {
+          writeJson(res, 403, { ok: false, code: 'FORBIDDEN', error: '仅主用户可操作' });
+          return;
+        }
+        try {
+          const registry = ctx.get('agentPresets') as unknown as
+            | { list(): Promise<Array<{ id: string; trust: 'system' | 'user'; isDefault: boolean; name?: string; description?: string; broken?: string }>> }
+            | undefined;
+          const presets = registry === undefined ? [] : await registry.list();
+          writeJson(res, 200, { ok: true, presets });
+        } catch (error) {
+          writeJson(res, 502, { ok: false, code: 'PRESETS_UNAVAILABLE', error: error instanceof Error ? error.message : 'Agent preset 暂不可用' });
+        }
+      },
+    },
     {
       kind: 'exact',
       path: '/api/dsh-passwords/workspaces',

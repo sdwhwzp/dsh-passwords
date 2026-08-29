@@ -86,6 +86,7 @@ const DICT: Record<Lang, Record<string, string>> = {
     'gw.timeLimit': '今日使用时长已用完',
     'gw.tokenLimit': '每小时 token 用量已达上限',
     'gw.folderDenied': '该文件夹不在你的授权目录内',
+    'gw.bodyTooLarge': '请求内容超过允许的大小',
     'gw.workspaceDenied': '你的账号无权创建或删除工作区',
     'gw.sandboxDenied': '你的沙盒权限不足，无法切换到该级别',
     // ── CLI ──
@@ -198,6 +199,7 @@ const DICT: Record<Lang, Record<string, string>> = {
     'gw.timeLimit': 'Daily usage time has been used up',
     'gw.tokenLimit': 'Hourly token limit reached',
     'gw.folderDenied': 'That folder is not in your allowed directories',
+    'gw.bodyTooLarge': 'The request content exceeds the allowed size',
     'gw.workspaceDenied': 'Your account cannot create or delete workspaces',
     'gw.sandboxDenied': 'Your sandbox permission is too low to switch to that level',
     'cli.warnMissingValue': 'missing value for {name}',

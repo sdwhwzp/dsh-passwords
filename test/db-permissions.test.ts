@@ -39,6 +39,35 @@ test('Issue #19：显式会话 grant 原子持久化、隔离且拒绝非法 ID'
   }
 });
 
+test('极旧 user_permissions 表缺少上传与 git 列时会补齐并默认关闭', () => {
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-db-legacy-upload-'));
+  const dbPath = path.join(tempDir, 'legacy-upload.db');
+  const raw = new DatabaseSync(dbPath);
+  raw.exec(`
+    CREATE TABLE user_permissions (
+      user_id INTEGER PRIMARY KEY,
+      allowed_folders TEXT,
+      hourly_token_limit INTEGER,
+      daily_minutes_limit INTEGER,
+      banned INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    INSERT INTO user_permissions (user_id, allowed_folders) VALUES (7, '["/srv/project"]');
+  `);
+  raw.close();
+
+  const db = new Database(dbPath, createFieldCrypto('test-key', 'test-key'));
+  try {
+    db.init();
+    const migrated = db.getPermissions(7);
+    assert.equal(migrated?.allow_upload, false);
+    assert.equal(migrated?.allow_git_download, false);
+  } finally {
+    db.close();
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test('旧 user_permissions 表会迁移 WebSocket 授权列，并保留现有权限', () => {
   const tempDir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-db-'));
   const dbPath = path.join(tempDir, 'legacy.db');
@@ -74,6 +103,7 @@ test('旧 user_permissions 表会迁移 WebSocket 授权列，并保留现有权
       allow_git_download: true,
       allow_workspace_create: false,
       allowed_websocket_paths: [],
+      allowed_agent_presets: null,
       banned: false,
       sandbox_mode: 'workspace-write',
       disabled_sessions: [],
@@ -88,6 +118,7 @@ test('旧 user_permissions 表会迁移 WebSocket 授权列，并保留现有权
       allowGitDownload: true,
       allowWorkspaceCreate: false,
       allowedWebSocketPaths: ['/plugin/ws/*'],
+      allowedAgentPresets: ['system/default'],
       banned: false,
       sandboxMode: 'workspace-write',
       disabledSessions: [],
@@ -104,6 +135,20 @@ test('旧 user_permissions 表会迁移 WebSocket 授权列，并保留现有权
       disabledSessions: [],
     });
     assert.deepEqual(db.getPermissions(7)?.allowed_websocket_paths, ['/plugin/ws/*']);
+    assert.deepEqual(db.getPermissions(7)?.allowed_agent_presets, ['system/default']);
+    db.setPermissions(7, {
+      allowedFolders: ['/srv/project'],
+      hourlyTokenLimit: 10,
+      dailyMinutesLimit: 20,
+      allowUpload: true,
+      allowGitDownload: true,
+      allowWorkspaceCreate: false,
+      allowedAgentPresets: null,
+      banned: false,
+      sandboxMode: 'workspace-write',
+      disabledSessions: [],
+    });
+    assert.equal(db.getPermissions(7)?.allowed_agent_presets, null, 'NULL 必须保留不限制的兼容语义');
   } finally {
     db.close();
     rmSync(tempDir, { recursive: true, force: true });

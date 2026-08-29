@@ -40,6 +40,36 @@ test('api rejects HTTP 200 HTML instead of silently returning an empty object', 
   await assert.rejects(api('/test'), /Expected a JSON response/);
 });
 
+test('api does not crash on malformed final redirect URL', async (t) => {
+  const response = new Response('<html>login</html>');
+  Object.defineProperties(response, {
+    redirected: { value: true },
+    url: { value: '' },
+  });
+
+  t.mock.method(globalThis, 'fetch', async () => response);
+
+  await assert.rejects(
+    api('/test'),
+    /Expected a JSON response/,
+  );
+});
+
+test('api does not treat a nested gateway path as the login redirect', async (t) => {
+  const response = new Response('<html>login</html>');
+  Object.defineProperties(response, {
+    redirected: { value: true },
+    url: { value: 'https://example.test/gateway/login/extra' },
+  });
+
+  t.mock.method(globalThis, 'fetch', async () => response);
+
+  await assert.rejects(
+    api('/test'),
+    /Expected a JSON response/,
+  );
+});
+
 test('api preserves structured HTTP errors for localized messages', async (t) => {
   t.mock.method(globalThis, 'fetch', async () => Response.json({
     error: 'Authentication required', code: 'NOT_AUTHENTICATED',

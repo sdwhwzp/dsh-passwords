@@ -5,7 +5,7 @@
 //                            __deny__ 哨兵 = 禁止所有）
 //   - hourlyTokenLimit       每小时 token 上限（null = 不限）
 //   - dailyMinutesLimit      每日使用时长上限，分钟（从当天首次使用起算；null = 不限）
-//   - allowUpload            是否允许上传文件
+//   - allowUpload            是否使用大请求体/大文件上传档位（false = 64 MiB，true = 300 MiB）
 //   - allowGitDownload       是否允许 git 下载（clone/pull 等）
 //   - allowWorkspaceCreate   是否允许创建/删除/重命名工作区
 //   - allowedWebSocketPaths  授权可访问的 WebSocket 路径（子用户仅能用勾选的子路径）

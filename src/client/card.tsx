@@ -72,6 +72,7 @@ export interface UpdateInfo {
   applyCooldownRemainingMs: number;
 }
 
+
 export interface PermOverview {
   me: { id: number; username: string; role: 'admin' | 'user' };
   availableWebSocketPaths: string[];
@@ -87,6 +88,7 @@ export interface PermOverview {
       allowGitDownload: boolean;
       allowWorkspaceCreate: boolean;
       allowedWebSocketPaths: string[];
+      allowedAgentPresets: string[] | null;
       banned: boolean;
       sandboxMode: string | null;
       disabledSessions: string[];
@@ -114,6 +116,16 @@ interface PermDraft {
   disabledSessions: string[];
   allowedSessionIds: string[];
   webSocketPaths: string[];
+  agentPresets: string[] | null;
+}
+
+interface AgentPresetInfo {
+  id: string;
+  trust: 'system' | 'user';
+  isDefault: boolean;
+  name?: string;
+  description?: string;
+  broken?: string;
 }
 
 interface WorkspaceInfo {
@@ -209,6 +221,9 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
   // 权限管理（仅主用户）
   const [overview, setOverview] = useState<PermOverview | null>(null);
   const [permDrafts, setPermDrafts] = useState<Record<number, PermDraft>>({});
+  const [agentPresets, setAgentPresets] = useState<AgentPresetInfo[]>([]);
+  const [agentPresetStatus, setAgentPresetStatus] = useState<'loading' | 'ready' | 'unavailable'>('loading');
+
   const [workspaces, setWorkspaces] = useState<WorkspaceInfo[]>([]);
   // 正在编辑中的子用户草稿：dirty 时 30s 自动刷新不覆盖本地未保存的修改
   const dirtyUsersRef = useRef<Set<number>>(new Set());
@@ -251,6 +266,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
                   workspaceCreate: u.permissions.allowWorkspaceCreate,
                   banned: u.permissions.banned,
                   webSocketPaths: [...(u.permissions.allowedWebSocketPaths ?? [])],
+                  agentPresets: u.permissions.allowedAgentPresets === null ? null : [...u.permissions.allowedAgentPresets],
                   sandbox: u.permissions.sandboxMode ?? '',
                   disabledSessions: [...(u.permissions.disabledSessions ?? [])],
                   allowedSessionIds: [...(u.permissions.allowedSessionIds ?? [])],
@@ -264,10 +280,26 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
               }
               return drafts;
             });
-            return api<{ workspaces: WorkspaceInfo[] }>('/api/dsh-passwords/workspaces')
-              .then((r) => {
-                if (!refreshQueuedRef.current) setWorkspaces(r.workspaces ?? []);
+            return Promise.allSettled([
+              api<{ workspaces: WorkspaceInfo[] }>('/api/dsh-passwords/workspaces'),
+              api<{ presets: AgentPresetInfo[] }>('/api/dsh-passwords/agent-presets'),
+            ])
+              .then(([workspaceResult, presetResult]) => {
+                if (refreshQueuedRef.current) return;
+
+                if (workspaceResult.status === 'fulfilled') {
+                  setWorkspaces(workspaceResult.value.workspaces ?? []);
+                }
+
+                if (presetResult.status === 'fulfilled') {
+                  setAgentPresets(presetResult.value.presets ?? []);
+                  setAgentPresetStatus('ready');
+                } else {
+                  setAgentPresets([]);
+                  setAgentPresetStatus('unavailable');
+                }
               })
+              .then(() => undefined)
               .catch((e) => {
                 // 工作区清单是权限编辑的可信状态；请求失败不能用空数组覆盖，
                 // 否则页面会把所有工作区误显示为关闭并在下一次保存时丢权限。
@@ -608,6 +640,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
           allowGitDownload: d.git,
           allowWorkspaceCreate: d.workspaceCreate,
           allowedWebSocketPaths: d.webSocketPaths,
+          allowedAgentPresets: d.agentPresets,
           banned: d.banned,
           sandboxMode: d.sandbox === '' ? null : d.sandbox,
           disabledSessions: d.disabledSessions,
@@ -963,6 +996,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
         h('div', { className: 'dshpw-hint' }, t('subHint')),
       ),
 
+
     // ── 子用户权限（仅主用户） ──
     isAdmin &&
       overview !== null &&
@@ -1056,6 +1090,57 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
                       );
                     }),
                   ),
+              agentPresetStatus === 'unavailable'
+                ? h(
+                    'div',
+                    { className: 'dshpw-row' },
+                    h('div', { className: 'dshpw-label' }, t('permsAgentPresets')),
+                    h('div', { className: 'dshpw-hint' }, t('permsAgentPresetsUnavailable')),
+                  )
+                : agentPresets.length > 0
+                ? h(
+                    'div',
+                    { className: 'dshpw-row' },
+                    h('div', { className: 'dshpw-label' }, t('permsAgentPresets')),
+                    h(
+                      'label',
+                      { className: 'dshpw-check' },
+                      h('input', {
+                        type: 'checkbox',
+                        checked: d.agentPresets === null,
+                        disabled: busy,
+                        onChange: (e: { target: { checked: boolean } }) =>
+                          setDraft(u.id, { agentPresets: e.target.checked ? null : [] }),
+                      }),
+                      t('permsAgentPresetsUnrestricted'),
+                    ),
+                    ...(d.agentPresets === null
+                      ? []
+                      : agentPresets.map((preset) =>
+                          h(
+                            'label',
+                            { className: 'dshpw-check', key: preset.id },
+                            h('input', {
+                              type: 'checkbox',
+                              checked: (d.agentPresets ?? []).includes(preset.id),
+                              disabled: busy || preset.broken !== undefined,
+                              onChange: (e: { target: { checked: boolean } }) => {
+                                const next = new Set(d.agentPresets ?? []);
+                                if (e.target.checked) next.add(preset.id);
+                                else next.delete(preset.id);
+                                setDraft(u.id, { agentPresets: [...next] });
+                              },
+                            }),
+                            h(
+                              'span',
+                              null,
+                              preset.name || preset.id,
+                              preset.broken !== undefined ? ` (${t('permsAgentPresetBroken')})` : '',
+                            ),
+                          ),
+                        )),
+                  )
+                : null,
               overview.availableWebSocketPaths.length > 0
                 ? h(
                     'div',

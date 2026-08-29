@@ -2,6 +2,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function isGatewayLoginRedirect(res: Response): boolean {
+  if (!res.redirected || typeof res.url !== 'string' || res.url === '') {
+    return false;
+  }
+
+  try {
+    return new URL(res.url).pathname === '/gateway/login';
+  } catch {
+    return false;
+  }
+}
+
 export async function api<T>(path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
     method: body === undefined ? 'GET' : 'POST',
@@ -10,7 +22,7 @@ export async function api<T>(path: string, body?: unknown): Promise<T> {
   });
 
   // An expired gateway session redirects fetch to an HTTP 200 HTML login page.
-  if (res.redirected && new URL(res.url).pathname === '/gateway/login') {
+  if (isGatewayLoginRedirect(res)) {
     throw Object.assign(new Error('Please sign in again'), { code: 'NOT_AUTHENTICATED' });
   }
 

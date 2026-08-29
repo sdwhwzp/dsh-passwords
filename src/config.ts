@@ -20,6 +20,8 @@ if (explicitEnvFile) {
 }
 loadEnv({ path: path.join(moduleDir, '..', '.env'), quiet: true });
 
+
+
 function readEnv(name: string, fallback: string): string {
   return (process.env[name] ?? '').trim() || fallback;
 }
@@ -55,6 +57,7 @@ export interface PlatformConfig {
     acmeEmail: string;
     /** 使用 Let's Encrypt 测试环境签发（浏览器不信任，仅调试用） */
     acmeStaging: boolean;
+
   };
   jwtSecret: string;
   /** 网关内部管理接口密钥（dsh 插件通知网关用；留空则从 SETUP_KEY 派生） */

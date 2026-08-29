@@ -367,9 +367,12 @@ export class AuthService {
       allowedFolders: ['__deny__'],
       hourlyTokenLimit: null,
       dailyMinutesLimit: null,
-      allowUpload: true,
+      // 新子用户默认使用 64 MiB 请求体档位；主用户可在权限卡片勾选
+      // “大请求体/大文件上传”后提升到 rc.2 上游一致的 300 MiB。
+      allowUpload: false,
       allowGitDownload: false,
       allowWorkspaceCreate: false,
+      allowedAgentPresets: [],
       banned: false,
       sandboxMode: null,
       disabledSessions: [],

@@ -37,7 +37,7 @@ function loginResponse() {
   return response;
 }
 
-async function mountCard(t: TestContext, overrides: Record<string, () => Response> = {}) {
+async function mountCard(t: TestContext, overrides: Record<string, () => Response> = {}, payloadOverrides: Record<string, unknown> = {}) {
   const intervals = new Map<number, { callback: () => void; delay: number }>();
   let nextTimer = 0;
   let renderer: ReactTestRenderer | undefined;
@@ -72,8 +72,12 @@ async function mountCard(t: TestContext, overrides: Record<string, () => Respons
       status: { settingsHostMode: true, whitelist: true, workspaceSearch: true },
     },
     '/api/dsh-passwords/update/status': { status: updateStatus },
+    '/api/dsh-passwords/agent-presets': { presets: [] },
+    ...payloadOverrides,
   };
-  t.mock.method(globalThis, 'fetch', async (input: string) => {
+  const requests: Array<{ input: string; init?: RequestInit }> = [];
+  t.mock.method(globalThis, 'fetch', async (input: string, init?: RequestInit) => {
+    requests.push({ input, init });
     if (overrides[input]) return overrides[input]();
     assert.ok(input in payloads, `Unexpected request: ${input}`);
     return Response.json(payloads[input]);
@@ -88,6 +92,7 @@ async function mountCard(t: TestContext, overrides: Record<string, () => Respons
   return {
     renderer: renderer!,
     text: () => JSON.stringify(renderer!.toJSON()),
+    requests,
     async refresh() {
       const timer = [...intervals.values()].find(({ delay }) => delay === 30_000);
       assert.ok(timer, 'Card must retain its refresh timer');
@@ -101,6 +106,61 @@ test('settings card renders account and patch controls for a healthy response', 
   assert.match(card.text(), /test-admin/);
   assert.match(card.text(), /patchOk/);
   assert.doesNotMatch(card.text(), /card-crashed/);
+});
+
+test('settings card synchronizes the large request body permission to the visible checkbox and save API', async (t) => {
+  const card = await mountCard(t, {
+    '/gateway/api/permissions': () => Response.json({ ok: true }),
+  }, {
+    '/gateway/api/overview': {
+      me: { id: 1, username: 'test-admin', role: 'admin' },
+      availableWebSocketPaths: [],
+      users: [{
+        id: 2,
+        username: 'subuser',
+        role: 'user',
+        permissions: {
+          allowedFolders: [],
+          hourlyTokenLimit: null,
+          dailyMinutesLimit: null,
+          allowUpload: false,
+          allowGitDownload: false,
+          allowWorkspaceCreate: false,
+          allowedWebSocketPaths: [],
+          allowedAgentPresets: [],
+          banned: false,
+          sandboxMode: null,
+          disabledSessions: [],
+          allowedSessionIds: [],
+        },
+        usage: null,
+      }],
+    },
+  });
+  const uploadLabel = card.renderer.root.findAllByType('label').find((label) => label.children.some((child) => child === 'permsUpload'));
+  assert.ok(uploadLabel, '大请求体权限开关必须出现在子用户权限卡片');
+  const checkbox = uploadLabel!.findByType('input');
+  assert.equal(checkbox.props.checked, false, '前端必须反映后端 allowUpload=false（64 MiB 档位）');
+  await act(async () => { checkbox.props.onChange({ target: { checked: true } }); });
+  const saveButton = card.renderer.root.findAllByType('button').find((button) => button.children.some((child) => child === 'permsSave'));
+  assert.ok(saveButton, '子用户权限卡片必须存在保存按钮');
+  await act(async () => { saveButton!.props.onClick(); });
+  const permissionRequest = card.requests.find((request) => request.input === '/gateway/api/permissions');
+  assert.ok(permissionRequest, '保存必须调用权限 API');
+  assert.equal(JSON.parse(String(permissionRequest!.init?.body)).allowUpload, true, '保存必须提交 allowUpload');
+});
+
+test('settings card shows Agent preset registry failure instead of hiding the permission section', async (t) => {
+  const card = await mountCard(t, {
+    '/api/dsh-passwords/agent-presets': () => new Response(JSON.stringify({ ok: false, code: 'PRESETS_UNAVAILABLE' }), { status: 502, headers: { 'content-type': 'application/json' } }),
+  }, {
+    '/gateway/api/overview': {
+      me: { id: 1, username: 'test-admin', role: 'admin' },
+      availableWebSocketPaths: [],
+      users: [{ id: 2, username: 'subuser', role: 'user', permissions: { allowedFolders: [], hourlyTokenLimit: null, dailyMinutesLimit: null, allowUpload: true, allowGitDownload: false, allowWorkspaceCreate: false, allowedWebSocketPaths: [], allowedAgentPresets: [], banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: [] }, usage: null }],
+    },
+  });
+  assert.match(card.text(), /permsAgentPresetsUnavailable/);
 });
 
 test('settings card stays mounted when login expires during refresh', async (t) => {
