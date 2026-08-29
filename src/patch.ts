@@ -126,8 +126,56 @@ const WORKSPACE_TARGET = path.join(
   'node_modules', '@deepseek-ai', 'dsh-client-ui-workspace', 'lib', 'client.js',
 );
 
+/** Resolve either a Web Profile root or its nested @deepseek-ai/dsh package. */
+function patchInstallRoot(dshRoot: string): string {
+  let candidate = path.resolve(dshRoot);
+  for (let depth = 0; depth <= 4; depth++) {
+    if (
+      existsSync(path.join(candidate, SETTINGS_TARGET)) ||
+      existsSync(path.join(candidate, WHITELIST_TARGET))
+    ) return candidate;
+    const parent = path.dirname(candidate);
+    if (parent === candidate) break;
+    candidate = parent;
+  }
+  return path.resolve(dshRoot);
+}
+
+/** Resolve the workspace client contributed by either the Profile or WebDAV bundle. */
+function workspaceClientTarget(installRoot: string): string {
+  const candidates = [
+    path.join(installRoot, WORKSPACE_TARGET),
+    path.join(installRoot, 'node_modules', 'dsh-nas-webdav', WORKSPACE_TARGET),
+  ];
+  return candidates.find(candidate => existsSync(candidate)) ?? candidates[0];
+}
+
 const SETTINGS_FROM = 'connection.isLoopback ? "host" : "memory"';
 const SETTINGS_TO = '"host"';
+const DEFAULT_MODEL_SAVE_FROM = 'await defaults.saveDefaultModelSelection?.(selected);';
+const DEFAULT_MODEL_SAVE_MARK = '/* dsh-passwords: keep model selection session-scoped */';
+
+function defaultModelSaveProtected(content: string): boolean {
+  if (!content.includes('"session.selectModel"') && !content.includes("'session.selectModel'")) return true;
+  return content.includes(DEFAULT_MODEL_SAVE_MARK);
+}
+
+/** Patch every shared-settings write performed by the Host API proxy. */
+function patchHostApiContent(content: string): string | null {
+  let next = content;
+  if (whitelistPatchApplicable(next) && !hasSettingsNamespace(next, 'dsh-passwords')) {
+    const re = /const WEB_SETTINGS_NAMESPACES = \[([\s\S]*?)\];/;
+    const match = re.exec(next);
+    if (!match) return null;
+    const inserted = match[1].replace(/(\s*[\'"][^\'"]+[\'"])/, `$1,\n\t"dsh-passwords"`);
+    next = next.replace(re, `const WEB_SETTINGS_NAMESPACES = [${inserted}];`);
+  }
+  if (!defaultModelSaveProtected(next)) {
+    if (!next.includes(DEFAULT_MODEL_SAVE_FROM)) return null;
+    next = next.replace(DEFAULT_MODEL_SAVE_FROM, DEFAULT_MODEL_SAVE_MARK);
+  }
+  return next;
+}
 
 // dsh 上游行为：搜索 query 非空时点击侧栏外只 blur 不收起——无结果时
 // 「无匹配会话」死状态会永久滞留侧栏（打开设置/卡片等任何点击都无法消除，
@@ -214,9 +262,10 @@ export function findDshRoot(explicit: string): string | null {
 export function patchStatus(
   dshRoot: string,
 ): { settingsHostMode: boolean; whitelist: boolean; workspaceSearch: boolean } {
-  const settingsFile = path.join(dshRoot, SETTINGS_TARGET);
-  const wlFile = path.join(dshRoot, WHITELIST_TARGET);
-  const wsFile = path.join(dshRoot, WORKSPACE_TARGET);
+  const installRoot = patchInstallRoot(dshRoot);
+  const settingsFile = path.join(installRoot, SETTINGS_TARGET);
+  const wlFile = path.join(installRoot, WHITELIST_TARGET);
+  const wsFile = workspaceClientTarget(installRoot);
   let settingsHostMode = false;
   let whitelist = false;
   let workspaceSearch = false;
@@ -227,7 +276,9 @@ export function patchStatus(
   try {
     const w = readFileSync(wlFile, 'utf8');
     // rc.7+ 已移除 WEB_SETTINGS_NAMESPACES 白名单 → 原生支持，视为已满足
-    whitelist = !whitelistPatchApplicable(w) || hasSettingsNamespace(w, 'dsh-passwords');
+    whitelist =
+      (!whitelistPatchApplicable(w) || hasSettingsNamespace(w, 'dsh-passwords')) &&
+      defaultModelSaveProtected(w);
   } catch { /* 同上 */ }
   try {
     const ws = readFileSync(wsFile, 'utf8');
@@ -247,34 +298,18 @@ export function patchStatus(
 
 /** 应用补丁（幂等）：返回 'applied'（本次有改动）或 'unchanged' 或 'missing'（目标文件不在） */
 export function applyRemotePatch(dshRoot: string): 'applied' | 'unchanged' | 'missing' {
-  const settingsFile = path.join(dshRoot, SETTINGS_TARGET);
-  const wlFile = path.join(dshRoot, WHITELIST_TARGET);
+  const installRoot = patchInstallRoot(dshRoot);
+  const settingsFile = path.join(installRoot, SETTINGS_TARGET);
+  const wlFile = path.join(installRoot, WHITELIST_TARGET);
   if (!existsSync(settingsFile) || !existsSync(wlFile)) return 'missing';
   let changed = false;
 
-  // 先完整预检白名单目标。不能先写 settings 再发现白名单结构损坏，
+  // 先完整预检 Host API proxy。不能先写 settings 再发现目标结构损坏，
   // 否则 applyRemotePatch() 返回 missing 时会留下半应用状态。
   const w = readFileSync(wlFile, 'utf8');
-  migrateLegacyBackup(wlFile, w, (original) => {
-    if (!whitelistPatchApplicable(original) || hasSettingsNamespace(original, 'dsh-passwords')) return null;
-    const re = /const WEB_SETTINGS_NAMESPACES = \[([\s\S]*?)\];/;
-    const match = re.exec(original);
-    if (!match) return null;
-    const inserted = match[1].replace(/(\s*[\'"][^\'"]+[\'"])/, `$1,\n\t"dsh-passwords"`);
-    return original.replace(re, `const WEB_SETTINGS_NAMESPACES = [${inserted}];`);
-  });
-  let whitelistPatched: string | null = null;
-  if (whitelistPatchApplicable(w) && !hasSettingsNamespace(w, 'dsh-passwords')) {
-    const re = /const WEB_SETTINGS_NAMESPACES = \[([\s\S]*?)\];/;
-    const match = re.exec(w);
-    if (!match) return 'missing';
-    const currentBlock = match[1];
-    const existing = [...currentBlock.matchAll(/[\'"]([^\'"]+)[\'"]/g)].map((m) => m[1]);
-    if (!existing.includes('dsh-passwords')) {
-      const inserted = currentBlock.replace(/(\s*[\'"][^\'"]+[\'"])/, `$1,\n\t"dsh-passwords"`);
-      whitelistPatched = w.replace(re, `const WEB_SETTINGS_NAMESPACES = [${inserted}];`);
-    }
-  }
+  const hostPatched = patchHostApiContent(w);
+  if (hostPatched === null) return 'missing';
+  migrateLegacyBackup(wlFile, w, patchHostApiContent);
 
   // 1) 客户端 settings 强制 host 模式
   const s = readFileSync(settingsFile, 'utf8');
@@ -288,17 +323,18 @@ export function applyRemotePatch(dshRoot: string): 'applied' | 'unchanged' | 'mi
     changed = true;
   }
 
-  // 2) 白名单补齐（仅 rc.6 及以下适用）。rc.7+ 已移除该机制，预检结果为 null。
-  if (whitelistPatched !== null) {
-    ensureOriginalBackup(wlFile, w, whitelistPatched);
-    writeFileSync(wlFile, whitelistPatched);
+  // 2) Host settings：旧版补命名空间白名单；所有适用版本阻止子用户
+  //    选模型时把该会话选择写成全局默认值。
+  if (hostPatched !== w) {
+    ensureOriginalBackup(wlFile, w, hostPatched);
+    writeFileSync(wlFile, hostPatched);
     changed = true;
   }
 
   // 3) 工作区侧栏搜索两个子补丁（可选：目标文件不存在则跳过，不影响 1/2）
   //    ① 无结果搜索点击别处自动收起并清空（消除「无匹配会话」死状态滞留）
   //    ② 搜索框 autocomplete="off" + 中性 name（阻断密码管理器把搜索框当用户名框自动填充）
-  const wsFile = path.join(dshRoot, WORKSPACE_TARGET);
+  const wsFile = workspaceClientTarget(installRoot);
   if (existsSync(wsFile)) {
     const ws = readFileSync(wsFile, 'utf8');
     migrateLegacyBackup(wsFile, ws, (original) => {
@@ -357,15 +393,30 @@ export function applyRemotePatch(dshRoot: string): 'applied' | 'unchanged' | 'mi
 }
 
 /**
+ * Ensure the on-disk Host proxy has no implicit shared-default model write.
+ * An applied result requires a process restart because the current process has
+ * already evaluated the old Host bundle.
+ */
+export function prepareSessionModelPatch(
+  dshRoot: string,
+): 'ready' | 'restart-required' | 'missing' {
+  const result = applyRemotePatch(dshRoot);
+  if (result === 'applied') return 'restart-required';
+  if (result === 'missing') return 'missing';
+  return patchStatus(dshRoot).whitelist ? 'ready' : 'missing';
+}
+
+/**
  * 回滚补丁：从 .bak-dshpw 备份恢复目标文件。
  * 备份不存在（从未打过补丁）时返回 'no-backup'。
  */
 export function rollbackPatch(dshRoot: string): 'rolled-back' | 'no-backup' | 'missing' {
-  const settingsFile = path.join(dshRoot, SETTINGS_TARGET);
-  const wlFile = path.join(dshRoot, WHITELIST_TARGET);
+  const installRoot = patchInstallRoot(dshRoot);
+  const settingsFile = path.join(installRoot, SETTINGS_TARGET);
+  const wlFile = path.join(installRoot, WHITELIST_TARGET);
   if (!existsSync(settingsFile) || !existsSync(wlFile)) return 'missing';
   let changed = false;
-  for (const target of [settingsFile, wlFile, path.join(dshRoot, WORKSPACE_TARGET)]) {
+  for (const target of [settingsFile, wlFile, workspaceClientTarget(installRoot)]) {
     // 只恢复带哈希元数据且内容未被篡改的当前版本原始备份；历史遗留的
     // .bak-dshpw 没有元数据时拒绝恢复，避免跨 dsh 版本回滚污染。
     if (currentMatchesPatchedBackup(target)) {

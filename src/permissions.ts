@@ -576,12 +576,29 @@ export function isGitRequest(pathname: string): boolean {
   );
 }
 
+/** Shared Host settings mutations change the Web Profile for every account. */
+export function isSharedSettingsWrite(pathname: string): boolean {
+  return /^\/api\/settings[.\/](openDocument|update|replace|mutate)$/.test(pathname);
+}
+
+/** Whether a request value contains one canonical cross-session reference token. */
+export function containsSessionReference(value: unknown, depth = 0): boolean {
+  if (depth > 12) return false;
+  if (typeof value === 'string') return /dsh-session:[A-Za-z0-9_-]+/u.test(value);
+  if (Array.isArray(value)) return value.some((entry) => containsSessionReference(entry, depth + 1));
+  if (value === null || typeof value !== 'object') return false;
+  return Object.values(value as Record<string, unknown>)
+    .some((entry) => containsSessionReference(entry, depth + 1));
+}
+
 /**
  * 第三方插件“运维面”端点（仅主用户可访问）：
  *   - dsh-ssh —— SSH 主机清单/隧道/远程文件：含服务器连接信息（host/port/user/auth/keyReady），
  *     泄露即扩大 SSH 凭据面；
  *   - skin-center —— 皮肤中心（未纳入网关权限模型）；
  *   - modlens —— 模型透镜（未纳入网关权限模型）；
+ *   - dsh-at-file 设置写入 —— 修改共享 Web Profile 的全局设置与工作区过滤规则；
+ *   - Host settings 写入 —— 修改所有账号共用的 Web Profile 设置文件；
  *   - dsh-uploads —— 共享上传存储的【列表/删除】（F-12）：枚举全部用户上传文件清单
  *     与删除他人文件均仅主用户；上传（POST）仍由 allow_upload 门控、下载
  *     （GET /download）仍由 allowGitDownload 门控，保持原权限语义。
@@ -589,12 +606,23 @@ export function isGitRequest(pathname: string): boolean {
  */
 export function isAdminOnlyPluginEndpoint(method: string, pathname: string): boolean {
   return (
+    pathname === '/api/settings.describe' ||
+    isSharedSettingsWrite(pathname) ||
+    pathname === '/api/dsh-web-ui-settings/describe' ||
+    pathname === '/api/dsh-web-ui-settings/mutate' ||
+    pathname === '/describe-image/native-images' ||
+    pathname === '/sidebar/api/settings.update' ||
+    /^\/api\/credentials[.\/](describe|set|unset)$/.test(pathname) ||
+    /^\/api\/host[.\/](pickDirectory|openPath)$/.test(pathname) ||
+    /^\/api\/agentPreset[.\/](read|copy|openDocument|remove)$/.test(pathname) ||
+    pathname === '/api/sessionReferenceResolver/candidates' ||
     pathname === '/api/dsh-ssh' ||
     pathname.startsWith('/api/dsh-ssh/') ||
     pathname === '/api/skin-center' ||
     pathname.startsWith('/api/skin-center/') ||
     pathname === '/modlens' ||
     pathname.startsWith('/modlens/') ||
+    (pathname === '/api/atFile/updateSettings' && method === 'POST') ||
     // F-12：仅精确匹配 /api/dsh-uploads（不含 /download 子路径），且只看
     // GET（列表）/DELETE（删除）；POST 上传由 isUploadRequest 按 allow_upload 判定
     (pathname === '/api/dsh-uploads' && (method === 'GET' || method === 'DELETE'))
@@ -666,7 +694,13 @@ export const WORKSPACE_ENDPOINT_RE = /^\/api\/session[.\/](create)([.\/]|$)/;
  * 子用户必须启用其所在工作区，且该会话未被管理员单独关闭。
  * create 无源会话、list 单独做工作区/会话过滤，均不在此列。
  */
-export const SESSION_SCOPED_RE = /^\/api\/session[.\/](history|prompt|respond|archive|delete|rename|retitle|title|resume|fork|truncate|export)([.\/]|$)/;
+export const SESSION_SCOPED_RE = /^\/api\/session[.\/](history|models|selectModel|prompt|respond|attachment|updateQueue|cancel|archive|delete|rename|retitle|title|resume|fork|truncate|export)([.\/]|$)/;
+
+/** Subagent RPCs are authorized by their direct parent session. */
+export const SUBAGENT_SCOPED_RE = /^\/api\/subagent[.\/](list|history|prompt|interrupt)([.\/]|$)/;
+
+/** dsh-at-file workspace search: `agentId` addresses one live session. */
+export const AT_FILE_SEARCH_RE = /^\/api\/atFile[.\/]search$/;
 
 /** 递归查找请求体里的 sessionId（typert wire 字段）；找不到返回 null */
 export function extractSessionId(value: unknown, depth = 0): string | null {
@@ -675,6 +709,18 @@ export function extractSessionId(value: unknown, depth = 0): string | null {
   if (typeof obj.sessionId === 'string' && obj.sessionId.length > 0) return obj.sessionId;
   for (const key of Object.keys(obj)) {
     const nested = extractSessionId(obj[key], depth + 1);
+    if (nested !== null) return nested;
+  }
+  return null;
+}
+
+/** Recursively find dsh-at-file's agent lookup id in one Typert request. */
+export function extractAgentId(value: unknown, depth = 0): string | null {
+  if (depth > 6 || value === null || typeof value !== 'object') return null;
+  const obj = value as Record<string, unknown>;
+  if (typeof obj.agentId === 'string' && obj.agentId.length > 0) return obj.agentId;
+  for (const key of Object.keys(obj)) {
+    const nested = extractAgentId(obj[key], depth + 1);
     if (nested !== null) return nested;
   }
   return null;

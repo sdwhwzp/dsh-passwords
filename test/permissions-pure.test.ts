@@ -11,7 +11,46 @@ import {
   filterOwnedSessionIds,
   normalizePath,
   sandboxPresetRank,
+  isAdminOnlyPluginEndpoint,
+  isSharedSettingsWrite,
+  containsSessionReference,
 } from '../src/permissions.js';
+
+test('第三方插件权限：子用户不能修改共享的 dsh-at-file 设置', () => {
+  assert.equal(isAdminOnlyPluginEndpoint('POST', '/api/atFile/updateSettings'), true);
+  assert.equal(isAdminOnlyPluginEndpoint('POST', '/api/atFile/getSettings'), false);
+  assert.equal(isAdminOnlyPluginEndpoint('POST', '/api/atFile/search'), false);
+});
+
+test('共享设置权限：写入口和敏感描述仅管理员可用', () => {
+  for (const operation of ['openDocument', 'update', 'replace', 'mutate']) {
+    for (const separator of ['.', '/']) {
+      const pathname = `/api/settings${separator}${operation}`;
+      assert.equal(isSharedSettingsWrite(pathname), true, pathname);
+      assert.equal(isAdminOnlyPluginEndpoint('POST', pathname), true, pathname);
+    }
+  }
+  assert.equal(isSharedSettingsWrite('/api/settings.describe'), false);
+  assert.equal(isAdminOnlyPluginEndpoint('POST', '/api/settings.describe'), true);
+  assert.equal(isAdminOnlyPluginEndpoint('POST', '/api/dsh-web-ui-settings/describe'), true);
+  assert.equal(isAdminOnlyPluginEndpoint('POST', '/api/dsh-web-ui-settings/mutate'), true);
+  assert.equal(isAdminOnlyPluginEndpoint('POST', '/describe-image/native-images'), true);
+  assert.equal(isAdminOnlyPluginEndpoint('POST', '/sidebar/api/settings.update'), true);
+  for (const pathname of [
+    '/api/credentials.describe', '/api/credentials.set', '/api/credentials.unset',
+    '/api/host.pickDirectory', '/api/host.openPath',
+    '/api/agentPreset.read', '/api/agentPreset.copy', '/api/agentPreset.openDocument', '/api/agentPreset.remove',
+  ]) assert.equal(isAdminOnlyPluginEndpoint('POST', pathname), true, pathname);
+  assert.equal(isAdminOnlyPluginEndpoint('POST', '/api/agentPreset.list'), false);
+  assert.equal(isAdminOnlyPluginEndpoint('POST', '/api/agentPreset.select'), false);
+});
+
+test('跨会话引用权限：候选接口和规范引用令牌可被完整识别', () => {
+  assert.equal(isAdminOnlyPluginEndpoint('POST', '/api/sessionReferenceResolver/candidates'), true);
+  assert.equal(containsSessionReference({ payload: { content: [{ type: 'text', text: '@[秘密](dsh-session:InMtb3RoZXIi)' }] } }), true);
+  assert.equal(containsSessionReference({ payload: { content: [{ type: 'text', text: '解释 dsh-session: URI' }] } }), false);
+  assert.equal(containsSessionReference({ payload: { content: [{ type: 'text', text: '@当前文件' }] } }), false);
+});
 
 // ── permissionPresetFromCommand（/permission 命令解析） ─────────
 

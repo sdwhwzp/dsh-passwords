@@ -199,7 +199,7 @@ async function runScenario(
     },
     jwtSecret: 'test-secret',
     internalSecret: 'test-internal',
-    localWorkspace: { host: '127.0.0.1', port: 0, publicUrl: '' },
+    localWorkspace: { host: '127.0.0.1', port: 0, publicUrl: '', placeholderRoot: path.join(path.dirname(root), 'local') },
     managedWorkspaceRoot: path.dirname(root),
     patch: { dshRoot: '', restartService: '' },
   };

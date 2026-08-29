@@ -206,7 +206,7 @@ async function startHub(options: LocalWorkspaceHubOptions, registry?: object): P
     },
     jwtSecret: 'test-jwt',
     internalSecret: 'test-internal',
-    localWorkspace: { host: '127.0.0.1', port: 0, publicUrl: '' },
+    localWorkspace: { host: '127.0.0.1', port: 0, publicUrl: '', placeholderRoot: path.join(temp, 'local-workspaces') },
     patch: { dshRoot: '', restartService: '' },
   };
   const hub = new LocalWorkspaceHub(ctx, db, config, options);

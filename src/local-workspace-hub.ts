@@ -165,7 +165,7 @@ export class LocalWorkspaceHub {
     private readonly config: PlatformConfig,
     options: LocalWorkspaceHubOptions = {},
   ) {
-    this.placeholderRoot = path.join(path.dirname(config.dbPath), 'local-workspaces');
+    this.placeholderRoot = config.localWorkspace.placeholderRoot;
     this.now = options.now ?? Date.now;
     this.launchTicketTtlMs = positiveInteger(options.launchTicketTtlMs, LOCAL_WORKSPACE_LAUNCH_TTL_MS);
     this.deviceCode = options.deviceCode ?? (() => String(randomInt(0, 1_000_000)).padStart(6, '0'));

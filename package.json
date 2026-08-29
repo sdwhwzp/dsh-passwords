@@ -1,6 +1,6 @@
 {
   "name": "dsh-passwords",
-  "version": "2.5.10",
+  "version": "2.5.18",
   "description": "dsh-passwords: a server-grade gateway that turns DeepSeek Harness into a multi-tenant platform — remote access + automatic HTTPS, per-subuser permissions & quotas, sandbox enforcement, first-run setup, SQLite/MySQL auth with at-rest encryption, rate-limit and audit log (bilingual zh/en UI)",
   "type": "module",
   "main": "dist/index.js",
@@ -71,13 +71,15 @@
     "test": "node --import tsx --test \"test/**/*.test.ts\""
   },
   "dependencies": {
-    "@deepseek-ai/dsh-llm": "^0.1.0-rc.8",
     "bcryptjs": "^3.0.2",
     "dotenv": "^16.4.5",
     "express": "^4.21.0",
     "jsonwebtoken": "^9.0.2",
     "mysql2": "^3.15.3",
     "ws": "^8.18.3"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-llm": "^0.1.0-rc.8 || ^0.1.1-rc.0 || ^0.1.2-alpha.1"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
@@ -87,6 +89,7 @@
     "@deepseek-ai/dsh-client-ui-primitives": "^0.1.0-rc.7",
     "@deepseek-ai/dsh-client-ui-settings": "^0.1.0-rc.7",
     "@deepseek-ai/dsh-host-webserver": "^0.1.0-rc.7",
+    "@deepseek-ai/dsh-llm": "^0.1.0-rc.8",
     "@deepseek-ai/dsh-system-prompt": "^0.1.0-rc.7",
     "@deepseek-ai/dsh-tools": "^0.1.0-rc.7",
     "@deepseek-ai/dsh-workspace": "^0.1.0-rc.7",

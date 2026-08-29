@@ -71,7 +71,7 @@ async function withManagedFiles(
     },
     jwtSecret: 'test-secret',
     internalSecret: 'test-internal',
-    localWorkspace: { host: '127.0.0.1', port: 0, publicUrl: '' },
+    localWorkspace: { host: '127.0.0.1', port: 0, publicUrl: '', placeholderRoot: path.join(path.dirname(root), 'local') },
     managedWorkspaceRoot: path.dirname(root),
     patch: { dshRoot: '', restartService: '' },
   };
@@ -140,6 +140,10 @@ async function withManagedFiles(
 
 test('subuser lists and downloads only regular files inside the private host folder', async () => {
   await withManagedFiles(async ({ root, request }) => {
+    const status = await request('GET', '/gateway/api/managed-files/status');
+    assert.equal(status.status, 200, status.body.toString('utf8'));
+    assert.deepEqual(status.json<{ ok: boolean; available: boolean }>(), { ok: true, available: true });
+
     const listing = await request('GET', '/gateway/api/managed-files?path=');
     assert.equal(listing.status, 200, listing.body.toString('utf8'));
     const value = listing.json<{

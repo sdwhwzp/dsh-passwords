@@ -141,6 +141,7 @@ export class ManagedWorkspaceProvisioner {
           const registration = await registry.create(workspacePath, workspaceTitle(user));
           if (registration.title !== workspaceTitle(user)) await registration.setTitle(workspaceTitle(user));
           if (!samePath(existing.path, workspacePath)) this.db.setManagedWorkspace(user.id, workspacePath);
+          this.db.setPermissions(user.id, mergedPermissions(workspacePath, this.db.getPermissions(user.id)));
         }
       } catch (error) {
         failures.push(error);
@@ -311,7 +312,7 @@ function mergedPermissions(
     };
   }
   const allowedFolders = current.allowed_folders.length === 0
-    ? []
+    ? [workspacePath]
     : current.allowed_folders.some((entry) => samePath(entry, workspacePath))
       ? current.allowed_folders
       : current.allowed_folders.length === 1 && current.allowed_folders[0] === '__deny__'

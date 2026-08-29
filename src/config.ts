@@ -60,6 +60,8 @@ export interface PlatformConfig {
     port: number;
     /** 对浏览器展示的完整 ws(s) 地址；留空时按当前访问主机与端口生成。 */
     publicUrl: string;
+    /** Stable host directory used for companion workspace registrations. */
+    placeholderRoot: string;
   };
   /** 宿主机上为子用户自动创建的专属工作区根目录。 */
   managedWorkspaceRoot: string;
@@ -148,6 +150,16 @@ export function loadConfig(): PlatformConfig {
     Number.isInteger(localWorkspacePortNum) && localWorkspacePortNum > 0 && localWorkspacePortNum <= 65535
       ? localWorkspacePortNum
       : Math.min(gatewayPort + 1, 65535);
+  const managedWorkspaceRoot = resolveEnvRelativePath(
+    readEnv('MCP_MANAGED_WORKSPACE_ROOT', ''),
+    envFilePath(),
+    path.join(homedir(), 'dsh-user-workspaces'),
+  );
+  const localWorkspacePlaceholderRoot = resolveEnvRelativePath(
+    readEnv('MCP_LOCAL_WORKSPACE_PLACEHOLDER_ROOT', ''),
+    envFilePath(),
+    path.join(path.dirname(managedWorkspaceRoot), 'dsh-local-workspaces'),
+  );
 
   return {
     setupKey,
@@ -186,12 +198,9 @@ export function loadConfig(): PlatformConfig {
       host: readEnv('MCP_LOCAL_WORKSPACE_HOST', '0.0.0.0'),
       port: localWorkspacePort,
       publicUrl: readEnv('MCP_LOCAL_WORKSPACE_PUBLIC_URL', ''),
+      placeholderRoot: localWorkspacePlaceholderRoot,
     },
-    managedWorkspaceRoot: resolveEnvRelativePath(
-      readEnv('MCP_MANAGED_WORKSPACE_ROOT', ''),
-      envFilePath(),
-      path.join(homedir(), 'dsh-user-workspaces'),
-    ),
+    managedWorkspaceRoot,
     patch: {
       dshRoot: readEnv('MCP_DSH_ROOT', ''),
       restartService,

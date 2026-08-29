@@ -113,6 +113,22 @@ export interface ManagedWorkspaceRow {
   created_at: string;
 }
 
+/** Immutable account ownership of one DSH session. */
+export interface SessionOwnerRow {
+  session_id: string;
+  user_id: number;
+  created_at: string;
+}
+
+/** Durable model selection owned by one DSH session. */
+export interface SessionModelSelectionRow {
+  session_id: string;
+  provider: string;
+  model: string;
+  reasoning_effort: string | null;
+  updated_at: string;
+}
+
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
@@ -206,6 +222,19 @@ CREATE TABLE IF NOT EXISTS managed_workspaces (
   user_id    INTEGER PRIMARY KEY,
   path       TEXT NOT NULL UNIQUE,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS session_owners (
+  session_id TEXT PRIMARY KEY,
+  user_id    INTEGER NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_session_owners_user ON session_owners(user_id);
+CREATE TABLE IF NOT EXISTS session_model_selections (
+  session_id       TEXT PRIMARY KEY,
+  provider         TEXT NOT NULL,
+  model            TEXT NOT NULL,
+  reasoning_effort TEXT,
+  updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 `;
@@ -303,6 +332,19 @@ CREATE TABLE IF NOT EXISTS managed_workspaces (
   user_id    INT UNSIGNED PRIMARY KEY,
   path       VARCHAR(768) NOT NULL UNIQUE,
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE IF NOT EXISTS session_owners (
+  session_id VARCHAR(200) PRIMARY KEY,
+  user_id    INT UNSIGNED NOT NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  KEY idx_session_owners_user (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE IF NOT EXISTS session_model_selections (
+  session_id       VARCHAR(200) PRIMARY KEY,
+  provider         VARCHAR(512) NOT NULL,
+  model            VARCHAR(512) NOT NULL,
+  reasoning_effort VARCHAR(191),
+  updated_at       DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 `;
 
@@ -1154,6 +1196,80 @@ export class Database {
       }
     }
     return null;
+  }
+
+  // ── 会话租户归属 ──────────────────────────────────────────
+
+  /**
+   * Claim an unowned session for one account and return its immutable owner.
+   * Existing ownership wins so a forged or reused session id cannot be moved
+   * between accounts. Rows intentionally survive user deletion.
+   */
+  claimSessionOwner(sessionId: string, userId: number): number {
+    if (sessionId.length === 0 || sessionId.length > 200) throw new Error('Invalid session id');
+    this.stmt(
+      `INSERT INTO session_owners (session_id, user_id) VALUES (?, ?)
+       ON CONFLICT(session_id) DO UPDATE SET user_id = session_owners.user_id`,
+    ).run(sessionId, userId);
+    const owner = this.getSessionOwner(sessionId);
+    if (owner === null) throw new Error('Session ownership write could not be read');
+    return owner;
+  }
+
+  /** Return one session's account owner, or null before legacy adoption. */
+  getSessionOwner(sessionId: string): number | null {
+    const row = this.stmt(
+      'SELECT user_id FROM session_owners WHERE session_id = ?',
+    ).get(sessionId) as { user_id: number } | undefined;
+    return row === undefined ? null : Number(row.user_id);
+  }
+
+  /** Load the durable ownership index used by the gateway. */
+  listSessionOwners(): SessionOwnerRow[] {
+    const rows = this.stmt(
+      'SELECT session_id, user_id, created_at FROM session_owners ORDER BY created_at ASC, session_id ASC',
+    ).all() as unknown as SessionOwnerRow[];
+    return rows.map((row) => ({ ...row, user_id: Number(row.user_id) }));
+  }
+
+  /** Persist one resolved model selection without changing the deployment default. */
+  setSessionModelSelection(
+    sessionId: string,
+    selection: { provider: string; model: string; reasoningEffort?: string },
+  ): void {
+    if (sessionId.length === 0 || sessionId.length > 200) throw new Error('Invalid session id');
+    if (selection.provider.length === 0 || selection.provider.length > 512) throw new Error('Invalid provider id');
+    if (selection.model.length === 0 || selection.model.length > 512) throw new Error('Invalid model id');
+    if (selection.reasoningEffort !== undefined && (selection.reasoningEffort.length === 0 || selection.reasoningEffort.length > 191)) {
+      throw new Error('Invalid reasoning effort');
+    }
+    this.stmt(
+      `INSERT INTO session_model_selections (session_id, provider, model, reasoning_effort)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(session_id) DO UPDATE SET
+         provider = excluded.provider,
+         model = excluded.model,
+         reasoning_effort = excluded.reasoning_effort,
+         updated_at = CURRENT_TIMESTAMP`,
+    ).run(sessionId, selection.provider, selection.model, selection.reasoningEffort ?? null);
+  }
+
+  /** Read the last successful model switch for one session. */
+  getSessionModelSelection(sessionId: string): {
+    provider: string;
+    model: string;
+    reasoningEffort?: string;
+  } | null {
+    if (sessionId.length === 0 || sessionId.length > 200) throw new Error('Invalid session id');
+    const row = this.stmt(
+      'SELECT session_id, provider, model, reasoning_effort, updated_at FROM session_model_selections WHERE session_id = ?',
+    ).get(sessionId) as SessionModelSelectionRow | undefined;
+    if (row === undefined) return null;
+    return {
+      provider: row.provider,
+      model: row.model,
+      ...row.reasoning_effort === null ? {} : { reasoningEffort: row.reasoning_effort },
+    };
   }
 
   /** 持久化一次成功配对；令牌只保存不可逆等值散列。 */

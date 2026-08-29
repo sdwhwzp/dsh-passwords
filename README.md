@@ -27,6 +27,7 @@ dsh 的网页界面默认面向本机使用。服务器地址一旦暴露，拿�
 - 新增子用户时自动在宿主机创建并注册一个专属工作区（默认 `~/dsh-user-workspaces/u<用户ID>`），初始沙盒为“可写工作区”；旧子用户会在升级后首次启动时自动补建
 - 向独立存储插件提供经过登录身份复核的专属目录解析服务；WebDAV 等插件可把每个账号自己的远端目录分别挂载到该目录内，不能借此指定或访问其他账号目录
 - 子用户可从左侧栏 Workspace 上方的“文件夹管理”打开独立管理页，浏览自己的托管目录、下载或删除文件、递归删除文件夹，并把本机文件或整个文件夹上传到当前目录；文件夹层级会保留（浏览器不提供空目录，因此不会单独创建空目录），路径不会暴露或越出其他账号及宿主机目录
+- 右侧 File 面板的普通文件预览和下载按工作区目录授权，不再被“git 下载”开关误伤；git 拉取、导出和共享上传下载仍由该开关单独控制
 - 当前身份旁提供“退出登录”按钮；确认后服务端立即吊销会话并清除 Cookie
 - 主用户可管理所有子用户；子用户只能改自己
 - 改密后旧会话全部立即失效；每次登录/失败都有记录，一条命令就能查谁在什么时候登录过
@@ -35,12 +36,13 @@ dsh 的网页界面默认面向本机使用。服务器地址一旦暴露，拿�
 
 主用户可以在设置页给每个子用户单独配置：
 
-- **工作区与会话权限**：主用户在每个子用户权限面板中用滑动开关开启工作区；开启后其中的活动会话默认全部可用，也可逐条取消勾选。归档会话不会出现在设置里
-- **会话与消息隔离**：子用户只能看到已授权工作区和启用会话；留言只显示广播、发给自己或自己发出的内容
+- **工作区与会话权限**：主用户在每个子用户权限面板中用滑动开关开启工作区；开启后其中的活动会话默认全部可用，也可逐条取消勾选。删除工作区登记只会把本人会话移入“未分组”，目录仍获授权时可以继续读取；归档会话不会出现在设置里。托管子账号没有额外工作区时只保留自己的专属目录，不会把空清单解释为全盘开放
+- **会话与消息隔离**：子用户只能看到已授权工作区中的会话及本人拥有的“未分组”会话；本人归档的会话仍可读取，归档状态只影响组织方式，不改变账号归属；留言只显示广播、发给自己或自己发出的内容
 - **消息默认私信**：子用户留言默认只发给主用户；广播仅主用户可发且需显式勾选
 - **每小时 token 上限**、**每日使用时长上限**：到量自动拒绝
 - **每月模型金额额度**：以人民币微元整数保存，精确到 ¥0.01；显示本月已用、剩余和 80% 预警，达到 100% 后拒绝下一模型步骤
 - **客户模型范围**：子用户在 ChatGPT（Codex）服务商下只显示 GPT-5.6-Sol、GPT-5.6-Terra、GPT-5.6-Luna，其他服务商模型保持可用；服务端同时拒绝子用户调用其他 Codex 模型，主用户不受限制
+- **会话模型持久化**：每个会话的模型选择独立保存，即使在首次提问前重启 dsh 也会恢复，不会把一个账号的选择写成共享默认值；主用户如需修改新会话默认模型，在 Settings 的 `agent-default-model` 分节明确修改
 - **沙盒权限**：只读 / 可写工作区 / 完全访问，三档可选；子用户的 AI 想越权提权时，网关直接把审批改成「拒绝」
 - **上传开关**（同时控制专属文件夹上传）、**git 下载开关**、**封禁子用户**
 
@@ -59,7 +61,7 @@ dsh 的网页界面默认面向本机使用。服务器地址一旦暴露，拿�
 
 所有主用户和子用户都只使用本项目数据库中的本地账号与 bcrypt 密码登录；数据库默认使用 SQLite，也可切换到 MySQL 8。网关会删除浏览器自行提交的身份头，再为上游请求生成 30 秒有效的 HMAC 身份断言；Harness 验证后把 principal 固化到每条消息、模型步骤和工具执行。
 
-子账号首次登录和后续刷新使用的工作区、会话列表均在服务端按本人权限过滤；工作区、会话和归档的 WebSocket 实时事件也经过同样的所有权过滤，浏览器不会先收到管理员数据再等待客户端隐藏。
+子账号首次登录和后续刷新使用的工作区、会话列表均在服务端按本人权限过滤；工作区、会话和归档的 WebSocket 实时事件也经过同样的所有权过滤，浏览器不会先收到管理员数据再等待客户端隐藏。会话所有权不依赖当前工作区登记或归档状态：可信 Host 列表中的旧会话只按其首条人工消息上由 `dsh-passwords` 签发并持久化的账号身份补登记，目录位置不能充当身份；没有可信身份的空白或旧格式会话保守归管理员。
 
 切换数据库驱动只会选择目标数据库，不会自动复制另一驱动中的历史行。已有账号的生产环境应先备份 `.env` 和数据库并单独迁移；首次部署到空库可直接切换。
 
@@ -117,9 +119,11 @@ dsh-passwords install     # 生成随机 SETUP_KEY + 恢复插件栈 + 应用补
 
 ### 自动恢复已安装插件
 
-`scripts/profile-plugins.json` 是跨机器部署的版本化插件清单。运行 `dsh-passwords install` 会把清单中的 NPM/Git 来源、bundle 顺序、Git 构建授权和必要的 profile patch 幂等合并到 `~/.dsh/profiles/web`，然后统一执行 `pnpm install`。已有本地 `link:` 开发源和未纳入清单的自定义插件不会被覆盖或删除；清单明确标记的旧聚合包会自动迁移。
+`scripts/profile-plugins.json` 是跨机器部署的版本化插件清单。运行 `dsh-passwords install` 会把清单中的 NPM/Git 来源、bundle 顺序、Git 构建授权和必要的 profile patch 幂等合并到 `~/.dsh/profiles/web`，然后统一执行 `pnpm install`。已有本地 `link:` 开发源和未纳入清单的自定义插件不会被覆盖或删除；只有链接实际指向清单声明的相邻源码时才构建其配套工作区，指向独立发布目录的链接不会误用相邻路径。清单明确标记的旧聚合包会自动迁移。
 
-清单默认自动安装 `dshmarket@1.16.2`、你自己的 `sdwhwzp/dsh-web` 仓库 `master` 分支中的 `@linxin666/dsh-web-all`、`dsh-spend` 的 `dev` 分支、`dsh-plugin-subscriptions` 的 `dev` 分支、better-sidebar 的 Office 预览插件以及当前 `dsh-passwords`。Office 插件为右侧文件栏提供 `.docx`、`.xlsx` 和 `.pptx` 预览。安装器会移除已停用的 `@linxin666/dsh-web-ui-all` 依赖和 bundle；如果 `dsh-web` 与 `dsh-passwords` 位于同一父目录，则优先链接并构建本地 `dsh-web` 聚合包及其全部 workspace 子包，确保 DSH 能从 profile 根目录解析每个 loader，也便于直接开发。`dsh-plugin-subscriptions` 始终使用记录的 `github:sdwhwzp/dsh-plugin-subscriptions#dev`，避免新机器误装 NPM 稳定版。
+清单默认自动安装 `dshmarket@1.16.2`、你自己的 `sdwhwzp/dsh-web` 仓库 `master` 分支中的 `@linxin666/dsh-web-all`、`dsh-spend` 的 `dev` 分支、`dsh-plugin-subscriptions` 的 `dev` 分支、`dsh-at-file` 的 `dev` 分支、`sdwhwzp/dsh-weknora` 的 `main` 分支、better-sidebar 的 Office 预览插件以及当前 `dsh-passwords`。Office 插件为右侧文件栏提供 `.docx`、`.xlsx` 和 `.pptx` 预览。`dsh-at-file` 在输入框键入 `@` 时搜索当前会话工作区中的文件和文件夹；搜索请求按会话归属校验，工作区外的符号链接不进入索引，子账号不能修改共享的插件设置。安装器会移除已停用的 `@linxin666/dsh-web-ui-all` 依赖和 bundle；如果 `dsh-web`、`dsh-at-file`、`dsh-plugin-subscriptions`、`dsh-weknora` 与 `dsh-passwords` 位于同一父目录，则优先链接对应本地源码，确保 DSH 能从 profile 根目录解析每个 loader，也便于直接开发。安装器会在启动前为本地 `dsh-at-file` 链接与当前 DSH 版本匹配的 Host peer，并自动放行其运行时依赖所需的 `protobufjs` 安装脚本；非标准运行时目录可用 `DSH_RUNTIME_NODE_MODULES` 指定。没有相邻源码时，`dsh-at-file` 和 `dsh-plugin-subscriptions` 才回退到清单记录的 GitHub `dev` 分支；存在已打包的相邻源码时直接使用本地链接，服务器无需额外安装 Git，同时仍避免新机器误装 NPM 稳定版。
+
+WeKnora 插件注册知识库列表、检索、文档读取和问答工具。未设置 `WEKNORA_BASE_URL` 时 bundle 保持禁用；启动 DSH 前设置该地址，并按服务要求设置 `WEKNORA_API_KEY`，平台级 Key 还需设置 `WEKNORA_TENANT_ID`，并可用逗号分隔的 `WEKNORA_KNOWLEDGE_BASE_IDS` 指定默认知识库。Web Profile 中的工具对所有登录账号可用，因此多用户部署必须使用只允许访问共享知识库的 WeKnora 凭据；`WEKNORA_KNOWLEDGE_BASE_IDS` 只是默认检索范围，不能代替服务端凭据权限。密钥不得写入 Git、Profile 的 `package.json` 或 `cordis.patch.yml`。
 
 `dsh-shandong-tizhi-brand` 和 `dsh-nas-webdav` 也在清单中，但目前只有本机源码，没有可公开拉取的远程分支。新机器部署前分别设置 `DSH_PLUGIN_BRAND_SPEC` 和 `DSH_PLUGIN_NAS_SPEC` 为可访问的 NPM、Git 或 `link:` 来源；未设置时安装器会明确提示并跳过，其他插件继续安装。
 
@@ -219,7 +223,7 @@ node scripts/start-http.mjs [端口]    # 默认 8080，会弹 y/N 确认
 
 | 功能 | 谁可用 | 说明 |
 |---|---|---|
-| **远程设置 + 重载补丁** | 所有登录用户 | 远程设置已应用（强制启用）；dsh 升级后若设置页出现异常，点"重载补丁"一键修复（自动重启网页服务并刷新页面，不用 SSH） |
+| **共享设置 + 重载补丁** | 仅主用户 | dsh 的 Web Profile 设置由所有账号共用，因此子用户不能读取或写入；升级后主用户可点“重载补丁”修复设置页 |
 | **修改密码** | 本人改自己；主用户可改任何人 | 改密后旧会话全部立即失效，需重新登录 |
 | **修改用户名** | 本人改自己；主用户可改任何人 | 改名后需用新用户名重新登录 |
 | **子用户管理** | 仅主用户 | 创建/删除子用户（子用户可用登录页进入，但没有管理权限） |
@@ -257,7 +261,8 @@ node scripts/start-http.mjs [端口]    # 默认 8080，会弹 y/N 确认
 | `MCP_LOCAL_WORKSPACE_HOST` | `0.0.0.0` | 本机助手 WebSocket 监听地址 |
 | `MCP_LOCAL_WORKSPACE_PORT` | 网关端口 + 1 | 本机助手连接端口；服务器防火墙需放行 |
 | `MCP_LOCAL_WORKSPACE_PUBLIC_URL` | 空 | 配对命令使用的完整 `ws://` 或 `wss://` 地址；NAT/反代后建议显式设置 |
-| `MCP_DSH_ROOT` | 自动探测 | dsh 安装目录（`@deepseek-ai/dsh` 所在处），探测不到时手动指定 |
+| `MCP_LOCAL_WORKSPACE_PLACEHOLDER_ROOT` | `~/dsh-local-workspaces` | 本机助手工作区注册使用的稳定占位目录；应位于 release/current 之外，避免每次部署产生重复工作区 |
+| `MCP_DSH_ROOT` | 自动探测 | dsh Web Profile 根目录或其中的 `@deepseek-ai/dsh` 包目录；补丁会自动向上定位同一 Profile 的客户端包 |
 | `MCP_DSH_RESTART_SERVICE` | `dsh-web` | 重载补丁后自动重启的 dsh systemd 服务名；显式留空不自动重启 |
 | `DSH_PASSWORDS_ENV_FILE` | 空 | 手动指定 `.env` 路径（插件自动传，一般不用填） |
 

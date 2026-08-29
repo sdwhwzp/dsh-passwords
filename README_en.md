@@ -35,12 +35,13 @@ Listed in [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek
 
 The owner can configure, per subuser, from the settings page:
 
-- **Workspace and session permissions**: the owner enables workspaces per subuser with switches; enabled workspaces expose active sessions by default, with per-session checkboxes to turn individual sessions off. Archived sessions are excluded from the settings list
-- **Session and message isolation**: subusers only see enabled workspaces and enabled sessions; messages are limited to broadcasts, messages addressed to them, and messages they sent
+- **Workspace and session permissions**: the owner enables workspaces per subuser with switches; enabled workspaces expose active sessions by default, with per-session checkboxes to turn individual sessions off. Removing a workspace registration moves that user's sessions to Ungrouped without deleting them, and they remain readable while their directory stays authorized. Archived sessions are excluded from the settings list
+- **Session and message isolation**: subusers only see sessions in enabled workspaces plus their own Ungrouped sessions. Their archived sessions remain readable because archive state affects organization, not account ownership. Messages are limited to broadcasts, messages addressed to them, and messages they sent
 - **DM-by-default messages**: subuser messages go to the owner by default; broadcasting is owner-only and must be explicitly chosen
 - **Hourly token limit** and **daily usage-time limit**: requests are rejected once the cap is hit
 - **Monthly model-spend allowance**: stored as integer CNY micros with ¥0.01 admin precision; shows used, remaining and an 80% warning, and rejects the next model step at 100%
 - **Customer model scope**: under the ChatGPT (Codex) provider, subuser selectors show only GPT-5.6-Sol, GPT-5.6-Terra, and GPT-5.6-Luna; models from other providers remain available, while the server rejects other Codex models for subusers and leaves the owner unrestricted
+- **Session model persistence**: each session keeps its model selection independently, including a selection made before the first prompt and followed by a dsh restart; selecting a model never changes the shared deployment default, which the owner changes explicitly in the `agent-default-model` Settings section
 - **Sandbox level**: read-only / workspace-write / full access; when a subuser's AI tries to escalate beyond its level, the gateway forces the approval to "reject"
 - **Upload toggle** (including private-folder uploads), **git-download toggle**, and **ban subusers**
 
@@ -59,7 +60,7 @@ The owner can configure, per subuser, from the settings page:
 
 Owners and subusers always sign in with local accounts and bcrypt passwords stored in this project's database. SQLite is the default and MySQL 8 is also supported. The gateway removes browser-supplied identity headers and creates a 30-second HMAC assertion for upstream requests; Harness verifies it and durably attaches the principal to each message, model step and tool execution.
 
-Workspace and session lists used by both initial sign-in and later refreshes are filtered on the server for the current subuser. WebSocket workspace, session, and archive events pass through the same ownership filter, so the browser never receives owner data while waiting for client-side hiding.
+Workspace and session lists used by both initial sign-in and later refreshes are filtered on the server for the current subuser. WebSocket workspace, session, and archive events pass through the same ownership filter, so the browser never receives owner data while waiting for client-side hiding. Session ownership does not depend on current workspace registration or archive state: a legacy session from a trusted Host list is adopted only from the `dsh-passwords` identity durably attached to its first human prompt. Directory location is never identity evidence; blank and pre-identity sessions conservatively remain with the owner account.
 
 Changing the database driver selects a different repository and does not copy rows from the other driver. Back up `.env` and the database and migrate existing accounts separately in production; a first deployment with an empty database can switch directly.
 
@@ -219,7 +220,7 @@ After logging in to dsh, open **Settings → Plugins** to find the "dsh-password
 
 | Feature | Who can use it | Notes |
 |---|---|---|
-| **Remote settings + reload patch** | All signed-in users | Remote settings are applied (always on); after a dsh upgrade, click "Reload patch" to fix the settings page in one click (restarts the web service and refreshes the page — no SSH) |
+| **Shared settings + reload patch** | Owner only | The Web Profile settings are shared by every account, so subusers cannot read or write them; the owner can reload the patch after an upgrade |
 | **Change password** | Yourself; the owner can change anyone's | Old sessions are invalidated immediately |
 | **Change username** | Yourself; the owner can change anyone's | Sign in with the new username afterwards |
 | **Subuser management** | Owner only | Create/delete subusers (subusers can sign in but have no admin rights) |

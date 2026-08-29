@@ -1,6 +1,6 @@
 # 28 服务器部署与运维手册
 
-本文记录 `192.168.10.28` 上 DeepSeek Harness 多用户服务的功能、运行结构、数据位置、部署步骤、验收方法和故障处理。内容依据 2026-08-27 的实际服务器盘点整理，不包含密码、API Key、OAuth Token、Tailscale Auth Key 或数据库口令。
+本文记录 28 服务器（Tailscale `100.64.0.5`，局域网 `192.168.10.28`）上 DeepSeek Harness 多用户服务的功能、运行结构、数据位置、部署步骤、验收方法和故障处理。内容依据 2026-08-28 的实际服务器盘点整理，不包含密码、API Key、OAuth Token、Tailscale Auth Key 或数据库口令。
 
 ## 1. 使用范围
 
@@ -13,7 +13,7 @@
 ```text
 局域网浏览器
     |
-    | HTTP 192.168.10.28:3081
+    | HTTP 100.64.0.5:3081
     v
 dsh-passwords 登录网关
     |
@@ -25,16 +25,16 @@ DeepSeek Harness Web + Web Profile + 插件
     |
     +---- 子账号专属目录 /home/tzwl3/dsh-user-workspaces/u<用户ID>
     |
-    +---- 本机助手 WebSocket 192.168.10.28:3082
+    +---- 本机助手 WebSocket 100.64.0.5:3082
     |
-    +---- Tailscale 100.64.0.4
+    +---- Tailscale 100.64.0.5
              |
              +---- kmMac 100.64.0.2:8080 文本模型
              +---- kmMac 100.64.0.2:8081 图片识别
              +---- kmMac 100.64.0.2:8082 图片生成
 ```
 
-客户端统一访问 `http://192.168.10.28:3081`。`3080` 是只监听回环地址的 dsh 上游管理入口，不应直接暴露给客户；`3082` 是本机工作区助手的明文 WebSocket 入口，只适合可信局域网或受控 VPN。
+客户端统一访问 `http://100.64.0.5:3081`。`3080` 是只监听回环地址的 dsh 上游管理入口，不应直接暴露给客户；`3082` 是本机工作区助手的明文 WebSocket 入口，只适合受控 Tailscale 网络或可信局域网。
 
 ## 3. 当前基线
 
@@ -49,13 +49,13 @@ DeepSeek Harness Web + Web Profile + 插件
 | 局域网地址 | `192.168.10.28/24` |
 | 默认网关 | `192.168.10.243` |
 | DNS | `114.114.114.114`、`223.5.5.5`，Tailscale DNS `100.100.100.100` |
-| Tailscale 地址 | `100.64.0.4` |
+| Tailscale 地址 | `100.64.0.5` |
 | Node.js | `22.21.1` |
 | pnpm | `11.7.0` |
 | PM2 | `6.0.13` |
 | Tailscale | `1.102.3` |
 | dsh | `0.1.1-rc.2`，含本地定制构建 |
-| dsh-passwords | `2.5.9`，提交 `5007b5c` |
+| dsh-passwords | `2.5.17` |
 | dsh-spend | `0.4.9`，提交 `9c55954` |
 | dsh-nas-webdav | `0.2.1`，提交 `3ff3e15` |
 | Office 侧栏预览 | `@huanlin/dsh-plugin-better-sidebar-plugin-office@0.1.2` |
@@ -161,6 +161,8 @@ DeepSeek Harness Web + Web Profile + 插件
 | `dsh-shandong-tizhi-brand` | 山东梯智物联品牌界面 |
 | `dsh-nas-webdav` | NAS WebDAV 文件服务 |
 
+WeKnora 知识库插件已纳入跨机器安装清单，来源固定为 `github:sdwhwzp/dsh-weknora#main`；本机存在相邻的 `dsh-weknora` 源码时优先链接并构建。插件提供 `weknora_list_knowledge_bases`、`weknora_search`、`weknora_read_document` 和 `weknora_ask`，不包含浏览器设置页。未设置 `WEKNORA_BASE_URL` 时 bundle 保持禁用。28 启用前必须先准备可达的 WeKnora API 地址和受限 API Key；同一 Web Profile 的登录账号共享这组工具和凭据，因此 API Key 本身必须只允许访问计划共享给客户的知识库。
+
 ### 4.6 WebDAV 工作区、Excel 工具和 Office 预览
 
 每个已登录账号在“设置 → WebDAV”中独立绑定地址、WebDAV 用户名、密码和 TLS 选项。凭据按 `(principal.source, principal.id)` 隔离，密码验证成功后使用 AES-GCM 加密保存在 MySQL，不回显、不写日志，也不进入模型上下文。28 当前使用 `/usr/bin/rclone` 和 FUSE，把每个账号的远端目录挂载到其专属目录下的 `WebDAV` 子目录并注册为工作区；多个账号可同时挂载同一台或不同的 NAS，解绑只卸载当前账号，不影响其他账号或删除 NAS 文件。
@@ -225,6 +227,7 @@ dsh-passwords 的账号、权限、使用量、留言、审计和工作区映射
 - 订阅 OAuth：`~/.dsh/plugins/subscriptions/auth.json`。
 - kmMac：`/home/tzwl3/mac.md` 或替代它的 SSH 私钥。
 - Tailscale：一次性或可撤销的 Auth Key。
+- WeKnora：`WEKNORA_API_KEY`，以及部署专用的 `WEKNORA_BASE_URL` 和允许共享的知识库 ID。
 
 不得修改一个已使用数据库对应的 `MCP_DB_ENC_KEY`，否则已加密用户名、IP 和审计字段无法解密。轮换 JWT 或内部签名密钥会使当前登录失效，应安排维护窗口。
 
@@ -245,7 +248,8 @@ MCP_GATEWAY_REDIRECT_PORT=0
 MCP_GATEWAY_AUTO_TLS=0
 MCP_LOCAL_WORKSPACE_HOST=0.0.0.0
 MCP_LOCAL_WORKSPACE_PORT=3082
-MCP_LOCAL_WORKSPACE_PUBLIC_URL=ws://192.168.10.28:3082
+MCP_LOCAL_WORKSPACE_PUBLIC_URL=ws://100.64.0.5:3082
+MCP_LOCAL_WORKSPACE_PLACEHOLDER_ROOT=/home/tzwl3/dsh-local-workspaces
 MCP_DSH_ROOT=/home/tzwl3/apps/dsh-runtime/current/node_modules/@deepseek-ai/dsh
 MCP_DSH_RESTART_SERVICE=
 ```
@@ -284,7 +288,7 @@ sudo tailscale up --reset \
 tailscale status
 ```
 
-Auth Key 必须从部署环境注入，不得写入脚本或本文。28 应获得 `100.64.0.4`；若地址变化，应同步修改模型 base URL、访问控制和文档基线。
+Auth Key 必须从部署环境注入，不得写入脚本或本文。28 当前应获得 `100.64.0.5`；若地址变化，应同步修改客户端入口、本机助手 WebSocket 地址、访问控制和文档基线。
 
 ### 7.3 准备源代码
 
@@ -295,6 +299,7 @@ Auth Key 必须从部署环境注入，不得写入脚本或本文。28 应获�
 - `https://github.com/sdwhwzp/dsh-web.git`
 - `https://github.com/sdwhwzp/dsh-spend.git`
 - `https://github.com/sdwhwzp/dsh-plugin-subscriptions.git`
+- `https://github.com/sdwhwzp/dsh-weknora.git`
 - `http://gr.gr-iot.cn:30000/deepseek-harness/nas.git`
 
 部署前必须确认这些仓库的改动已经 commit 和 push。dsh-web 的客户开发与部署分支是 `master`；同步上游时先更新 fork 的 `dev`，验证后再合并到 `master`。本次 principal、WebDAV 和 Spend 兼容修复分别以 `5007b5c`、`3ff3e15` 和 `9c55954` 为可重复部署基线。
@@ -328,6 +333,11 @@ cd /path/to/dsh-plugin-subscriptions
 pnpm install --frozen-lockfile
 pnpm run build
 pnpm test
+
+cd /path/to/dsh-weknora
+npm ci
+npm run typecheck
+npm test
 ```
 
 若某仓库的锁文件与实际包管理器不同，以仓库 `package.json` 和锁文件为准。不要在服务器上自动更新到 `latest`；先在本机测试并固定提交或包版本。
@@ -345,6 +355,8 @@ mkdir -p "$release"
 ln -sfn "$release" "$runtime_root/current"
 ```
 
+dsh-web 是 pnpm workspace，不能只把新发布目录的根 `node_modules` 软链接到旧发布。每个 `packages/*` 依赖的是本发布目录内由 pnpm 生成的包级 `node_modules` 链接；缺失时 Cordis 会在加载插件时以 `ERR_MODULE_NOT_FOUND` 退出，PM2 随即进入重启循环。新发布必须在自身目录完成 `pnpm install --offline --frozen-lockfile`（或完整复制一套已经验证的 pnpm 布局），切换 `current` 前至少直接导入本次修改插件的 `lib/index.js`，并观察 PM2 的 PID 与重启次数在一个验收窗口内保持不变。
+
 业务插件也使用同一模式：
 
 ```text
@@ -353,6 +365,7 @@ ln -sfn "$release" "$runtime_root/current"
   dsh-plugin-subscriptions/
   dsh-spend/
   dsh-shandong-tizhi-brand/
+  dsh-weknora/
   nas/
 ```
 
@@ -371,7 +384,19 @@ node /home/tzwl3/apps/dsh-runtime/current/node_modules/@deepseek-ai/dsh/lib/bin.
   --profile web --dump-config >/tmp/dsh-web-config.yml
 ```
 
-该清单会安装 `@huanlin/dsh-plugin-better-sidebar-plugin-office@0.1.2`。安装后检查 `~/.dsh/profiles/web/package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`cordis.patch.yml` 和 `node_modules` 都指向新发布，且 Office 包同时存在于 dependencies 和 `dsh.profile.bundles`。不要手工只改 `package.json` 而不更新锁文件和依赖目录。已有服务器采用独立不可变发布目录时，先备份整套 Profile，再用 `pnpm add --save-exact` 更新依赖和锁文件，并只向 bundles 追加目标插件；验证失败时同时恢复 Profile 备份和 plugins `current` 软链接。
+该清单会安装 `dsh-at-file` 的 `dev` 分支、`@huanlin/dsh-plugin-better-sidebar-plugin-office@0.1.2` 和 `@wxg-prc-cpg/dsh-weknora`。安装后检查 `~/.dsh/profiles/web/package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`cordis.patch.yml` 和 `node_modules` 都指向新发布，且三个包同时存在于 dependencies 和 `dsh.profile.bundles`。`dsh-at-file` 的搜索端点必须经过会话归属校验，子账号只能读取本人获准工作区的过滤设置并且不能修改共享设置；插件索引和手工 `@path` 引用都必须拒绝规范目标位于工作区外部的符号链接。清单安装器只为实际命中相邻源码的插件执行本地构建；Profile 中指向 `/home/tzwl3/apps/dsh-web/current` 等独立发布目录的既有链接会原样保留，不会再误查 `dsh-passwords` 旁边不存在的 `dsh-web`。发布目录内已有 `dsh-plugin-subscriptions` 和 `dsh-at-file` 时优先使用相邻链接，服务器无需安装 Git；只有源码缺失时才拉取 GitHub `dev`。本地 at-file 链接安装前会运行 `scripts/link-runtime-peers.mjs`，从 `~/apps/dsh-runtime/current/node_modules` 解析当前版本的 Typert、Settings、LLM 和 Invariants Host 包，并把 `protobufjs` 加入 Profile 的 `allowBuilds`；非标准布局必须设置 `DSH_RUNTIME_NODE_MODULES`。不要手工只改 `package.json` 而不更新锁文件和依赖目录。已有服务器采用独立不可变发布目录时，先备份整套 Profile，再用清单脚本更新依赖和锁文件；验证失败时同时恢复 Profile 备份和 plugins `current` 软链接。
+
+WeKnora 配置必须通过 PM2 进程环境或仅部署人员可读的环境文件注入，并在 `pm2 restart dsh-web --update-env` 后生效：
+
+```dotenv
+WEKNORA_BASE_URL=https://weknora.example.com/api/v1
+WEKNORA_API_KEY=<restricted-api-key>
+WEKNORA_TENANT_ID=<platform-key-tenant-id-if-required>
+WEKNORA_KNOWLEDGE_BASE_IDS=<shared-kb-id-1>,<shared-kb-id-2>
+WEKNORA_AGENT_ID=<optional-agent-id>
+```
+
+不要照抄示例地址。先从 28 验证 `${WEKNORA_BASE_URL}/knowledge-bases` 可达，再检查 `dsh --profile web --dump-config` 只包含环境表达式或已注入的运行时值，不把 API Key 复制进仓库和部署文档。`WEKNORA_KNOWLEDGE_BASE_IDS` 只设置默认范围，不能阻止调用方传入其他知识库 ID；多账号环境必须在 WeKnora 服务端限制该 API Key 的实际权限。
 
 ### 7.7 配置 dsh-passwords 和 MySQL
 
@@ -558,6 +583,7 @@ grep -q 'xlsx' /tmp/dsh-office-preview-client.js
 
 - 左侧 Workspace 上方显示“文件夹管理”。
 - 可上传单文件、整个文件夹、下载、删除文件和递归删除文件夹。
+- 右侧 File 面板可下载普通文件；关闭“git 下载”只禁止 git、会话导出和共享下载通道，不影响已授权工作区内的普通文件。
 - 删除专属根目录、`..` 路径和符号链接逃逸会失败。
 - 空白新对话的“选择模式”旁显示“一键选择本机文件夹”。
 - Windows 助手可配对、选择目录并显示“打开对话”。
@@ -581,7 +607,7 @@ curl -fsS http://100.64.0.2:8082/health
 
 完成一次服务器重启，再检查：
 
-- `tailscaled` 自动启动并恢复 `100.64.0.4`。
+- `tailscaled` 自动启动并恢复 `100.64.0.5`。
 - crontab 成功执行 `pm2 resurrect`。
 - `kmmac-model-monitor.timer` 为 active，下一次触发时间正常。
 - 3080、3081、3082 恢复监听。
@@ -694,15 +720,19 @@ rg -n '(PASSWORD|SECRET|TOKEN|AUTH_KEY|API_KEY)=.+|BEGIN .*PRIVATE KEY' \
 | 组件 | 当前目标 |
 |---|---|
 | runtime | `/home/tzwl3/apps/dsh-runtime/releases/deploy-28-20260826-conversation-bootstrap-all-copies` |
-| plugins | `/home/tzwl3/apps/dsh-plugins/releases/20260827-a6ea992-2653b52-tenant-events-webdav-restore` |
-| dsh-web | `/home/tzwl3/apps/dsh-web/releases/20260827-092833-footer-chat-drag` |
+| plugins | `/home/tzwl3/apps/dsh-plugins/releases/20260828-194748-dsh-passwords-2.5.17-archived-history` |
+| dsh-web | `/home/tzwl3/apps/dsh-web/releases/20260828-1110-pet-default-off-fixed` |
 | conversation bundle | SHA-1 `2440832da50b0eb887ac0ff05b1e4462f9109123` |
-| dsh-passwords client bundle | SHA-1 `881b7f21b8a3fe48dbf1bff8f7d4f5f2f23f033d` |
+| dsh-passwords gateway bundle | SHA-1 `8262267ae4ad0e636ad1396301d3ae82ff2ab1c8` |
+| dsh-passwords client bundle | SHA-1 `ed90595fdbe831026025b3c4cfee55ac6aca6b1e` |
 | dsh-nas-webdav client bundle | SHA-1 `6fa1f333a1b76b241756eee42568292e0c0ee782` |
 | Office preview client bundle | SHA-1 `48cc39dc0df93b99e287c1889cf6096552b90cb6` |
-| Web Profile 回滚备份 | `/home/tzwl3/.dsh/profile-backups/20260827-office-preview-principal` |
+| WeKnora | `@wxg-prc-cpg/dsh-weknora@0.1.1`，未配置 `WEKNORA_BASE_URL` 时禁用 |
+| dsh-at-file client bundle | SHA-256 `9c2c0e1b74c94556acd23526908d6756b4fb5349197662c7061faacea6999222` |
+| dsh-passwords 2.5.17 安装包 | SHA-256 `3c9ce7dc7e89468a208517ccc26f37c024823fad609e30875c0293871ff5538e` |
+| Web Profile 回滚备份 | `/home/tzwl3/apps/deploy-backups/20260828-194748-dsh-passwords-2.5.17-archived-history` |
 
-这些标识用于确认 2026-08-27 的服务器快照。任何后续构建都应创建新的发布标识和内容哈希，不应复用目录名或把新内容覆盖到旧发布中。
+这些标识用于确认 2026-08-28 的服务器快照。任何后续构建都应创建新的发布标识和内容哈希，不应复用目录名或把新内容覆盖到旧发布中。
 
 ## 14. 2026-08-27 principal、Spend 与 Excel 预览部署记录
 
@@ -719,3 +749,71 @@ rg -n '(PASSWORD|SECRET|TOKEN|AUTH_KEY|API_KEY)=.+|BEGIN .*PRIVATE KEY' \
 修复由 dsh-passwords `2.5.10` 提供：子账号的 `/api/events.host` 与 `/api/events.mux` 在网关终止，每帧按工作区路径、会话归属、禁用列表和归档集合过滤，未知全局事件默认丢弃；同时 `managedUserWorkspace.listPrincipals()` 只向受信 Host 插件提供当前账号身份。dsh-nas-webdav `0.2.2` 在启动和定时巡检时遍历这些账号，只为已绑定的账号恢复独立挂载，单个账号失败不阻塞其他账号。对应提交为 dsh-passwords `a6ea992` 和 dsh-nas-webdav `2653b52`。
 
 部署使用新的不可变发布目录 `20260827-a6ea992-2653b52-tenant-events-webdav-restore`，原子切换 `current` 后重启 PM2。服务器内定向回归为 dsh-passwords 27/27、dsh-nas-webdav 36/36；运行态验证为 3080=200、3081 匿名=302、PM2 online。`wzp` 的 WebDAV 已自动恢复为 `fuse.rclone` 并列出 7 个根目录条目；使用 90 秒临时诊断 JWT 调用 3081 时，工作区仅有 `u2`、`u2/测试`和 `u2/WebDAV`，归档 ID 为 0，Mux 收到 3 帧且外账号会话帧为 0，WebDAV 浏览接口返回 200 与 7 个条目。
+
+## 16. 2026-08-27 WeKnora 插件接入记录
+
+`@wxg-prc-cpg/dsh-weknora@0.1.1` 已加入 Web Profile dependencies、bundle 和 pnpm 构建授权，模块链接到不可变发布目录 `20260827-weknora-0.1.1`。插件注册知识库列表、检索、文档读取和问答四项工具，注册由 `ctx.effect()` 持有，卸载或重配置时会撤销工具。默认配置读取 `WEKNORA_BASE_URL`、`WEKNORA_API_KEY`、`WEKNORA_TENANT_ID`、`WEKNORA_KNOWLEDGE_BASE_IDS` 和 `WEKNORA_AGENT_ID`。
+
+28 当前没有配置任何 `WEKNORA_*` 进程环境变量，也没有本机 WeKnora 服务，因此 loader 行保持禁用，不向客户暴露必然失败的工具。后续启用必须使用服务端受限 API Key；同一 Web Profile 的主账号和子账号共享该凭据，不能依赖默认知识库 ID 作为权限隔离。
+
+部署前后插件测试均为 52/52，通过类型检查和文件哈希核对。最终运行态为 PM2 online、3080=200、3081 匿名=302，近期 WeKnora loader 错误为 0；`wzp` 的 WebDAV 仍为 `fuse.rclone` 且根目录 7 项。Profile 回滚文件保存在 `/home/tzwl3/.dsh/profile-backups/20260827-weknora-before`，旧插件发布目录未删除。
+
+## 17. 2026-08-27 dsh-at-file 插件接入记录
+
+`dsh-at-file@0.6.10` 基于 `sdwhwzp/dsh-at-file` 的 `dev` 分支接入 Web Profile。客户端在输入框键入 `@` 时枚举当前会话工作区内的文件和文件夹；Host 搜索 RPC 由 dsh-passwords 按 `agentId` 校验会话归属，子账号只能读取获准工作区的过滤设置且不能修改共享设置。插件枚举与手工 `@path` 都会解析符号链接的规范路径，目标落在工作区外时拒绝访问。
+
+跨机器安装清单把该插件固定为 `github:sdwhwzp/dsh-at-file#dev`，相邻发布源码存在时强制切换到相邻链接，不继续保留旧发布目录。`scripts/link-runtime-peers.mjs` 自动链接当前 DSH 运行时的 Typert、Settings、LLM 和 Invariants Host 包，清单同时批准 `protobufjs` 的安装脚本；28 不再依赖手工创建 peer 链接或预装 Git。
+
+部署包 `dsh-at-file-0.6.10.tgz` 的 SHA-256 为 `9ec6139a6089942c34d6c16fcf3aaa848df39ca1394d0839f302509581564bc8`。本机插件测试 169/169、类型检查和构建通过；加入连接重置与请求取消回归后，dsh-passwords 部署定向测试为 52/52。最终发布目录为 `/home/tzwl3/apps/dsh-plugins/releases/20260827-at-file-0.6.10-gateway-reset`，回滚 Profile 为 `/home/tzwl3/.dsh/profile-backups/20260827-at-file-0.6.10-gateway-reset-before`，旧 0.6.9、首个 0.6.10 和中间修复发布仍保留。
+
+上线前的本机验证还发现两个取消连接竞态。浏览器旧 WebSocket 在网关重启期间复连并立即重置时，未转发的升级 Socket 会产生无人监听的 `ECONNRESET`；浏览器取消 `@` 搜索且工作区快照刷新同时失败时，上游错误与权限分支可能对同一响应重复写头并触发 `ERR_HTTP_HEADERS_SENT`。升级入口现在吸收已不可恢复连接的错误，异步权限检查只向仍可写的响应发送结果；20 次连续 WebSocket 重置和取消搜索回归均通过。本机重启后 PID 与启动次数保持不变，3081 连续返回 302。相同补丁已包含在 28 的最终发布中。
+
+上线后 PM2 为 online，重启次数在观察窗口内保持 339，服务器本机 3080=200、3081 匿名=302，局域网 3081=302；插件客户端返回 200 和 611715 字节，重启后新增日志中的 loader、缺失模块和 dsh-at-file 错误为 0。3080 继续仅允许服务器本机访问，客户入口为 3081。`wzp` 的 WebDAV 仍挂载为 `fuse.rclone`，根目录保持 7 项。
+
+## 18. 2026-08-27 工作区、实时事件和历史可靠性修复
+
+本轮同时处理四个关联表现：右侧 File 面板的普通下载被 git 权限误拒绝；旧子账号的空工作区清单仍按旧语义开放普通宿主目录；新会话刚创建时，后续实时帧可能在工作区注册写回前被过滤；历史与实时连接每次都同步等待 `workspace.list`，上游短暂失败时分别表现为 502 和前台停止更新。
+
+dsh-passwords 现在把普通文件预览和下载与 git 外带通道分开授权；服务启动会把托管子账号的旧空清单收紧为自己的专属目录，同时保留显式分配的共享目录；新会话进入待确认集合并保留到下一次权威工作区快照；已有可信快照时，工作区刷新改为后台执行并带失败退避，未知会话仍同步刷新并保持 fail-closed。定向测试覆盖下载权限、旧账号迁移、新会话连续事件和 `workspace.list` 暂时失败时的历史加载。
+
+## 19. 2026-08-28 首屏工作区缓存隔离修复
+
+子账号刷新后短暂出现其他账号工作区、约 3 秒后自动消失的原因是首屏使用 GET 加载 `workspace.list` 和 `session.list`，旧响应没有账号私有缓存指令。浏览器可能直接复用上一账号的 GET 缓存，随后 WebSocket 就绪触发的 POST 基线才用当前账号过滤结果覆盖页面。工作区列表本身没有写入 localStorage；Host/Mux WebSocket 的服务器端租户过滤继续保留。
+
+dsh-passwords `2.5.12` 对认证 HTML、`workspace.list`、`session.list`、`session.search` 和 `session.history` 强制返回 `Cache-Control: private, no-store`、`Pragma: no-cache`、`Expires: 0` 和 `Vary: Cookie`。注入到 HTML 最前部的兼容脚本同时把首屏列表的浏览器 fetch 改为 `cache: no-store`，确保升级前已经保存的旧缓存也不会被读取。服务端仍按工作区路径、不可变会话归属、禁用列表和归档集合过滤响应，缓存控制不能替代权限检查。
+
+本次创建不可变业务插件发布目录 `/home/tzwl3/apps/dsh-plugins/releases/20260828-dsh-passwords-2.5.12-history-gzip`，再把 `dsh-passwords-2.5.12.tgz` 安装到实际优先加载的 Web Profile。部署包 SHA-256 为 `57c6a555b03dccf74cbade241e2c31532bdeef11c70f25ccf2428ee6e06d2cb6`，Profile 回滚备份为 `/home/tzwl3/.dsh/profile-backups/20260828-history-gzip-before`。Profile 中的 `dist/gateway.js` 和 `dist/client.js` 已与本机构建哈希一致。
+
+上线验证结果：PM2 `dsh-web` 为 online，3080 返回 200，3081 匿名访问返回 302；短期诊断子账号请求 `/api/workspace.list` 返回可解析 JSON、3 个获准工作区路径和上述私有禁缓存响应头，认证 HTML 含首屏 fetch 防缓存脚本。3080、3081、3082 均正常监听，重启后的日志没有新增 loader、JSON 解析或重复响应头错误。
+
+同一子账号的一条尾页历史响应达到 15,774,235 字节，远程浏览器可能在 30 秒 RPC 截止时间前无法完成下载并显示请求被中止。网关处理 `session.history` 后会按浏览器的 `Accept-Encoding` 重新 gzip，并追加 `Vary: Accept-Encoding`；该生产样本压缩后为 1,271,360 字节，服务器本机请求耗时 0.60 秒。历史 JSON 的租户过滤和隐藏 Unicode 清洗仍在压缩前完成，压缩不会改变其授权语义。
+
+## 20. 2026-08-28 会话隔离、历史连接和宠物默认值修复
+
+子账号页面反复显示“载入历史”的直接原因是租户事件 WebSocket 把 `ws.send()` 成功回调传入的 `null` 当作发送失败，每收到一帧就关闭浏览器连接；客户端重连后重新同步当前会话，因此形成周期性历史加载。网关现在同时接受 `null` 和 `undefined` 为成功结果，上游事件流短暂断开时只在网关内部指数退避重连，不再关闭浏览器连接。改密、改名、删除账号、内部会话失效和退出登录会主动关闭旧租户连接；每帧及每次上游重连前还会重新验证 JWT、账号身份和 `credential_version`。
+
+历史响应的异常分支也已收紧。子账号的 `session.history` 若收到 HTML、坏 JSON、损坏 gzip 或重写异常，网关统一返回 `application/json`、HTTP 502 和 `UPSTREAM_UNAVAILABLE`，不会再把 `<!doctype ...>` 交给客户端解析；管理员仍保留既有兼容回退。上线后的普通体量真实子账号历史只读探测返回 HTTP 200、合法 JSON 和业务成功，说明部署前用户看到的通用 502 已不再由当前发布复现。
+
+会话身份改为不可变归属：显式 `session.create` ID 只有在 Host 注册表确认不存在、上游创建成功且返回相同 ID 后才能领取，并用按 ID reservation 阻止两个账号并发抢占；旧未归属 ID、其他账号 ID 和不可见 ID 都在转发前拒绝。`agentPreset.select` 复用同一所有权检查，模型选择按 `session_id` 持久化到 `session_model_selections`，不会再把某个会话的模型写成所有账号共享的默认值。子账号的 Session 引用候选端点返回 JSON 403，`dsh-at-file` bundle 禁用内置 `ui-reference`，因此输入 `@` 只显示当前工作区的文件和目录。
+
+宠物由独立 Web 发布 `/home/tzwl3/apps/dsh-web/releases/20260828-1110-pet-default-off-fixed` 提供。没有账号级持久设置的新账号默认 `enabled=false`，客户端在设置加载完成且显式启用前不挂载宠物或启动轮询；已有账号的显式开关保持不变。每个 dsh-web 发布仍必须自带完整 pnpm 包级 `node_modules` 布局，不能只复用旧发布根目录的链接。
+
+最终业务插件发布为 `/home/tzwl3/apps/dsh-plugins/releases/20260828-120830-dsh-passwords-2.5.14-final`，安装包 SHA-256 为 `a099730170a5b9b425707bb8ef45eba53201d91ffb2ab61f529a54d3570552b7`。本机 Node 22 全量测试 250/250、构建和 `git diff --check` 通过；服务器安装文件与本机构建的 gateway/client 哈希一致。上线后 PM2 只增加一次计划内重启并保持 online，3080=200、3081 匿名=302、3082 服务可达；真实子账号会话列表为合法 JSON，其他账号 `agentPreset.select` 返回 JSON 403，自己的历史返回业务成功，宠物设置为 `false`，事件 WebSocket 在 12 秒观察窗口内持续打开并接收 4 个过滤后帧。
+
+## 21. 2026-08-28 大历史响应 502 修复
+
+一条特定会话的 `session.history` 在 Host 3080 返回合法 JSON，但未压缩正文达到 20,014,188 字节。网关此前在 JSON 解析、隐藏 Unicode 清洗、租户过滤和出站 gzip 之前统一使用 16 MiB 原始响应上限，因此该会话稳定返回 JSON 502；强制刷新不能改变响应大小，也不能绕过该限制。
+
+dsh-passwords `2.5.15` 仅把 `session.history` 改写分支的原始响应上限提高到 32 MiB。其他 API 继续使用 16 MiB，全局解压上限继续使用 64 MiB，历史内容仍须完整经过 JSON 校验、清洗和子账号沙盒降级后才能发送，超限响应继续 fail-closed 为 JSON 502。回归测试用分块响应验证 20 MiB 历史成功、超过 32 MiB 失败，避免测试本身一次性占用同等内存。
+
+本机 Node 22 全量测试 251/251、构建和 `git diff --check` 通过。不可变发布目录为 `/home/tzwl3/apps/dsh-plugins/releases/20260828-180633-dsh-passwords-2.5.15-large-history`，安装包 SHA-256 为 `a0db3c263963b3781bc3b81b0d429d37ea896fe3f3a2455489116c6d75a5de2c`，Web Profile 回滚备份位于 `/home/tzwl3/apps/deploy-backups/20260828-180633-dsh-passwords-2.5.15-large-history`。上线后原故障会话以管理员和所属子账号身份请求均返回 HTTP 200、合法 JSON 和业务成功；解压正文为 20,014,164 字节，gzip 线上传输约 1.65 MB，服务器本机耗时 1.2 至 1.7 秒。PM2 只增加一次计划内重启并保持 online，3080=200、3081 匿名=302。
+
+## 22. 2026-08-28 未分组与归档历史 403 修复
+
+删除 Workspace 登记后，Host 会保留会话并把它投影到“未分组”。网关此前把当前 Workspace 成员关系同时当成会话归属条件，因此本人拥有、目录仍获授权的保留会话会在 `session.history` 被拒绝。旧会话补登记现在只读取 Host 返回的完整最早历史页，并校验首条人工消息上由 `dsh-passwords` 写入的 principal；目录位置不能证明账号身份，空白、旧格式、损坏或无法验证的历史不会分配给子账号。安全复审曾阻止按专属目录直接认领的初版方案，最终实现保持不可变账号归属、当前 cwd 路径授权和逐会话禁用三项检查。
+
+生产目标会话完成安全补登记后仍返回 403，进一步确认它同时存在于 Host 的全局 `archivedSessionIds`。归档只是会话整理状态，不是账号授权边界；dsh-passwords `2.5.17` 因此允许子账号列出、搜索、读取和接收本人归档会话的实时帧，但仍要求 durable owner 匹配、cwd 存在、目录当前获准且未被逐条禁用。Workspace 响应继续删除跨账号归档枚举源，归档事件也只保留当前账号拥有的 ID。其他账号、缺少 cwd 或目录权限已撤销的归档会话继续 fail-closed。
+
+本机 Node 22 聚焦测试 79/79、全量测试 251/251、`npm run build` 和 `git diff --check` 通过；独立复审未发现 HIGH 或 MEDIUM 级跨账号绕过。不可变发布目录为 `/home/tzwl3/apps/dsh-plugins/releases/20260828-194748-dsh-passwords-2.5.17-archived-history`，安装包 SHA-256 为 `3c9ce7dc7e89468a208517ccc26f37c024823fad609e30875c0293871ff5538e`，gateway/client SHA-1 分别为 `8262267ae4ad0e636ad1396301d3ae82ff2ab1c8` 和 `ed90595fdbe831026025b3c4cfee55ac6aca6b1e`，Profile 回滚备份位于 `/home/tzwl3/apps/deploy-backups/20260828-194748-dsh-passwords-2.5.17-archived-history`。
+
+上线后的真实账号验收为：管理员看到 17 个会话和 4 个未分组会话；目标子账号看到 9 个会话，其中 1 个为本人未分组会话；该会话出现在列表且 `session.history` 返回 HTTP 200 和业务成功，活动会话对照同样返回 200。其余 3 个未分组会话对该子账号均返回 403，管理员对照返回 200。PM2 保持 online，3080 返回 200，3081 匿名访问返回 302，运行版本为 `2.5.17`。

@@ -1,9 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { applyRemotePatch, patchStatus, rollbackPatch } from '../src/patch.js';
+import {
+  applyRemotePatch,
+  patchStatus,
+  prepareSessionModelPatch,
+  rollbackPatch,
+} from '../src/patch.js';
 
 function fixtureRoot(): string {
   const root = mkdtempSync(path.join(os.tmpdir(), 'dshpw-patch-rc8-'));
@@ -14,7 +19,10 @@ function fixtureRoot(): string {
   mkdirSync(apiproxy, { recursive: true });
   mkdirSync(workspace, { recursive: true });
   writeFileSync(path.join(settings, 'client.js'), 'const mode = connection.isLoopback ? "host" : "memory";');
-  writeFileSync(path.join(apiproxy, 'index.js'), 'const WEB_SETTINGS_NAMESPACES = ["settings"];');
+  writeFileSync(
+    path.join(apiproxy, 'index.js'),
+    'const WEB_SETTINGS_NAMESPACES = ["settings"];\nasync function choose(){ await defaults.saveDefaultModelSelection?.(selected); }\nconst methods = { "session.selectModel": choose };',
+  );
   // rc.8 bundle shape: compact click-outside statements and searchOnExpand in deps.
   writeFileSync(
     path.join(workspace, 'client.js'),
@@ -108,6 +116,70 @@ test('rc.8 内部补丁：紧凑 bundle 的 workspace 搜索逻辑可应用且�
     assert.equal(workspace.includes('remoteSearch, normalizedQuery, wide, searchExpanded'), true);
     assert.deepEqual(patchStatus(root), { settingsHostMode: true, whitelist: true, workspaceSearch: true });
     assert.equal(applyRemotePatch(root), 'unchanged');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('MCP_DSH_ROOT 指向 Profile 内 dsh 包时向上定位同级客户端包', () => {
+  const root = fixtureRoot();
+  try {
+    const dshPackage = path.join(root, 'node_modules/@deepseek-ai/dsh');
+    mkdirSync(dshPackage, { recursive: true });
+    assert.equal(applyRemotePatch(dshPackage), 'applied');
+    assert.deepEqual(patchStatus(dshPackage), {
+      settingsHostMode: true,
+      whitelist: true,
+      workspaceSearch: true,
+    });
+    assert.equal(rollbackPatch(dshPackage), 'rolled-back');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('WebDAV bundle 提供的嵌套 workspace 客户端也会被补丁覆盖', () => {
+  const root = fixtureRoot();
+  try {
+    const direct = path.join(root, 'node_modules/@deepseek-ai/dsh-client-ui-workspace');
+    const nested = path.join(root, 'node_modules/dsh-nas-webdav/node_modules/@deepseek-ai/dsh-client-ui-workspace');
+    mkdirSync(path.dirname(nested), { recursive: true });
+    renameSync(direct, nested);
+    assert.equal(applyRemotePatch(root), 'applied');
+    assert.equal(readFileSync(path.join(nested, 'lib/client.js'), 'utf8').includes('data-dshpw-autofill-harden'), true);
+    assert.deepEqual(patchStatus(root), {
+      settingsHostMode: true,
+      whitelist: true,
+      workspaceSearch: true,
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('会话模型选择不写共享默认模型设置', () => {
+  const root = fixtureRoot();
+  try {
+    const target = path.join(root, 'node_modules/@deepseek-ai/dsh-host-apiproxy/lib/index.js');
+    assert.equal(patchStatus(root).whitelist, false);
+    assert.equal(applyRemotePatch(root), 'applied');
+    const patched = readFileSync(target, 'utf8');
+    assert.match(patched, /dsh-passwords: keep model selection session-scoped/);
+    assert.doesNotMatch(patched, /await defaults\.saveDefaultModelSelection\?\.\(selected\)/);
+    assert.equal(patchStatus(root).whitelist, true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('会话模型 sidecar 在 Host 补丁生效前 fail-loud', () => {
+  const root = fixtureRoot();
+  try {
+    assert.equal(prepareSessionModelPatch(root), 'restart-required');
+    assert.equal(prepareSessionModelPatch(root), 'ready');
+    const target = path.join(root, 'node_modules/@deepseek-ai/dsh-host-apiproxy/lib/index.js');
+    const patched = readFileSync(target, 'utf8');
+    assert.doesNotMatch(patched, /await defaults\.saveDefaultModelSelection\?\.\(selected\)/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

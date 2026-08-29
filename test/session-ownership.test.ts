@@ -3,6 +3,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   SESSION_SCOPED_RE,
+  AT_FILE_SEARCH_RE,
+  extractAgentId,
   extractSessionId,
   isDisplayableDshSession,
   isDisplayableDshSurface,
@@ -18,6 +20,13 @@ test('工作区授权：会话 RPC 路由命中，create/list 单独处理', () 
   }
   assert.equal(SESSION_SCOPED_RE.test('/api/session.create'), false);
   assert.equal(SESSION_SCOPED_RE.test('/api/session.list'), false);
+});
+
+test('工作区授权：dsh-at-file 搜索按 agentId 执行会话归属检查', () => {
+  assert.equal(AT_FILE_SEARCH_RE.test('/api/atFile/search'), true);
+  assert.equal(AT_FILE_SEARCH_RE.test('/api/atFile/getSettings'), false);
+  assert.equal(extractAgentId({ payload: { agentId: 's-file' } }), 's-file');
+  assert.equal(extractAgentId({ sessionId: 's-other' }), null);
 });
 
 test('extractSessionId：提取顶层与嵌套 sessionId', () => {
@@ -65,12 +74,12 @@ test('工作区过滤：只显示活动工作区成员，禁用覆盖逐条关�
   assert.deepEqual(out.result.value.map((item) => item.sessionId), ['s-on']);
 });
 
-test('同目录但已从工作区移除的会话不作为未分组项显示', () => {
+test('会话过滤按调用方提供的归属判定，不因 cwd 相同自动保留', () => {
   const value = {
     result: {
       value: [
         { sessionId: 's-active', cwd: '/workspace/a' },
-        { sessionId: 's-removed', cwd: '/workspace/a' },
+        { sessionId: 's-unowned', cwd: '/workspace/a' },
       ],
     },
   };
