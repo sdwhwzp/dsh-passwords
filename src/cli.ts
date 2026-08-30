@@ -29,6 +29,12 @@ import {
 } from './patch.js';
 import { t, resolveCliLang } from './i18n.js';
 import { backupSqliteBeforeMigration } from './db-backup.js';
+import {
+  assertStandaloneUpstreamSupported,
+  exchangeUpstreamBrowserCookie,
+  UPSTREAM_BROWSER_AUTH_REQUEST,
+  UPSTREAM_BROWSER_AUTH_RESPONSE,
+} from './upstream-browser-auth.js';
 
 /** CLI 输出语言：LANG / LC_ALL / LC_MESSAGES 以 en 开头则英文，否则中文 */
 const lang = resolveCliLang();
@@ -38,6 +44,55 @@ interface CliOverrides {
   port?: number;
   host?: string;
   upstream?: string;
+}
+
+const UPSTREAM_BROWSER_AUTH_IPC_TIMEOUT_MS = 10_000;
+const UPSTREAM_BROWSER_AUTH_REFRESH_MS = 12 * 60 * 60 * 1000;
+const UPSTREAM_BROWSER_AUTH_RETRY_MS = 5 * 60 * 1000;
+
+/** Request a fresh, process-scoped Host launch URL over the inherited IPC channel. */
+function requestUpstreamBrowserAuthenticatedUrl(): Promise<string> {
+  return new Promise((resolve, reject) => {
+    if (typeof process.send !== 'function') {
+      reject(new Error('Host browser authentication IPC is unavailable'));
+      return;
+    }
+    let settled = false;
+    let timeout: NodeJS.Timeout | null = null;
+    const finish = (error: Error | null, authenticatedUrl?: string) => {
+      if (settled) return;
+      settled = true;
+      if (timeout !== null) clearTimeout(timeout);
+      process.off('message', onMessage);
+      process.off('disconnect', onDisconnect);
+      if (error !== null) reject(error);
+      else resolve(authenticatedUrl!);
+    };
+    const onMessage = (message: unknown) => {
+      if (
+        message === null ||
+        typeof message !== 'object' ||
+        (message as { type?: unknown }).type !== UPSTREAM_BROWSER_AUTH_RESPONSE ||
+        typeof (message as { authenticatedUrl?: unknown }).authenticatedUrl !== 'string'
+      ) return;
+      finish(null, (message as { authenticatedUrl: string }).authenticatedUrl);
+    };
+    const onDisconnect = () => finish(new Error('Host browser authentication IPC disconnected'));
+    timeout = setTimeout(() => {
+      finish(new Error('Host browser authentication IPC timed out'));
+    }, UPSTREAM_BROWSER_AUTH_IPC_TIMEOUT_MS);
+    process.on('message', onMessage);
+    process.once('disconnect', onDisconnect);
+    process.send({ type: UPSTREAM_BROWSER_AUTH_REQUEST }, (error) => {
+      if (error !== null) finish(new Error('Host browser authentication IPC failed'));
+    });
+  });
+}
+
+/** Exchange an IPC-delivered launch URL without retaining it after this call. */
+async function refreshUpstreamBrowserCookie(upstream: string): Promise<string> {
+  const authenticatedUrl = await requestUpstreamBrowserAuthenticatedUrl();
+  return exchangeUpstreamBrowserCookie(authenticatedUrl, upstream);
 }
 
 /** 解析 --port/--host/--upstream 参数（支持 --k=v 与 --k v 两种写法） */
@@ -195,6 +250,17 @@ async function boot() {
   if (cli.host !== undefined) config.gateway.host = cli.host;
   if (cli.upstream !== undefined) config.gateway.upstream = cli.upstream;
 
+  const parentPid = Number(process.env.DSH_GATEWAY_PARENT_PID ?? '');
+  const parentManaged = Number.isInteger(parentPid) && parentPid > 0;
+  const upstreamBrowserAuthenticationRequired =
+    parentManaged && process.env.DSH_GATEWAY_BROWSER_AUTH_REQUIRED === '1';
+  let upstreamBrowserCookie: string | null = null;
+  if (upstreamBrowserAuthenticationRequired) {
+    upstreamBrowserCookie = await refreshUpstreamBrowserCookie(config.gateway.upstream);
+  } else if (!parentManaged) {
+    await assertStandaloneUpstreamSupported(config.gateway.upstream);
+  }
+
   // ── 自动 HTTPS：域名补全（零配置探测公网 IP → <IP>.sslip.io）+ 端口默认 ──
   // 失败即拒绝启动（fail-closed）：密码门绝不静默降级为明文 HTTP。
   // 需要 HTTP 的用户必须显式关闭（MCP_GATEWAY_AUTO_TLS=0）或走 scripts/start-http.mjs。
@@ -316,7 +382,24 @@ async function boot() {
   }
 
   const tlsOn = config.gateway.tls !== null;
-  const gateway = createGatewayServer(config, auth, db);
+  const gateway = createGatewayServer(config, auth, db, {
+    upstreamBrowserCookie: () => upstreamBrowserCookie,
+  });
+  let browserAuthRefreshTimer: NodeJS.Timeout | null = null;
+  const scheduleBrowserAuthRefresh = (delayMs: number) => {
+    if (!upstreamBrowserAuthenticationRequired) return;
+    browserAuthRefreshTimer = setTimeout(() => {
+      void refreshUpstreamBrowserCookie(config.gateway.upstream).then((cookie) => {
+        upstreamBrowserCookie = cookie;
+        scheduleBrowserAuthRefresh(UPSTREAM_BROWSER_AUTH_REFRESH_MS);
+      }).catch(() => {
+        console.error('[dsh-passwords] Host 浏览器认证会话刷新失败，将自动重试');
+        scheduleBrowserAuthRefresh(UPSTREAM_BROWSER_AUTH_RETRY_MS);
+      });
+    }, delayMs);
+    browserAuthRefreshTimer.unref();
+  };
+  scheduleBrowserAuthRefresh(UPSTREAM_BROWSER_AUTH_REFRESH_MS);
 
   // 端口被占用等监听失败：给出错误码退出（不崩溃在未处理的 error 事件上）
   gateway.on('error', (error) => {
@@ -345,8 +428,7 @@ async function boot() {
 
   // ── 父进程看门狗：由 dsh 插件拉起时（DSH_GATEWAY_PARENT_PID），
   // 宿主 dsh 退出后密码门随之停止，避免残留进程占用端口 ──
-  const parentPid = Number(process.env.DSH_GATEWAY_PARENT_PID ?? '');
-  if (Number.isInteger(parentPid) && parentPid > 0) {
+  if (parentManaged) {
     console.error(`[dsh-passwords] ${tr('cli.watchParent', { pid: parentPid })}`);
     // 记录父进程启动时刻（/proc/<pid>/stat field 22，jiffies）：kill(pid,0) 只
     // 验证 PID 存在，父进程死后 PID 被系统复用时看门狗会永不退出（僵尸进程）。
@@ -383,11 +465,13 @@ async function boot() {
   }
 
   process.on('SIGINT', () => {
+    if (browserAuthRefreshTimer !== null) clearTimeout(browserAuthRefreshTimer);
     gateway.close();
     redirect?.close();
     process.exit(0);
   });
   process.on('SIGTERM', () => {
+    if (browserAuthRefreshTimer !== null) clearTimeout(browserAuthRefreshTimer);
     gateway.close();
     redirect?.close();
     process.exit(0);

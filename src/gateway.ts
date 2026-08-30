@@ -897,6 +897,8 @@ export interface GatewayServerOptions {
   managedFileUploadMaxBytes?: number;
   /** Lower every proxied request carrier ceiling, primarily for bounded integration tests. */
   proxyRequestMaxBytes?: number;
+  /** Trusted Host browser Cookie pair, or a resolver updated by the parent-managed refresh loop. */
+  upstreamBrowserCookie?: string | (() => string | null);
 }
 
 function lowerSafetyLimit(requested: number | undefined, fixed: number): number {
@@ -962,6 +964,77 @@ export function createGatewayServer(
   // 上游连接池：复用与 dsh 的 TCP 连接（keep-alive），
   // 避免每个代理请求都新建一次 TCP 握手
   const upstreamAgent = new http.Agent({ keepAlive: true, maxSockets: 64, keepAliveMsecs: 30_000 });
+  const configuredUpstreamBrowserCookie = options.upstreamBrowserCookie;
+  const rawUpstreamBrowserCookie: () => string | null = typeof configuredUpstreamBrowserCookie === 'function'
+    ? configuredUpstreamBrowserCookie
+    : () => configuredUpstreamBrowserCookie ?? null;
+  const upstreamBrowserCookieHeader = (): string | null => {
+    const value = rawUpstreamBrowserCookie();
+    if (value === null || value === '') return null;
+    if (
+      Buffer.byteLength(value) > 8 * 1024 ||
+      /[\r\n]/u.test(value) ||
+      !/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+=[\x21-\x3A\x3C-\x7E]*$/u.test(value) ||
+      value.startsWith(`${COOKIE_NAME}=`)
+    ) {
+      throw new Error('upstream browser Cookie header is invalid');
+    }
+    return value;
+  };
+  const upstreamAuthenticationHeaders = (): Record<string, string> => {
+    const cookie = upstreamBrowserCookieHeader();
+    return cookie === null ? {} : { cookie };
+  };
+  const stripUpstreamBrowserSetCookie = (
+    headers: Record<string, string | string[] | undefined>,
+  ): void => {
+    const values = headers['set-cookie'];
+    const hostCookie = upstreamBrowserCookieHeader();
+    if (values === undefined || hostCookie === null) return;
+    const hostCookieName = hostCookie.slice(0, hostCookie.indexOf('='));
+    const retained = (Array.isArray(values) ? values : [values]).filter((value) => {
+      const separator = value.indexOf('=');
+      return separator < 0 || value.slice(0, separator).trim() !== hostCookieName;
+    });
+    if (retained.length === 0) delete headers['set-cookie'];
+    else headers['set-cookie'] = retained;
+  };
+  upstreamBrowserCookieHeader();
+
+  // Orchestrators use these minimal endpoints without receiving tenant, path, or secret data.
+  app.get('/gateway/healthz', (_req, res) => {
+    res.status(200).json({ ok: true, service: 'dsh-passwords' });
+  });
+  app.get('/gateway/readyz', async (_req, res) => {
+    const healthy = await db.health().catch(() => false);
+    res.status(healthy ? 200 : 503).json({ ok: healthy, database: healthy });
+  });
+
+  /** Verify that the retained Host browser session still serves the application index. */
+  function probeUpstreamBrowserSession(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const request = http.request({
+        hostname: upstreamHost,
+        port: upstreamPort,
+        path: '/',
+        method: 'GET',
+        agent: upstreamAgent,
+        headers: {
+          accept: 'text/html',
+          'accept-encoding': 'identity',
+          ...upstreamAuthenticationHeaders(),
+        },
+        timeout: 3000,
+      }, (response) => {
+        response.resume();
+        if (response.statusCode === 200) resolve();
+        else reject(new Error('upstream browser session is not ready'));
+      });
+      request.on('timeout', () => request.destroy(new Error('upstream browser session probe timed out')));
+      request.on('error', reject);
+      request.end();
+    });
+  }
 
   // workspaceId → 规范路径 映射：从 workspace.list 响应里收集，供 session.create 用 workspaceId 时解析路径
   const workspacePathById = new Map<string, string>();
@@ -1150,6 +1223,7 @@ export function createGatewayServer(
             'accept-encoding': 'identity',
             'content-type': 'application/json',
             'content-length': String(payload.length),
+            ...upstreamAuthenticationHeaders(),
             ...internalAdminPrincipalHeaders(),
           },
           timeout: 5000,
@@ -1877,17 +1951,38 @@ export function createGatewayServer(
   // 仅限本机 dsh 插件调用：要求回环地址 + 恒定时间比对内部密钥
   // （密钥由 SETUP_KEY 派生，泄漏面与安装密钥一致）。响应立即返回，
   // 补丁应用与 dsh 重启异步进行，让设置页的响应先刷给浏览器。
-  app.post('/gateway/internal/patch', express.json({ limit: '4kb' }), (req, res) => {
+  function internalRequestAuthorized(req: Request): boolean {
     const remoteIp = req.socket.remoteAddress ?? '';
     if (remoteIp !== '127.0.0.1' && remoteIp !== '::1' && remoteIp !== '::ffff:127.0.0.1') {
+      return false;
+    }
+    const secret = typeof req.headers['x-internal-secret'] === 'string' ? req.headers['x-internal-secret'] : '';
+    const actual = Buffer.from(secret);
+    const expected = Buffer.from(config.internalSecret);
+    return actual.length === expected.length && timingSafeEqual(actual, expected);
+  }
+
+  app.get('/gateway/internal/readyz', async (req, res) => {
+    res.setHeader('cache-control', 'no-store');
+    if (!internalRequestAuthorized(req)) {
       res.status(403).json({ ok: false, error: 'forbidden' });
       return;
     }
-    const secret = typeof req.headers['x-internal-secret'] === 'string' ? req.headers['x-internal-secret'] : '';
-    const expected = config.internalSecret;
-    const a = Buffer.from(secret);
-    const b = Buffer.from(expected);
-    if (a.length !== b.length || !timingSafeEqual(a, b)) {
+    const database = await db.health().catch(() => false);
+    let upstreamReady = false;
+    try {
+      await probeUpstreamBrowserSession();
+      await refreshWorkspaceAccessSnapshot();
+      upstreamReady = true;
+    } catch {
+      upstreamReady = false;
+    }
+    const ok = database && upstreamReady;
+    res.status(ok ? 200 : 503).json({ ok, database, upstream: upstreamReady });
+  });
+
+  app.post('/gateway/internal/patch', express.json({ limit: '4kb' }), (req, res) => {
+    if (!internalRequestAuthorized(req)) {
       res.status(403).json({ ok: false, error: 'forbidden' });
       return;
     }
@@ -1910,16 +2005,7 @@ export function createGatewayServer(
   // 改密/改名/删除用户后，JWT 的 cv 校验要等 30 秒缓存 TTL 才重新查库；
   // 此接口让插件在操作成功后通知网关同步清理该用户的缓存条目，撤销窗口归零。
   app.post('/gateway/internal/session-invalidate', express.json({ limit: '4kb' }), (req, res) => {
-    const remoteIp = req.socket.remoteAddress ?? '';
-    if (remoteIp !== '127.0.0.1' && remoteIp !== '::1' && remoteIp !== '::ffff:127.0.0.1') {
-      res.status(403).json({ ok: false, error: 'forbidden' });
-      return;
-    }
-    const secret = typeof req.headers['x-internal-secret'] === 'string' ? req.headers['x-internal-secret'] : '';
-    const expected = config.internalSecret;
-    const a = Buffer.from(secret);
-    const b = Buffer.from(expected);
-    if (a.length !== b.length || !timingSafeEqual(a, b)) {
+    if (!internalRequestAuthorized(req)) {
       res.status(403).json({ ok: false, error: 'forbidden' });
       return;
     }
@@ -3034,6 +3120,7 @@ export function createGatewayServer(
   // transfer-encoding（RFC 9110 §8.6：CL 与 TE 同帧属于畸形消息，Nginx 直接 502）
   function headersForRewrittenBody(upstreamHeaders: IncomingHttpHeaders): Record<string, string | string[] | undefined> {
     const h: Record<string, string | string[] | undefined> = { ...upstreamHeaders };
+    stripUpstreamBrowserSetCookie(h);
     delete h['content-length'];
     delete h['content-encoding'];
     delete h['transfer-encoding'];
@@ -3044,6 +3131,7 @@ export function createGatewayServer(
   // 流式透传：上游若异常同时带 CL+TE，按 RFC 9110 §8.6 保留 TE、丢弃 CL
   function headersForStreaming(upstreamHeaders: IncomingHttpHeaders): Record<string, string | string[] | undefined> {
     const h: Record<string, string | string[] | undefined> = { ...upstreamHeaders };
+    stripUpstreamBrowserSetCookie(h);
     if (h['content-length'] !== undefined && h['transfer-encoding'] !== undefined) delete h['content-length'];
     // 网关标识：客户端插件探测此头判断是否经 dsh-passwords 远程访问
     h['x-dsh-gateway'] = '1';
@@ -3193,6 +3281,7 @@ export function createGatewayServer(
             'accept-encoding': 'identity',
             'content-type': 'application/json',
             'content-length': String(payload.length),
+            ...upstreamAuthenticationHeaders(),
             ...internalAdminPrincipalHeaders(),
           },
           timeout: 5000,
@@ -3263,6 +3352,7 @@ export function createGatewayServer(
             'accept-encoding': 'identity',
             'content-type': 'application/json',
             'content-length': String(payload.length),
+            ...upstreamAuthenticationHeaders(),
             ...internalAdminPrincipalHeaders(),
           },
           timeout: 5000,
@@ -3363,6 +3453,7 @@ export function createGatewayServer(
           'content-type': 'application/json',
           'content-length': String(Buffer.byteLength(body)),
           'x-internal-secret': config.internalSecret,
+          ...upstreamAuthenticationHeaders(),
         },
         timeout: 3000,
       },
@@ -3413,16 +3504,21 @@ export function createGatewayServer(
         }, config.internalSecret));
       }
     }
-    // F-15：剥离网关会话 Cookie（dsh_gateway_token JWT）——上游 dsh 是无认证
-    // 应用，本不需要令牌；不剥离则上游或其第三方插件被入侵/投毒时可收割全部
-    // 活动会话 JWT 并回放。白盒确认 dsh-host-webserver / dsh-anonymous-user-id
-    // 均无 cookie 逻辑。
-    // 例外：/api/dsh-passwords/* 是本网关自身插件路由，其 guard 靠 Cookie 中
-    // 的 JWT 鉴权（同一信任域、自己签发的服务），必须保留；其余上游面全剥。
+    // F-15: browser-provided cookies never cross the proxy boundary. Ordinary Host
+    // requests receive only the in-memory Host cookie; own-plugin routes additionally
+    // receive the gateway JWT after the gateway has verified it.
     const ownPluginRoute = normalizeDecodedPath(
       new URL(req.originalUrl, `http://${req.headers.host ?? 'localhost'}`).pathname,
     ).startsWith('/api/dsh-passwords/');
-    if (!ownPluginRoute) delete headers['cookie'];
+    const trustedCookies: string[] = [];
+    if (ownPluginRoute) {
+      const gatewayToken = readCookie(req.headers.cookie, COOKIE_NAME);
+      if (gatewayToken !== null) trustedCookies.push(`${COOKIE_NAME}=${encodeURIComponent(gatewayToken)}`);
+    }
+    const hostCookie = upstreamBrowserCookieHeader();
+    if (hostCookie !== null) trustedCookies.push(hostCookie);
+    if (trustedCookies.length === 0) delete headers.cookie;
+    else headers.cookie = trustedCookies.join('; ');
     // 只允许 gzip/identity：HTML 注入与 workspace/session 过滤只处理 gzip，
     // 上游若返回 br 会损坏页面/导致过滤静默失效（brotli 不走代理缓冲）。
     // 不向未声明 gzip 的客户端强塞压缩响应。
@@ -4961,6 +5057,7 @@ export function createGatewayServer(
           handshakeTimeout: 10_000,
           headers: {
             Origin: `${upstream.protocol}//${upstreamHost}:${String(upstreamPort)}`,
+            ...upstreamAuthenticationHeaders(),
             ...(() => {
               const currentUser = db.getUserById(userId);
               return currentUser === null
@@ -5235,6 +5332,8 @@ export function createGatewayServer(
           lines.push(`${key}: ${Array.isArray(value) ? value.join(', ') : value}`);
         }
       }
+      const hostCookie = upstreamBrowserCookieHeader();
+      if (hostCookie !== null) lines.push(`Cookie: ${hostCookie}`);
       for (const [key, value] of Object.entries(principalHeaders)) lines.push(`${key}: ${value}`);
       lines.push('', '');
       upstreamSocket.write(lines.join('\r\n'));

@@ -8,6 +8,7 @@
 //      dsh 升级覆盖补丁后，主用户在设置页点"重载补丁"即可，无需登录服务器。
 import type { Context } from '@deepseek-ai/cordis';
 import type {} from '@deepseek-ai/dsh-agent';
+import type {} from '@deepseek-ai/dsh-client-connection';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver';
 import http from 'node:http';
@@ -44,6 +45,11 @@ import {
   spendCheckUnavailableError,
 } from './quota-notice.js';
 import { CUSTOMER_MODEL_IDS, customerModelAllowed } from './model-policy.js';
+import {
+  supportsUpstreamBrowserAuthentication,
+  UPSTREAM_BROWSER_AUTH_REQUEST,
+  UPSTREAM_BROWSER_AUTH_RESPONSE,
+} from './upstream-browser-auth.js';
 
 interface SpendAccounting {
   reconcile(): Promise<void>;
@@ -67,8 +73,8 @@ declare module '@deepseek-ai/cordis' {
 /** 稳定 cordis 插件名（insert 进 cordis.yml 时用同一个名字） */
 export const name = 'dsh-passwords';
 
-/** 依赖 dsh 主机侧的 webServer 服务（路由挂载点） */
-export const inject = ['webServer'];
+/** 依赖 Host Web 服务与其进程内浏览器认证服务。 */
+export const inject = ['webServer', 'connection'];
 
 /** 网关会话 cookie 名（与 gateway.ts 保持一致） */
 const COOKIE_NAME = 'dsh_gateway_token';
@@ -277,23 +283,57 @@ function startGateway(ctx: Context, cfg: PlatformConfig): void {
           // 拿不到就用默认值
         }
         const explicitUpstream = process.env.MCP_GATEWAY_UPSTREAM?.trim() ?? '';
+        const upstreamRoot = explicitUpstream !== ''
+          ? explicitUpstream
+          : `http://127.0.0.1:${String(upstreamPort)}`;
+        const connection: unknown = ctx.connection;
+        const upstreamBrowserAuthenticationRequired = supportsUpstreamBrowserAuthentication(connection);
         const gatewayArgs =
           explicitUpstream !== ''
             ? [cliPath, 'serve-gateway']
-            : [cliPath, 'serve-gateway', '--upstream', `http://127.0.0.1:${String(upstreamPort)}`];
-        child = spawn(process.execPath, gatewayArgs, {
+            : [cliPath, 'serve-gateway', '--upstream', upstreamRoot];
+        const spawned = spawn(process.execPath, gatewayArgs, {
           cwd: INSTALL_ROOT,
           env: {
             ...process.env,
             DSH_GATEWAY_PARENT_PID: String(process.pid),
+            DSH_GATEWAY_BROWSER_AUTH_REQUIRED: upstreamBrowserAuthenticationRequired ? '1' : '0',
             DSH_PASSWORDS_ENV_FILE: path.join(INSTALL_ROOT, '.env'),
           },
-          stdio: ['ignore', 'inherit', 'inherit'],
+          stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
         });
-        child.on('error', (error) => {
+        child = spawned;
+        spawned.on('message', (message: unknown) => {
+          if (
+            !upstreamBrowserAuthenticationRequired ||
+            disposed ||
+            message === null ||
+            typeof message !== 'object' ||
+            (message as { type?: unknown }).type !== UPSTREAM_BROWSER_AUTH_REQUEST ||
+            !spawned.connected
+          ) return;
+          let authenticatedUrl: string;
+          try {
+            if (!supportsUpstreamBrowserAuthentication(connection)) throw new Error('unavailable');
+            authenticatedUrl = connection.authenticatedUrl(upstreamRoot);
+          } catch {
+            console.error('[dsh-passwords] 无法创建 Host 浏览器认证会话，密码门停止启动');
+            spawned.kill('SIGTERM');
+            return;
+          }
+          spawned.send(
+            { type: UPSTREAM_BROWSER_AUTH_RESPONSE, authenticatedUrl },
+            (error) => {
+              if (error === null) return;
+              console.error('[dsh-passwords] Host 浏览器认证 IPC 传递失败，密码门停止运行');
+              if (spawned.exitCode === null) spawned.kill('SIGTERM');
+            },
+          );
+        });
+        spawned.on('error', (error) => {
           console.error('[dsh-passwords] 密码门拉起失败:', error);
         });
-        child.on('exit', (code, signal) => {
+        spawned.on('exit', (code, signal) => {
           if (disposed) return;
           const reason = code ?? signal ?? 'unknown';
           if (reason === EXIT_CERT_FAILED) {
@@ -304,6 +344,8 @@ function startGateway(ctx: Context, cfg: PlatformConfig): void {
             console.error(`[dsh-passwords] 密码门进程已退出（code=${String(reason)}）。重启 dsh 会自动再次拉起`);
           }
         });
+      }).catch(() => {
+        if (!disposed) console.error('[dsh-passwords] 密码门启动前检查失败');
       });
 
       return () => {

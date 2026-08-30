@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
 import { Component, createElement, type ComponentProps, type ReactNode } from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
-import { DshPasswordsCard, type UpdateInfo } from '../src/client/card.tsx';
+import { DshPasswordsCard } from '../src/client/card.tsx';
+import { api } from '../src/client/api.ts';
 
 class CardBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
   state = { failed: false };
@@ -15,16 +16,6 @@ class CardBoundary extends Component<{ children: ReactNode }, { failed: boolean 
     return this.state.failed ? 'card-crashed' : this.props.children;
   }
 }
-
-const updateStatus: UpdateInfo = {
-  env: 'npm-prefix', currentVersion: '2.6.4', latestVersion: null,
-  updateAvailable: false, phase: 'idle', downloadPercent: null,
-  downloadMode: null, downloadedBytes: 0, totalBytes: null,
-  pendingVersion: null, installConfirmationRequired: false,
-  lastNotificationAt: null, idleRemainingMs: null, autoUpdateEnabled: false,
-  autoInstallSupported: true, checking: false, manualCommand: '',
-  lastCheckedAt: null, lastError: null, applyCooldownRemainingMs: 0,
-};
 
 function loginResponse() {
   const response = new Response('<!doctype html><title>Login</title>', {
@@ -71,8 +62,7 @@ async function mountCard(t: TestContext, overrides: Record<string, () => Respons
     '/api/dsh-passwords/patch/status': {
       status: { settingsHostMode: true, whitelist: true, workspaceSearch: true },
     },
-    '/api/dsh-passwords/update/status': { status: updateStatus },
-    '/api/dsh-passwords/agent-presets': { presets: [] },
+    '/api/dsh-passwords/budgets': { budgets: [] },
     ...payloadOverrides,
   };
   const requests: Array<{ input: string; init?: RequestInit }> = [];
@@ -86,7 +76,10 @@ async function mountCard(t: TestContext, overrides: Record<string, () => Respons
     ? 'Session expired' : key) as ComponentProps<typeof DshPasswordsCard>['t'];
   await act(async () => {
     renderer = create(createElement(CardBoundary, {
-      children: createElement(DshPasswordsCard, { t: translate }),
+      children: createElement(DshPasswordsCard, {
+        t: translate,
+        loadState: () => api('/api/dsh-passwords/state'),
+      }),
     }));
   });
   return {
@@ -150,25 +143,11 @@ test('settings card synchronizes the large request body permission to the visibl
   assert.equal(JSON.parse(String(permissionRequest!.init?.body)).allowUpload, true, '保存必须提交 allowUpload');
 });
 
-test('settings card shows Agent preset registry failure instead of hiding the permission section', async (t) => {
-  const card = await mountCard(t, {
-    '/api/dsh-passwords/agent-presets': () => new Response(JSON.stringify({ ok: false, code: 'PRESETS_UNAVAILABLE' }), { status: 502, headers: { 'content-type': 'application/json' } }),
-  }, {
-    '/gateway/api/overview': {
-      me: { id: 1, username: 'test-admin', role: 'admin' },
-      availableWebSocketPaths: [],
-      users: [{ id: 2, username: 'subuser', role: 'user', permissions: { allowedFolders: [], hourlyTokenLimit: null, dailyMinutesLimit: null, allowUpload: true, allowGitDownload: false, allowWorkspaceCreate: false, allowedWebSocketPaths: [], allowedAgentPresets: [], banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: [] }, usage: null }],
-    },
-  });
-  assert.match(card.text(), /permsAgentPresetsUnavailable/);
-});
-
 test('settings card stays mounted when login expires during refresh', async (t) => {
   const responses: Record<string, () => Response> = {};
   const card = await mountCard(t, responses);
   responses['/api/dsh-passwords/state'] = loginResponse;
   responses['/api/dsh-passwords/patch/status'] = loginResponse;
-  responses['/api/dsh-passwords/update/status'] = loginResponse;
   await card.refresh();
   assert.doesNotMatch(card.text(), /card-crashed/);
   assert.match(card.text(), /Session expired/);
@@ -188,21 +167,5 @@ for (const [label, payload] of [
     assert.doesNotMatch(card.text(), /card-crashed/);
     assert.match(card.text(), /patchUnknown/);
     assert.match(card.text(), /test-admin/);
-  });
-}
-
-for (const code of ['DOWNLOAD_IN_PROGRESS', 'INSTALL_IN_PROGRESS']) {
-  test(`settings card preserves the ${code} update notice`, async (t) => {
-    const card = await mountCard(t, {
-      '/api/dsh-passwords/update/apply': () => Response.json({
-        ok: false, code, message: 'Update already in progress',
-      }),
-    });
-    const button = card.renderer.root.findByProps({ className: 'dshpw-btn dshpw-update-apply' });
-    assert.equal(button.props.disabled, false);
-    await act(async () => { await button.props.onClick(); });
-    assert.match(card.text(), /Update already in progress/);
-    assert.equal(card.renderer.root.findAllByProps({ className: 'dshpw-error' }).length, 0);
-    assert.doesNotMatch(card.text(), /card-crashed/);
   });
 }

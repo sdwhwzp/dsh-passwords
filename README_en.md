@@ -58,7 +58,7 @@ The owner can configure, per subuser, from the settings page:
 
 ## Identity and spend synchronization
 
-Owners and subusers always sign in with local accounts and bcrypt passwords stored in this project's database. SQLite is the default and MySQL 8 is also supported. The gateway removes browser-supplied identity headers and creates a 30-second HMAC assertion for upstream requests; Harness verifies it and durably attaches the principal to each message, model step and tool execution.
+Owners and subusers always sign in with local accounts and bcrypt passwords stored in this project's database. SQLite is the default and MySQL 8 is also supported. The gateway removes browser-supplied identity headers and creates a 30-second HMAC assertion for upstream requests; Harness verifies it and durably attaches the principal to each message, model step and tool execution. With newer Harness builds that require browser authentication, the Host plugin and gateway child exchange and periodically renew the Host Cookie only through internal IPC. The process-scoped URL is never placed in arguments, environment variables, logs, or files, and the Host Cookie is never returned to customer browsers. The dsh plugin must launch the gateway in this mode and standalone startup fails explicitly; older Hosts without browser authentication may still use standalone startup.
 
 Workspace and session lists used by both initial sign-in and later refreshes are filtered on the server for the current subuser. WebSocket workspace, session, and archive events pass through the same ownership filter, so the browser never receives owner data while waiting for client-side hiding. Session ownership does not depend on current workspace registration or archive state: a legacy session from a trusted Host list is adopted only from the `dsh-passwords` identity durably attached to its first human prompt. Directory location is never identity evidence; blank and pre-identity sessions conservatively remain with the owner account.
 
@@ -112,7 +112,7 @@ npm install -g dsh-passwords
 dsh-passwords install     # generates SETUP_KEY, restores the plugin stack, and applies the patch
 ```
 
-(`dsh-passwords --version` prints the version; `dsh-passwords serve-gateway` runs the gateway manually.)
+(`dsh-passwords --version` prints the version; only a running and reachable older dsh build without Host browser authentication supports manual `dsh-passwords serve-gateway` startup.)
 
 The installer checks for prebuilt files, installing dependencies and building only when they are missing. It then generates `SETUP_KEY`, restores the recorded web-profile plugin stack, and applies the remote-settings patch.
 
@@ -170,7 +170,7 @@ dsh starts → plugin loads → plugin spawns the password gate (logs appear in 
 dsh exits  → the gate stops with it (no orphan process holding ports)
 ```
 
-- Advanced: to run the gateway standalone, use `node dist/cli.js serve-gateway` or set up your own systemd unit.
+- Running older dsh builds without Host browser authentication may use `node dist/cli.js serve-gateway` or a systemd unit. Newer builds must let the plugin launch the gateway over internal IPC; standalone startup fails explicitly when the Host is unreachable or requires authentication.
 - Temporarily disable the auto-start (debugging): start dsh with `DSH_PASSWORDS_NO_AUTOSTART=1`.
 
 ## Automatic HTTPS
@@ -268,7 +268,7 @@ After logging in to dsh, open **Settings → Plugins** to find the "dsh-password
 node dist/cli.js audit --limit 20             # last 20 audit-log entries (auto-decrypted)
 node dist/cli.js patch status                 # remote-settings patch status
 node dist/cli.js patch                        # reload the patch (re-applies + restarts dsh-web)
-node dist/cli.js serve-gateway --port 9000    # run the gateway manually on another port
+node dist/cli.js serve-gateway --port 9000    # older dsh only: run the gateway manually on another port
 node scripts/start-http.mjs 8080              # plaintext HTTP mode (dangerous, y/N confirmation)
 dsh-local-workspace                           # reconnect with the saved local device token
 ```

@@ -59,7 +59,7 @@ dsh 的网页界面默认面向本机使用。服务器地址一旦暴露，拿�
 
 ## 身份与消费额度同步
 
-所有主用户和子用户都只使用本项目数据库中的本地账号与 bcrypt 密码登录；数据库默认使用 SQLite，也可切换到 MySQL 8。网关会删除浏览器自行提交的身份头，再为上游请求生成 30 秒有效的 HMAC 身份断言；Harness 验证后把 principal 固化到每条消息、模型步骤和工具执行。
+所有主用户和子用户都只使用本项目数据库中的本地账号与 bcrypt 密码登录；数据库默认使用 SQLite，也可切换到 MySQL 8。网关会删除浏览器自行提交的身份头，再为上游请求生成 30 秒有效的 HMAC 身份断言；Harness 验证后把 principal 固化到每条消息、模型步骤和工具执行。对开启强制浏览器认证的新版 Harness，宿主插件与网关子进程仅通过内部 IPC 兑换并定期续期 Host Cookie；进程专用 URL 不写入参数、环境变量、日志或磁盘，该 Cookie 也不会下发给客户浏览器。此时必须由 dsh 插件拉起网关，手动独立启动会明确报错；未开启该认证的旧版宿主仍可使用独立启动方式。
 
 子账号首次登录和后续刷新使用的工作区、会话列表均在服务端按本人权限过滤；工作区、会话和归档的 WebSocket 实时事件也经过同样的所有权过滤，浏览器不会先收到管理员数据再等待客户端隐藏。会话所有权不依赖当前工作区登记或归档状态：可信 Host 列表中的旧会话只按其首条人工消息上由 `dsh-passwords` 签发并持久化的账号身份补登记，目录位置不能充当身份；没有可信身份的空白或旧格式会话保守归管理员。
 
@@ -113,7 +113,7 @@ npm install -g dsh-passwords
 dsh-passwords install     # 生成随机 SETUP_KEY + 恢复插件栈 + 应用补丁（等价一键安装）
 ```
 
-（`dsh-passwords --version` 看版本；`dsh-passwords serve-gateway` 手动启动网关。）
+（`dsh-passwords --version` 看版本；未启用宿主浏览器认证的旧版 dsh 启动并可访问后，才可用 `dsh-passwords serve-gateway` 手动启动网关。）
 
 安装脚本会检查预构建文件，缺失时再安装依赖和编译；随后生成 `SETUP_KEY`、恢复已记录的 web profile 插件栈并应用远程设置补丁。
 
@@ -173,7 +173,7 @@ dsh 启动 → 插件被加载 → 插件自动拉起密码门（日志就在 ds
 dsh 退出 → 密码门跟着停（不会留僵尸进程占端口）
 ```
 
-- 高级用法：想单独托管网关进程？`node dist/cli.js serve-gateway` 手动跑，或自己配 systemd 也行。
+- 仅对已启动且未启用宿主浏览器认证的旧版 dsh：可用 `node dist/cli.js serve-gateway` 或 systemd 单独托管。新版 dsh 必须让插件通过内部 IPC 拉起网关；宿主不可达或要求认证时，独立启动都会明确拒绝继续。
 - 临时禁止自动拉起（调试用）：启动 dsh 时加环境变量 `DSH_PASSWORDS_NO_AUTOSTART=1`。
 
 ## 自动 HTTPS
@@ -272,7 +272,7 @@ node scripts/start-http.mjs [端口]    # 默认 8080，会弹 y/N 确认
 node dist/cli.js audit --limit 20        # 看最近 20 条审计日志（自动解密）
 node dist/cli.js patch status            # 看远程设置补丁状态
 node dist/cli.js patch                   # 重载补丁（重新应用 + 重启 dsh-web）
-node dist/cli.js serve-gateway --port 9000   # 手动启动网关并换端口
+node dist/cli.js serve-gateway --port 9000   # 仅旧版 dsh：手动启动网关并换端口
 node scripts/start-http.mjs 8080         # 明文 HTTP 模式（危险，y/N 确认）
 dsh-local-workspace                      # 使用已保存的设备令牌恢复本机工作区连接
 ```

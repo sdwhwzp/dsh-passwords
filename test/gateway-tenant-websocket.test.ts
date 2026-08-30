@@ -14,6 +14,7 @@ import { createFieldCrypto } from '../src/encrypt.js';
 import { createGatewayServer } from '../src/gateway.js';
 
 const ownRoot = '/tenants/u2';
+const HOST_BROWSER_COOKIE = 'dsh-auth-test=trusted-upstream';
 const workspaceSnapshot = {
   type: 'server-response',
   rpcId: 'workspace-list',
@@ -74,7 +75,10 @@ test('restricted event downlinks filter other tenants and survive an upstream re
   let muxConnections = 0;
   let forcedMuxTerminations = 0;
   let closedMuxConnections = 0;
+  const upstreamHttpCookies: Array<string | undefined> = [];
+  const upstreamUpgradeCookies: Array<string | undefined> = [];
   const upstream = http.createServer((req, res) => {
+    upstreamHttpCookies.push(req.headers.cookie);
     if (req.url === '/api/workspace.list' && req.method === 'POST') {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify(workspaceSnapshot));
@@ -101,6 +105,7 @@ test('restricted event downlinks filter other tenants and survive an upstream re
     res.writeHead(404).end();
   });
   upstream.on('upgrade', (req, socket, head) => {
+    upstreamUpgradeCookies.push(req.headers.cookie);
     upstreamWebSockets.handleUpgrade(req, socket, head, (websocket) => {
       if (req.url === '/api/events.mux') websocket.once('close', () => { closedMuxConnections += 1; });
       setTimeout(() => {
@@ -160,7 +165,9 @@ test('restricted event downlinks filter other tenants and survive an upstream re
     patch: { dshRoot: '', restartService: '' },
     webSocket: { adminAllowlist: [], userAllowlist: ['/plugin/ws/*'] },
   };
-  const gateway = createGatewayServer(config, new AuthService(config, db), db);
+  const gateway = createGatewayServer(config, new AuthService(config, db), db, {
+    upstreamBrowserCookie: HOST_BROWSER_COOKIE,
+  });
   await new Promise<void>((resolve) => gateway.listen(0, '127.0.0.1', resolve));
   const gatewayPort = (gateway.address() as { port: number }).port;
   const cookie = `dsh_gateway_token=${jwt.sign({
@@ -249,6 +256,10 @@ test('restricted event downlinks filter other tenants and survive an upstream re
       ['user-live', 'user-ungrouped', 'user-archived', 'user-new'],
     );
     assert.doesNotMatch(JSON.stringify(mux), /admin/);
+    assert.ok(upstreamHttpCookies.length > 0);
+    assert.ok(upstreamUpgradeCookies.length >= 3, 'host, mux, and mux reconnect must authenticate upstream');
+    assert.deepEqual(new Set(upstreamHttpCookies), new Set([HOST_BROWSER_COOKIE]));
+    assert.deepEqual(new Set(upstreamUpgradeCookies), new Set([HOST_BROWSER_COOKIE]));
 
     const closingMux = new WebSocket(`ws://127.0.0.1:${String(gatewayPort)}/api/events.mux`, {
       headers: { cookie },

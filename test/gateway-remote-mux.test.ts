@@ -13,6 +13,8 @@ import { createFieldCrypto } from '../src/encrypt.js';
 import { createGatewayServer } from '../src/gateway.js';
 import { verifyPrincipalHeaders } from '../src/principal.js';
 
+const HOST_BROWSER_COOKIE = 'dsh-auth-test=trusted-upstream';
+
 function closeServer(server: http.Server): Promise<void> {
   return new Promise((resolve) => server.close(() => resolve()));
 }
@@ -56,7 +58,9 @@ test('remote mux and granted plugin sockets receive signed principals and close 
     patch: { dshRoot: '', restartService: '' },
     webSocket: { adminAllowlist: [], userAllowlist: ['/plugin/ws/*'] },
   };
-  const gateway = createGatewayServer(config, new AuthService(config, db), db);
+  const gateway = createGatewayServer(config, new AuthService(config, db), db, {
+    upstreamBrowserCookie: HOST_BROWSER_COOKIE,
+  });
   await new Promise<void>((resolve) => gateway.listen(0, '127.0.0.1', resolve));
   const gatewayPort = (gateway.address() as { port: number }).port;
   const token = jwt.sign({
@@ -65,7 +69,7 @@ test('remote mux and granted plugin sockets receive signed principals and close 
   const cookie = `dsh_gateway_token=${token}`;
   const downstream = new WebSocket(`ws://127.0.0.1:${String(gatewayPort)}/api/remote.mux`, {
     headers: {
-      cookie,
+      cookie: `${cookie}; attacker=browser; dsh-auth-test=browser-forged`,
       'x-dsh-principal': 'browser-forged',
       'x-dsh-principal-signature': 'browser-forged',
     },
@@ -85,7 +89,7 @@ test('remote mux and granted plugin sockets receive signed principals and close 
     downstream.send('ping');
     assert.equal(await echoed, 'ping');
     assert.ok(upstreamHeaders !== undefined);
-    assert.equal(upstreamHeaders.cookie, undefined);
+    assert.equal(upstreamHeaders.cookie, HOST_BROWSER_COOKIE);
     const headers = new Headers();
     for (const [key, value] of Object.entries(upstreamHeaders)) {
       if (value !== undefined) headers.set(key, Array.isArray(value) ? value.join(', ') : value);

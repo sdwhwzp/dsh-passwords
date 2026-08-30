@@ -40,6 +40,7 @@ const USAGE_HTML_BODY = `<html><head><script>globalThis["__DSH_BOOT__"] = ${JSON
 const HASHED_STATIC_BODY = 'export const repeatedPluginPayload = "compress-me";\n'.repeat(4_096);
 const LARGE_HISTORY_CHUNK = Buffer.alloc(256 * 1024, 0x78);
 const TEST_PROXY_REQUEST_MAX_BYTES = 256 * 1024;
+const HOST_BROWSER_COOKIE = 'dsh-auth-test=trusted-upstream';
 const REQUEST_STREAM_CHUNK = Buffer.alloc(32 * 1024, 0x78);
 const LARGE_HISTORY_BYTES = 20 * 1024 * 1024;
 const OVERSIZE_HISTORY_BYTES = 32 * 1024 * 1024 + 1;
@@ -508,6 +509,7 @@ before(async () => {
   auth = new AuthService(config, db);
   gateway = createGatewayServer(config, auth, db, {
     proxyRequestMaxBytes: TEST_PROXY_REQUEST_MAX_BYTES,
+    upstreamBrowserCookie: HOST_BROWSER_COOKIE,
   });
   await new Promise<void>((resolve) => gateway.listen(0, '127.0.0.1', () => resolve()));
   gatewayPort = (gateway.address() as { port: number }).port;
@@ -1253,28 +1255,30 @@ test('JSON 解析失败回退路径：不得同时出现 CL+TE，body 原样透�
   assert.equal(r.body, 'not-json{');
 });
 
-test('F-15：网关会话 Cookie 不得转发给上游（信任边界最小化）', async () => {
-  const r = await gatewayReq('GET', '/api/workspace.list');
+test('F-15：普通上游请求只携带 Host 浏览器 Cookie', async () => {
+  const r = await gatewayReq('GET', '/api/workspace.list', {
+    cookie: `${cookie}; attacker=browser; dsh-auth-test=browser-forged`,
+  });
   assert.equal(r.status, 200);
   assert.equal(lastUpstreamMethod, 'POST', '列表兼容 GET 必须转换为 Host 接受的 POST RPC');
   assert.equal(lastUpstreamHeaders['content-type'], 'application/json');
   assert.ok(Number(lastUpstreamHeaders['content-length']) > 0);
-  // 上游收到的请求头里不得出现 cookie（含 dsh_gateway_token JWT）——
-  // 否则上游/插件被入侵时可收割全部活动会话并回放
   assert.equal(
     lastUpstreamHeaders['cookie'],
-    undefined,
-    `上游收到网关 Cookie：${JSON.stringify(lastUpstreamHeaders['cookie'])}`,
+    HOST_BROWSER_COOKIE,
+    '客户 JWT 与浏览器伪造 Cookie 不得进入普通 Host 请求',
   );
 });
 
-test('F-15 例外：自身插件路由 /api/dsh-passwords/* 必须保留 Cookie（插件 guard 鉴权依赖）', async () => {
-  const r = await gatewayReq('GET', '/api/dsh-passwords/state');
+test('F-15 例外：自身插件路由只重建已校验 JWT 与 Host Cookie', async () => {
+  const r = await gatewayReq('GET', '/api/dsh-passwords/state', {
+    cookie: `${cookie}; attacker=browser; dsh-auth-test=browser-forged`,
+  });
   assert.equal(r.status, 200);
   assert.equal(
     lastUpstreamHeaders['cookie'],
-    cookie,
-    '插件路由的上游请求必须携带网关 Cookie，否则设置页用户管理全部 401',
+    `${cookie}; ${HOST_BROWSER_COOKIE}`,
+    '插件 guard 需要网关 JWT，Host 同时需要内部浏览器 Cookie',
   );
 });
 
