@@ -456,7 +456,8 @@ export function collectSessionCwdFromWorkspaces(value: unknown, out: Map<string,
 
 /**
  * 递归查找请求体里的 workspaceId（session.create 可能带 workspaceId 而非 cwd）。
- *  ⚠ 递归时跳过 args 子对象（同 extractPathFromBody：args 是 dsh 不消费的伪字段）。
+ * Legacy dot-style envelopes skip an `args` child. Alpha slash-style envelopes are
+ * unwrapped by the gateway before this helper receives their real parameter object.
  */
 export function extractWorkspaceId(value: unknown, depth = 0): string | null {
   if (depth > 6 || value === null || typeof value !== 'object') return null;
@@ -560,6 +561,10 @@ export function forceRejectApproval(value: unknown, depth = 0): boolean {
   let changed = false;
   if (typeof obj.approvalId === 'string' && typeof obj.outcome === 'string' && obj.outcome !== 'rejected') {
     obj.outcome = 'rejected';
+    changed = true;
+  }
+  if (obj.kind === 'result' && obj.value === 'allowed-once') {
+    obj.value = 'rejected';
     changed = true;
   }
   for (const key of Object.keys(obj)) {
@@ -689,7 +694,7 @@ export function containsSessionReference(value: unknown, depth = 0): boolean {
  */
 export function isAdminOnlyPluginEndpoint(method: string, pathname: string): boolean {
   return (
-    pathname === '/api/settings.describe' ||
+    /^\/api\/settings[.\/](?:describe|openSettingsDocument|openAgentPresetDirectory|canOpenAgentPresetDirectory)$/.test(pathname) ||
     isSharedSettingsWrite(pathname) ||
     pathname === '/api/dsh-web-ui-settings/describe' ||
     pathname === '/api/dsh-web-ui-settings/mutate' ||
@@ -697,7 +702,11 @@ export function isAdminOnlyPluginEndpoint(method: string, pathname: string): boo
     pathname === '/sidebar/api/settings.update' ||
     /^\/api\/credentials[.\/](describe|set|unset)$/.test(pathname) ||
     /^\/api\/host[.\/](pickDirectory|openPath)$/.test(pathname) ||
-    /^\/api\/agentPreset[.\/](read|copy|openDocument|remove)$/.test(pathname) ||
+    /^\/api\/agentPresets?[.\/](read|copy|openDocument|remove|deletePreset)$/.test(pathname) ||
+    pathname === '/api/llm/discoverModels' ||
+    pathname === '/api/pluginInventory/list' ||
+    pathname === '/api/dynamicCordisRunner' ||
+    pathname.startsWith('/api/dynamicCordisRunner/') ||
     pathname === '/api/sessionReferenceResolver/candidates' ||
     pathname === '/api/dsh-ssh' ||
     pathname.startsWith('/api/dsh-ssh/') ||
@@ -775,7 +784,7 @@ export function isWorkspaceCreate(pathname: string): boolean {
 
 /** Directory creation used by the Host workspace picker before registration. */
 export function isWorkspaceDirectoryCreate(pathname: string): boolean {
-  return /^\/api\/host[.\/]createDirectory(?:[.\/]|$)/.test(pathname);
+  return /^\/api\/(?:host[.\/]createDirectory|directoryPicker[.\/]createDirectory)(?:[.\/]|$)/.test(pathname);
 }
 
 /** Workspace removal and rename endpoints supported by the current Host. */
@@ -802,10 +811,19 @@ export const WORKSPACE_ENDPOINT_RE = /^\/api\/session[.\/](create)([.\/]|$)/;
  * 子用户必须启用其所在工作区，且该会话未被管理员单独关闭。
  * create 无源会话、list 单独做工作区/会话过滤，均不在此列。
  */
-export const SESSION_SCOPED_RE = /^\/api\/session[.\/](history|models|selectModel|prompt|respond|attachment|updateQueue|cancel|archive|delete|rename|retitle|title|resume|fork|truncate|export)([.\/]|$)/;
+export const SESSION_SCOPED_RE = /^\/api\/session[.\/](history|page|models|selectModel|openWorkspacePath|prompt|respond|attachment|updateQueue|cancel|archive|delete|rename|retitle|title|resume|fork|truncate|export)([.\/]|$)/;
 
 /** Subagent RPCs are authorized by their direct parent session. */
-export const SUBAGENT_SCOPED_RE = /^\/api\/subagent[.\/](list|history|prompt|interrupt)([.\/]|$)/;
+export const SUBAGENT_SCOPED_RE = /^\/api\/subagents?[.\/](list|history|prompt|interrupt|interruptByParent)([.\/]|$)/;
+
+/** Agent-scoped command RPCs use the addressed Session as their authorization subject. */
+export const COMMANDS_SCOPED_RE = /^\/api\/commands[.\/](list|execute)$/;
+
+/** Goal mutations operate on one Agent and therefore inherit its Session ownership. */
+export const GOALS_SCOPED_RE = /^\/api\/goals?[.\/](create|edit|pause|resume|complete|clear)$/;
+
+/** Session-owned feedback rows exposed by the alpha.1 message feedback service. */
+export const MESSAGE_FEEDBACK_SCOPED_RE = /^\/api\/messageFeedback[.\/](list|put|delete)$/;
 
 /** dsh-at-file workspace search: `agentId` addresses one live session. */
 export const AT_FILE_SEARCH_RE = /^\/api\/atFile[.\/]search$/;
@@ -1023,10 +1041,9 @@ const PATH_FIELDS = [
 ];
 
 /**
- * 递归查找请求体里第一个字符串路径字段（兼容 typert 信封 {type,rpcId,method,payload}）。
- * ⚠ 递归时跳过 args 子对象——实测 {payload:{args:{cwd:'/root/11'}}} 会被 dsh 忽略 args、
- *  用默认工作区（/opt），而网关若把 args.cwd 当白名单依据会误放行（fail-open 越权）。
- *  真实 wire 路径是 payload.cwd（payload 层），args 是 dsh 不消费的伪字段。
+ * Recursively find the first string path field in one already-selected RPC parameter object.
+ * Legacy dot-style envelopes skip an `args` child because those Hosts do not consume it.
+ * Alpha slash-style envelopes are method-checked and unwrapped by the gateway first.
  */
 export function extractPathFromBody(value: unknown, depth = 0): string | null {
   if (depth > 6 || value === null || typeof value !== 'object') return null;
@@ -1071,7 +1088,7 @@ export function isStaticAsset(pathname: string): boolean {
 export function isUsageAnchorRequest(pathname: string): boolean {
   return (
     /^\/api\/session[.\/]prompt$/.test(pathname) ||
-    /^\/api\/subagent[.\/]prompt$/.test(pathname) ||
+    /^\/api\/subagents?[.\/]prompt$/.test(pathname) ||
     /^\/api\/agent[.\/]prompt$/.test(pathname)
   );
 }

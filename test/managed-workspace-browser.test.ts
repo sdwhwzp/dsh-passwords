@@ -96,10 +96,18 @@ async function runScenario(
         method: string;
         payload: Record<string, unknown>;
       };
-      upstreamCalls.push({ method: envelope.method, payload: envelope.payload });
+      const args = envelope.payload.args;
+      const alphaArgs = args !== null && typeof args === 'object' && !Array.isArray(args)
+        ? args as Record<string, unknown>
+        : null;
+      const request = alphaArgs?.request;
+      const logicalPayload = request !== null && typeof request === 'object' && !Array.isArray(request)
+        ? request as Record<string, unknown>
+        : alphaArgs ?? envelope.payload;
+      upstreamCalls.push({ method: envelope.method, payload: logicalPayload });
 
-      if (envelope.method === 'host.listDirectory') {
-        const listed = String(envelope.payload.path);
+      if (envelope.method === 'host.listDirectory' || envelope.method === 'directoryPicker/list') {
+        const listed = String(logicalPayload.path);
         const entries = readdirSync(listed, { withFileTypes: true })
           .filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
           .map((entry) => ({ name: entry.name, path: path.join(listed, entry.name), hidden: false }));
@@ -124,16 +132,16 @@ async function runScenario(
         return;
       }
 
-      if (envelope.method === 'host.createDirectory') {
-        const created = path.join(String(envelope.payload.path), String(envelope.payload.name));
+      if (envelope.method === 'host.createDirectory' || envelope.method === 'directoryPicker/createDirectory') {
+        const created = path.join(String(logicalPayload.path), String(logicalPayload.name));
         mkdirSync(created);
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(rpcResponse(envelope.rpcId, { path: created }));
         return;
       }
 
-      if (envelope.method === 'workspace.create') {
-        const workspacePath = String(envelope.payload.path);
+      if (envelope.method === 'workspace.create' || envelope.method === 'workspace/create') {
+        const workspacePath = String(logicalPayload.path);
         createdWorkspacePath = workspacePath;
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(rpcResponse(envelope.rpcId, {
@@ -214,11 +222,18 @@ async function runScenario(
 
   const request = (method: string, payload: Record<string, unknown>): Promise<GatewayResponse> =>
     new Promise((resolve, reject) => {
+      const alphaPayload = method.includes('/')
+        ? {
+            args: method.startsWith('directoryPicker/')
+              ? payload
+              : { request: payload },
+          }
+        : payload;
       const body = JSON.stringify({
         type: 'client-request',
         rpcId: `${method}-${String(Math.random())}`,
         method,
-        payload,
+        payload: alphaPayload,
       });
       const req = http.request(
         {
@@ -323,5 +338,32 @@ test('subuser can create, adopt, and remove a private workspace registration but
       upstreamCalls.filter((call) => call.method === 'workspace.delete').length,
       deleteCallsBeforeOutside,
     );
+  });
+});
+
+test('alpha.1 directory and workspace RPCs stay confined to the private root', async () => {
+  await runScenario(async ({ root, outside, upstreamCalls, request }) => {
+    const listed = await request('directoryPicker/list', {});
+    assert.equal(listed.status, 200, String(listed.body));
+    assert.equal(upstreamCalls.at(-1)?.method, 'directoryPicker/list');
+    assert.equal(upstreamCalls.at(-1)?.payload.path, root);
+
+    const created = await request('directoryPicker/createDirectory', { path: root, name: 'alpha-project' });
+    assert.equal(created.status, 200, String(created.body));
+    const alphaProject = path.join(root, 'alpha-project');
+    assert.equal(existsSync(alphaProject), true);
+
+    const adopted = await request('workspace/create', { path: alphaProject });
+    assert.equal(adopted.status, 200, String(adopted.body));
+    assert.equal(upstreamCalls.at(-1)?.method, 'workspace/create');
+    assert.equal(upstreamCalls.at(-1)?.payload.path, alphaProject);
+
+    const callsBeforeDenials = upstreamCalls.length;
+    assert.equal((await request('directoryPicker/list', { path: outside })).status, 403);
+    assert.equal((await request('directoryPicker/createDirectory', { path: outside, name: 'blocked' })).status, 403);
+    assert.equal((await request('workspace/create', { path: outside })).status, 403);
+    assert.equal((await request('session/create', { cwd: outside })).status, 403);
+    assert.equal((await request('directoryPicker/pick', {})).status, 403);
+    assert.equal(upstreamCalls.length, callsBeforeDenials);
   });
 });

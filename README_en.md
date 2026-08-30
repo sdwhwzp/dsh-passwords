@@ -60,7 +60,7 @@ The owner can configure, per subuser, from the settings page:
 
 Owners and subusers always sign in with local accounts and bcrypt passwords stored in this project's database. SQLite is the default and MySQL 8 is also supported. The gateway removes browser-supplied identity headers and creates a 30-second HMAC assertion for upstream requests; Harness verifies it and durably attaches the principal to each message, model step and tool execution. With newer Harness builds that require browser authentication, the Host plugin and gateway child exchange and periodically renew the Host Cookie only through internal IPC. The process-scoped URL is never placed in arguments, environment variables, logs, or files, and the Host Cookie is never returned to customer browsers. The dsh plugin must launch the gateway in this mode and standalone startup fails explicitly; older Hosts without browser authentication may still use standalone startup.
 
-Workspace and session lists used by both initial sign-in and later refreshes are filtered on the server for the current subuser. WebSocket workspace, session, and archive events pass through the same ownership filter, so the browser never receives owner data while waiting for client-side hiding. Session ownership does not depend on current workspace registration or archive state: a legacy session from a trusted Host list is adopted only from the `dsh-passwords` identity durably attached to its first human prompt. Directory location is never identity evidence; blank and pre-identity sessions conservatively remain with the owner account.
+Workspace and session lists used by both initial sign-in and later refreshes are filtered on the server for the current subuser. WebSocket workspace, session, and archive events pass through the same ownership filter, so the browser never receives owner data while waiting for client-side hiding. The gateway strictly validates both newer Harness `workspace/follow`, `session/list`, and `session/page` Remote/slash RPCs and legacy dot-style RPCs according to their respective protocols. Session ownership does not depend on current workspace registration or archive state: a legacy session from a trusted Host list is adopted only from the `dsh-passwords` identity durably attached to the first human prompt in a complete oldest-page walk at one fixed log cut. That read does not activate a cold Session. Directory location is never identity evidence; blank, incomplete, or unverifiable sessions conservatively remain with the owner account.
 
 Changing the database driver selects a different repository and does not copy rows from the other driver. Back up `.env` and the database and migrate existing accounts separately in production; a first deployment with an empty database can switch directly.
 
@@ -312,6 +312,7 @@ Passwords are stored as bcrypt hashes only. Usernames, IPs, and audit records ar
 - **Password-spray protection (per-IP throttle)**: 50 failed logins from the same IP within 15 minutes → that IP is globally throttled for 15 minutes (accumulated across usernames — aimed at the "one IP rotating many usernames" spraying technique; bcrypt is not consumed while throttled, and a successful login lifts the throttle). If a large NAT/shared egress trips it by accident, it auto-recovers after 15 minutes with no manual action.
 - **Session revocation**: logging out revokes the token server-side immediately; changing the password/username invalidates all old sessions.
 - **Subuser isolation (third-party plugin surface)**: ops endpoints such as dsh-ssh (SSH hosts/tunnels), skin-center, modlens, and the dsh-uploads list/delete are owner-only; upload/download stay gated by `allow_upload` / `allowGitDownload`, and **new subusers default to git download off** (including dsh-uploads download and other exfiltration channels) — the owner enables it per-user, so subusers can't enumerate or exfiltrate files from the shared upload storage.
+- **New Remote isolation**: commands, goals, subagents, feedback, model selection, and native path opening all recheck the addressed Session for subusers; opened paths must also stay inside that Session workspace. Plugin inventory, dynamic Cordis, shared settings, credentials, and Agent Preset administration entries are omitted from the subuser boot graph, and crafted direct requests receive 403 as well.
 - **Slow-connection protection**: explicit request timeouts (half-open headers cut off at 20s) plus a concurrent-connection cap (512 gateway / 256 redirect) to resist slowloris-style resource exhaustion.
 - **Path normalization**: the gate resolves the prefix from the raw URL with iterative decoding (blocks double-encoding), slash collapsing and WHATWG normalization — `%2f..%2f` / `%252f..` SPA-shell bypass variants are all rejected.
 - **Hardening tips**:
@@ -328,6 +329,11 @@ The UI is bilingual (Chinese/English) and follows dsh's language setting:
 - **CLI**: follows the `LANG` / `LC_ALL` environment variables (`en` prefix = English).
 
 ## Release notes
+
+### v2.6.9 (2026-08-30)
+
+- Supports newer Harness slash RPCs, the `workspace/follow` Remote workspace snapshot, and cold-safe legacy ownership recovery through `session/page`; stream frames, methods, immutable page cuts, and readiness probes are validated strictly and fail closed.
+- Applies subuser isolation to commands, goals, subagents, feedback, model selection, native path opening, shared settings, plugin inventory, and dynamic Cordis administration, while omitting the corresponding owner-only client entries.
 
 ### v2.5.4 (2026-08-20)
 

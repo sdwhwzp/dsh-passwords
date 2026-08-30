@@ -27,6 +27,7 @@ test('remote mux and granted plugin sockets receive signed principals and close 
   db.createUser('admin', 'hash', 'admin');
   const customer = db.createUser('customer', 'hash', 'user');
   const deniedCustomer = db.createUser('denied-customer', 'hash', 'user');
+  db.setManagedWorkspace(customer.id, '/managed/u2');
   db.setPermissions(customer.id, {
     allowedFolders: [], hourlyTokenLimit: null, dailyMinutesLimit: null,
     allowUpload: true, allowGitDownload: false, allowWorkspaceCreate: false,
@@ -36,11 +37,26 @@ test('remote mux and granted plugin sockets receive signed principals and close 
 
   const upstreamWebSockets = new WebSocketServer({ noServer: true, perMessageDeflate: false });
   let upstreamHeaders: http.IncomingHttpHeaders | undefined;
-  const upstream = http.createServer((_req, res) => res.writeHead(404).end());
+  const upstream = http.createServer((req, res) => {
+    if (req.url === '/api/workspace.list' && req.method === 'POST') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        type: 'server-response', rpcId: 'workspace-list',
+        result: { ok: true, value: { items: [], archivedSessionIds: [] } },
+      }));
+      return;
+    }
+    res.writeHead(404).end();
+  });
   upstream.on('upgrade', (req, socket, head) => {
     upstreamHeaders = req.headers;
     upstreamWebSockets.handleUpgrade(req, socket, head, (websocket) => {
-      websocket.on('message', (data, binary) => websocket.send(data, { binary }));
+      websocket.on('message', (data) => {
+        const frame = JSON.parse(data.toString()) as { type: string; streamId: string };
+        if (frame.type === 'open') {
+          websocket.send(JSON.stringify({ type: 'item', streamId: frame.streamId, value: 'pong' }));
+        }
+      });
     });
   });
   await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
@@ -79,15 +95,17 @@ test('remote mux and granted plugin sockets receive signed principals and close 
       downstream.once('open', resolve);
       downstream.once('error', reject);
     });
-    const echoed = new Promise<string>((resolve, reject) => {
+    const echoed = new Promise<Record<string, unknown>>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('remote mux echo timed out')), 1_000);
       downstream.once('message', (data) => {
         clearTimeout(timer);
-        resolve(data.toString());
+        resolve(JSON.parse(data.toString()) as Record<string, unknown>);
       });
     });
-    downstream.send('ping');
-    assert.equal(await echoed, 'ping');
+    downstream.send(JSON.stringify({
+      type: 'open', streamId: 'control', endpoint: 'session/control', payload: { args: {} },
+    }));
+    assert.deepEqual(await echoed, { type: 'item', streamId: 'control', value: 'pong' });
     assert.ok(upstreamHeaders !== undefined);
     assert.equal(upstreamHeaders.cookie, HOST_BROWSER_COOKIE);
     const headers = new Headers();

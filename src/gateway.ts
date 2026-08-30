@@ -61,6 +61,9 @@ import {
   findStringField,
   SESSION_SCOPED_RE,
   SUBAGENT_SCOPED_RE,
+  COMMANDS_SCOPED_RE,
+  GOALS_SCOPED_RE,
+  MESSAGE_FEEDBACK_SCOPED_RE,
   AT_FILE_SEARCH_RE,
   extractSessionId,
   extractAgentId,
@@ -84,8 +87,14 @@ import {
 import { findDshRoot, applyRemotePatch, restartDshWeb } from './patch.js';
 import { t, resolveGatewayLang, type Lang } from './i18n.js';
 import { signedPrincipalHeaders } from './principal.js';
-import { filterCustomerModelCatalogResponse } from './model-policy.js';
+import { customerModelAllowed, filterCustomerModelCatalogResponse } from './model-policy.js';
 import { filterTenantEventEnvelope } from './tenant-events.js';
+import {
+  TENANT_REMOTE_STREAM_ENDPOINTS,
+  TenantRemoteEventFilter,
+  parseTenantRemoteClientFrame,
+  parseTenantRemoteServerFrame,
+} from './tenant-remote-mux.js';
 
 export const DEFAULT_USER_REQUEST_BODY_BYTES = 64 * 1024 * 1024;
 export const ADMIN_REQUEST_BODY_BYTES = 300 * 1024 * 1024;
@@ -133,23 +142,40 @@ type Req = Request & {
   dshpwAgentPreset?: string;
   /** Session whose preset selection is committed only after a successful Host response. */
   dshpwSelectedSessionId?: string;
+  /** Canonical candidate passed to the Session-aware native path opener. */
+  dshpwOpenWorkspacePath?: string;
   /** Monotonic request order used to ignore stale workspace registry responses. */
   dshpwWorkspaceSnapshotRevision?: number;
 };
 
-const HOST_LIST_DIRECTORY_RE = /^\/api\/host[.\/]listDirectory$/;
-const HOST_CREATE_DIRECTORY_RE = /^\/api\/host[.\/]createDirectory$/;
+const DIRECTORY_PICKER_LIST_RE = /^\/api\/(?:host[.\/]listDirectory|directoryPicker[.\/]list)$/;
+const DIRECTORY_PICKER_CREATE_RE = /^\/api\/(?:host[.\/]createDirectory|directoryPicker[.\/]createDirectory)$/;
+const DIRECTORY_PICKER_NATIVE_RE = /^\/api\/directoryPicker[.\/]pick$/;
 const WORKSPACE_CREATE_RE = /^\/api\/workspace[.\/]create$/;
 const WORKSPACE_DELETE_RE = /^\/api\/workspace[.\/]delete$/;
-const MODEL_CATALOG_RE = /^\/api\/(?:llm|session)[.\/]models$/;
-const AGENT_PRESET_SELECT_RE = /^\/api\/agentPreset[.\/]select$/;
+const MODEL_CATALOG_RE = /^\/api\/(?:(?:llm|session)[.\/]models|session[.\/]modelCatalog)$/;
+const AGENT_PRESET_SELECT_RE = /^\/api\/agentPresets?[.\/]select$/;
+const SESSION_OPEN_WORKSPACE_PATH_RE = /^\/api\/session[.\/]openWorkspacePath$/;
+const SESSION_SELECT_MODEL_RE = /^\/api\/session[.\/]selectModel$/;
 const WORKSPACE_ARCHIVE_SESSION_RE = /^\/api\/workspace[.\/]archiveSession$/;
-const PRINCIPAL_SCOPED_RESPONSE_RE = /^(?:\/api\/workspace[.\/]list|\/api\/session[.\/](?:list|search|history))$/;
+const PRINCIPAL_SCOPED_RESPONSE_RE = /^(?:\/api\/workspace[.\/]list|\/api\/session[.\/](?:list|search|history|page))$/;
 const MANAGED_FILE_UPLOAD_MAX_BYTES = 256 * 1024 * 1024;
 const MANAGED_FILE_LIST_MAX_ENTRIES = 1_000;
 const WORKSPACE_SNAPSHOT_REFRESH_INTERVAL_MS = 15_000;
 const WORKSPACE_SNAPSHOT_RETRY_DELAY_MS = 5_000;
-const ADMIN_ONLY_CLIENT_ENTRY_IDS = new Set(['@linxin666/dsh-usage', 'dsh-usage']);
+const SESSION_OWNERSHIP_BOOTSTRAP_TIMEOUT_MS = 15_000;
+const SESSION_OWNERSHIP_BOOTSTRAP_RETRY_DELAY_MS = 30_000;
+const SESSION_OWNERSHIP_BOOTSTRAP_CONCURRENCY = 4;
+const ADMIN_ONLY_CLIENT_ENTRY_IDS = new Set([
+  '@linxin666/dsh-usage',
+  'dsh-usage',
+  'ui-settings-plugin-inventory',
+  '@deepseek-ai/dsh-client-ui-settings-plugin-inventory',
+  'cordis-client-runner',
+  '@deepseek-ai/dsh-cordis-client-runner',
+  'ui-cordis',
+  '@deepseek-ai/dsh-client-ui-cordis',
+]);
 
 /** Background update polling does not count as interactive gateway activity. */
 export function isBackgroundUpdateRequest(gatePath: string): boolean {
@@ -265,18 +291,38 @@ function managedFileSegments(relativePath: string): string[] | null {
   return segments;
 }
 
-/** Read the payload object consumed by Typert host/workspace requests. */
-function rpcPayloadOf(value: unknown): Record<string, unknown> | null {
+/** Resolve the exact Typert method encoded by one normalized `/api` path. */
+function rpcMethodForPath(pathname: string): string | null {
+  if (!pathname.startsWith('/api/')) return null;
+  const method = pathname.slice('/api/'.length);
+  return /^[A-Za-z0-9_$-]+(?:[./][A-Za-z0-9_$-]+)+$/u.test(method) ? method : null;
+}
+
+/** Read the real parameter object from legacy and alpha.1 Typert envelopes. */
+function rpcPayloadOf(value: unknown, expectedMethod?: string | null): Record<string, unknown> | null {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
   const envelope = value as Record<string, unknown>;
-  return envelope.payload !== null && typeof envelope.payload === 'object' && !Array.isArray(envelope.payload)
-    ? envelope.payload as Record<string, unknown>
-    : envelope;
+  if (envelope.type !== 'client-request') return envelope;
+  if (
+    typeof envelope.method !== 'string' ||
+    (expectedMethod !== undefined && expectedMethod !== null && envelope.method !== expectedMethod) ||
+    envelope.payload === null ||
+    typeof envelope.payload !== 'object' ||
+    Array.isArray(envelope.payload)
+  ) return null;
+  const payload = envelope.payload as Record<string, unknown>;
+  if (!envelope.method.includes('/')) return payload;
+  if (payload.args === null || typeof payload.args !== 'object' || Array.isArray(payload.args)) return null;
+  const args = payload.args as Record<string, unknown>;
+  if (args.request !== null && typeof args.request === 'object' && !Array.isArray(args.request)) {
+    return args.request as Record<string, unknown>;
+  }
+  return args;
 }
 
 /** Replace the path consumed by Typert host/workspace requests. */
-function setRpcPayloadPath(value: unknown, workspacePath: string): boolean {
-  const target = rpcPayloadOf(value);
+function setRpcPayloadPath(value: unknown, workspacePath: string, expectedMethod?: string | null): boolean {
+  const target = rpcPayloadOf(value, expectedMethod);
   if (target === null) return false;
   target.path = workspacePath;
   return true;
@@ -899,6 +945,8 @@ export interface GatewayServerOptions {
   proxyRequestMaxBytes?: number;
   /** Trusted Host browser Cookie pair, or a resolver updated by the parent-managed refresh loop. */
   upstreamBrowserCookie?: string | (() => string | null);
+  /** Use alpha.1 slash RPCs and Remote streams exposed by BrowserAuth-capable Hosts. */
+  upstreamRemoteTransport?: boolean;
 }
 
 function lowerSafetyLimit(requested: number | undefined, fixed: number): number {
@@ -966,6 +1014,7 @@ export function createGatewayServer(
   // 避免每个代理请求都新建一次 TCP 握手
   const upstreamAgent = new http.Agent({ keepAlive: true, maxSockets: 64, keepAliveMsecs: 30_000 });
   const configuredUpstreamBrowserCookie = options.upstreamBrowserCookie;
+  const upstreamRemoteTransport = options.upstreamRemoteTransport === true;
   const rawUpstreamBrowserCookie: () => string | null = typeof configuredUpstreamBrowserCookie === 'function'
     ? configuredUpstreamBrowserCookie
     : () => configuredUpstreamBrowserCookie ?? null;
@@ -1076,10 +1125,14 @@ export function createGatewayServer(
   const sessionOwnerById = new Map(
     db.listSessionOwners().map((row) => [row.session_id, row.user_id] as const),
   );
-  const adminUserId = db.listUsers().find((user) => user.role === 'admin')?.id ?? null;
+  /** Resolve setup-created or replaced administrators at the instant an internal read is signed. */
+  function currentAdminUserId(): number | null {
+    return db.listUsers().find((user) => user.role === 'admin')?.id ?? null;
+  }
 
   /** Sign gateway-owned registry reads as the current administrator. */
   function internalAdminPrincipalHeaders(): Record<string, string> {
+    const adminUserId = currentAdminUserId();
     const admin = adminUserId === null ? null : db.getUserById(adminUserId);
     if (admin === null) throw new Error('internal Host reads require an administrator account');
     return signedPrincipalHeaders({
@@ -1094,7 +1147,14 @@ export function createGatewayServer(
   const pendingWorkspaceSessionIds = new Set<string>();
   let archivedWorkspaceSessionIds = new Set<string>();
   let workspaceSnapshotRefresh: Promise<void> | null = null;
-  let sessionIdentitySnapshotRefresh: Promise<Set<string>> | null = null;
+  let sessionIdentitySnapshotRefresh: Promise<SessionIdentitySnapshot> | null = null;
+  type AlphaSessionOwnershipBootstrapState = 'not-required' | 'idle' | 'running' | 'ready' | 'partial' | 'failed';
+  let alphaSessionOwnershipBootstrapState: AlphaSessionOwnershipBootstrapState = upstreamRemoteTransport
+    ? 'idle'
+    : 'not-required';
+  let alphaSessionOwnershipBootstrapRefresh: Promise<void> | null = null;
+  let alphaSessionOwnershipBootstrapRetryAt = 0;
+  let alphaSessionOwnershipBootstrapError: unknown;
   const sessionCreateReservations = new Map<string, Promise<void>>();
   let workspaceSnapshotReady = false;
   let workspaceSnapshotUpdatedAt = 0;
@@ -1151,14 +1211,9 @@ export function createGatewayServer(
     release?.();
   }
 
-  /** Resolve the first human prompt's authenticated account from an oldest-prefix history page. */
-  function legacyOwnerFromHistory(value: unknown): number | null | undefined {
-    const history = successfulRpcValue(value);
-    if (history === null || typeof history !== 'object' || Array.isArray(history)) return undefined;
-    const record = history as Record<string, unknown>;
-    if (!Array.isArray(record.events) || record.hasMore !== false) return undefined;
-
-    for (const item of record.events) {
+  /** Resolve the first human prompt's authenticated account from a complete oldest prefix. */
+  function ownerFromHistoryRecords(records: readonly unknown[]): number | null {
+    for (const item of records) {
       if (item === null || typeof item !== 'object' || Array.isArray(item)) continue;
       const event = (item as Record<string, unknown>).event;
       if (event === null || typeof event !== 'object' || Array.isArray(event)) continue;
@@ -1195,17 +1250,17 @@ export function createGatewayServer(
     return null;
   }
 
-  /**
-   * Resolve one pre-ownership-table session from the authenticated identity on its first prompt.
-   * A directory path alone is not identity evidence because administrators can work inside a
-   * subuser directory. Blank, pre-identity, malformed, or unverifiable histories stay with admin.
-   */
-  function resolveLegacySessionOwner(sessionId: string): Promise<number | null> {
-    const current = sessionOwner(sessionId);
-    if (current !== null) return Promise.resolve(current);
-    const active = legacyOwnerResolutions.get(sessionId);
-    if (active !== undefined) return active;
+  /** Validate one legacy history response before inspecting its complete oldest prefix. */
+  function legacyOwnerFromHistory(value: unknown): number | null | undefined {
+    const history = successfulRpcValue(value);
+    if (history === null || typeof history !== 'object' || Array.isArray(history)) return undefined;
+    const record = history as Record<string, unknown>;
+    if (!Array.isArray(record.events) || record.hasMore !== false) return undefined;
+    return ownerFromHistoryRecords(record.events);
+  }
 
+  /** Read one pre-alpha.1 history page used as durable ownership evidence. */
+  function resolveLegacySessionOwnerViaHistory(sessionId: string): Promise<number | null> {
     const payload = Buffer.from(JSON.stringify({
       type: 'client-request',
       rpcId: `dshpw-legacy-owner-${randomBytes(12).toString('hex')}`,
@@ -1254,7 +1309,7 @@ export function createGatewayServer(
                 reject(new Error('session.history returned no complete oldest-prefix page'));
                 return;
               }
-              const owner = inferred ?? adminUserId;
+              const owner = inferred ?? currentAdminUserId();
               resolve(owner === null ? null : claimSessionOwner(sessionId, owner));
             } catch (error) {
               reject(error);
@@ -1266,7 +1321,284 @@ export function createGatewayServer(
       request.on('timeout', () => request.destroy(new Error('session.history upstream timeout')));
       request.on('error', reject);
       request.end(payload);
-    }).catch((error: unknown) => {
+    });
+    return pending;
+  }
+
+  interface RemoteHistoryPage {
+    readonly records: readonly unknown[];
+    readonly firstSeq: number | null;
+    readonly hasMore: boolean;
+  }
+
+  /** Validate chronological alpha.1 history records at one immutable log cut. */
+  function remoteHistoryPageOf(
+    value: unknown,
+    throughSeq: number,
+    beforeSeq: number | undefined,
+  ): RemoteHistoryPage | null {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+    const page = value as Record<string, unknown>;
+    if (
+      !hasExactKeys(page, ['records', 'hasMore']) ||
+      !Array.isArray(page.records) ||
+      typeof page.hasMore !== 'boolean'
+    ) return null;
+    let previousSeq = -1;
+    for (const item of page.records) {
+      if (item === null || typeof item !== 'object' || Array.isArray(item)) return null;
+      const record = item as Record<string, unknown>;
+      if (
+        !hasExactKeys(record, ['type', 'event']) ||
+        (record.type !== 'event' && record.type !== 'chunks') ||
+        record.event === null ||
+        typeof record.event !== 'object' ||
+        Array.isArray(record.event)
+      ) return null;
+      const event = record.event as Record<string, unknown>;
+      const validKeys = record.type === 'event'
+        ? hasOnlyKeys(event, ['type', 'seq', 'time', 'data'], ['sourceEventSeqs', 'surfaceOp'])
+        : hasExactKeys(event, ['type', 'seq', 'time', 'data']);
+      if (
+        !validKeys ||
+        typeof event.type !== 'string' || event.type.length === 0 ||
+        (record.type === 'chunks' && !event.type.startsWith('chunkrow/')) ||
+        !Number.isSafeInteger(event.seq) || (event.seq as number) < 0 ||
+        (event.seq as number) <= previousSeq ||
+        (event.seq as number) > throughSeq ||
+        (beforeSeq !== undefined && (event.seq as number) >= beforeSeq) ||
+        typeof event.time !== 'number' || !Number.isFinite(event.time)
+      ) return null;
+      if (
+        Object.hasOwn(event, 'sourceEventSeqs') &&
+        (!Array.isArray(event.sourceEventSeqs) || !event.sourceEventSeqs.every(
+          (seq) => Number.isSafeInteger(seq) && (seq as number) >= 0,
+        ))
+      ) return null;
+      previousSeq = event.seq as number;
+    }
+    const windowEnd = Math.min(throughSeq + 1, beforeSeq ?? throughSeq + 1);
+    if (page.records.length === 0) {
+      if (page.hasMore || windowEnd > 0) return null;
+    } else {
+      const firstSeq = ((page.records[0] as Record<string, unknown>).event as Record<string, unknown>).seq;
+      if ((page.hasMore && firstSeq === 0) || (!page.hasMore && firstSeq !== 0)) return null;
+    }
+    return {
+      records: page.records,
+      firstSeq: page.records.length === 0
+        ? null
+        : ((page.records[0] as Record<string, unknown>).event as Record<string, unknown>).seq as number,
+      hasMore: page.hasMore,
+    };
+  }
+
+  type RemoteHistoryRead =
+    | { readonly kind: 'page'; readonly page: RemoteHistoryPage }
+    | { readonly kind: 'past-cursor' };
+
+  /** Read one strict alpha.1 session/page response with the administrator principal. */
+  function readRemoteHistoryPage(
+    sessionId: string,
+    throughSeq: number,
+    beforeSeq: number | undefined,
+    maxMessages: number,
+    allowPastCursor: boolean,
+    timeoutMs: number,
+  ): Promise<RemoteHistoryRead> {
+    const rpcId = `dshpw-owner-page-${randomBytes(12).toString('hex')}`;
+    const requestValue = {
+      address: { kind: 'session', sessionId },
+      throughSeq,
+      ...(beforeSeq === undefined ? {} : { beforeSeq }),
+      maxMessages,
+    };
+    const payload = Buffer.from(JSON.stringify({
+      type: 'client-request',
+      rpcId,
+      method: 'session/page',
+      payload: { args: { request: requestValue } },
+    }), 'utf8');
+    return new Promise<RemoteHistoryRead>((resolve, reject) => {
+      const request = http.request(
+        {
+          hostname: upstreamHost,
+          port: upstreamPort,
+          path: '/api/session/page',
+          method: 'POST',
+          agent: upstreamAgent,
+          headers: {
+            host: upstreamAuthority,
+            accept: 'application/json',
+            'accept-encoding': 'identity',
+            'content-type': 'application/json',
+            'content-length': String(payload.length),
+            ...upstreamAuthenticationHeaders(),
+            ...internalAdminPrincipalHeaders(),
+          },
+          timeout: timeoutMs,
+        },
+        (response) => {
+          const status = response.statusCode ?? 500;
+          if (status < 200 || status >= 300) {
+            response.resume();
+            reject(new Error('session ownership page returned a non-success status'));
+            return;
+          }
+          const chunks: Buffer[] = [];
+          let size = 0;
+          response.on('data', (chunk: Buffer) => {
+            size += chunk.length;
+            if (size > MAX_BUFFER_BYTES) {
+              response.destroy(new OversizeResponseError());
+              return;
+            }
+            chunks.push(chunk);
+          });
+          response.on('end', () => {
+            try {
+              const decoded: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+              if (decoded === null || typeof decoded !== 'object' || Array.isArray(decoded)) {
+                throw new Error('session ownership page returned an invalid envelope');
+              }
+              const envelope = decoded as Record<string, unknown>;
+              if (
+                !hasExactKeys(envelope, ['type', 'rpcId', 'result']) ||
+                envelope.type !== 'server-response' ||
+                envelope.rpcId !== rpcId ||
+                envelope.result === null ||
+                typeof envelope.result !== 'object' ||
+                Array.isArray(envelope.result)
+              ) throw new Error('session ownership page returned an invalid envelope');
+              const result = envelope.result as Record<string, unknown>;
+              if (result.ok === false) {
+                const error = result.error;
+                if (
+                  !hasExactKeys(result, ['ok', 'error']) ||
+                  error === null ||
+                  typeof error !== 'object' ||
+                  Array.isArray(error) ||
+                  !hasExactKeys(error as Record<string, unknown>, ['code', 'message', 'details']) ||
+                  typeof (error as Record<string, unknown>).code !== 'string' ||
+                  typeof (error as Record<string, unknown>).message !== 'string' ||
+                  (error as Record<string, unknown>).details === null ||
+                  typeof (error as Record<string, unknown>).details !== 'object' ||
+                  Array.isArray((error as Record<string, unknown>).details)
+                ) throw new Error('session ownership page returned an invalid error');
+                if (allowPastCursor && (error as Record<string, unknown>).code === 'bad-request') {
+                  resolve({ kind: 'past-cursor' });
+                  return;
+                }
+                throw new Error('session ownership page was rejected');
+              }
+              if (!hasExactKeys(result, ['ok', 'value']) || result.ok !== true) {
+                throw new Error('session ownership page returned an invalid result');
+              }
+              const page = remoteHistoryPageOf(result.value, throughSeq, beforeSeq);
+              if (page === null) throw new Error('session ownership page returned invalid records');
+              resolve({ kind: 'page', page });
+            } catch (error) {
+              reject(error);
+            }
+          });
+          response.on('aborted', () => reject(new Error('session ownership page response was aborted')));
+          response.on('error', reject);
+        },
+      );
+      const absoluteTimer = setTimeout(
+        () => request.destroy(new Error('session ownership page timed out')),
+        timeoutMs,
+      );
+      absoluteTimer.unref();
+      request.once('close', () => clearTimeout(absoluteTimer));
+      request.on('timeout', () => request.destroy(new Error('session ownership page timed out')));
+      request.on('error', reject);
+      request.end(payload);
+    });
+  }
+
+  /** Resolve ownership from an immutable alpha.1 page cut without activating a cold Agent. */
+  async function resolveRemoteSessionOwnerViaPages(
+    sessionId: string,
+    deadline = Date.now() + SESSION_OWNERSHIP_BOOTSTRAP_TIMEOUT_MS,
+  ): Promise<number | null> {
+    let calls = 0;
+    const read = async (
+      throughSeq: number,
+      beforeSeq: number | undefined,
+      maxMessages: number,
+      allowPastCursor: boolean,
+    ): Promise<RemoteHistoryRead> => {
+      calls += 1;
+      if (calls > 256) throw new Error('session ownership evidence exceeded its page budget');
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error('session ownership evidence timed out');
+      return readRemoteHistoryPage(
+        sessionId,
+        throughSeq,
+        beforeSeq,
+        maxMessages,
+        allowPastCursor,
+        Math.min(5_000, remaining),
+      );
+    };
+
+    let lower = -1;
+    let upper = 0;
+    for (;;) {
+      // `beforeSeq: 0` keeps cursor probes payload-free even when the Session
+      // contains one very large message/tool span. The Host validates
+      // `throughSeq` against the durable cursor before applying this empty window.
+      const probe = await read(upper, 0, 1, true);
+      if (probe.kind === 'past-cursor') break;
+      lower = upper;
+      if (upper >= (Number.MAX_SAFE_INTEGER - 1) / 2) {
+        throw new Error('session ownership cursor exceeded its safe probe range');
+      }
+      upper = upper === 0 ? 1 : upper * 2 + 1;
+    }
+    while (upper - lower > 1) {
+      const middle = lower + Math.floor((upper - lower) / 2);
+      const probe = await read(middle, 0, 1, true);
+      if (probe.kind === 'page') lower = middle;
+      else upper = middle;
+    }
+
+    let beforeSeq: number | undefined;
+    for (;;) {
+      const readResult = await read(lower, beforeSeq, 512, false);
+      if (readResult.kind !== 'page') throw new Error('session ownership page cut became invalid');
+      const page = readResult.page;
+      if (!page.hasMore) {
+        const owner = ownerFromHistoryRecords(page.records) ?? currentAdminUserId();
+        return owner === null ? null : claimSessionOwner(sessionId, owner);
+      }
+      if (page.firstSeq === null || (beforeSeq !== undefined && page.firstSeq >= beforeSeq)) {
+        throw new Error('session ownership pages did not move backwards');
+      }
+      beforeSeq = page.firstSeq;
+    }
+  }
+
+  /**
+   * Resolve one pre-ownership-table session from the authenticated identity on its first prompt.
+   * A directory path alone is not identity evidence because administrators can work inside a
+   * subuser directory. Blank, pre-identity, malformed, or unverifiable histories stay with admin.
+   */
+  function resolveLegacySessionOwner(
+    sessionId: string,
+    deadline = Date.now() + SESSION_OWNERSHIP_BOOTSTRAP_TIMEOUT_MS,
+  ): Promise<number | null> {
+    const current = sessionOwner(sessionId);
+    if (current !== null) return Promise.resolve(current);
+    const active = legacyOwnerResolutions.get(sessionId);
+    if (active !== undefined) return active;
+
+    const pending = (
+      upstreamRemoteTransport
+        ? resolveRemoteSessionOwnerViaPages(sessionId, deadline)
+        : resolveLegacySessionOwnerViaHistory(sessionId)
+    ).catch((error: unknown) => {
       console.warn('[dsh-passwords] 旧会话归属证据读取失败，保持不可见:', error instanceof Error ? error.message : String(error));
       return null;
     }).finally(() => {
@@ -1276,18 +1608,58 @@ export function createGatewayServer(
     return pending;
   }
 
-  /** Record one trusted Host session.list snapshot and resolve legacy owners from durable prompts. */
-  async function observeSessionIdentitySnapshot(value: unknown): Promise<Set<string>> {
-    const sessionIds = collectSessionIds(value);
+  interface SessionIdentitySnapshot {
+    readonly sessionIds: Set<string>;
+    /** Every row with a cwd either had an owner already or gained one in this bounded pass. */
+    readonly ownershipComplete: boolean;
+  }
+
+  /** Resolve unowned Session rows in one bounded worker pool. */
+  async function resolveSessionIdentitySnapshot(
+    sessionIds: Set<string>,
+    sessionCwds: ReadonlyMap<string, string>,
+    deadline = Date.now() + SESSION_OWNERSHIP_BOOTSTRAP_TIMEOUT_MS,
+  ): Promise<SessionIdentitySnapshot> {
     const unresolved: string[] = [];
-    for (const [sessionId, cwd] of collectSessionCwd(value)) {
+    for (const [sessionId, cwd] of sessionCwds) {
       sessionCwdById.set(sessionId, cwd);
       if (sessionOwner(sessionId) === null) unresolved.push(sessionId);
     }
-    for (const sessionId of unresolved) {
-      await resolveLegacySessionOwner(sessionId);
-    }
-    return sessionIds;
+    let nextIndex = 0;
+    let ownershipComplete = true;
+    const worker = async (): Promise<void> => {
+      for (;;) {
+        if (Date.now() >= deadline) {
+          ownershipComplete = false;
+          return;
+        }
+        const index = nextIndex++;
+        if (index >= unresolved.length) return;
+        const sessionId = unresolved[index]!;
+        try {
+          await resolveLegacySessionOwner(sessionId, deadline);
+        } catch {
+          // The per-Session resolver logs the concrete failure; this pass keeps the row unowned.
+        }
+        if (sessionOwner(sessionId) === null) ownershipComplete = false;
+      }
+    };
+    const workerCount = Math.min(SESSION_OWNERSHIP_BOOTSTRAP_CONCURRENCY, unresolved.length);
+    await Promise.all(Array.from({ length: workerCount }, worker));
+    if (nextIndex < unresolved.length) ownershipComplete = false;
+    return { sessionIds, ownershipComplete };
+  }
+
+  /** Record one trusted legacy session.list snapshot and resolve its legacy owners. */
+  function observeSessionIdentitySnapshot(
+    value: unknown,
+    deadline = Date.now() + SESSION_OWNERSHIP_BOOTSTRAP_TIMEOUT_MS,
+  ): Promise<SessionIdentitySnapshot> {
+    return resolveSessionIdentitySnapshot(
+      collectSessionIds(value),
+      collectSessionCwd(value),
+      deadline,
+    );
   }
 
   function collectWorkspaceRows(
@@ -1832,6 +2204,11 @@ export function createGatewayServer(
 
     try {
       await auth.setup({ setupKey, username, password }, meta);
+      if (upstreamRemoteTransport && alphaSessionOwnershipBootstrapState === 'failed') {
+        alphaSessionOwnershipBootstrapState = 'idle';
+        alphaSessionOwnershipBootstrapRetryAt = 0;
+        alphaSessionOwnershipBootstrapError = undefined;
+      }
       // F-07：初始化成功 → 固话派生密钥 + 轮换 SETUP_KEY + 删 setup-key.txt
       // （失败不阻断初始化，用户仍能进入登录页）
       try {
@@ -1974,6 +2351,9 @@ export function createGatewayServer(
     const database = await db.health().catch(() => false);
     let upstreamIndex = false;
     let workspaceList = false;
+    let workspaceListFailure: WorkspaceListFailure | null = null;
+    let sessionList = !upstreamRemoteTransport;
+    let sessionListFailure: SessionListFailure | null = null;
     try {
       await probeUpstreamBrowserSession();
       upstreamIndex = true;
@@ -1983,10 +2363,20 @@ export function createGatewayServer(
     try {
       await refreshWorkspaceAccessSnapshot();
       workspaceList = true;
-    } catch {
+    } catch (error) {
       workspaceList = false;
+      workspaceListFailure = workspaceListFailureOf(error);
     }
-    const upstreamReady = upstreamIndex && workspaceList;
+    if (upstreamRemoteTransport) {
+      try {
+        await probeAlphaSessionIdentityReadiness();
+        sessionList = true;
+      } catch (error) {
+        sessionList = false;
+        sessionListFailure = sessionListFailureOf(error);
+      }
+    }
+    const upstreamReady = upstreamIndex && workspaceList && sessionList;
     const ok = database && upstreamReady;
     res.status(ok ? 200 : 503).json({
       ok,
@@ -1994,6 +2384,10 @@ export function createGatewayServer(
       upstream: upstreamReady,
       upstreamIndex,
       workspaceList,
+      workspaceListFailure,
+      sessionList,
+      sessionListFailure,
+      sessionOwnerBootstrap: alphaSessionOwnershipBootstrapState,
     });
   });
 
@@ -2891,7 +3285,7 @@ export function createGatewayServer(
     return new URL(decoded.replace(/\/+/g, '/'), 'http://localhost').pathname;
   }
 
-  app.use((req, res, next) => {
+  app.use(async (req, res, next) => {
     let gatePath = '/';
     try {
       // Host 格式校验：拒绝含路径/控制字符/超长的畸形 Host（防 CRLF/Header 注入
@@ -3034,6 +3428,10 @@ export function createGatewayServer(
           denyRequest(req, res, lang, t(lang, 'gw.adminOnly'));
           return;
         }
+        if (DIRECTORY_PICKER_NATIVE_RE.test(requestPath)) {
+          denyRequest(req, res, lang, t(lang, 'gw.workspaceDenied'));
+          return;
+        }
         if (!perms.allow_upload && isUploadRequest(req.method, requestPath)) {
           denyRequest(req, res, lang, t(lang, 'gw.noUpload'));
           return;
@@ -3062,9 +3460,8 @@ export function createGatewayServer(
           return;
         }
         if (
-          (HOST_LIST_DIRECTORY_RE.test(requestPath) || isWorkspaceDirectoryCreate(requestPath)) &&
-          managedWorkspace === null &&
-          !perms.allow_workspace_create
+          (DIRECTORY_PICKER_LIST_RE.test(requestPath) || isWorkspaceDirectoryCreate(requestPath)) &&
+          managedWorkspace === null
         ) {
           denyRequest(req, res, lang, t(lang, 'gw.workspaceDenied'));
           return;
@@ -3103,6 +3500,15 @@ export function createGatewayServer(
         }
         // 附上权限，供后续文件夹限制中间件 / 代理 token 计量使用
         (req as Req).dshpwPerms = perms;
+        if (upstreamRemoteTransport && /^\/api\/session\/list$/.test(requestPath)) {
+          try {
+            await ensureAlphaSessionOwnershipBootstrap();
+          } catch (error) {
+            console.warn('[dsh-passwords] alpha 会话归属引导失败:', error instanceof Error ? error.message : String(error));
+            sendApiError(res, 502, 'UPSTREAM_UNAVAILABLE', 'session registry is unavailable');
+            return;
+          }
+        }
       }
       // ── 第三方插件纵深防御（所有登录用户，含主用户） ──
       // dsh-uploads 上传：高危 Web 可解释扩展名（.php/.jsp/.svg 等）拒绝——
@@ -3180,6 +3586,84 @@ export function createGatewayServer(
   const MAX_DECOMPRESSED_BYTES = 64 * 1024 * 1024;
   /** 安全过滤分支专属：解压超限时 fail-closed（502），不得透传未过滤内容 */
   class OversizeResponseError extends Error {}
+
+  type WorkspaceListFailure =
+    | 'admin-principal'
+    | 'http-400'
+    | 'http-401'
+    | 'http-403'
+    | 'http-404'
+    | 'http-415'
+    | 'http-5xx'
+    | 'http-other'
+    | 'rpc-error'
+    | 'invalid-envelope'
+    | 'invalid-stream-frame'
+    | 'stream-ended'
+    | 'invalid-json'
+    | 'response-too-large'
+    | 'timeout'
+    | 'connect'
+    | 'unknown';
+
+  class WorkspaceListRefreshError extends Error {
+    constructor(readonly failure: WorkspaceListFailure) {
+      super(failure);
+    }
+  }
+
+  function workspaceListHttpFailure(status: number): WorkspaceListFailure {
+    if (status === 400) return 'http-400';
+    if (status === 401) return 'http-401';
+    if (status === 403) return 'http-403';
+    if (status === 404) return 'http-404';
+    if (status === 415) return 'http-415';
+    if (status >= 500 && status <= 599) return 'http-5xx';
+    return 'http-other';
+  }
+
+  function workspaceListFailureOf(error: unknown): WorkspaceListFailure {
+    if (error instanceof WorkspaceListRefreshError) return error.failure;
+    if (error instanceof SyntaxError) return 'invalid-json';
+    if (error instanceof OversizeResponseError) return 'response-too-large';
+    const code = error !== null && typeof error === 'object'
+      ? (error as { code?: unknown }).code
+      : undefined;
+    if (
+      code === 'ECONNREFUSED'
+      || code === 'ECONNRESET'
+      || code === 'EHOSTUNREACH'
+      || code === 'ENETUNREACH'
+      || code === 'ENOTFOUND'
+      || code === 'EAI_AGAIN'
+      || code === 'EPIPE'
+    ) return 'connect';
+    if (code === 'ETIMEDOUT') return 'timeout';
+    if (code === 'WS_ERR_UNSUPPORTED_MESSAGE_LENGTH') return 'response-too-large';
+    if (error instanceof Error && error.message === 'internal Host reads require an administrator account') {
+      return 'admin-principal';
+    }
+    return 'unknown';
+  }
+
+  function assertSuccessfulWorkspaceListEnvelope(value: unknown): void {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new WorkspaceListRefreshError('invalid-envelope');
+    }
+    const envelope = value as Record<string, unknown>;
+    if (
+      envelope.result === null
+      || typeof envelope.result !== 'object'
+      || Array.isArray(envelope.result)
+    ) {
+      throw new WorkspaceListRefreshError('invalid-envelope');
+    }
+    const result = envelope.result as Record<string, unknown>;
+    if (result.ok === false) throw new WorkspaceListRefreshError('rpc-error');
+    if (result.ok !== true || !Object.prototype.hasOwnProperty.call(result, 'value')) {
+      throw new WorkspaceListRefreshError('invalid-envelope');
+    }
+  }
 
   /**
    * 有界解压：用 zlib 的 maxOutputLength 在分配内存前限制输出——事后 body.length 检查
@@ -3274,10 +3758,8 @@ export function createGatewayServer(
     bufferUpstream(upstreamRes, res, onEnd, 'fail', MAX_SESSION_HISTORY_BUFFER_BYTES);
   }
 
-  /** Refresh active workspace/session membership directly from the trusted upstream registry. */
-  function refreshWorkspaceAccessSnapshot(): Promise<void> {
-    if (workspaceSnapshotRefresh !== null) return workspaceSnapshotRefresh;
-    const snapshotRevision = ++nextWorkspaceSnapshotRevision;
+  /** Read the legacy unary workspace registry used by pre-alpha.1 Hosts. */
+  function refreshLegacyWorkspaceAccessSnapshot(snapshotRevision: number): Promise<void> {
     const payload = Buffer.from(JSON.stringify({
       type: 'client-request',
       rpcId: `dshpw-workspaces-${randomBytes(12).toString('hex')}`,
@@ -3306,7 +3788,7 @@ export function createGatewayServer(
         (response) => {
           if ((response.statusCode ?? 500) < 200 || (response.statusCode ?? 500) >= 300) {
             response.resume();
-            reject(new Error(`workspace.list upstream status ${String(response.statusCode ?? 0)}`));
+            reject(new WorkspaceListRefreshError(workspaceListHttpFailure(response.statusCode ?? 0)));
             return;
           }
           const chunks: Buffer[] = [];
@@ -3314,7 +3796,7 @@ export function createGatewayServer(
           response.on('data', (chunk: Buffer) => {
             size += chunk.length;
             if (size > MAX_BUFFER_BYTES) {
-              response.destroy(new OversizeResponseError());
+              response.destroy(new WorkspaceListRefreshError('response-too-large'));
               return;
             }
             chunks.push(chunk);
@@ -3325,7 +3807,9 @@ export function createGatewayServer(
               const decoded = String(response.headers['content-encoding'] ?? '').includes('gzip')
                 ? gunzipBounded(raw)
                 : raw;
-              replaceWorkspaceAccessSnapshot(JSON.parse(decoded.toString('utf8')), snapshotRevision);
+              const envelope: unknown = JSON.parse(decoded.toString('utf8'));
+              assertSuccessfulWorkspaceListEnvelope(envelope);
+              replaceWorkspaceAccessSnapshot(envelope, snapshotRevision);
               resolve();
             } catch (error) {
               reject(error);
@@ -3334,10 +3818,205 @@ export function createGatewayServer(
           response.on('error', reject);
         },
       );
-      request.on('timeout', () => request.destroy(new Error('workspace.list upstream timeout')));
+      request.on('timeout', () => request.destroy(new WorkspaceListRefreshError('timeout')));
       request.on('error', reject);
       request.end(payload);
-    }).catch((error: unknown) => {
+    });
+    return pending;
+  }
+
+  /** Test one parsed wire object for an exact set of own string keys. */
+  function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+    const keys = Reflect.ownKeys(value);
+    return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
+  }
+
+  /** Test one parsed wire object for required keys and a closed optional-key set. */
+  function hasOnlyKeys(
+    value: Record<string, unknown>,
+    required: readonly string[],
+    optional: readonly string[],
+  ): boolean {
+    const keys = Reflect.ownKeys(value);
+    return required.every((key) => Object.hasOwn(value, key)) && keys.every(
+      (key) => typeof key === 'string' && (required.includes(key) || optional.includes(key)),
+    );
+  }
+
+  /** Validate one complete workspace/follow opening item without retaining unrelated wire data. */
+  function workspaceBaselineOf(value: unknown): Record<string, unknown> | null {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+    const frame = value as Record<string, unknown>;
+    if (
+      frame.type !== 'baseline' ||
+      !hasExactKeys(frame, ['type', 'value']) ||
+      frame.value === null ||
+      typeof frame.value !== 'object' ||
+      Array.isArray(frame.value)
+    ) {
+      return null;
+    }
+    const baseline = frame.value as Record<string, unknown>;
+    if (
+      !hasExactKeys(baseline, ['items', 'archivedSessionIds']) ||
+      !Array.isArray(baseline.items) ||
+      !Array.isArray(baseline.archivedSessionIds)
+    ) return null;
+    if (!baseline.archivedSessionIds.every((id) => typeof id === 'string' && id.length > 0)) return null;
+    for (const item of baseline.items) {
+      if (item === null || typeof item !== 'object' || Array.isArray(item)) return null;
+      const workspace = item as Record<string, unknown>;
+      if (
+        !hasExactKeys(workspace, ['workspaceId', 'path', 'title', 'sessionIds', 'createdAt', 'updatedAt']) ||
+        typeof workspace.workspaceId !== 'string' || workspace.workspaceId.length === 0 ||
+        typeof workspace.path !== 'string' || workspace.path.length === 0 ||
+        typeof workspace.title !== 'string' ||
+        !Array.isArray(workspace.sessionIds) ||
+        !workspace.sessionIds.every((id) => typeof id === 'string' && id.length > 0) ||
+        typeof workspace.createdAt !== 'string' ||
+        typeof workspace.updatedAt !== 'string'
+      ) return null;
+    }
+    return baseline;
+  }
+
+  /** Read the first item from one authenticated alpha.1 Remote stream. */
+  function readRemoteOpeningItem(
+    endpoint: string,
+    payload: Record<string, unknown>,
+    timeoutMs = 5_000,
+  ): Promise<unknown> {
+    const streamId = `dshpw-stream-${randomBytes(12).toString('hex')}`;
+    return new Promise<unknown>((resolve, reject) => {
+      let active: WebSocket | null = null;
+      let settled = false;
+      let timer: NodeJS.Timeout | null = null;
+
+      const finish = (error: unknown | undefined, value?: unknown) => {
+        if (settled) return;
+        settled = true;
+        if (timer !== null) clearTimeout(timer);
+        const socket = active;
+        if (socket !== null) {
+          socket.removeAllListeners();
+          socket.on('error', () => undefined);
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: 'cancel', streamId }), () => socket.close(1000));
+          } else if (socket.readyState === WebSocket.CONNECTING) {
+            socket.terminate();
+          }
+        }
+        if (error === undefined) resolve(value);
+        else reject(error);
+      };
+      timer = setTimeout(() => {
+        finish(new WorkspaceListRefreshError('timeout'));
+      }, timeoutMs);
+      timer.unref();
+
+      try {
+        const wsProtocol = upstream.protocol === 'https:' ? 'wss:' : 'ws:';
+        active = new WebSocket(`${wsProtocol}//${upstreamAuthority}/api/remote.mux`, {
+          perMessageDeflate: false,
+          maxPayload: MAX_BUFFER_BYTES,
+          handshakeTimeout: timeoutMs + 1_500,
+          headers: {
+            Host: upstreamAuthority,
+            Origin: upstream.origin,
+            ...upstreamAuthenticationHeaders(),
+            ...internalAdminPrincipalHeaders(),
+          },
+        });
+        active.once('open', () => {
+          active?.send(JSON.stringify({
+            type: 'open',
+            streamId,
+            endpoint,
+            payload,
+          }));
+        });
+        active.once('unexpected-response', (_request, response) => {
+          response.resume();
+          finish(new WorkspaceListRefreshError(workspaceListHttpFailure(response.statusCode ?? 0)));
+        });
+        active.once('error', (error) => finish(error));
+        active.once('close', () => finish(new WorkspaceListRefreshError('stream-ended')));
+        active.on('message', (data, isBinary) => {
+          if (isBinary) {
+            finish(new WorkspaceListRefreshError('invalid-stream-frame'));
+            return;
+          }
+          let decoded: unknown;
+          try {
+            decoded = JSON.parse(data.toString());
+          } catch {
+            finish(new WorkspaceListRefreshError('invalid-json'));
+            return;
+          }
+          if (decoded === null || typeof decoded !== 'object' || Array.isArray(decoded)) {
+            finish(new WorkspaceListRefreshError('invalid-stream-frame'));
+            return;
+          }
+          const frame = decoded as Record<string, unknown>;
+          if (frame.streamId !== streamId) {
+            finish(new WorkspaceListRefreshError('invalid-stream-frame'));
+            return;
+          }
+          if (frame.type === 'error') {
+            const error = frame.error;
+            if (
+              !hasExactKeys(frame, ['type', 'streamId', 'error']) ||
+              error === null ||
+              typeof error !== 'object' ||
+              Array.isArray(error) ||
+              !hasExactKeys(error as Record<string, unknown>, ['code', 'message', 'details']) ||
+              typeof (error as Record<string, unknown>).code !== 'string' ||
+              typeof (error as Record<string, unknown>).message !== 'string' ||
+              (error as Record<string, unknown>).details === null ||
+              typeof (error as Record<string, unknown>).details !== 'object' ||
+              Array.isArray((error as Record<string, unknown>).details)
+            ) {
+              finish(new WorkspaceListRefreshError('invalid-stream-frame'));
+              return;
+            }
+            finish(new WorkspaceListRefreshError('rpc-error'));
+            return;
+          }
+          if (frame.type === 'end') {
+            finish(new WorkspaceListRefreshError(
+              hasExactKeys(frame, ['type', 'streamId']) ? 'stream-ended' : 'invalid-stream-frame',
+            ));
+            return;
+          }
+          if (frame.type !== 'item' || !hasExactKeys(frame, ['type', 'streamId', 'value'])) {
+            finish(new WorkspaceListRefreshError('invalid-stream-frame'));
+            return;
+          }
+          finish(undefined, frame.value);
+        });
+      } catch (error) {
+        finish(error);
+      }
+    });
+  }
+
+  /** Read one alpha.1 workspace/follow baseline over the authenticated Remote stream mux. */
+  async function refreshRemoteWorkspaceAccessSnapshot(snapshotRevision: number): Promise<void> {
+    const value = await readRemoteOpeningItem('workspace/follow', { args: {} });
+    const baseline = workspaceBaselineOf(value);
+    if (baseline === null) throw new WorkspaceListRefreshError('invalid-stream-frame');
+    replaceWorkspaceAccessSnapshot(baseline, snapshotRevision);
+  }
+
+  /** Refresh active workspace/session membership directly from the trusted upstream registry. */
+  function refreshWorkspaceAccessSnapshot(): Promise<void> {
+    if (workspaceSnapshotRefresh !== null) return workspaceSnapshotRefresh;
+    const snapshotRevision = ++nextWorkspaceSnapshotRevision;
+    const pending = (
+      upstreamRemoteTransport
+        ? refreshRemoteWorkspaceAccessSnapshot(snapshotRevision)
+        : refreshLegacyWorkspaceAccessSnapshot(snapshotRevision)
+    ).catch((error: unknown) => {
       workspaceSnapshotRetryAt = Date.now() + WORKSPACE_SNAPSHOT_RETRY_DELAY_MS;
       throw error;
     }).finally(() => {
@@ -3347,21 +4026,185 @@ export function createGatewayServer(
     return pending;
   }
 
-  /** Read all persisted/live session ids before treating an explicit create id as new. */
-  function refreshSessionIdentitySnapshot(): Promise<Set<string>> {
-    if (sessionIdentitySnapshotRefresh !== null) return sessionIdentitySnapshotRefresh;
-    const payload = Buffer.from(JSON.stringify({
-      type: 'client-request',
-      rpcId: `dshpw-sessions-${randomBytes(12).toString('hex')}`,
-      method: 'session.list',
-      payload: {},
-    }), 'utf8');
-    const pending = new Promise<Set<string>>((resolve, reject) => {
+  type SessionListFailure =
+    | 'admin-principal'
+    | 'http-400'
+    | 'http-401'
+    | 'http-403'
+    | 'http-404'
+    | 'http-415'
+    | 'http-5xx'
+    | 'http-other'
+    | 'rpc-error'
+    | 'invalid-envelope'
+    | 'invalid-json'
+    | 'response-too-large'
+    | 'timeout'
+    | 'connect'
+    | 'unknown';
+
+  class SessionListRefreshError extends Error {
+    constructor(readonly failure: SessionListFailure) {
+      super(failure);
+    }
+  }
+
+  function sessionListHttpFailure(status: number): SessionListFailure {
+    if (status === 400) return 'http-400';
+    if (status === 401) return 'http-401';
+    if (status === 403) return 'http-403';
+    if (status === 404) return 'http-404';
+    if (status === 415) return 'http-415';
+    if (status >= 500 && status <= 599) return 'http-5xx';
+    return 'http-other';
+  }
+
+  function sessionListFailureOf(error: unknown): SessionListFailure {
+    if (error instanceof SessionListRefreshError) return error.failure;
+    if (error instanceof SyntaxError) return 'invalid-json';
+    if (error instanceof OversizeResponseError) return 'response-too-large';
+    const code = error !== null && typeof error === 'object'
+      ? (error as { code?: unknown }).code
+      : undefined;
+    if (
+      code === 'ECONNREFUSED' || code === 'ECONNRESET' || code === 'EHOSTUNREACH' ||
+      code === 'ENETUNREACH' || code === 'ENOTFOUND' || code === 'EAI_AGAIN' || code === 'EPIPE'
+    ) return 'connect';
+    if (code === 'ETIMEDOUT') return 'timeout';
+    if (error instanceof Error && error.message === 'internal Host reads require an administrator account') {
+      return 'admin-principal';
+    }
+    return 'unknown';
+  }
+
+  /** Validate the fixed carrier fields of one Session projection baseline. */
+  function isAlphaSessionProjectionsBlock(value: unknown): boolean {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+    const projections = value as Record<string, unknown>;
+    return (
+      hasExactKeys(projections, ['asOfSeq', 'values']) &&
+      typeof projections.asOfSeq === 'number' &&
+      Number.isInteger(projections.asOfSeq) &&
+      projections.asOfSeq >= -1 &&
+      projections.values !== null &&
+      typeof projections.values === 'object' &&
+      !Array.isArray(projections.values)
+    );
+  }
+
+  /** Return the exact successful value from one alpha.1 session/list envelope. */
+  function alphaSessionListValueOf(value: unknown, rpcId: string): Record<string, unknown> {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new SessionListRefreshError('invalid-envelope');
+    }
+    const envelope = value as Record<string, unknown>;
+    if (
+      !hasExactKeys(envelope, ['type', 'rpcId', 'result']) ||
+      envelope.type !== 'server-response' ||
+      envelope.rpcId !== rpcId ||
+      envelope.result === null ||
+      typeof envelope.result !== 'object' ||
+      Array.isArray(envelope.result)
+    ) throw new SessionListRefreshError('invalid-envelope');
+    const result = envelope.result as Record<string, unknown>;
+    if (result.ok === false) {
+      const error = result.error;
+      if (
+        !hasExactKeys(result, ['ok', 'error']) ||
+        error === null ||
+        typeof error !== 'object' ||
+        Array.isArray(error) ||
+        !hasExactKeys(error as Record<string, unknown>, ['code', 'message', 'details']) ||
+        typeof (error as Record<string, unknown>).code !== 'string' ||
+        typeof (error as Record<string, unknown>).message !== 'string' ||
+        (error as Record<string, unknown>).details === null ||
+        typeof (error as Record<string, unknown>).details !== 'object' ||
+        Array.isArray((error as Record<string, unknown>).details)
+      ) {
+        throw new SessionListRefreshError('invalid-envelope');
+      }
+      throw new SessionListRefreshError('rpc-error');
+    }
+    if (!hasExactKeys(result, ['ok', 'value']) || result.ok !== true) {
+      throw new SessionListRefreshError('invalid-envelope');
+    }
+    const list = result.value;
+    if (
+      list === null ||
+      typeof list !== 'object' ||
+      Array.isArray(list) ||
+      !hasExactKeys(list as Record<string, unknown>, ['items']) ||
+      !Array.isArray((list as Record<string, unknown>).items)
+    ) throw new SessionListRefreshError('invalid-envelope');
+    for (const item of (list as Record<string, unknown>).items as unknown[]) {
+      if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+        throw new SessionListRefreshError('invalid-envelope');
+      }
+      const summary = item as Record<string, unknown>;
+      if (
+        !hasOnlyKeys(
+          summary,
+          ['sessionId', 'updatedAt', 'running', 'blank'],
+          ['parentSessionId', 'origin', 'cwd', 'projections'],
+        ) ||
+        typeof summary.sessionId !== 'string' || summary.sessionId.length === 0 ||
+        typeof summary.updatedAt !== 'number' || !Number.isFinite(summary.updatedAt) ||
+        typeof summary.running !== 'boolean' ||
+        typeof summary.blank !== 'boolean' ||
+        (Object.hasOwn(summary, 'parentSessionId') && (
+          typeof summary.parentSessionId !== 'string' || summary.parentSessionId.length === 0
+        )) ||
+        (Object.hasOwn(summary, 'origin') && summary.origin !== 'subagent') ||
+        (Object.hasOwn(summary, 'cwd') && typeof summary.cwd !== 'string') ||
+        (Object.hasOwn(summary, 'projections') && !isAlphaSessionProjectionsBlock(summary.projections))
+      ) throw new SessionListRefreshError('invalid-envelope');
+    }
+    return list as Record<string, unknown>;
+  }
+
+  /** Read identities only from validated top-level alpha.1 SessionSummary rows. */
+  function alphaSessionIdentitiesOf(list: Record<string, unknown>): {
+    readonly sessionIds: Set<string>;
+    readonly sessionCwds: Map<string, string>;
+  } {
+    const sessionIds = new Set<string>();
+    const sessionCwds = new Map<string, string>();
+    for (const item of list.items as Array<Record<string, unknown>>) {
+      const sessionId = item.sessionId as string;
+      sessionIds.add(sessionId);
+      if (typeof item.cwd === 'string' && item.cwd.length > 0) sessionCwds.set(sessionId, item.cwd);
+    }
+    return { sessionIds, sessionCwds };
+  }
+
+  /** Read one trusted session registry using one exact Host transport generation. */
+  function readSessionIdentitySnapshot(
+    legacy: boolean,
+    options: { readonly resolveOwners?: boolean; readonly deadline?: number } = {},
+  ): Promise<SessionIdentitySnapshot> {
+    const deadline = options.deadline ?? Date.now() + SESSION_OWNERSHIP_BOOTSTRAP_TIMEOUT_MS;
+    const timeoutMs = Math.min(5_000, deadline - Date.now());
+    if (timeoutMs <= 0) return Promise.reject(new SessionListRefreshError('timeout'));
+    const rpcId = `dshpw-sessions-${randomBytes(12).toString('hex')}`;
+    const payload = Buffer.from(JSON.stringify(legacy
+      ? {
+          type: 'client-request',
+          rpcId,
+          method: 'session.list',
+          payload: {},
+        }
+      : {
+          type: 'client-request',
+          rpcId,
+          method: 'session/list',
+          payload: { args: { _request: {} } },
+        }), 'utf8');
+    return new Promise<SessionIdentitySnapshot>((resolve, reject) => {
       const request = http.request(
         {
           hostname: upstreamHost,
           port: upstreamPort,
-          path: '/api/session.list',
+          path: legacy ? '/api/session.list' : '/api/session/list',
           method: 'POST',
           agent: upstreamAgent,
           headers: {
@@ -3373,12 +4216,12 @@ export function createGatewayServer(
             ...upstreamAuthenticationHeaders(),
             ...internalAdminPrincipalHeaders(),
           },
-          timeout: 5000,
+          timeout: timeoutMs,
         },
         (response) => {
           if ((response.statusCode ?? 500) < 200 || (response.statusCode ?? 500) >= 300) {
             response.resume();
-            reject(new Error(`session.list upstream status ${String(response.statusCode ?? 0)}`));
+            reject(new SessionListRefreshError(sessionListHttpFailure(response.statusCode ?? 0)));
             return;
           }
           const chunks: Buffer[] = [];
@@ -3386,32 +4229,119 @@ export function createGatewayServer(
           response.on('data', (chunk: Buffer) => {
             size += chunk.length;
             if (size > MAX_BUFFER_BYTES) {
-              response.destroy(new OversizeResponseError());
+              response.destroy(new SessionListRefreshError('response-too-large'));
               return;
             }
             chunks.push(chunk);
           });
           response.on('end', () => {
             try {
-              const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-              const success = successfulRpcValue(parsed);
-              if (success === null) throw new Error('session.list returned no successful value');
-              void observeSessionIdentitySnapshot(success).then(resolve, reject);
+              const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+              const success = legacy ? successfulRpcValue(parsed) : alphaSessionListValueOf(parsed, rpcId);
+              if (success === null) throw new SessionListRefreshError('rpc-error');
+              const alphaIdentities = legacy ? null : alphaSessionIdentitiesOf(success as Record<string, unknown>);
+              if (options.resolveOwners === false) {
+                resolve({
+                  sessionIds: alphaIdentities?.sessionIds ?? collectSessionIds(success),
+                  ownershipComplete: true,
+                });
+                return;
+              }
+              const snapshot = alphaIdentities === null
+                ? observeSessionIdentitySnapshot(success, deadline)
+                : resolveSessionIdentitySnapshot(
+                    alphaIdentities.sessionIds,
+                    alphaIdentities.sessionCwds,
+                    deadline,
+                  );
+              void snapshot.then(resolve, reject);
             } catch (error) {
               reject(error);
             }
           });
+          response.on('aborted', () => reject(new SessionListRefreshError('connect')));
           response.on('error', reject);
         },
       );
-      request.on('timeout', () => request.destroy(new Error('session.list upstream timeout')));
+      const absoluteTimer = setTimeout(
+        () => request.destroy(new SessionListRefreshError('timeout')),
+        timeoutMs,
+      );
+      absoluteTimer.unref();
+      request.once('close', () => clearTimeout(absoluteTimer));
+      request.on('timeout', () => request.destroy(new SessionListRefreshError('timeout')));
       request.on('error', reject);
       request.end(payload);
+    });
+  }
+
+  /** Read all persisted/live session ids before treating an explicit create id as new. */
+  function refreshSessionIdentitySnapshot(): Promise<SessionIdentitySnapshot> {
+    if (sessionIdentitySnapshotRefresh !== null) return sessionIdentitySnapshotRefresh;
+    const pending = readSessionIdentitySnapshot(!upstreamRemoteTransport, {
+      deadline: Date.now() + SESSION_OWNERSHIP_BOOTSTRAP_TIMEOUT_MS,
     }).finally(() => {
       if (sessionIdentitySnapshotRefresh === pending) sessionIdentitySnapshotRefresh = null;
     });
     sessionIdentitySnapshotRefresh = pending;
     return pending;
+  }
+
+  /** Complete one shared bounded admin scan before alpha.1 exposes tenant Session registries. */
+  function ensureAlphaSessionOwnershipBootstrap(): Promise<void> {
+    if (!upstreamRemoteTransport) return Promise.resolve();
+    const now = Date.now();
+    if (alphaSessionOwnershipBootstrapState === 'ready') return Promise.resolve();
+    if (
+      alphaSessionOwnershipBootstrapState === 'partial' &&
+      now < alphaSessionOwnershipBootstrapRetryAt
+    ) return Promise.resolve();
+    if (
+      alphaSessionOwnershipBootstrapState === 'failed' &&
+      now < alphaSessionOwnershipBootstrapRetryAt
+    ) return Promise.reject(alphaSessionOwnershipBootstrapError);
+    if (alphaSessionOwnershipBootstrapRefresh !== null) return alphaSessionOwnershipBootstrapRefresh;
+
+    alphaSessionOwnershipBootstrapState = 'running';
+    const pending = refreshSessionIdentitySnapshot().then((snapshot) => {
+      alphaSessionOwnershipBootstrapState = snapshot.ownershipComplete ? 'ready' : 'partial';
+      alphaSessionOwnershipBootstrapRetryAt = snapshot.ownershipComplete
+        ? 0
+        : Date.now() + SESSION_OWNERSHIP_BOOTSTRAP_RETRY_DELAY_MS;
+      alphaSessionOwnershipBootstrapError = undefined;
+    }).catch((error: unknown) => {
+      alphaSessionOwnershipBootstrapState = 'failed';
+      alphaSessionOwnershipBootstrapRetryAt = Date.now() + SESSION_OWNERSHIP_BOOTSTRAP_RETRY_DELAY_MS;
+      alphaSessionOwnershipBootstrapError = error;
+      throw error;
+    }).finally(() => {
+      if (alphaSessionOwnershipBootstrapRefresh === pending) {
+        alphaSessionOwnershipBootstrapRefresh = null;
+      }
+    });
+    alphaSessionOwnershipBootstrapRefresh = pending;
+    return pending;
+  }
+
+  /** Prove alpha.1 session/list remains exact while preserving the completed bootstrap state. */
+  async function probeAlphaSessionIdentityReadiness(): Promise<void> {
+    if (!upstreamRemoteTransport) return;
+    if (
+      alphaSessionOwnershipBootstrapState === 'idle' ||
+      alphaSessionOwnershipBootstrapState === 'running' ||
+      alphaSessionOwnershipBootstrapState === 'failed' ||
+      (
+        alphaSessionOwnershipBootstrapState === 'partial' &&
+        Date.now() >= alphaSessionOwnershipBootstrapRetryAt
+      )
+    ) {
+      await ensureAlphaSessionOwnershipBootstrap();
+      return;
+    }
+    await readSessionIdentitySnapshot(false, {
+      resolveOwners: false,
+      deadline: Date.now() + SESSION_OWNERSHIP_BOOTSTRAP_TIMEOUT_MS,
+    });
   }
 
   /**
@@ -3652,7 +4582,7 @@ export function createGatewayServer(
         const contentType = String(upstreamRes.headers['content-type'] ?? '');
         const encoding = String(upstreamRes.headers['content-encoding'] ?? '');
         const isSessionHistoryResponse =
-          req.method === 'POST' && /^\/api\/session[.\/]history$/.test(proxyPath);
+          req.method === 'POST' && /^\/api\/session[.\/](?:history|page)$/.test(proxyPath);
         const isRestrictedSessionHistoryResponse =
           isSessionHistoryResponse && reqAs.dshpwPerms !== undefined;
         if (
@@ -3785,7 +4715,7 @@ export function createGatewayServer(
         // ── host.listDirectory 响应：子用户只看到本人专属根目录及其内容 ──
         if (
           req.method === 'POST' &&
-          HOST_LIST_DIRECTORY_RE.test(proxyPath) &&
+          DIRECTORY_PICKER_LIST_RE.test(proxyPath) &&
           reqAs.dshpwUser !== undefined &&
           reqAs.dshpwManagedWorkspaceRoot !== undefined
         ) {
@@ -4010,7 +4940,7 @@ export function createGatewayServer(
                 const enc = String(upstreamRes.headers['content-encoding'] ?? '');
                 if (enc.includes('gzip')) body = gunzipBounded(body);
                 const parsed = JSON.parse(body.toString('utf8'));
-                await observeSessionIdentitySnapshot(parsed);
+                if (!upstreamRemoteTransport) await observeSessionIdentitySnapshot(parsed);
 
                 // Durable ownership is the tenant boundary. Workspace membership and archive state
                 // control grouping; neither revokes an owned session whose directory remains allowed.
@@ -4124,7 +5054,7 @@ export function createGatewayServer(
           req.method === 'POST' &&
           reqAs.dshpwPerms !== undefined &&
           reqAs.dshpwPerms.allowed_agent_presets !== null &&
-          /^\/api\/agentPreset[.\/]list$/.test(proxyPath)
+          /^\/api\/agentPresets?[.\/]list$/.test(proxyPath)
         ) {
           bufferUpstream(upstreamRes, res, (raw) => {
             try {
@@ -4153,6 +5083,7 @@ export function createGatewayServer(
                   const valueRecord = value as Record<string, unknown>;
                   if ('items' in valueRecord) valueRecord.items = filterItems(valueRecord.items);
                   if ('presets' in valueRecord) valueRecord.presets = filterItems(valueRecord.presets);
+                  if ('authorable' in valueRecord) valueRecord.authorable = false;
                 }
               }
               const out = Buffer.from(JSON.stringify(parsed), 'utf8');
@@ -4313,8 +5244,8 @@ export function createGatewayServer(
       reqAs.dshpwManagedWorkspaceRoot !== undefined &&
       req.method === 'POST' &&
       (
-        HOST_LIST_DIRECTORY_RE.test(proxyPath) ||
-        HOST_CREATE_DIRECTORY_RE.test(proxyPath) ||
+        DIRECTORY_PICKER_LIST_RE.test(proxyPath) ||
+        DIRECTORY_PICKER_CREATE_RE.test(proxyPath) ||
         isWorkspaceCreate(proxyPath) ||
         isWorkspaceDeleteOrRename(proxyPath)
       );
@@ -4325,6 +5256,7 @@ export function createGatewayServer(
         needsManagedWorkspaceCheck ||
         isWorkspaceDeleteOrRename(proxyPath) ||
         WORKSPACE_ENDPOINT_RE.test(proxyPath) ||
+        SESSION_OPEN_WORKSPACE_PATH_RE.test(proxyPath) ||
         isAionuiPanel(proxyPath)
       );
     const needsSandboxCheck =
@@ -4347,7 +5279,7 @@ export function createGatewayServer(
       reqAs.dshpwPerms !== undefined &&
       reqAs.dshpwPerms.sandbox_mode !== null &&
       (req.method === 'POST' || req.method === 'PUT') &&
-      /^\/api\/respond$/.test(proxyPath);
+      /^(?:\/api\/respond|\/api\/\$events\/result)$/.test(proxyPath);
     // 会话作用域 RPC（history/prompt/respond/archive/delete/rename/fork 等）
     // 必须位于已开启工作区且未被管理员逐会话关闭。
     const needsOwnershipCheck =
@@ -4356,6 +5288,9 @@ export function createGatewayServer(
       (
         SESSION_SCOPED_RE.test(proxyPath) ||
         SUBAGENT_SCOPED_RE.test(proxyPath) ||
+        COMMANDS_SCOPED_RE.test(proxyPath) ||
+        GOALS_SCOPED_RE.test(proxyPath) ||
+        MESSAGE_FEEDBACK_SCOPED_RE.test(proxyPath) ||
         AT_FILE_SEARCH_RE.test(proxyPath) ||
         AGENT_PRESET_SELECT_RE.test(proxyPath) ||
         WORKSPACE_ARCHIVE_SESSION_RE.test(proxyPath)
@@ -4368,7 +5303,7 @@ export function createGatewayServer(
         /^\/api\/session[.\/](create|fork|prompt)$/.test(proxyPath) ||
         AGENT_PRESET_SELECT_RE.test(proxyPath)
       );
-    const agentPresetMutation = /^\/api\/agentPreset[.\/](copy|openDocument|remove|read)$/.test(proxyPath);
+    const agentPresetMutation = /^\/api\/agentPresets?[.\/](copy|openDocument|remove|read|deletePreset)$/.test(proxyPath);
     if (
       reqAs.dshpwPerms !== undefined &&
       reqAs.dshpwPerms.allowed_agent_presets !== null &&
@@ -4492,7 +5427,9 @@ export function createGatewayServer(
           ) {
             reqAs.dshpwAgentPreset = selectedPreset;
           }
-          if (requiresExplicitPreset) reqAs.dshpwSelectedSessionId = [...sessionIds][0];
+          if (requiresExplicitPreset) {
+            reqAs.dshpwSelectedSessionId = extractSessionId(bodyObj) ?? extractAgentId(bodyObj) ?? undefined;
+          }
         }
 
         // dsh-ssh SSRF 封堵：创建/修改主机时 body.host 命中私网/回环 → 403。
@@ -4522,9 +5459,18 @@ export function createGatewayServer(
 
         if (needsFolderCheck) {
           let targetPath: string | null = null;
-          const isWorkspaceRename = /^\/api\/workspace[.\/](rename|update)([.\/]|$)/.test(proxyPath);
-          const renamePaths = isWorkspaceRename ? extractWorkspaceRenamePaths(bodyObj) : null;
-          if (isWorkspaceRename) {
+          const requestMethod = rpcMethodForPath(proxyPath);
+          const authorizationPayload = rpcPayloadOf(bodyObj, requestMethod);
+          if (authorizationPayload === null) {
+            upstreamReq.destroy();
+            denyRequest(req, res, lang, t(lang, 'gw.folderDenied'));
+            return;
+          }
+          const isLegacyWorkspacePathRename = /^\/api\/workspace\.(rename|update)(?:[./]|$)/.test(proxyPath);
+          const renamePaths = isLegacyWorkspacePathRename
+            ? extractWorkspaceRenamePaths(authorizationPayload)
+            : null;
+          if (isLegacyWorkspacePathRename) {
             const oldPath = renamePaths?.oldPath ?? null;
             const newPath = renamePaths?.newPath ?? null;
             const oldAllowed = oldPath !== null && (
@@ -4544,12 +5490,12 @@ export function createGatewayServer(
             }
             targetPath = oldPath;
           } else if (needsManagedWorkspaceCheck) {
-            targetPath = extractPathFromBody(bodyObj);
-            if (targetPath === null && HOST_LIST_DIRECTORY_RE.test(proxyPath)) {
+            targetPath = extractPathFromBody(authorizationPayload);
+            if (targetPath === null && DIRECTORY_PICKER_LIST_RE.test(proxyPath)) {
               targetPath = reqAs.dshpwManagedWorkspaceRoot!;
             }
             if (targetPath === null) {
-              const workspaceId = extractWorkspaceId(bodyObj);
+              const workspaceId = extractWorkspaceId(authorizationPayload);
               if (workspaceId !== null) {
                 targetPath = workspacePathById.get(workspaceId) ?? null;
                 if (targetPath === null) {
@@ -4567,13 +5513,19 @@ export function createGatewayServer(
               }
             }
             const canonical = targetPath === null ? null : managedPathFor(reqAs.dshpwUser!, targetPath);
-            if (canonical === null || !setRpcPayloadPath(bodyObj, canonical)) {
+            const rewritesPath = DIRECTORY_PICKER_LIST_RE.test(proxyPath) ||
+              DIRECTORY_PICKER_CREATE_RE.test(proxyPath) ||
+              isWorkspaceCreate(proxyPath);
+            if (
+              canonical === null ||
+              (rewritesPath && !setRpcPayloadPath(bodyObj, canonical, requestMethod))
+            ) {
               upstreamReq.destroy();
               denyRequest(req, res, lang, t(lang, 'gw.folderDenied'));
               return;
             }
-            if (HOST_CREATE_DIRECTORY_RE.test(proxyPath)) {
-              const name = rpcPayloadOf(bodyObj)?.name;
+            if (DIRECTORY_PICKER_CREATE_RE.test(proxyPath)) {
+              const name = rpcPayloadOf(bodyObj, rpcMethodForPath(proxyPath))?.name;
               if (
                 typeof name !== 'string' ||
                 name.trim() === '' ||
@@ -4601,9 +5553,9 @@ export function createGatewayServer(
               return;
             }
           } else {
-            targetPath = extractPathFromBody(bodyObj);
+            targetPath = extractPathFromBody(authorizationPayload);
             if (targetPath === null) {
-              const workspaceId = extractWorkspaceId(bodyObj);
+              const workspaceId = extractWorkspaceId(authorizationPayload);
               if (workspaceId !== null) {
                 targetPath = workspacePathById.get(workspaceId) ?? null;
                 if (targetPath === null) {
@@ -4639,6 +5591,15 @@ export function createGatewayServer(
             upstreamReq.destroy();
             denyRequest(req, res, lang, t(lang, 'gw.folderDenied'));
             return;
+          }
+          if (SESSION_OPEN_WORKSPACE_PATH_RE.test(proxyPath)) {
+            const canonical = targetPath === null ? null : canonicalCandidate(targetPath);
+            if (canonical === null) {
+              upstreamReq.destroy();
+              denyRequest(req, res, lang, t(lang, 'gw.folderDenied'));
+              return;
+            }
+            reqAs.dshpwOpenWorkspacePath = canonical;
           }
           if (
             /^\/api\/workspace[.\/](remove|delete)([.\/]|$)/.test(proxyPath) &&
@@ -4686,7 +5647,7 @@ export function createGatewayServer(
             }
             if (owner === null) {
               try {
-                knownUpstreamSessionIds = await refreshSessionIdentitySnapshot();
+                knownUpstreamSessionIds = (await refreshSessionIdentitySnapshot()).sessionIds;
               } catch (error) {
                 upstreamReq.destroy();
                 console.warn('[dsh-passwords] session.create 会话身份快照刷新失败:', error instanceof Error ? error.message : String(error));
@@ -4777,6 +5738,20 @@ export function createGatewayServer(
           }
         }
 
+        if (reqAs.dshpwPerms !== undefined && SESSION_SELECT_MODEL_RE.test(proxyPath)) {
+          const selection = rpcPayloadOf(bodyObj, rpcMethodForPath(proxyPath));
+          if (
+            selection === null ||
+            typeof selection.provider !== 'string' ||
+            typeof selection.model !== 'string' ||
+            !customerModelAllowed(selection.provider, selection.model)
+          ) {
+            upstreamReq.destroy();
+            denyRequest(req, res, lang, t(lang, 'gw.folderDenied'));
+            return;
+          }
+        }
+
         // Cross-session references are a Host-global capability: the resolver reads
         // source sessions after the gateway has authorized only the target prompt.
         // Subusers use workspace files for @ mentions, so reject canonical session
@@ -4793,7 +5768,13 @@ export function createGatewayServer(
             ? extractAgentId(bodyObj)
             : SUBAGENT_SCOPED_RE.test(proxyPath)
               ? findStringField(bodyObj, 'parentSessionId')
-            : extractSessionId(bodyObj) ?? parsedUrl.searchParams.get('sessionId');
+            : COMMANDS_SCOPED_RE.test(proxyPath) || GOALS_SCOPED_RE.test(proxyPath)
+              ? extractAgentId(bodyObj)
+            : AGENT_PRESET_SELECT_RE.test(proxyPath)
+              ? extractSessionId(bodyObj) ?? extractAgentId(bodyObj)
+              : extractSessionId(bodyObj) ??
+                findStringField(bodyObj, 'parentSessionId') ??
+                parsedUrl.searchParams.get('sessionId');
           if (sessionId === null) {
             upstreamReq.destroy();
             denyRequest(req, res, lang, t(lang, 'gw.folderDenied'));
@@ -4818,6 +5799,16 @@ export function createGatewayServer(
             upstreamReq.destroy();
             denyRequest(req, res, lang, t(lang, 'gw.folderDenied'));
             return;
+          }
+          if (SESSION_OPEN_WORKSPACE_PATH_RE.test(proxyPath)) {
+            const cwd = sessionCwdById.get(sessionId);
+            const canonicalCwd = cwd === undefined ? null : canonicalCandidate(cwd);
+            const target = reqAs.dshpwOpenWorkspacePath;
+            if (canonicalCwd === null || target === undefined || !pathWithin(canonicalCwd, target)) {
+              upstreamReq.destroy();
+              denyRequest(req, res, lang, t(lang, 'gw.folderDenied'));
+              return;
+            }
           }
         }
 
@@ -5136,6 +6127,242 @@ export function createGatewayServer(
     });
   }
 
+  /** Convert every ws text-carrier representation without accepting binary frames. */
+  function remoteFrameText(data: RawData): string {
+    if (Array.isArray(data)) return Buffer.concat(data).toString('utf8');
+    if (data instanceof ArrayBuffer) return Buffer.from(data).toString('utf8');
+    return Buffer.from(data).toString('utf8');
+  }
+
+  /** Test the fixed empty argument payload required by the forwarded event stream. */
+  function isEmptyRemoteEventPayload(value: unknown): boolean {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+    const payload = value as Record<string, unknown>;
+    if (!hasExactKeys(payload, ['args'])) return false;
+    if (payload.args === null || typeof payload.args !== 'object' || Array.isArray(payload.args)) return false;
+    return Reflect.ownKeys(payload.args).length === 0;
+  }
+
+  /**
+   * Terminate a restricted browser's alpha Remote mux and relay only known logical streams.
+   * The physical upstream socket is dedicated to one signed principal; event items receive an
+   * additional gateway ownership filter because several Host events are process-global.
+   */
+  function proxyTenantRemoteMuxWebSocket(
+    req: IncomingMessage,
+    socket: Duplex,
+    head: Buffer,
+    userId: number,
+    token: string,
+    credentialVersion: number,
+    releasePendingConnection: () => void,
+  ): void {
+    tenantWebSockets.handleUpgrade(req, socket, head, (downstream) => {
+      type LogicalStream = {
+        readonly endpoint: string;
+        readonly events: TenantRemoteEventFilter | null;
+      };
+      const streams = new Map<string, LogicalStream>();
+      const cancelledStreamIds = new Set<string>();
+      const pendingFrames: string[] = [];
+      let pendingBytes = 0;
+      let closed = false;
+      let upstreamWebSocket: WebSocket | null = null;
+      let unregisterTenantConnection = () => {};
+
+      const tenantCredentialIsCurrent = () => {
+        if (isTokenRevoked(token)) return false;
+        try {
+          const verified = auth.verifyToken(token);
+          const currentUser = db.getUserById(userId);
+          return verified.userId === userId &&
+            verified.cv === credentialVersion &&
+            currentUser !== null &&
+            currentUser.role !== 'admin' &&
+            currentUser.username === verified.username &&
+            currentUser.credential_version === credentialVersion;
+        } catch {
+          return false;
+        }
+      };
+
+      const closeBoth = (code = 1008, reason = 'invalid Remote stream frame') => {
+        if (closed) return;
+        closed = true;
+        unregisterTenantConnection();
+        streams.clear();
+        cancelledStreamIds.clear();
+        pendingFrames.length = 0;
+        pendingBytes = 0;
+        if (downstream.readyState === WebSocket.OPEN) downstream.close(code, reason);
+        else if (downstream.readyState === WebSocket.CONNECTING) downstream.terminate();
+        const active = upstreamWebSocket;
+        upstreamWebSocket = null;
+        if (active?.readyState === WebSocket.OPEN) active.close(code, reason);
+        else if (active?.readyState === WebSocket.CONNECTING) active.terminate();
+      };
+
+      unregisterTenantConnection = registerTenantConnection(
+        userId,
+        token,
+        (reason) => closeBoth(1008, reason),
+      );
+      releasePendingConnection();
+
+      const sendDownstream = (value: string) => {
+        if (closed || downstream.readyState !== WebSocket.OPEN) return;
+        downstream.send(value, (error) => {
+          if (error !== undefined && error !== null) closeBoth(1011, 'Remote stream delivery failed');
+        });
+      };
+
+      const sendUpstream = (value: string) => {
+        const active = upstreamWebSocket;
+        if (closed || active === null) return;
+        if (active.readyState === WebSocket.OPEN) {
+          active.send(value, (error) => {
+            if (error !== undefined && error !== null) closeBoth(1011, 'Remote stream relay failed');
+          });
+          return;
+        }
+        pendingBytes += Buffer.byteLength(value);
+        if (pendingFrames.length >= 64 || pendingBytes > 1024 * 1024) {
+          closeBoth(1008, 'too many pending Remote stream frames');
+          return;
+        }
+        pendingFrames.push(value);
+      };
+
+      downstream.on('message', (data, isBinary) => {
+        if (closed) return;
+        if (!tenantCredentialIsCurrent()) {
+          closeBoth(1008, 'session invalidated');
+          return;
+        }
+        const perms = effectivePermissions(userId);
+        if (perms.banned || isBinary) {
+          closeBoth(1008, isBinary ? 'text messages required' : 'account unavailable');
+          return;
+        }
+        try {
+          const text = remoteFrameText(data);
+          const frame = parseTenantRemoteClientFrame(text);
+          if (frame.type === 'open') {
+            if (
+              !TENANT_REMOTE_STREAM_ENDPOINTS.has(frame.endpoint) ||
+              streams.has(frame.streamId) ||
+              cancelledStreamIds.has(frame.streamId) ||
+              streams.size + cancelledStreamIds.size >= 256 ||
+              (frame.endpoint === '$events' && !isEmptyRemoteEventPayload(frame.payload))
+            ) {
+              throw new Error('Remote stream open is not allowed');
+            }
+            streams.set(frame.streamId, {
+              endpoint: frame.endpoint,
+              events: frame.endpoint === '$events' ? new TenantRemoteEventFilter() : null,
+            });
+          } else {
+            if (!streams.delete(frame.streamId)) throw new Error('unknown Remote stream cancellation');
+            cancelledStreamIds.add(frame.streamId);
+          }
+          sendUpstream(text);
+        } catch {
+          closeBoth(1008, 'invalid Remote stream request');
+        }
+      });
+
+      downstream.once('error', () => closeBoth(1011, 'Remote stream browser failed'));
+      downstream.once('close', () => closeBoth(1000, 'client closed'));
+
+      const currentUser = db.getUserById(userId);
+      const managedWorkspace = db.getManagedWorkspace(userId);
+      if (currentUser === null || currentUser.role === 'admin' || managedWorkspace === null) {
+        closeBoth(1008, 'managed workspace unavailable');
+        return;
+      }
+      const principalHeaders = signedPrincipalHeaders({
+        userId: currentUser.id,
+        username: currentUser.username,
+        role: currentUser.role,
+      }, config.internalSecret);
+      const wsProtocol = upstream.protocol === 'https:' ? 'wss:' : 'ws:';
+      const active = new WebSocket(`${wsProtocol}//${upstreamAuthority}/api/remote.mux`, {
+        perMessageDeflate: false,
+        maxPayload: 16 * 1024 * 1024,
+        handshakeTimeout: 10_000,
+        headers: {
+          Host: upstreamAuthority,
+          Origin: upstream.origin,
+          ...upstreamAuthenticationHeaders(),
+          ...principalHeaders,
+        },
+      });
+      upstreamWebSocket = active;
+      active.once('open', () => {
+        if (closed || active !== upstreamWebSocket) {
+          active.terminate();
+          return;
+        }
+        const queued = pendingFrames.splice(0);
+        pendingBytes = 0;
+        for (const queuedFrame of queued) {
+          if (active.readyState !== WebSocket.OPEN || closed) break;
+          active.send(queuedFrame, (error) => {
+            if (error !== undefined && error !== null) closeBoth(1011, 'Remote stream relay failed');
+          });
+        }
+      });
+      active.on('message', (data, isBinary) => {
+        if (closed || active !== upstreamWebSocket) return;
+        if (!tenantCredentialIsCurrent()) {
+          closeBoth(1008, 'session invalidated');
+          return;
+        }
+        if (isBinary) {
+          closeBoth(1011, 'invalid upstream Remote stream frame');
+          return;
+        }
+        try {
+          const text = remoteFrameText(data);
+          const frame = parseTenantRemoteServerFrame(text);
+          const stream = streams.get(frame.streamId);
+          if (stream === undefined) {
+            if (cancelledStreamIds.has(frame.streamId)) {
+              if (frame.type !== 'item') cancelledStreamIds.delete(frame.streamId);
+              return;
+            }
+            throw new Error('unknown upstream Remote stream id');
+          }
+          if (frame.type === 'item' && stream.events !== null) {
+            const perms = effectivePermissions(userId);
+            if (perms.banned) {
+              closeBoth(1008, 'account unavailable');
+              return;
+            }
+            const decision = stream.events.accept(frame.value, {
+              managedHome: managedWorkspace.path,
+              sessionAllowed: (sessionId) => subuserCanAccessSession(userId, perms, sessionId),
+            });
+            if (decision.kind === 'forward') {
+              sendDownstream(JSON.stringify({
+                type: 'item',
+                streamId: frame.streamId,
+                value: decision.value,
+              }));
+            }
+            return;
+          }
+          if (frame.type !== 'item') streams.delete(frame.streamId);
+          sendDownstream(text);
+        } catch {
+          closeBoth(1011, 'invalid upstream Remote stream frame');
+        }
+      });
+      active.once('error', () => closeBoth(1011, 'upstream Remote stream failed'));
+      active.once('close', () => closeBoth(1011, 'upstream Remote stream closed'));
+    });
+  }
+
   // ── 内存结构周期性清理（防长期运行缓慢积累） ───────────────────
   // sessionCache / revokedTokens / usageThrottle / usageReportThrottle /
   // setupAttempts / msgRate 都以 token / IP / userId 为键，平时按需淘汰，
@@ -5273,6 +6500,45 @@ export function createGatewayServer(
     // P1-3：WS 升级路径级权限——admin-only 端点对非 admin 拒绝
     if (userRole !== 'admin' && isAdminOnlyPluginEndpoint(req.method ?? 'GET', gatePath)) {
       rejectUpgrade(socket, 403);
+      return;
+    }
+
+    // Restricted browsers never receive a raw Remote mux: the gateway binds one
+    // signed upstream principal to the socket and filters every global event item.
+    if (
+      userRole !== 'admin' &&
+      authedUserId !== null &&
+      authedToken !== null &&
+      authedCredentialVersion !== null &&
+      gatePath === '/api/remote.mux'
+    ) {
+      const releasePendingConnection = registerTenantConnection(
+        authedUserId,
+        authedToken,
+        () => socket.destroy(),
+      );
+      socket.once('close', releasePendingConnection);
+      void (async () => {
+        await ensureAlphaSessionOwnershipBootstrap();
+        await ensureWorkspaceAccessSnapshot();
+      })().then(() => {
+        if (!socket.destroyed) {
+          proxyTenantRemoteMuxWebSocket(
+            req,
+            socket,
+            head,
+            authedUserId,
+            authedToken,
+            authedCredentialVersion,
+            releasePendingConnection,
+          );
+        } else {
+          releasePendingConnection();
+        }
+      }).catch(() => {
+        releasePendingConnection();
+        if (!socket.destroyed) rejectUpgrade(socket, 503);
+      });
       return;
     }
 

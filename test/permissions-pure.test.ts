@@ -14,6 +14,10 @@ import {
   isAdminOnlyPluginEndpoint,
   isSharedSettingsWrite,
   containsSessionReference,
+  COMMANDS_SCOPED_RE,
+  GOALS_SCOPED_RE,
+  SESSION_SCOPED_RE,
+  SUBAGENT_SCOPED_RE,
 } from '../src/permissions.js';
 
 test('第三方插件权限：子用户不能修改共享的 dsh-at-file 设置', () => {
@@ -32,6 +36,10 @@ test('共享设置权限：写入口和敏感描述仅管理员可用', () => {
   }
   assert.equal(isSharedSettingsWrite('/api/settings.describe'), false);
   assert.equal(isAdminOnlyPluginEndpoint('POST', '/api/settings.describe'), true);
+  assert.equal(isAdminOnlyPluginEndpoint('POST', '/api/settings/describe'), true);
+  assert.equal(isAdminOnlyPluginEndpoint('POST', '/api/settings/openSettingsDocument'), true);
+  assert.equal(isAdminOnlyPluginEndpoint('POST', '/api/settings/openAgentPresetDirectory'), true);
+  assert.equal(isAdminOnlyPluginEndpoint('POST', '/api/settings/canOpenAgentPresetDirectory'), true);
   assert.equal(isAdminOnlyPluginEndpoint('POST', '/api/dsh-web-ui-settings/describe'), true);
   assert.equal(isAdminOnlyPluginEndpoint('POST', '/api/dsh-web-ui-settings/mutate'), true);
   assert.equal(isAdminOnlyPluginEndpoint('POST', '/describe-image/native-images'), true);
@@ -40,9 +48,22 @@ test('共享设置权限：写入口和敏感描述仅管理员可用', () => {
     '/api/credentials.describe', '/api/credentials.set', '/api/credentials.unset',
     '/api/host.pickDirectory', '/api/host.openPath',
     '/api/agentPreset.read', '/api/agentPreset.copy', '/api/agentPreset.openDocument', '/api/agentPreset.remove',
+    '/api/agentPreset/deletePreset', '/api/agentPresets/deletePreset', '/api/llm/discoverModels',
+    '/api/pluginInventory/list',
+    '/api/dynamicCordisRunner/inventory', '/api/dynamicCordisRunner/runHostHalf',
   ]) assert.equal(isAdminOnlyPluginEndpoint('POST', pathname), true, pathname);
   assert.equal(isAdminOnlyPluginEndpoint('POST', '/api/agentPreset.list'), false);
   assert.equal(isAdminOnlyPluginEndpoint('POST', '/api/agentPreset.select'), false);
+  assert.equal(isAdminOnlyPluginEndpoint('POST', '/api/agentPresets.select'), false);
+});
+
+test('alpha.1 agent-addressed endpoints inherit Session ownership', () => {
+  assert.equal(COMMANDS_SCOPED_RE.test('/api/commands/list'), true);
+  assert.equal(COMMANDS_SCOPED_RE.test('/api/commands/execute'), true);
+  assert.equal(GOALS_SCOPED_RE.test('/api/goals/create'), true);
+  assert.equal(GOALS_SCOPED_RE.test('/api/goals/complete'), true);
+  assert.equal(SUBAGENT_SCOPED_RE.test('/api/subagents/interruptByParent'), true);
+  assert.equal(SESSION_SCOPED_RE.test('/api/session/openWorkspacePath'), true);
 });
 
 test('跨会话引用权限：候选接口和规范引用令牌可被完整识别', () => {
@@ -98,6 +119,20 @@ test('forceRejectApproval：嵌套 result.value 信封也能命中', () => {
   const obj = { result: { value: { approvalId: 'ap2', outcome: 'accepted' } } };
   assert.equal(forceRejectApproval(obj), true);
   assert.equal(obj.result.value.outcome, 'rejected');
+});
+
+test('forceRejectApproval：alpha.1 Remote event 的一次性允许改为拒绝', () => {
+  const obj = {
+    payload: {
+      args: {
+        clientId: 'client-1',
+        eventId: 'event-1',
+        outcome: { kind: 'result', value: 'allowed-once' },
+      },
+    },
+  };
+  assert.equal(forceRejectApproval(obj), true);
+  assert.equal(obj.payload.args.outcome.value, 'rejected');
 });
 
 test('forceRejectApproval：已是 rejected / ask_user_question(answer) 不改', () => {

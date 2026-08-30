@@ -81,6 +81,7 @@ before(async () => {
   });
   db.claimSessionOwner('existing-session', user.id);
   db.claimSessionOwner('gzip-session', user.id);
+  db.claimSessionOwner('alpha-session', user.id);
   upstream = http.createServer((req, res) => {
     upstreamCalls.push(req.url ?? '');
     const reply = (value: unknown) => {
@@ -97,14 +98,14 @@ before(async () => {
       res.end(raw);
     };
     if (req.url?.startsWith('/api/workspace.list')) {
-      reply({ result: { ok: true, value: { items: [{ workspaceId: 'workspace', path: '/work/allowed', title: 'Allowed', sessionIds: ['existing-session', 'gzip-session'], createdAt: '2026-08-28T00:00:00.000Z', updatedAt: '2026-08-28T00:00:00.000Z' }], archivedSessionIds: [] } } });
+      reply({ result: { ok: true, value: { items: [{ workspaceId: 'workspace', path: '/work/allowed', title: 'Allowed', sessionIds: ['existing-session', 'gzip-session', 'alpha-session'], createdAt: '2026-08-28T00:00:00.000Z', updatedAt: '2026-08-28T00:00:00.000Z' }], archivedSessionIds: [] } } });
     } else if (req.url?.startsWith('/api/session.list')) {
-      reply({ result: { ok: true, value: { items: [{ sessionId: 'existing-session', cwd: '/work/allowed', agentPreset: 'preset/allowed' }, { sessionId: 'gzip-session', cwd: '/work/allowed' }] } } });
+      reply({ result: { ok: true, value: { items: [{ sessionId: 'existing-session', cwd: '/work/allowed', agentPreset: 'preset/allowed' }, { sessionId: 'gzip-session', cwd: '/work/allowed' }, { sessionId: 'alpha-session', cwd: '/work/allowed' }] } } });
     } else if (req.url?.startsWith('/api/session.create')) {
       successfulCreates += 1;
       const sessionId = successfulCreates === 1 ? 'restricted-session' : 'new-session';
       reply({ result: { ok: true, value: { sessionId, cwd: '/work/allowed' } } });
-    } else if (req.url?.startsWith('/api/agentPreset.select')) {
+    } else if (req.url?.startsWith('/api/agentPreset.select') || req.url === '/api/agentPresets/select') {
         if (selectBlocked) {
         reply({ result: { ok: false, error: { message: 'boom' } } });
       } else {
@@ -115,6 +116,14 @@ before(async () => {
         { id: 'preset/allowed' },
         { id: 'preset/blocked' },
       ] } } });
+    } else if (req.url === '/api/agentPresets/list') {
+      reply({
+        type: 'server-response', rpcId: 'alpha-preset-list',
+        result: { ok: true, value: {
+          presets: [{ id: 'preset/allowed' }, { id: 'preset/blocked' }],
+          authorable: true,
+        } },
+      });
     } else {
       reply({ ok: true });
     }
@@ -176,6 +185,26 @@ test('Issue #22: 授权 preset 允许创建会话，并登记缓存供 prompt �
   assert.equal(select.status, 200, select.body);
   const afterPrompt = await request('/api/session.prompt', JSON.stringify({ sessionId: 'existing-session', text: 'hi' }));
   assert.equal(afterPrompt.status, 200, afterPrompt.body);
+});
+
+test('alpha.1 plural agentPresets select records agentId state and filters authoring', async () => {
+  const beforePrompt = await request('/api/session.prompt', JSON.stringify({ sessionId: 'alpha-session', text: 'hi' }));
+  assert.equal(beforePrompt.status, 403);
+  const selected = await request('/api/agentPresets/select', JSON.stringify({
+    type: 'client-request', rpcId: 'alpha-preset-select', method: 'agentPresets/select',
+    payload: { args: { agentId: 'alpha-session', agentPreset: 'preset/allowed' } },
+  }));
+  assert.equal(selected.status, 200, selected.body);
+  const afterPrompt = await request('/api/session.prompt', JSON.stringify({ sessionId: 'alpha-session', text: 'hi' }));
+  assert.equal(afterPrompt.status, 200, afterPrompt.body);
+
+  const list = await request('/api/agentPresets/list', JSON.stringify({
+    type: 'client-request', rpcId: 'alpha-preset-list', method: 'agentPresets/list', payload: { args: {} },
+  }));
+  assert.equal(list.status, 200, list.body);
+  const value = JSON.parse(list.body).result.value;
+  assert.deepEqual(value.presets, [{ id: 'preset/allowed' }]);
+  assert.equal(value.authorable, false);
 });
 
 test('Agent preset gzip chunked responses are decoded before filtering and selection state updates', async () => {

@@ -30,11 +30,23 @@ const USAGE_HTML_BODY = `<html><head><script>globalThis["__DSH_BOOT__"] = ${JSON
   entries: [
     { id: '@deepseek-ai/dsh-client-modules', url: '/plugins/modules.js', rev: 'm' },
     { id: '@linxin666/dsh-usage', url: '/plugins/usage.js', rev: 'u' },
+    { id: 'ui-settings-plugin-inventory', url: '/plugins/inventory.js', rev: 'i' },
+    { id: 'cordis-client-runner', url: '/plugins/cordis-runner.js', rev: 'cr' },
+    { id: 'ui-cordis', url: '/plugins/cordis-ui.js', rev: 'cu' },
     { id: '@fixture/other', url: '/plugins/other.js', rev: 'o' },
   ],
   batches: [
     { phase: 'bootstrap', url: '/plugins/bootstrap.js', rev: 'b', entries: ['@deepseek-ai/dsh-client-modules'] },
-    { phase: 'application', url: '/plugins/application.js', rev: 'a', entries: ['@linxin666/dsh-usage', '@fixture/other'] },
+    {
+      phase: 'application', url: '/plugins/application.js', rev: 'a',
+      entries: [
+        '@linxin666/dsh-usage',
+        'ui-settings-plugin-inventory',
+        'cordis-client-runner',
+        'ui-cordis',
+        '@fixture/other',
+      ],
+    },
   ],
 })}</script></head><body>usage shell</body></html>`;
 const HASHED_STATIC_BODY = 'export const repeatedPluginPayload = "compress-me";\n'.repeat(4_096);
@@ -123,6 +135,7 @@ let failWorkspaceList = false;
 let failSessionList = false;
 let sessionListRequestsSeen = 0;
 let uploadRequestsSeen = 0;
+let lastRemoteEventResult: unknown = null;
 
 /** Stream a valid large history response without retaining another full-size fixture buffer. */
 function sendLargeHistory(res: http.ServerResponse, historyBytes: number): void {
@@ -275,6 +288,16 @@ function startMockUpstream(): Promise<http.Server> {
             },
           },
         }));
+      } else if (req.url === '/api/$events/result') {
+        const chunks: Buffer[] = [];
+        req.on('data', (chunk: Buffer) => chunks.push(chunk));
+        req.on('end', () => {
+          lastRemoteEventResult = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({
+            type: 'server-response', rpcId: 'event-result', result: { ok: true },
+          }));
+        });
       } else if (req.url === '/api/session.history') {
         if (testMode === 'history-html') {
           res.writeHead(200, { 'content-type': 'text/html' });
@@ -559,15 +582,21 @@ test('HTML 改写路径（注入脚本）：只有 content-length，无 transfer
   assert.ok(r.body.includes('<title>home</title>'), 'HTML 内容缺失');
 });
 
-test('子用户不加载 dsh-usage 客户端贡献，管理员仍可加载', async () => {
+test('子用户不加载管理员用量、插件清单与动态 Cordis 客户端贡献', async () => {
   const customer = await gatewayReq('GET', '/usage-shell', { cookie: customerCookie });
   assert.equal(customer.status, 200);
   assert.doesNotMatch(customer.body, /@linxin666\/dsh-usage/u);
+  assert.doesNotMatch(customer.body, /ui-settings-plugin-inventory/u);
+  assert.doesNotMatch(customer.body, /cordis-client-runner/u);
+  assert.doesNotMatch(customer.body, /ui-cordis/u);
   assert.match(customer.body, /@fixture\/other/u);
 
   const admin = await gatewayReq('GET', '/usage-shell');
   assert.equal(admin.status, 200);
   assert.match(admin.body, /@linxin666\/dsh-usage/u);
+  assert.match(admin.body, /ui-settings-plugin-inventory/u);
+  assert.match(admin.body, /cordis-client-runner/u);
+  assert.match(admin.body, /ui-cordis/u);
 });
 
 test('dsh-usage 余额与计划 API 仅管理员可访问', async () => {
@@ -770,6 +799,91 @@ test('agentPreset.select 复用会话归属与可见性校验', async () => {
   assert.equal(other.status, 403);
   assert.match(rawHeader(other.rawHeaders, 'content-type'), /^application\/json/);
   assert.equal(JSON.parse(other.body).code, 'FORBIDDEN');
+
+  const alphaOwn = await gatewayReq('POST', '/api/agentPreset/select', {
+    cookie: customerCookie,
+    'content-type': 'application/json',
+  }, JSON.stringify({
+    type: 'client-request', rpcId: 'preset-alpha-own', method: 'agentPreset/select',
+    payload: { args: { agentId: 's-owned', agentPreset: 'standard' } },
+  }));
+  assert.equal(alphaOwn.status, 200);
+
+  const alphaOther = await gatewayReq('POST', '/api/agentPreset/select', {
+    cookie: customerCookie,
+    'content-type': 'application/json',
+  }, JSON.stringify({
+    type: 'client-request', rpcId: 'preset-alpha-other', method: 'agentPreset/select',
+    payload: { args: { agentId: 's-other', agentPreset: 'standard' } },
+  }));
+  assert.equal(alphaOther.status, 403);
+});
+
+test('alpha.1 feedback endpoints enforce session ownership', async () => {
+  const request = (sessionId: string) => gatewayReq('POST', '/api/messageFeedback/list', {
+    cookie: customerCookie,
+    'content-type': 'application/json',
+  }, JSON.stringify({
+    type: 'client-request', rpcId: `feedback-${sessionId}`, method: 'messageFeedback/list',
+    payload: { args: { request: { sessionId } } },
+  }));
+  assert.equal((await request('s-owned')).status, 200);
+  assert.equal((await request('s-other')).status, 403);
+});
+
+test('alpha.1 commands, goals, and subagent control inherit Session ownership', async () => {
+  const request = (
+    endpoint: string,
+    method: string,
+    args: Record<string, unknown>,
+  ) => gatewayReq('POST', endpoint, {
+    cookie: customerCookie,
+    'content-type': 'application/json',
+  }, JSON.stringify({
+    type: 'client-request', rpcId: `${method}-${String(Math.random())}`, method,
+    payload: { args },
+  }));
+
+  assert.equal((await request('/api/commands/list', 'commands/list', { agentId: 's-owned' })).status, 200);
+  assert.equal((await request('/api/commands/execute', 'commands/execute', {
+    agentId: 's-owned', line: '/compact', images: [],
+  })).status, 200);
+  assert.equal((await request('/api/commands/execute', 'commands/execute', {
+    agentId: 's-other', line: '/compact', images: [],
+  })).status, 403);
+
+  assert.equal((await request('/api/goals/create', 'goals/create', {
+    agentId: 's-owned', request: { objective: 'own goal' },
+  })).status, 200);
+  assert.equal((await request('/api/goals/complete', 'goals/complete', {
+    agentId: 's-other', ref: { id: 'goal-1', revision: 1 },
+  })).status, 403);
+
+  assert.equal((await request('/api/subagents/interruptByParent', 'subagents/interruptByParent', {
+    childSessionId: 'child-1', parentSessionId: 's-owned', mode: 'continuable',
+  })).status, 200);
+  assert.equal((await request('/api/subagents/interruptByParent', 'subagents/interruptByParent', {
+    childSessionId: 'child-2', parentSessionId: 's-other', mode: 'continuable',
+  })).status, 403);
+});
+
+test('alpha.1 approval event results cannot grant a restricted subuser escalation', async () => {
+  lastRemoteEventResult = null;
+  const response = await gatewayReq('POST', '/api/$events/result', {
+    cookie: customerCookie,
+    'content-type': 'application/json',
+  }, JSON.stringify({
+    type: 'client-request', rpcId: 'approval-alpha', method: '$events/result',
+    payload: {
+      args: {
+        clientId: 'client-1', eventId: 'event-1',
+        outcome: { kind: 'result', value: 'allowed-once' },
+      },
+    },
+  }));
+  assert.equal(response.status, 200);
+  const envelope = lastRemoteEventResult as { payload: { args: { outcome: { value: unknown } } } };
+  assert.equal(envelope.payload.args.outcome.value, 'rejected');
 });
 
 test('共享 Host 设置面仅管理员可读写', async () => {
@@ -788,6 +902,23 @@ test('共享 Host 设置面仅管理员可读写', async () => {
     }
   }
   for (const endpoint of ['/api/dsh-web-ui-settings/describe', '/api/dsh-web-ui-settings/mutate']) {
+    const response = await gatewayReq('POST', endpoint, {
+      cookie: customerCookie,
+      'content-type': 'application/json',
+    }, '{}');
+    assert.equal(response.status, 403, endpoint);
+    assert.equal(JSON.parse(response.body).code, 'FORBIDDEN');
+  }
+  for (const endpoint of [
+    '/api/settings/describe',
+    '/api/settings/openSettingsDocument',
+    '/api/settings/openAgentPresetDirectory',
+    '/api/settings/canOpenAgentPresetDirectory',
+    '/api/agentPresets/deletePreset',
+    '/api/llm/discoverModels',
+    '/api/pluginInventory/list',
+    '/api/dynamicCordisRunner/inventory',
+  ]) {
     const response = await gatewayReq('POST', endpoint, {
       cookie: customerCookie,
       'content-type': 'application/json',
@@ -993,6 +1124,42 @@ test('子用户可切换自己的会话模型，但不能操作其他账号会�
     'content-type': 'application/json',
   }, JSON.stringify({ sessionId: 's-other', provider: 'codex', model: 'gpt-5.6-luna' }));
   assert.equal(other.status, 403);
+});
+
+test('alpha.1 model selection and native path opening enforce customer policy and Session cwd', async () => {
+  const request = (
+    method: string,
+    requestValue: Record<string, unknown>,
+  ) => gatewayReq('POST', `/api/${method}`, {
+    cookie: customerCookie,
+    'content-type': 'application/json',
+  }, JSON.stringify({
+    type: 'client-request', rpcId: `${method}-${String(Math.random())}`, method,
+    payload: { args: { request: requestValue } },
+  }));
+
+  assert.equal((await request('session/selectModel', {
+    sessionId: 's-owned', provider: 'codex', model: 'gpt-5.6-sol',
+  })).status, 200);
+  assert.equal((await request('session/selectModel', {
+    sessionId: 's-owned', provider: 'codex', model: 'gpt-5.5',
+  })).status, 403);
+  assert.equal((await request('session/selectModel', {
+    sessionId: 's-owned', provider: 'deepseek-official', model: 'deepseek-v4',
+  })).status, 200);
+  assert.equal((await request('session/selectModel', {
+    sessionId: 's-other', provider: 'codex', model: 'gpt-5.6-sol',
+  })).status, 403);
+
+  assert.equal((await request('session/openWorkspacePath', {
+    sessionId: 's-owned', path: '/workspaces/a/reports/result.xlsx',
+  })).status, 200);
+  assert.equal((await request('session/openWorkspacePath', {
+    sessionId: 's-owned', path: '/workspaces/b/admin.xlsx',
+  })).status, 403);
+  assert.equal((await request('session/openWorkspacePath', {
+    sessionId: 's-other', path: '/workspaces/a/reports/result.xlsx',
+  })).status, 403);
 });
 
 test('session.search：子用户搜索结果不包含其他账号会话', async () => {

@@ -384,6 +384,7 @@ async function boot() {
   const tlsOn = config.gateway.tls !== null;
   const gateway = createGatewayServer(config, auth, db, {
     upstreamBrowserCookie: () => upstreamBrowserCookie,
+    upstreamRemoteTransport: upstreamBrowserAuthenticationRequired,
   });
   let browserAuthRefreshTimer: NodeJS.Timeout | null = null;
   const scheduleBrowserAuthRefresh = (delayMs: number) => {
