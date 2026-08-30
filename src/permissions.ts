@@ -27,6 +27,62 @@ export function normalizePath(p: string): string {
   return n;
 }
 
+export type WebSocketAccess = 'deny' | 'authenticated';
+
+/** Parse exact or trailing-wildcard WebSocket path grants. */
+export function parseWebSocketAllowlist(raw: string | undefined, envName: string): string[] {
+  if (raw === undefined || raw.trim() === '') return [];
+  const rules = new Set<string>();
+  for (const item of raw.split(',')) {
+    const rule = item.trim();
+    if (rule === '') continue;
+    if (rule.length > 256) throw new Error(`${envName}: rule is longer than 256 characters`);
+    if (!rule.startsWith('/')) throw new Error(`${envName}: rule must start with /: ${rule}`);
+    if (/[? #%\\\u0000-\u001f\u007f]/.test(rule)) {
+      throw new Error(`${envName}: rule contains query, encoding, backslash, or control characters: ${rule}`);
+    }
+    const wildcard = rule.endsWith('/*');
+    if (rule.includes('*') && !wildcard) {
+      throw new Error(`${envName}: only a trailing /* wildcard is supported: ${rule}`);
+    }
+    const pathPart = wildcard ? rule.slice(0, -2) : rule;
+    if (pathPart === '' || pathPart === '/') throw new Error(`${envName}: root and /* are not allowed`);
+    if (pathPart === '/gateway' || pathPart.startsWith('/gateway/')) {
+      throw new Error(`${envName}: gateway paths cannot be allowlisted: ${rule}`);
+    }
+    if (pathPart === '/api/dsh-passwords/internal' || pathPart.startsWith('/api/dsh-passwords/internal/')) {
+      throw new Error(`${envName}: internal gateway paths cannot be allowlisted: ${rule}`);
+    }
+    const segments = pathPart.split('/').slice(1);
+    if (segments.some((segment) => segment === '.' || segment === '..' || segment === '')) {
+      throw new Error(`${envName}: rule contains an empty or dot path segment: ${rule}`);
+    }
+    rules.add(rule);
+    if (rules.size > 64) throw new Error(`${envName}: at most 64 rules are supported`);
+  }
+  return [...rules];
+}
+
+/** Match one WebSocket pathname against an exact or trailing-wildcard rule. */
+export function matchesWebSocketRule(pathname: string, rule: string): boolean {
+  return rule.endsWith('/*') ? pathname.startsWith(`${rule.slice(0, -2)}/`) : pathname === rule;
+}
+
+/** Resolve an authenticated account's access to one WebSocket route. */
+export function webSocketAccessForPath(
+  pathname: string,
+  configuredRules: readonly string[],
+  grantedRules: readonly string[],
+  userRole: 'admin' | 'user',
+  builtin: boolean,
+): WebSocketAccess {
+  if (builtin) return 'authenticated';
+  if (!configuredRules.some((rule) => matchesWebSocketRule(pathname, rule))) return 'deny';
+  return userRole === 'admin' || grantedRules.some((rule) => matchesWebSocketRule(pathname, rule))
+    ? 'authenticated'
+    : 'deny';
+}
+
 /**
  * 工作区白名单的"禁止所有"哨兵值：主用户选择"禁止工作区"时存入白名单，
  * 与空数组（=全部允许）区分开（空数组还是"未限制"语义，兼容默认子用户）。
@@ -414,6 +470,30 @@ export function extractWorkspaceId(value: unknown, depth = 0): string | null {
   return null;
 }
 
+/** Extract both explicit paths from a workspace rename request. */
+export function extractWorkspaceRenamePaths(value: unknown): { oldPath: string; newPath: string } | null {
+  const oldKeys = new Set(['oldPath', 'previousPath', 'sourcePath', 'fromPath']);
+  const newKeys = new Set(['newPath', 'targetPath', 'destinationPath', 'toPath']);
+  let oldPath: string | null = null;
+  let newPath: string | null = null;
+  const visit = (current: unknown, depth: number): void => {
+    if (depth > 6 || current === null || typeof current !== 'object' || (oldPath !== null && newPath !== null)) return;
+    if (Array.isArray(current)) {
+      for (const item of current) visit(item, depth + 1);
+      return;
+    }
+    for (const [key, item] of Object.entries(current as Record<string, unknown>)) {
+      if (typeof item === 'string' && item.trim() !== '') {
+        if (oldKeys.has(key) && oldPath === null) oldPath = item;
+        if (newKeys.has(key) && newPath === null) newPath = item;
+      }
+      visit(item, depth + 1);
+    }
+  };
+  visit(value, 0);
+  return oldPath !== null && newPath !== null ? { oldPath, newPath } : null;
+}
+
 /** 沙盒权限级别（dsh SANDBOX_MODES）+ 严重度排序（越靠后越宽松） */
 type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
 export const SANDBOX_RANK: Record<SandboxMode, number> = {
@@ -597,6 +677,7 @@ export function containsSessionReference(value: unknown, depth = 0): boolean {
  *     泄露即扩大 SSH 凭据面；
  *   - skin-center —— 皮肤中心（未纳入网关权限模型）；
  *   - modlens —— 模型透镜（未纳入网关权限模型）；
+ *   - dsh-usage —— 提供商余额、订阅计划和用量总览仅管理员可见；
  *   - dsh-at-file 设置写入 —— 修改共享 Web Profile 的全局设置与工作区过滤规则；
  *   - Host settings 写入 —— 修改所有账号共用的 Web Profile 设置文件；
  *   - dsh-uploads —— 共享上传存储的【列表/删除】（F-12）：枚举全部用户上传文件清单
@@ -622,11 +703,19 @@ export function isAdminOnlyPluginEndpoint(method: string, pathname: string): boo
     pathname.startsWith('/api/skin-center/') ||
     pathname === '/modlens' ||
     pathname.startsWith('/modlens/') ||
+    pathname === '/api/dsh-usage' ||
+    pathname.startsWith('/api/dsh-usage/') ||
+    pathname === '/plugins/events' ||
     (pathname === '/api/atFile/updateSettings' && method === 'POST') ||
     // F-12：仅精确匹配 /api/dsh-uploads（不含 /download 子路径），且只看
     // GET（列表）/DELETE（删除）；POST 上传由 isUploadRequest 按 allow_upload 判定
     (pathname === '/api/dsh-uploads' && (method === 'GET' || method === 'DELETE'))
   );
+}
+
+/** better-sidebar host file, Git, preview, upload, and terminal surface. */
+export function isAdminOnlySidebarEndpoint(pathname: string): boolean {
+  return pathname === '/sidebar' || pathname.startsWith('/sidebar/');
 }
 
 /** aionui-panel 文件树：读取/下载文件内容的端点（raw 为 GET 流式传输，read 为 POST JSON） */
@@ -677,9 +766,26 @@ export function aionuiRootFrom(
   return null;
 }
 
+/** Workspace registration endpoints covered by the create permission. */
+export function isWorkspaceCreate(pathname: string): boolean {
+  return /^\/api\/workspace[.\/](add|create)([.\/]|$)/.test(pathname);
+}
+
+/** Directory creation used by the Host workspace picker before registration. */
+export function isWorkspaceDirectoryCreate(pathname: string): boolean {
+  return /^\/api\/host[.\/]createDirectory(?:[.\/]|$)/.test(pathname);
+}
+
+/** Workspace removal and rename endpoints supported by the current Host. */
+export function isWorkspaceDeleteOrRename(pathname: string): boolean {
+  return /^\/api\/workspace[.\/](remove|delete|rename|update)([.\/]|$)/.test(pathname);
+}
+
 /** 工作区创建/删除/重命名/归档/移动等写操作，由网关按操作与目标目录授权。 */
 export function isWorkspaceWrite(pathname: string): boolean {
-  return /^\/api\/workspace[.\/](add|create|import|remove|delete|rename|update|move|archiveSession|insertBefore|insertSessionBefore|materialize|adopt)/.test(pathname);
+  return isWorkspaceCreate(pathname) ||
+    isWorkspaceDeleteOrRename(pathname) ||
+    /^\/api\/workspace[.\/](import|move|archiveSession|insertBefore|insertSessionBefore|materialize|adopt)([.\/]|$)/.test(pathname);
 }
 
 // ── 工作区/会话文件夹限制：需要读 JSON 请求体 ──────────────────────────
@@ -766,25 +872,37 @@ export function collectArchivedSessionIds(value: unknown, out: Set<string> = new
   return out;
 }
 
-/**
- * 递归清空 archivedSessionIds 数组（F-25 枚举源：workspace.list 把他人会话 ID
- * 直接漏给受限子用户）。返回是否有改动。
- */
-export function stripArchivedSessionIds(value: unknown, depth = 0): boolean {
+/** Filter archived session ids in-place, retaining only entries accepted by the caller. */
+export function filterArchivedSessionIds(
+  value: unknown,
+  keep: (id: string) => boolean,
+  depth = 0,
+): boolean {
   if (depth > 8 || value === null || typeof value !== 'object') return false;
   const obj = value as Record<string, unknown>;
   let changed = false;
-  if (Array.isArray(obj.archivedSessionIds) && obj.archivedSessionIds.length > 0) {
-    obj.archivedSessionIds = [];
-    changed = true;
+  if (Array.isArray(obj.archivedSessionIds)) {
+    const original = obj.archivedSessionIds;
+    const filtered = original.filter(
+      (id): id is string => typeof id === 'string' && keep(id),
+    );
+    if (filtered.length !== original.length || filtered.some((id, index) => id !== original[index])) {
+      obj.archivedSessionIds = filtered;
+      changed = true;
+    }
   }
   for (const key of Object.keys(obj)) {
-    const v = obj[key];
-    if (v !== null && typeof v === 'object') {
-      if (stripArchivedSessionIds(v, depth + 1)) changed = true;
+    const nested = obj[key];
+    if (nested !== null && typeof nested === 'object') {
+      if (filterArchivedSessionIds(nested, keep, depth + 1)) changed = true;
     }
   }
   return changed;
+}
+
+/** Clear archived session ids where a caller must suppress the entire enumeration source. */
+export function stripArchivedSessionIds(value: unknown, depth = 0): boolean {
+  return filterArchivedSessionIds(value, () => false, depth);
 }
 
 /**

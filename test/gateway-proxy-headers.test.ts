@@ -18,13 +18,25 @@ import zlib from 'node:zlib';
 import { mkdtempSync, rmSync } from 'node:fs';
 import jwt from 'jsonwebtoken';
 
-import { createGatewayServer } from '../src/gateway.js';
+import { DEFAULT_USER_REQUEST_BODY_BYTES, createGatewayServer } from '../src/gateway.js';
 import { AuthService } from '../src/auth.js';
 import { Database } from '../src/db.js';
 import { createFieldCrypto } from '../src/encrypt.js';
 import type { PlatformConfig } from '../src/config.js';
 
 const HTML_BODY = '<html><head><title>home</title></head><body>hello</body></html>';
+const USAGE_HTML_BODY = `<html><head><script>globalThis["__DSH_BOOT__"] = ${JSON.stringify({
+  rev: 'host-rev',
+  entries: [
+    { id: '@deepseek-ai/dsh-client-modules', url: '/plugins/modules.js', rev: 'm' },
+    { id: '@linxin666/dsh-usage', url: '/plugins/usage.js', rev: 'u' },
+    { id: '@fixture/other', url: '/plugins/other.js', rev: 'o' },
+  ],
+  batches: [
+    { phase: 'bootstrap', url: '/plugins/bootstrap.js', rev: 'b', entries: ['@deepseek-ai/dsh-client-modules'] },
+    { phase: 'application', url: '/plugins/application.js', rev: 'a', entries: ['@linxin666/dsh-usage', '@fixture/other'] },
+  ],
+})}</script></head><body>usage shell</body></html>`;
 const HASHED_STATIC_BODY = 'export const repeatedPluginPayload = "compress-me";\n'.repeat(4_096);
 const LARGE_HISTORY_CHUNK = Buffer.alloc(256 * 1024, 0x78);
 const LARGE_HISTORY_BYTES = 20 * 1024 * 1024;
@@ -35,6 +47,20 @@ const WORKSPACES_JSON = JSON.stringify({
     { id: 'ws-1', workspaceId: 'ws-1', path: '/workspaces/a', sessionIds: ['s-owned'] },
     { id: 'ws-2', workspaceId: 'ws-2', path: '/workspaces/b', sessionIds: ['s-other'] },
   ],
+});
+const ARCHIVED_WORKSPACES_JSON = JSON.stringify({
+  type: 'server-response',
+  rpcId: 'workspace-list-archived',
+  result: {
+    ok: true,
+    value: {
+      items: [
+        { workspaceId: 'ws-1', path: '/workspaces/a', sessionIds: ['s-owned', 's-archived'] },
+        { workspaceId: 'ws-2', path: '/workspaces/b', sessionIds: ['s-other'] },
+      ],
+      archivedSessionIds: ['s-archived', 's-other'],
+    },
+  },
 });
 const AT_FILE_SETTINGS_RESPONSE = {
   result: {
@@ -125,6 +151,12 @@ function startMockUpstream(): Promise<http.Server> {
         res.writeHead(200, { 'content-type': 'text/html' });
         res.write(HTML_BODY.slice(0, 20)); // 无 CL 的多次 write → chunked
         res.end(HTML_BODY.slice(20));
+      } else if ((req.url ?? '').startsWith('/usage-shell')) {
+        res.writeHead(200, { 'content-type': 'text/html' });
+        res.end(USAGE_HTML_BODY);
+      } else if ((req.url ?? '').startsWith('/api/dsh-usage/')) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, plan: 'administrator subscription' }));
       } else if ((req.url ?? '').startsWith('/plugins/example/client.js?rev=abc123')) {
         res.writeHead(200, {
           'content-type': 'application/javascript; charset=utf-8',
@@ -137,7 +169,13 @@ function startMockUpstream(): Promise<http.Server> {
           return;
         }
         res.writeHead(200, { 'content-type': 'application/json' });
-        res.write(badJson ? 'not-json{' : WORKSPACES_JSON);
+        res.write(
+          badJson
+            ? 'not-json{'
+            : testMode === 'archived-sessions'
+              ? ARCHIVED_WORKSPACES_JSON
+              : WORKSPACES_JSON,
+        );
         res.end();
       } else if ((req.url ?? '').startsWith('/api/session.list')) {
         if (failSessionList) {
@@ -364,13 +402,14 @@ before(async () => {
     hourlyTokenLimit: null,
     dailyMinutesLimit: null,
     monthlyBudgetMicros: 0,
-    allowUpload: true,
+    allowUpload: false,
     allowGitDownload: true,
     banned: false,
     sandboxMode: 'workspace-write',
     disabledSessions: [],
   });
   db.claimSessionOwner('s-owned', customer.id);
+  db.claimSessionOwner('s-archived', customer.id);
   db.claimSessionOwner('s-other', user.id);
   const secondCustomer = db.createUser('customer-2', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(secondCustomer.id, {
@@ -459,6 +498,25 @@ test('HTML 改写路径（注入脚本）：只有 content-length，无 transfer
   assert.ok(r.body.includes('<title>home</title>'), 'HTML 内容缺失');
 });
 
+test('子用户不加载 dsh-usage 客户端贡献，管理员仍可加载', async () => {
+  const customer = await gatewayReq('GET', '/usage-shell', { cookie: customerCookie });
+  assert.equal(customer.status, 200);
+  assert.doesNotMatch(customer.body, /@linxin666\/dsh-usage/u);
+  assert.match(customer.body, /@fixture\/other/u);
+
+  const admin = await gatewayReq('GET', '/usage-shell');
+  assert.equal(admin.status, 200);
+  assert.match(admin.body, /@linxin666\/dsh-usage/u);
+});
+
+test('dsh-usage 余额与计划 API 仅管理员可访问', async () => {
+  const customer = await gatewayReq('GET', '/api/dsh-usage/overview', { cookie: customerCookie });
+  assert.equal(customer.status, 403);
+  const admin = await gatewayReq('GET', '/api/dsh-usage/overview');
+  assert.equal(admin.status, 200);
+  assert.equal(JSON.parse(admin.body).plan, 'administrator subscription');
+});
+
 test('带 rev 的插件静态资源流式 gzip 并长期缓存，identity 客户端保持原文', async () => {
   const compressed = await gatewayReq('GET', '/plugins/example/client.js?rev=abc123', {
     'accept-encoding': 'gzip',
@@ -516,6 +574,22 @@ test('workspace.list JSON 改写路径：只有 content-length，无 transfer-en
     path: '/workspaces/a',
     sessionIds: ['s-owned'],
   });
+});
+
+test('workspace.list：子用户归档会话保留工作区槽且不泄露其他账号', async () => {
+  const response = await gatewayReq('POST', '/api/workspace.list', {
+    cookie: customerCookie,
+    'content-type': 'application/json',
+    'x-test-mode': 'archived-sessions',
+  }, '{}');
+  assert.equal(response.status, 200);
+  const value = JSON.parse(response.body).result.value as {
+    items: Array<{ path: string; sessionIds: string[] }>;
+    archivedSessionIds: string[];
+  };
+  assert.deepEqual(value.items.map((item) => item.path), ['/workspaces/a']);
+  assert.deepEqual(value.items[0].sessionIds, ['s-owned', 's-archived']);
+  assert.deepEqual(value.archivedSessionIds, ['s-archived']);
 });
 
 test('dsh-at-file：子用户只读取获准工作区设置且不能修改共享设置', async () => {
@@ -702,7 +776,10 @@ test('API 拒绝与登录失效始终返回 JSON，不再把登录页或 403 HTM
   const tooLarge = await gatewayReq('POST', '/api/session.prompt', {
     cookie: customerCookie,
     'content-type': 'application/json',
-  }, JSON.stringify({ sessionId: 's-owned', content: 'x'.repeat(1024 * 1024 + 1) }));
+  }, JSON.stringify({
+    sessionId: 's-owned',
+    content: 'x'.repeat(DEFAULT_USER_REQUEST_BODY_BYTES + 1),
+  }));
   assert.equal(tooLarge.status, 413);
   assert.match(rawHeader(tooLarge.rawHeaders, 'content-type'), /^application\/json/);
   assert.equal(JSON.parse(tooLarge.body).code, 'PAYLOAD_TOO_LARGE');

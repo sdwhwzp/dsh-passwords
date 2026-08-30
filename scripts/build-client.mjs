@@ -1,6 +1,6 @@
 // 构建浏览器侧插件包：esbuild 把 src/client/* 打成 CJS，
 // 再包成 dsh 客户端模块系统要求的 __ModuleLoader__.load 工厂格式
-// （classic script + factory(require)，与 @linxin666 插件产物同构）。
+// （classic script + factory(require)）。
 // 产物：dist/client.js（dsh 通过 /plugins/dsh-passwords/client.js 分发）。
 import { build } from 'esbuild';
 import { writeFileSync } from 'node:fs';
@@ -24,7 +24,10 @@ const result = await build({
   // react* 同理：dsh 前端把自己的 react 作为静态模块共享给所有插件（必须共用
   // 同一份 React，否则 hooks 在渲染器里拿不到 dispatcher 会直接崩溃）
   external: [
-    '@deepseek-ai/dsh-client-runtime/client',
+    '@deepseek-ai/cordis',
+    '@deepseek-ai/dsh-api-gateway/client',
+    '@deepseek-ai/dsh-api-session-controller/client',
+    '@deepseek-ai/dsh-api-workspace-controller/client',
     '@deepseek-ai/dsh-client-ui-slots/client',
     '@deepseek-ai/dsh-client-ui-settings/client',
     '@deepseek-ai/dsh-client-ui-primitives',

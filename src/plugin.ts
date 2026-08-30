@@ -24,7 +24,7 @@ import { databaseTarget, loadConfig, type PlatformConfig } from './config.js';
 import { Database, type UserListRow } from './db.js';
 import { createFieldCrypto } from './encrypt.js';
 import { AuthService, AuthError, assertNoSqlInjection, type AuthedUser, type RequestMeta } from './auth.js';
-import { findDshRoot, patchStatus, prepareSessionModelPatch } from './patch.js';
+import { findDshRoot, patchStatus } from './patch.js';
 import { isDisplayableDshSession, isDisplayableDshSurface, todayLocal } from './permissions.js';
 import {
   DEVICE_APPROVAL_ERROR,
@@ -34,6 +34,7 @@ import { ManagedWorkspaceProvisioner, registerManagedUserWorkspace } from './man
 import { AgentTurnPrincipalTracker, registerRequestPrincipal } from './principal.js';
 import type { AuthenticatedPrincipal } from './principal.js';
 import { registerPrincipalAccess } from './principal-access.js';
+import { DshPasswordsRemote } from './remote.js';
 import { backupSqliteBeforeMigration } from './db-backup.js';
 import { createMonthlyBudgetResolver } from './spend-budget.js';
 import {
@@ -43,10 +44,6 @@ import {
   spendCheckUnavailableError,
 } from './quota-notice.js';
 import { CUSTOMER_MODEL_IDS, customerModelAllowed } from './model-policy.js';
-import {
-  installSessionModelSelectionPersistence,
-  type SessionModelApiProxy,
-} from './session-model-selection.js';
 
 interface SpendAccounting {
   reconcile(): Promise<void>;
@@ -64,7 +61,6 @@ interface SpendAccounting {
 declare module '@deepseek-ai/cordis' {
   interface Context {
     spendAccounting: SpendAccounting;
-    apiProxy: SessionModelApiProxy;
   }
 }
 
@@ -370,6 +366,10 @@ export function apply(ctx: Context): void {
   if (db !== null) {
     registerManagedUserWorkspace(ctx, db, cfg);
     registerPrincipalAccess(ctx, db);
+    const remoteDb = db;
+    ctx.inject(['typertGateway'], (scope) => {
+      new DshPasswordsRemote(scope, remoteDb);
+    });
   }
   let userMutationTail: Promise<void> = Promise.resolve();
   const mutateUser = <T>(operation: () => Promise<T>): Promise<T> => {
@@ -422,19 +422,6 @@ export function apply(ctx: Context): void {
   // accounting is unavailable; local administrators are intentionally unlimited.
   if (db !== null) {
     const budgetDb = db;
-    const dshRoot = findDshRoot(cfg.patch.dshRoot);
-    if (dshRoot === null) {
-      throw new Error('dsh-passwords: 无法定位 dsh Host，拒绝在共享默认模型写入状态未知时启用会话模型持久化');
-    }
-    const modelPatch = prepareSessionModelPatch(dshRoot);
-    if (modelPatch === 'restart-required') {
-      throw new Error('dsh-passwords: 已应用 Host 模型隔离补丁；必须重启 dsh 后才能安全接受模型选择');
-    }
-    if (modelPatch === 'missing') {
-      throw new Error('dsh-passwords: Host 模型隔离补丁不兼容当前 dsh，拒绝启动会话模型持久化');
-    }
-    ctx.inject(['apiProxy'], (scope) =>
-      installSessionModelSelectionPersistence(scope.apiProxy, budgetDb));
     const stepPrincipals = new AgentTurnPrincipalTracker();
     ctx.inject(['spendAccounting'], (scope) =>
       scope.spendAccounting.registerBudgetResolver(createMonthlyBudgetResolver(budgetDb)));

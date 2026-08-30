@@ -63,6 +63,10 @@ export interface UserPermissionsRow {
   monthly_budget_micros: number | null;
   allow_upload: boolean;
   allow_git_download: boolean;
+  allow_workspace_create: boolean;
+  allowed_websocket_paths: string[];
+  /** Null preserves unrestricted legacy accounts; an empty array denies every preset. */
+  allowed_agent_presets: string[] | null;
   banned: boolean;
   sandbox_mode: string | null;
   disabled_sessions: string[];
@@ -179,6 +183,9 @@ CREATE TABLE IF NOT EXISTS user_permissions (
   monthly_budget_micros INTEGER NOT NULL DEFAULT 0, -- 人民币微元；NULL = 不限（仅管理员）
   allow_upload       INTEGER NOT NULL DEFAULT 1,
   allow_git_download INTEGER NOT NULL DEFAULT 0,
+  allow_workspace_create INTEGER NOT NULL DEFAULT 0,
+  allowed_websocket_paths TEXT NOT NULL DEFAULT '[]',
+  allowed_agent_presets TEXT,
   banned             INTEGER NOT NULL DEFAULT 0,
   sandbox_mode       TEXT,                          -- NULL = 不更改；read-only/workspace-write/danger-full-access
   disabled_sessions  TEXT NOT NULL DEFAULT '[]',    -- 已开启工作区内逐会话关闭的 sessionId JSON 数组
@@ -289,6 +296,9 @@ CREATE TABLE IF NOT EXISTS user_permissions (
   monthly_budget_micros BIGINT NOT NULL DEFAULT 0,
   allow_upload          TINYINT NOT NULL DEFAULT 1,
   allow_git_download    TINYINT NOT NULL DEFAULT 0,
+  allow_workspace_create TINYINT NOT NULL DEFAULT 0,
+  allowed_websocket_paths MEDIUMTEXT NOT NULL,
+  allowed_agent_presets MEDIUMTEXT,
   banned                TINYINT NOT NULL DEFAULT 0,
   sandbox_mode          VARCHAR(64),
   disabled_sessions     MEDIUMTEXT NOT NULL,
@@ -452,6 +462,7 @@ export class Database {
     if (this.mysql) {
       this.db.exec(MYSQL_SCHEMA);
       this.migrateRoles();
+      this.migratePermissions();
       this.migrateUsers();
       this.migrateAuditLogs();
       this.setSetting('mysql_schema_version', '1');
@@ -503,17 +514,24 @@ export class Database {
 
   // ── 迁移：user_permissions 补后续版本列（均可重复执行） ─────────────────
   private migratePermissions(): void {
-    if (this.mysql) return;
-    const cols = this.stmt('PRAGMA table_info(user_permissions)').all() as { name: string }[];
-    if (!cols.some((c) => c.name === 'sandbox_mode')) {
-      this.db.exec('ALTER TABLE user_permissions ADD COLUMN sandbox_mode TEXT');
-    }
-    if (!cols.some((c) => c.name === 'disabled_sessions')) {
-      this.db.exec("ALTER TABLE user_permissions ADD COLUMN disabled_sessions TEXT NOT NULL DEFAULT '[]'");
-    }
-    if (!cols.some((c) => c.name === 'monthly_budget_micros')) {
-      this.db.exec('ALTER TABLE user_permissions ADD COLUMN monthly_budget_micros INTEGER NOT NULL DEFAULT 0');
-    }
+    const names = new Set(
+      this.mysql
+        ? (this.stmt('SHOW COLUMNS FROM user_permissions').all() as { Field: string }[]).map((column) => column.Field)
+        : (this.stmt('PRAGMA table_info(user_permissions)').all() as { name: string }[]).map((column) => column.name),
+    );
+    const add = (name: string, sqliteDefinition: string, mysqlDefinition: string) => {
+      if (names.has(name)) return;
+      this.db.exec(`ALTER TABLE user_permissions ADD COLUMN ${name} ${this.mysql ? mysqlDefinition : sqliteDefinition}`);
+      names.add(name);
+    };
+    add('allow_upload', 'INTEGER NOT NULL DEFAULT 0', 'TINYINT NOT NULL DEFAULT 0');
+    add('allow_git_download', 'INTEGER NOT NULL DEFAULT 0', 'TINYINT NOT NULL DEFAULT 0');
+    add('allow_workspace_create', 'INTEGER NOT NULL DEFAULT 0', 'TINYINT NOT NULL DEFAULT 0');
+    add('allowed_websocket_paths', "TEXT NOT NULL DEFAULT '[]'", 'MEDIUMTEXT NULL');
+    add('allowed_agent_presets', 'TEXT', 'MEDIUMTEXT');
+    add('sandbox_mode', 'TEXT', 'VARCHAR(64)');
+    add('disabled_sessions', "TEXT NOT NULL DEFAULT '[]'", 'MEDIUMTEXT NULL');
+    add('monthly_budget_micros', 'INTEGER NOT NULL DEFAULT 0', 'BIGINT NOT NULL DEFAULT 0');
   }
 
   // ── 迁移：users.username 明文 → 密文 + username_hash ──────────
@@ -1007,7 +1025,7 @@ export class Database {
   // ── 子用户权限（网关强制执行） ────────────────────────────
   getPermissions(userId: number): UserPermissionsRow | null {
     const row = this.stmt(
-      'SELECT user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, monthly_budget_micros, allow_upload, allow_git_download, banned, sandbox_mode, disabled_sessions, updated_at FROM user_permissions WHERE user_id = ?',
+      'SELECT user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, monthly_budget_micros, allow_upload, allow_git_download, allow_workspace_create, allowed_websocket_paths, allowed_agent_presets, banned, sandbox_mode, disabled_sessions, updated_at FROM user_permissions WHERE user_id = ?',
     ).get(userId) as
       | {
           user_id: number;
@@ -1017,6 +1035,9 @@ export class Database {
           monthly_budget_micros: number | null;
           allow_upload: number;
           allow_git_download: number;
+          allow_workspace_create: number;
+          allowed_websocket_paths: string | null;
+          allowed_agent_presets: string | null;
           banned: number;
           sandbox_mode: string | null;
           disabled_sessions: string | null;
@@ -1032,6 +1053,9 @@ export class Database {
       monthly_budget_micros: row.monthly_budget_micros,
       allow_upload: row.allow_upload === 1,
       allow_git_download: row.allow_git_download === 1,
+      allow_workspace_create: row.allow_workspace_create === 1,
+      allowed_websocket_paths: parseJsonArray(row.allowed_websocket_paths),
+      allowed_agent_presets: row.allowed_agent_presets === null ? null : parseJsonArray(row.allowed_agent_presets),
       banned: row.banned === 1,
       sandbox_mode: row.sandbox_mode,
       disabled_sessions: parseJsonArray(row.disabled_sessions),
@@ -1045,9 +1069,12 @@ export class Database {
       allowedFolders: string[];
       hourlyTokenLimit: number | null;
       dailyMinutesLimit: number | null;
-      monthlyBudgetMicros: number | null;
+      monthlyBudgetMicros?: number | null;
       allowUpload: boolean;
       allowGitDownload: boolean;
+      allowWorkspaceCreate?: boolean;
+      allowedWebSocketPaths?: string[];
+      allowedAgentPresets?: string[] | null;
       banned: boolean;
       sandboxMode: string | null;
       disabledSessions?: string[];
@@ -1057,9 +1084,19 @@ export class Database {
     // （fail-open 陷阱）——网关端点已拒绝，数据层再兑底一次。
     const allowedFolders = sanitizeAllowedFolders(perms.allowedFolders);
     const disabledSessions = [...new Set((perms.disabledSessions ?? []).filter((id) => typeof id === 'string' && id.length > 0 && id.length <= 200))].slice(0, 2000);
+    const existing = this.getPermissions(userId);
+    const allowWorkspaceCreate = perms.allowWorkspaceCreate ?? existing?.allow_workspace_create ?? false;
+    const allowedWebSocketPaths = perms.allowedWebSocketPaths === undefined
+      ? existing?.allowed_websocket_paths ?? []
+      : [...new Set(perms.allowedWebSocketPaths.filter((entry) => typeof entry === 'string' && entry.length > 0 && entry.length <= 512))];
+    const allowedAgentPresets = perms.allowedAgentPresets === undefined
+      ? existing?.allowed_agent_presets ?? null
+      : perms.allowedAgentPresets === null
+        ? null
+        : [...new Set(perms.allowedAgentPresets.filter((entry) => typeof entry === 'string' && entry.length > 0 && entry.length <= 512))];
     this.stmt(
-      `INSERT INTO user_permissions (user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, monthly_budget_micros, allow_upload, allow_git_download, banned, sandbox_mode, disabled_sessions)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO user_permissions (user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, monthly_budget_micros, allow_upload, allow_git_download, allow_workspace_create, allowed_websocket_paths, allowed_agent_presets, banned, sandbox_mode, disabled_sessions)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(user_id) DO UPDATE SET
          allowed_folders = excluded.allowed_folders,
          hourly_token_limit = excluded.hourly_token_limit,
@@ -1067,6 +1104,9 @@ export class Database {
          monthly_budget_micros = excluded.monthly_budget_micros,
          allow_upload = excluded.allow_upload,
          allow_git_download = excluded.allow_git_download,
+         allow_workspace_create = excluded.allow_workspace_create,
+         allowed_websocket_paths = excluded.allowed_websocket_paths,
+         allowed_agent_presets = excluded.allowed_agent_presets,
          banned = excluded.banned,
          sandbox_mode = excluded.sandbox_mode,
          disabled_sessions = excluded.disabled_sessions,
@@ -1076,9 +1116,12 @@ export class Database {
       JSON.stringify(allowedFolders),
       perms.hourlyTokenLimit,
       perms.dailyMinutesLimit,
-      perms.monthlyBudgetMicros,
+      perms.monthlyBudgetMicros ?? 0,
       perms.allowUpload ? 1 : 0,
       perms.allowGitDownload ? 1 : 0,
+      allowWorkspaceCreate ? 1 : 0,
+      JSON.stringify(allowedWebSocketPaths),
+      allowedAgentPresets === null ? null : JSON.stringify(allowedAgentPresets),
       perms.banned ? 1 : 0,
       perms.sandboxMode,
       JSON.stringify(disabledSessions),

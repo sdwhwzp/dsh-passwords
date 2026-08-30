@@ -32,12 +32,26 @@ function commandPath(command) {
 }
 
 function run(command, args = [], { quiet = false, env } = {}) {
-  const result = spawnSync(commandPath(command), args, {
-    shell: isWin && WINDOWS_SHIMS.has(command),
+  const runOptions = {
     stdio: quiet ? 'ignore' : 'inherit',
     cwd: root,
     env: env ?? process.env,
-  });
+  };
+  let result;
+  if (isWin && WINDOWS_SHIMS.has(command)) {
+    // Windows 的 npm/pnpm/dsh 是 .cmd shim，只能由 cmd.exe 启动。
+    // cmd /d /s /c 显式调用（不用 shell:true，避开 Node 22 的 DEP0190
+    // "shell:true + 参数数组"弃用警告）；外部双引号让 /s 剥壳后
+    // 留下 "npm.cmd" "install" ... 的标准命令串。
+    const line = [commandPath(command), ...args].map((a) => `"${a}"`).join(' ');
+    result = spawnSync(
+      process.env.ComSpec || 'cmd.exe',
+      ['/d', '/s', '/c', `"${line}"`],
+      runOptions,
+    );
+  } else {
+    result = spawnSync(commandPath(command), args, runOptions);
+  }
   if (result.error !== undefined) {
     // ENOENT（Unix 上命令不存在）等 spawn 错误：返回非零状态码，走调用方的
     // 友好错误路径——不能 throw，否则 mustRun 的"先检测后安装"分支
@@ -76,7 +90,7 @@ function mustRun(command, args, failureMessage, options = {}) {
   process.exit(1);
 }
 
-// ── 0. 当前目录必须是项目目录（壳脚本保证 clone 到正确位置） ──
+// ── 0. 项目根目录必须完整（root 由脚本自身位置定位，不依赖 cwd；壳脚本保证 clone 到正确位置） ──
 const pkgPath = path.join(root, 'package.json');
 if (!existsSync(pkgPath)) {
   err(`未找到 ${pkgPath}，请先下载项目（git clone 或运行 install.bat/install.sh）`);
@@ -150,8 +164,8 @@ if (prebuilt) {
     ? ['ci', '--no-audit', '--no-fund']
     : ['install', '--no-audit', '--no-fund'];
   mustRun('npm', installArgs, '依赖安装失败，请修复 npm 输出后重试');
-  // 发布到 npm 的包不含 tsconfig.json/src，无法编译；依赖装好后应直接用预构建产物。
-  // 仅源码 clone（含 tsconfig.json）才执行编译。
+  // 源码 clone 与 npm 发布包都带 tsconfig.json/src（package.json files 白名单），
+  // 有 tsconfig.json 就执行编译；只有不含它的旧发布物才要求预构建产物必须完整。
   if (existsSync(path.join(root, 'tsconfig.json'))) {
     say('编译…');
     mustRun('npm', ['run', 'build'], '编译失败，请修复错误后重试');

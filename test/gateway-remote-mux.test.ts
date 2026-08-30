@@ -17,13 +17,20 @@ function closeServer(server: http.Server): Promise<void> {
   return new Promise((resolve) => server.close(() => resolve()));
 }
 
-test('remote mux receives a gateway-signed principal and closes on account invalidation', async () => {
+test('remote mux and granted plugin sockets receive signed principals and close on invalidation', async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), 'dshpw-remote-mux-'));
   const dbPath = path.join(temporary, 'platform.db');
   const db = new Database(dbPath, createFieldCrypto('enc', 'setup'));
   db.init();
   db.createUser('admin', 'hash', 'admin');
   const customer = db.createUser('customer', 'hash', 'user');
+  const deniedCustomer = db.createUser('denied-customer', 'hash', 'user');
+  db.setPermissions(customer.id, {
+    allowedFolders: [], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: true, allowGitDownload: false, allowWorkspaceCreate: false,
+    allowedWebSocketPaths: ['/plugin/ws/*'], allowedAgentPresets: [],
+    banned: false, sandboxMode: null, disabledSessions: [],
+  });
 
   const upstreamWebSockets = new WebSocketServer({ noServer: true, perMessageDeflate: false });
   let upstreamHeaders: http.IncomingHttpHeaders | undefined;
@@ -47,6 +54,7 @@ test('remote mux receives a gateway-signed principal and closes on account inval
     localWorkspace: { host: '127.0.0.1', port: 0, publicUrl: '', placeholderRoot: path.join(temporary, 'local') },
     managedWorkspaceRoot: path.join(temporary, 'managed'),
     patch: { dshRoot: '', restartService: '' },
+    webSocket: { adminAllowlist: [], userAllowlist: ['/plugin/ws/*'] },
   };
   const gateway = createGatewayServer(config, new AuthService(config, db), db);
   await new Promise<void>((resolve) => gateway.listen(0, '127.0.0.1', resolve));
@@ -86,6 +94,32 @@ test('remote mux receives a gateway-signed principal and closes on account inval
       source: 'dsh-passwords', id: String(customer.id), username: customer.username, role: 'user',
     });
     assert.notEqual(upstreamHeaders['x-dsh-principal'], 'browser-forged');
+
+    const pluginSocket = new WebSocket(`ws://127.0.0.1:${String(gatewayPort)}/plugin/ws/echo`, {
+      headers: { cookie },
+    });
+    await new Promise<void>((resolve, reject) => {
+      pluginSocket.once('open', resolve);
+      pluginSocket.once('error', reject);
+    });
+    pluginSocket.terminate();
+
+    const deniedToken = jwt.sign({
+      sub: String(deniedCustomer.id), username: deniedCustomer.username,
+      cv: deniedCustomer.credential_version, jti: 'denied-plugin-ws',
+    }, config.jwtSecret, { expiresIn: '1h' });
+    const deniedSocket = new WebSocket(`ws://127.0.0.1:${String(gatewayPort)}/plugin/ws/echo`, {
+      headers: { cookie: `dsh_gateway_token=${deniedToken}` },
+    });
+    const deniedStatus = await new Promise<number>((resolve, reject) => {
+      deniedSocket.once('unexpected-response', (_request, response) => {
+        response.resume();
+        resolve(response.statusCode ?? 0);
+      });
+      deniedSocket.once('error', reject);
+    });
+    assert.equal(deniedStatus, 404);
+    deniedSocket.terminate();
 
     const closed = new Promise<number>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('remote mux invalidation timed out')), 1_000);

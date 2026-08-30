@@ -1,22 +1,16 @@
 /** Host authorization for principal-scoped Session and Workspace reads. */
 
 import type { Context } from '@deepseek-ai/cordis';
+import type {
+  PrincipalAccessResult,
+  PrincipalAccessSubjects,
+} from '@deepseek-ai/dsh-principal-access';
+import type { SessionId } from '@deepseek-ai/dsh-session/types';
+import type { WorkspaceId } from '@deepseek-ai/dsh-workspace';
 import { realpath } from 'node:fs/promises';
 import path from 'node:path';
 import type { Database, UserPermissionsRow } from './db.js';
 import type { AuthenticatedPrincipal } from './principal.js';
-
-/** Resource ids the Harness asks the deployment to authorize in one batch. */
-export interface PrincipalAccessSubjects {
-  readonly sessionIds?: readonly string[];
-  readonly workspaceIds?: readonly string[];
-}
-
-/** Requested resource ids that one authenticated account may read. */
-export interface PrincipalAccessResult {
-  readonly readableSessionIds: ReadonlySet<string>;
-  readonly readableWorkspaceIds: ReadonlySet<string>;
-}
 
 interface WorkspaceRecord {
   readonly id: string;
@@ -51,6 +45,9 @@ function defaultPermissions(userId: number): UserPermissionsRow {
     monthly_budget_micros: 0,
     allow_upload: true,
     allow_git_download: false,
+    allow_workspace_create: false,
+    allowed_websocket_paths: [],
+    allowed_agent_presets: [],
     banned: false,
     sandbox_mode: null,
     disabled_sessions: [],
@@ -106,13 +103,13 @@ export class DshPasswordsPrincipalAccessProvider {
       return pending;
     };
 
-    const readableWorkspaceIds = new Set<string>();
+    const readableWorkspaceIds = new Set<WorkspaceId>();
     for (const workspaceId of requestedWorkspaces) {
       const workspacePath = workspacePaths.get(workspaceId);
       if (workspacePath !== undefined && await pathAllowed(workspacePath)) readableWorkspaceIds.add(workspaceId);
     }
 
-    const readableSessionIds = new Set<string>();
+    const readableSessionIds = new Set<SessionId>();
     if (requestedSessions.length > 0 && query !== undefined) {
       const records = await query.listSessions(signal);
       signal?.throwIfAborted();

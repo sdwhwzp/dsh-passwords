@@ -10,6 +10,7 @@ import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import type { MysqlConnectionOptions } from './mysql-sync.js';
+import { parseWebSocketAllowlist } from './permissions.js';
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 // dsh 进程里没有本项目的 .env（通过 DSH_PASSWORDS_ENV_FILE 显式指定网关 .env 路径）
@@ -21,6 +22,12 @@ loadEnv({ path: path.join(moduleDir, '..', '.env'), quiet: true });
 
 function readEnv(name: string, fallback: string): string {
   return (process.env[name] ?? '').trim() || fallback;
+}
+
+/** Resolve a configured path against its deployment directory. */
+export function resolveConfigPath(value: string, configRoot: string, fallbackName: string): string {
+  const configured = value.trim() || fallbackName;
+  return path.isAbsolute(configured) ? path.normalize(configured) : path.resolve(configRoot, configured);
 }
 
 export interface PlatformConfig {
@@ -71,6 +78,11 @@ export interface PlatformConfig {
     dshRoot: string;
     /** 补丁应用后要重启的 dsh systemd 服务名；留空则不自动重启 */
     restartService: string;
+  };
+  /** Optional third-party WebSocket routes; built-in alpha transports stay explicit in the gateway. */
+  webSocket?: {
+    adminAllowlist: string[];
+    userAllowlist: string[];
   };
 }
 
@@ -204,6 +216,16 @@ export function loadConfig(): PlatformConfig {
     patch: {
       dshRoot: readEnv('MCP_DSH_ROOT', ''),
       restartService,
+    },
+    webSocket: {
+      adminAllowlist: parseWebSocketAllowlist(
+        process.env.MCP_GATEWAY_WS_ADMIN_ALLOWLIST,
+        'MCP_GATEWAY_WS_ADMIN_ALLOWLIST',
+      ),
+      userAllowlist: parseWebSocketAllowlist(
+        process.env.MCP_GATEWAY_WS_USER_ALLOWLIST,
+        'MCP_GATEWAY_WS_USER_ALLOWLIST',
+      ),
     },
   };
 }

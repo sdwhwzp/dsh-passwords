@@ -70,6 +70,7 @@ async function runScenario(
   const dbPath = path.join(tempDir, 'data', 'platform.db');
   const db = new Database(dbPath, createFieldCrypto('test-key', 'test-key'));
   db.init();
+  db.createUser('admin', '$2a$10$dummyhashdummyhashdummyhashdu', 'admin');
   const user = db.createUser('subuser', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setManagedWorkspace(user.id, root);
   db.setPermissions(user.id, {
@@ -283,6 +284,19 @@ test('subuser can create, adopt, and remove a private workspace registration but
     const adopted = await request('workspace.create', { path: fresh });
     assert.equal(adopted.status, 200);
     assert.equal(upstreamCalls.at(-1)?.payload.path, fresh);
+
+    const renamed = await request('workspace.rename', {
+      oldPath: fresh,
+      newPath: path.join(root, 'renamed'),
+    });
+    assert.equal(renamed.status, 200, String(renamed.body));
+    assert.equal(upstreamCalls.at(-1)?.method, 'workspace.rename');
+    const renameCallsBeforeOutside = upstreamCalls.filter((call) => call.method === 'workspace.rename').length;
+    assert.equal((await request('workspace.rename', { oldPath: fresh, newPath: outside })).status, 403);
+    assert.equal(
+      upstreamCalls.filter((call) => call.method === 'workspace.rename').length,
+      renameCallsBeforeOutside,
+    );
 
     const callsBeforeDenials = upstreamCalls.length;
     assert.equal((await request('host.listDirectory', { path: outside })).status, 403);

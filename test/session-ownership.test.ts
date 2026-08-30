@@ -9,6 +9,8 @@ import {
   isDisplayableDshSession,
   isDisplayableDshSurface,
   stripArchivedSessionIds,
+  filterArchivedSessionIds,
+  filterOwnedSessionIds,
   filterSessionItems,
   collectSessionCwd,
   collectSessionCwdFromWorkspaces,
@@ -52,6 +54,28 @@ test('归档枚举源清理：archivedSessionIds 被清空', () => {
   const value = { workspaces: [{ archivedSessionIds: ['s-archived'] }] };
   assert.equal(stripArchivedSessionIds(value), true);
   assert.deepEqual(value.workspaces[0].archivedSessionIds, []);
+});
+
+test('可见归档会话保留工作区槽位，不会掉入未分组', () => {
+  const value = {
+    result: {
+      value: {
+        items: [{ path: '/a', sessionIds: ['s-active', 's-archived', 's-disabled', 's-foreign'] }],
+        archivedSessionIds: ['s-archived', 's-disabled', 's-foreign'],
+      },
+    },
+  };
+  const owned = new Set(['s-active', 's-archived', 's-disabled']);
+  const disabled = new Set(['s-disabled']);
+  const archived = new Set(value.result.value.archivedSessionIds);
+  const visible = new Set(collectSessionCwdFromWorkspaces(value).keys());
+  filterArchivedSessionIds(
+    value,
+    (id) => archived.has(id) && visible.has(id) && owned.has(id) && !disabled.has(id),
+  );
+  filterOwnedSessionIds(value, (id) => owned.has(id) && !disabled.has(id));
+  assert.deepEqual(value.result.value.items[0].sessionIds, ['s-active', 's-archived']);
+  assert.deepEqual(value.result.value.archivedSessionIds, ['s-archived']);
 });
 
 test('工作区过滤：只显示活动工作区成员，禁用覆盖逐条关闭', () => {

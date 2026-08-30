@@ -3,7 +3,10 @@
 //   - 远程设置补丁状态 + "重载补丁"按钮（任何登录用户可触发；补丁强制启用）
 //   - 用户管理（改密/改名/子用户） → fetch /api/dsh-passwords/*（网关
 //     JWT cookie 鉴权）
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client';
+import type { Context as ClientContext } from '@deepseek-ai/cordis';
+import type {} from '@deepseek-ai/dsh-api-gateway/client';
+import type {} from '@deepseek-ai/dsh-api-session-controller/client';
+import type {} from '@deepseek-ai/dsh-api-workspace-controller/client';
 import type {} from '@deepseek-ai/dsh-client-ui-slots/client';
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client';
 import type {} from '@deepseek-ai/dsh-client-locale/client';
@@ -15,6 +18,7 @@ import { LocalWorkspaceLauncher } from './local-workspace-launcher';
 import { ManagedFilesLauncher } from './managed-files-launcher';
 import { zh, en } from './locales';
 import { AccountLogoutRow, installDesktopLauncherSuppression } from './account-logout';
+import { DSH_PASSWORDS_REMOTE, type DshPasswordsRemoteClient } from './remote';
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface SlotMap {
@@ -151,7 +155,9 @@ button.dshpw-managed-files-name:hover{color:var(--dsw-alias-brand-primary)}
 
 export const inject = ['slots', 'locale', 'sessions', 'workspaces'] as const;
 
-export function apply(ctx: ClientContext): void {
+export async function apply(ctx: ClientContext): Promise<void> {
+  const remote = ctx.remote as unknown as DshPasswordsRemoteClient;
+  await remote.$mount(DSH_PASSWORDS_REMOTE);
   let gatewayDetected: boolean | null = null;
   const isBehindGateway = async (): Promise<boolean> => {
     if (gatewayDetected !== null) return gatewayDetected;
@@ -233,7 +239,7 @@ export function apply(ctx: ClientContext): void {
         key: 'dsh-passwords-card',
         order: 55,
         locale: 'dshpw',
-        inject: () => ({}),
+        inject: () => ({ loadState: () => remote.dshPasswords.state() }),
       },
       DshPasswordsCard,
     ),

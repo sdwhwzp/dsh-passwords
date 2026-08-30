@@ -1,5 +1,4 @@
 // dsh-passwords 设置分区（settings.section 一级分区）。
-// 参考 @linxin666/dsh-client-ui-web-ui-settings 的 WebUIPluginsSection 模式：
 // 在设置页左侧导航注册一个独立分区（有自己的 label），分区体 = 静态标题 +
 // 描述 + 子槽卡片列表（renderSlot 渲染注册进 dsh-passwords.plugin.item 的卡片）。
 // 这样 dsh-passwords 的设置不再挤在官方"插件"列表里，而是单独成区。
