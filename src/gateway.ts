@@ -960,6 +960,7 @@ export function createGatewayServer(
   const upstream = new URL(config.gateway.upstream);
   const upstreamHost = upstream.hostname;
   const upstreamPort = Number(upstream.port || 80);
+  const upstreamAuthority = upstream.host;
 
   // 上游连接池：复用与 dsh 的 TCP 连接（keep-alive），
   // 避免每个代理请求都新建一次 TCP 握手
@@ -1020,6 +1021,7 @@ export function createGatewayServer(
         method: 'GET',
         agent: upstreamAgent,
         headers: {
+          host: upstreamAuthority,
           accept: 'text/html',
           'accept-encoding': 'identity',
           ...upstreamAuthenticationHeaders(),
@@ -1219,6 +1221,7 @@ export function createGatewayServer(
           method: 'POST',
           agent: upstreamAgent,
           headers: {
+            host: upstreamAuthority,
             accept: 'application/json',
             'accept-encoding': 'identity',
             'content-type': 'application/json',
@@ -1969,16 +1972,29 @@ export function createGatewayServer(
       return;
     }
     const database = await db.health().catch(() => false);
-    let upstreamReady = false;
+    let upstreamIndex = false;
+    let workspaceList = false;
     try {
       await probeUpstreamBrowserSession();
-      await refreshWorkspaceAccessSnapshot();
-      upstreamReady = true;
+      upstreamIndex = true;
     } catch {
-      upstreamReady = false;
+      upstreamIndex = false;
     }
+    try {
+      await refreshWorkspaceAccessSnapshot();
+      workspaceList = true;
+    } catch {
+      workspaceList = false;
+    }
+    const upstreamReady = upstreamIndex && workspaceList;
     const ok = database && upstreamReady;
-    res.status(ok ? 200 : 503).json({ ok, database, upstream: upstreamReady });
+    res.status(ok ? 200 : 503).json({
+      ok,
+      database,
+      upstream: upstreamReady,
+      upstreamIndex,
+      workspaceList,
+    });
   });
 
   app.post('/gateway/internal/patch', express.json({ limit: '4kb' }), (req, res) => {
@@ -3277,6 +3293,7 @@ export function createGatewayServer(
           method: 'POST',
           agent: upstreamAgent,
           headers: {
+            host: upstreamAuthority,
             accept: 'application/json',
             'accept-encoding': 'identity',
             'content-type': 'application/json',
@@ -3348,6 +3365,7 @@ export function createGatewayServer(
           method: 'POST',
           agent: upstreamAgent,
           headers: {
+            host: upstreamAuthority,
             accept: 'application/json',
             'accept-encoding': 'identity',
             'content-type': 'application/json',
@@ -3450,6 +3468,7 @@ export function createGatewayServer(
         path: '/api/dsh-passwords/internal/sandbox',
         method: 'POST',
         headers: {
+          host: upstreamAuthority,
           'content-type': 'application/json',
           'content-length': String(Buffer.byteLength(body)),
           'x-internal-secret': config.internalSecret,
@@ -5056,7 +5075,8 @@ export function createGatewayServer(
           maxPayload: 16 * 1024 * 1024,
           handshakeTimeout: 10_000,
           headers: {
-            Origin: `${upstream.protocol}//${upstreamHost}:${String(upstreamPort)}`,
+            Host: upstreamAuthority,
+            Origin: upstream.origin,
             ...upstreamAuthenticationHeaders(),
             ...(() => {
               const currentUser = db.getUserById(userId);

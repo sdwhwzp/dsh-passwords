@@ -24,10 +24,12 @@ test('readiness proves database and authenticated Host data access without expos
   db.init();
   const admin = db.createUser('admin', 'hash', 'admin');
   const upstreamCookies: Array<string | undefined> = [];
+  const upstreamAuthorities: Array<string | undefined> = [];
   let upstreamRequests = 0;
   const upstream = http.createServer((req, res) => {
     upstreamRequests += 1;
     upstreamCookies.push(req.headers.cookie);
+    upstreamAuthorities.push(req.headers.host);
     if (req.headers.cookie !== HOST_BROWSER_COOKIE) {
       res.writeHead(401).end();
       return;
@@ -88,8 +90,18 @@ test('readiness proves database and authenticated Host data access without expos
       headers: { 'x-internal-secret': config.internalSecret },
     });
     assert.equal(ready.status, 200);
-    assert.deepEqual(await ready.json(), { ok: true, database: true, upstream: true });
+    assert.deepEqual(await ready.json(), {
+      ok: true,
+      database: true,
+      upstream: true,
+      upstreamIndex: true,
+      workspaceList: true,
+    });
     assert.deepEqual(new Set(upstreamCookies), new Set([HOST_BROWSER_COOKIE]));
+    assert.deepEqual(
+      new Set(upstreamAuthorities),
+      new Set([`127.0.0.1:${String(upstreamPort)}`]),
+    );
 
     const token = jwt.sign({
       sub: String(admin.id), username: admin.username, cv: admin.credential_version,
