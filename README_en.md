@@ -305,6 +305,8 @@ The bottleneck is usually the network path to the server.
 
 ## Manual install
 
+> v2.6.6 is compatible with the DSH `0.1.2-alpha.1` runtime path: the installers strictly require Node.js `22.5+`, register the plugin, detect the dsh installation and apply the compatibility patch. Automatic updates and settings-page patch reload use the same patch path; this release does not modify the official npm/Docker packages.
+
 1. `git clone https://github.com/slywalker2006/dsh-passwords && cd dsh-passwords`
 2. `npm install && npm run build`
 3. `cp .env.example .env` and set SETUP_KEY to `openssl rand -hex 24`

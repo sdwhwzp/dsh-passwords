@@ -137,9 +137,24 @@ function findDshBundleFile(dshRoot: string, packageName: string, relativePath: s
     const candidate = path.join(dir, 'node_modules', packageName, relativePath);
     if (existsSync(candidate)) return candidate;
     const parent = path.dirname(dir);
-    if (parent === dir) return null;
+    if (parent === dir) break;
     dir = parent;
   }
+  // dsh 0.1.2-alpha.1 在源码构建时保留 pnpm workspace 布局：包名仍沿用
+  // dsh 的公开 package name，但不会复制到 dshRoot/node_modules 下的发布包目录。
+  // 只加入已确认的源码目录映射，不做模糊递归搜索，避免补丁打到错误同名文件。
+  const workspacePath: Record<string, string> = {
+    [SETTINGS_PACKAGE]: path.join('packages', 'client', 'ui-settings'),
+    [WORKSPACE_PACKAGE]: path.join('packages', 'client', 'ui-workspace'),
+    [STARTUP_PACKAGE]: path.join('packages', 'bundle', 'web-app'),
+    [CONNECTION_PACKAGE]: path.join('packages', 'client', 'connection'),
+  };
+  const workspacePackage = workspacePath[packageName];
+  if (workspacePackage !== undefined) {
+    const candidate = path.join(dshRoot, workspacePackage, relativePath);
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
 }
 
 const SETTINGS_PACKAGE = '@deepseek-ai/dsh-client-ui-settings';
@@ -150,6 +165,10 @@ const WORKSPACE_PACKAGE = '@deepseek-ai/dsh-client-ui-workspace';
 const WORKSPACE_FILE = path.join('lib', 'client.js');
 const STARTUP_PACKAGE = '@deepseek-ai/dsh-web-app';
 const STARTUP_FILE = path.join('lib', 'startup.js');
+const CONNECTION_PACKAGE = '@deepseek-ai/dsh-client-connection';
+const CONNECTION_FILE = path.join('lib', 'index.js');
+const AUTH_COOKIE_PATCH_MARK = 'dshpw-authenticated-cookie';
+const AUTH_COOKIE_PATCH_HARDEN_MARK = 'dshpw-authenticated-cookie-loopback-v2';
 // dsh 上游安全闸：拒绑 0.0.0.0（防把可执行 RPC 暴露到网络）。分容器拓扑中网关容器
 // 要跨容器访问 dsh web，但 dsh 只允许回环——本子补丁默认关闭（MCP_DSH_PATCH_ALLOW_BIND_ALL=1
 // 开启），开启后允许 dsh 绑所有网卡，使另一容器的网关能访问到 dsh web。
@@ -161,6 +180,69 @@ const BIND_ALL_TO =
 // 结构化闸签名：不依赖完整报错文案——上游改措辞仍能识别「拒绑闸还在」，
 // 真正移除拒绑（原生支持 0.0.0.0）才不匹配。用于 fail-closed 状态判定。
 const BIND_ALL_GUARD_RE = /program\.error\(\s*['"][^'"]*0\.0\.0\.0[^'"]*['"]/;;
+
+/**
+ * Add the alpha.1 Host-only Cookie minting bridge. The official browser auth
+ * flow remains unchanged: browsers still receive a Cookie only after the
+ * one-time query-token exchange. This extra method is callable only by the
+ * in-process Host plugin and returns a Cookie pair, never a token or Set-Cookie
+ * header. The replacement is deliberately marker-based and idempotent so an
+ * upstream bundle can be repatched after npm updates.
+ */
+function authenticatedCookieMethodSource(): string {
+  return [
+    `\t/** ${AUTH_COOKIE_PATCH_MARK} / ${AUTH_COOKIE_PATCH_HARDEN_MARK}: trusted Host-side authority-bound Cookie mint. */`,
+    '\tauthenticatedCookie(baseUrl) {',
+    '\t\tconst url = new URL(baseUrl);',
+    '\t\tif (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("client-connection: authenticatedCookie requires HTTP(S)");',
+    '\t\tif (url.username !== "" || url.password !== "") throw new Error("client-connection: authenticatedCookie rejects URL credentials");',
+    '\t\tconst parts = url.hostname.split(".");',
+    '\t\tconst loopback = url.hostname === "localhost" || url.hostname === "[::1]" || (parts.length === 4 && parts[0] === "127" && parts.every((part) => /^\\d{1,3}$/.test(part) && Number(part) <= 255));',
+    '\t\tif (!loopback) throw new Error("client-connection: authenticatedCookie requires a loopback authority");',
+    '\t\tconst authority = url.host;',
+    '\t\tconst issuedAt = Date.now();',
+    '\t\tconst expiresAt = issuedAt + this.maxAgeMilliseconds;',
+    '\t\tconst value = encodeCookie({ version: COOKIE_PAYLOAD_VERSION, authority, issuedAt, expiresAt }, this.secret);',
+    "\t\treturn cookieName(authority) + '=' + value;",
+    '\t}',
+  ].join('\n');
+}
+
+function patchConnectionAuthCookie(content: string): string | null {
+  if (content.includes(AUTH_COOKIE_PATCH_HARDEN_MARK)) return null;
+  const browserMethod = /(\n\s*authenticatedUrl\(baseUrl\)\s*\{[\s\S]*?\})\n(?=\s*\/\*|\s*authorizeIndex\()/;
+  const browserMatch = browserMethod.exec(content);
+  if (browserMatch === null) return null;
+
+  // Upgrade a previously injected alpha bridge in place. The old marker is
+  // intentionally accepted only as a migration signal; the new method adds
+  // the authority/protocol/loopback boundary before minting any Cookie.
+  if (content.includes(AUTH_COOKIE_PATCH_MARK)) {
+    const oldBrowserCookie = /\n\s*\/\*\* dshpw-authenticated-cookie: trusted Host-side authority-bound Cookie mint\. \*\/\n\s*authenticatedCookie\(baseUrl\) \{[\s\S]*?\n\s*\}\n(?=\s*\/\*|\s*authorizeIndex\()/;
+    const oldMatch = oldBrowserCookie.exec(content);
+    if (oldMatch === null) return null;
+    const migrated = content.replace(oldBrowserCookie, `\n${authenticatedCookieMethodSource()}\n`);
+    return migrated === content ? null : migrated;
+  }
+
+  const browserInsertion = [
+    browserMatch[0].trimEnd(),
+    authenticatedCookieMethodSource(),
+    '',
+  ].join('\n');
+  let next = content.replace(browserMethod, `\n${browserInsertion}`);
+  const hostMethod = /(\n\s*authenticatedUrl\(baseUrl\)\s*\{\s*return this\.browserAuth\.authenticatedUrl\(baseUrl\);\s*\})\n/;
+  const hostMatch = hostMethod.exec(next);
+  if (hostMatch === null) return null;
+  const hostInsertion = [
+    hostMatch[0].trimEnd(),
+    `\t/** ${AUTH_COOKIE_PATCH_MARK}: expose only the derived Cookie pair to trusted Host plugins. */`,
+    '\tauthenticatedCookie(baseUrl) { return this.browserAuth.authenticatedCookie(baseUrl); }',
+    '',
+  ].join('\n');
+  next = next.replace(hostMethod, `\n${hostInsertion}`);
+  return next === content ? null : next;
+}
 
 /** 分容器拓扑开关：MCP_DSH_PATCH_ALLOW_BIND_ALL=1/true/yes 时允许 dsh web 绑 0.0.0.0 */
 function bindAllEnabled(): boolean {
@@ -274,10 +356,14 @@ export function patchStatus(
     settingsHostMode = !s.includes(SETTINGS_FROM) && s.includes(SETTINGS_TO);
   } catch { /* 文件缺失按未打处理 */ }
   try {
-    if (wlFile === null) throw new Error('apiproxy bundle not found');
-    const w = readFileSync(wlFile, 'utf8');
-    // rc.7+（含当前 rc.8）已移除 WEB_SETTINGS_NAMESPACES 白名单 → 原生支持，视为已满足
-    whitelist = !whitelistPatchApplicable(w) || hasSettingsNamespace(w, 'dsh-passwords');
+    // rc.7+ / alpha 的 @Remote gateway 已移除旧 ApiProxy 白名单；旧包缺失
+    // 本身就是原生动态注册机制，不应阻断其他独立补丁。
+    if (wlFile === null) {
+      whitelist = true;
+    } else {
+      const w = readFileSync(wlFile, 'utf8');
+      whitelist = !whitelistPatchApplicable(w) || hasSettingsNamespace(w, 'dsh-passwords');
+    }
   } catch { /* 同上 */ }
   try {
     if (wsFile === null) throw new Error('workspace bundle not found');
@@ -313,30 +399,48 @@ export function patchStatus(
 export function applyRemotePatch(dshRoot: string): 'applied' | 'unchanged' | 'missing' {
   const settingsFile = findDshBundleFile(dshRoot, SETTINGS_PACKAGE, SETTINGS_FILE);
   const wlFile = findDshBundleFile(dshRoot, WHITELIST_PACKAGE, WHITELIST_FILE);
-  if (settingsFile === null || wlFile === null) return 'missing';
+  const connectionFile = findDshBundleFile(dshRoot, CONNECTION_PACKAGE, CONNECTION_FILE);
+  if (settingsFile === null) return 'missing';
   let changed = false;
 
-  // 先完整预检白名单目标。不能先写 settings 再发现白名单结构损坏，
-  // 否则 applyRemotePatch() 返回 missing 时会留下半应用状态。
-  const w = readFileSync(wlFile, 'utf8');
-  migrateLegacyBackup(wlFile, w, (original) => {
-    if (!whitelistPatchApplicable(original) || hasSettingsNamespace(original, 'dsh-passwords')) return null;
-    const re = /const WEB_SETTINGS_NAMESPACES = \[([\s\S]*?)\];/;
-    const match = re.exec(original);
-    if (!match) return null;
-    const inserted = match[1].replace(/(\s*[\'"][^\'"]+[\'"])/, `$1,\n\t"dsh-passwords"`);
-    return original.replace(re, `const WEB_SETTINGS_NAMESPACES = [${inserted}];`);
-  });
+  // 旧 ApiProxy 白名单目标在 alpha 已删除；其缺失表示采用 @Remote 动态注册，
+  // 不能阻断 settings/workspace/startup 等独立目标。只有目标存在时才尝试旧补丁。
+  let w = '';
   let whitelistPatched: string | null = null;
-  if (whitelistPatchApplicable(w) && !hasSettingsNamespace(w, 'dsh-passwords')) {
-    const re = /const WEB_SETTINGS_NAMESPACES = \[([\s\S]*?)\];/;
-    const match = re.exec(w);
-    if (!match) return 'missing';
-    const currentBlock = match[1];
-    const existing = [...currentBlock.matchAll(/[\'"]([^\'"]+)[\'"]/g)].map((m) => m[1]);
-    if (!existing.includes('dsh-passwords')) {
-      const inserted = currentBlock.replace(/(\s*[\'"][^\'"]+[\'"])/, `$1,\n\t"dsh-passwords"`);
-      whitelistPatched = w.replace(re, `const WEB_SETTINGS_NAMESPACES = [${inserted}];`);
+  if (wlFile !== null) {
+    w = readFileSync(wlFile, 'utf8');
+    migrateLegacyBackup(wlFile, w, (original) => {
+      if (!whitelistPatchApplicable(original) || hasSettingsNamespace(original, 'dsh-passwords')) return null;
+      const re = /const WEB_SETTINGS_NAMESPACES = \[([\s\S]*?)\];/;
+      const match = re.exec(original);
+      if (!match) return null;
+      const inserted = match[1].replace(/(\s*[\'\"][^\'\"]+[\'\"])/, `$1,\n\t"dsh-passwords"`);
+      return original.replace(re, `const WEB_SETTINGS_NAMESPACES = [${inserted}];`);
+    });
+    if (whitelistPatchApplicable(w) && !hasSettingsNamespace(w, 'dsh-passwords')) {
+      const re = /const WEB_SETTINGS_NAMESPACES = \[([\s\S]*?)\];/;
+      const match = re.exec(w);
+      if (!match) return 'missing';
+      const currentBlock = match[1];
+      const existing = [...currentBlock.matchAll(/[\'\"]([^\'\"]+)[\'\"]/g)].map((m) => m[1]);
+      if (!existing.includes('dsh-passwords')) {
+        const inserted = currentBlock.replace(/(\s*[\'\"][^\'\"]+[\'\"])/, `$1,\n\t"dsh-passwords"`);
+        whitelistPatched = w.replace(re, `const WEB_SETTINGS_NAMESPACES = [${inserted}];`);
+      }
+    }
+  }
+
+  // alpha.1 connection：为 dsh-passwords 的同进程 Host 插件提供受信任的
+  // authority-bound Cookie 派生入口。首次启动后会在磁盘上完成补丁；后续
+  // dsh 重启加载已打补丁的 HostConnectionService，插件即可无网络地刷新 Cookie。
+  if (connectionFile !== null) {
+    const c = readFileSync(connectionFile, 'utf8');
+    migrateLegacyBackup(connectionFile, c, patchConnectionAuthCookie);
+    const patched = patchConnectionAuthCookie(c);
+    if (patched !== null) {
+      ensureOriginalBackup(connectionFile, c, patched);
+      writeFileSync(connectionFile, patched);
+      changed = true;
     }
   }
 
@@ -357,7 +461,7 @@ export function applyRemotePatch(dshRoot: string): 'applied' | 'unchanged' | 'mi
   }
 
   // 2) 白名单补齐（仅 rc.6 及以下适用）。rc.7+（含当前 rc.8）已移除该机制，预检结果为 null。
-  if (whitelistPatched !== null) {
+  if (whitelistPatched !== null && wlFile !== null) {
     ensureOriginalBackup(wlFile, w, whitelistPatched);
     writeFileSync(wlFile, whitelistPatched);
     changed = true;
@@ -459,11 +563,12 @@ export function applyRemotePatch(dshRoot: string): 'applied' | 'unchanged' | 'mi
 export function rollbackPatch(dshRoot: string): 'rolled-back' | 'no-backup' | 'missing' {
   const settingsFile = findDshBundleFile(dshRoot, SETTINGS_PACKAGE, SETTINGS_FILE);
   const wlFile = findDshBundleFile(dshRoot, WHITELIST_PACKAGE, WHITELIST_FILE);
-  if (settingsFile === null || wlFile === null) return 'missing';
+  if (settingsFile === null) return 'missing';
   const wsFile = findDshBundleFile(dshRoot, WORKSPACE_PACKAGE, WORKSPACE_FILE);
   const stFile = findDshBundleFile(dshRoot, STARTUP_PACKAGE, STARTUP_FILE);
+  const connectionFile = findDshBundleFile(dshRoot, CONNECTION_PACKAGE, CONNECTION_FILE);
   let changed = false;
-  for (const target of [settingsFile, wlFile, wsFile, stFile]) {
+  for (const target of [settingsFile, wlFile, wsFile, stFile, connectionFile]) {
     if (target === null) continue;
     // 只恢复带哈希元数据且内容未被篡改的当前版本原始备份；历史遗留的
     // .bak-dshpw 没有元数据时拒绝恢复，避免跨 dsh 版本回滚污染。

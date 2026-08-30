@@ -30,7 +30,7 @@ import https from 'node:https';
 import net from 'node:net';
 import jwt from 'jsonwebtoken';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -45,7 +45,7 @@ import { isDisplayableDshSession, isDisplayableDshSurface } from './permissions.
 export const name = 'dsh-passwords';
 
 /** 依赖 dsh 主机侧的 webServer 服务（路由挂载点） */
-export const inject = ['webServer'];
+export const inject = ['webServer', 'connection'];
 
 /** 网关会话 cookie 名（与 gateway.ts 保持一致） */
 const COOKIE_NAME = 'dsh_gateway_token';
@@ -266,6 +266,260 @@ function gatewayAlreadyRunning(port: number): Promise<boolean> {
 }
 
 /**
+ * Wait for a port to become free without ever terminating its owner. This is
+ * specifically for the dsh restart handoff: the old password-gateway child
+ * may still hold 443 while the new dsh process loads the plugin. A bounded
+ * wait preserves unrelated listeners and prevents a permanent skip race.
+ */
+export async function waitForGatewayPortFree(
+  port: number,
+  timeoutMs = 15_000,
+  intervalMs = 250,
+): Promise<boolean> {
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  do {
+    if (!(await gatewayAlreadyRunning(port))) return true;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    await new Promise<void>((resolve) => setTimeout(resolve, Math.min(intervalMs, remaining)));
+  } while (Date.now() <= deadline);
+  return false;
+}
+
+function gatewayHealthz(cfg: PlatformConfig): Promise<boolean> {
+  return new Promise((resolve) => {
+    const secure = cfg.gateway.tls !== null;
+    const transport = secure ? https : http;
+    const request = transport.request(`${secure ? 'https' : 'http'}://127.0.0.1:${String(cfg.gateway.port)}/gateway/healthz`, {
+      method: 'GET',
+      rejectUnauthorized: false,
+      timeout: 1000,
+    }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on('data', (chunk: Buffer) => chunks.push(chunk));
+      response.on('end', () => {
+        let body: unknown;
+        try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { body = null; }
+        const ok = response.statusCode === 200 && typeof body === 'object' && body !== null &&
+          (body as { service?: unknown }).service === 'dsh-passwords';
+        resolve(ok);
+      });
+    });
+    request.on('error', () => resolve(false));
+    request.on('timeout', () => { request.destroy(); resolve(false); });
+    request.end();
+  });
+}
+
+/** Return the owning dsh PID for a password gateway, or null when unavailable. */
+function gatewayOwnerPid(cfg: PlatformConfig): Promise<number | null> {
+  return new Promise((resolve) => {
+    const secure = cfg.gateway.tls !== null;
+    const transport = secure ? https : http;
+    const request = transport.request(`${secure ? 'https' : 'http'}://127.0.0.1:${String(cfg.gateway.port)}/gateway/internal/owner`, {
+      method: 'GET',
+      headers: { 'x-internal-secret': cfg.internalSecret },
+      rejectUnauthorized: false,
+      timeout: 1000,
+    }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on('data', (chunk: Buffer) => chunks.push(chunk));
+      response.on('end', () => {
+        if (response.statusCode !== 200) { resolve(null); return; }
+        try {
+          const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { ok?: unknown; parentPid?: unknown };
+          resolve(body.ok === true && typeof body.parentPid === 'number' && Number.isInteger(body.parentPid) && body.parentPid > 0
+            ? body.parentPid
+            : null);
+        } catch {
+          resolve(null);
+        }
+      });
+    });
+    request.on('error', () => resolve(null));
+    request.on('timeout', () => { request.destroy(); resolve(null); });
+    request.end();
+  });
+}
+
+/**
+ * Use the alpha.1 Host-side auth bridge when present. `undefined` means the
+ * running dsh is an older release with no bridge; `null` means the bridge was
+ * present but returned an invalid value. The function never calls the
+ * one-time query-token URL, so it is safe to use after a health failure.
+ */
+function deriveDshBrowserCookie(connection: unknown, baseUrl: string): string | null | undefined {
+  if (!isLoopbackUpstream(baseUrl) || connection === null || typeof connection !== 'object') return undefined;
+  const method = (connection as { authenticatedCookie?: unknown }).authenticatedCookie;
+  if (typeof method !== 'function') return undefined;
+  const expectedCookieName = upstreamAuthCookieName(baseUrl);
+  if (expectedCookieName === null) return null;
+  try {
+    const cookie = String(method.call(connection, baseUrl));
+    const escapedName = expectedCookieName.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+    return new RegExp(`^${escapedName}=[A-Za-z0-9._~-]+$`).test(cookie) ? cookie : null;
+  } catch (error) {
+    console.error('[dsh-passwords] dsh Host Cookie 派生失败：', error);
+    return null;
+  }
+}
+
+/**
+ * dsh alpha 的 Web UI/API/WS 都要求先用进程启动 token 换取 authority-bound
+ * dsh-auth cookie。插件和网关属于同一个 dsh 进程拓扑：由插件使用 connection
+ * 官方 authenticatedUrl() 完成一次交换，再把 cookie 交给网关子进程；不把
+ * 一次性 token 暴露给公网，也不绕过 dsh 的浏览器认证。
+ */
+interface UpstreamBrowserAuth {
+  supported: boolean;
+  cookie: string | null;
+}
+
+function upstreamAuthCookieName(baseUrl: string): string | null {
+  try {
+    const authority = new URL(baseUrl).host;
+    return `dsh-auth-${createHash('sha256').update(authority).digest('base64url')}`;
+  } catch {
+    return null;
+  }
+}
+
+function isLoopbackUpstream(baseUrl: string): boolean {
+  try {
+    const parsed = new URL(baseUrl);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+    const hostname = parsed.hostname;
+    if (hostname === 'localhost' || hostname === '[::1]') return true;
+    const parts = hostname.split('.');
+    return parts.length === 4 && parts[0] === '127' && parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255);
+  } catch {
+    return false;
+  }
+}
+
+function syncGatewayBrowserCookie(cfg: PlatformConfig, cookie: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const secure = cfg.gateway.tls !== null;
+    const transport = secure ? https : http;
+    const body = JSON.stringify({ cookie });
+    const request = transport.request(`${secure ? 'https' : 'http'}://127.0.0.1:${String(cfg.gateway.port)}/gateway/internal/upstream-auth`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'content-length': String(Buffer.byteLength(body)),
+        'x-internal-secret': cfg.internalSecret,
+      },
+      rejectUnauthorized: false,
+      timeout: 3000,
+    }, (response) => {
+      const ok = response.statusCode !== undefined && response.statusCode >= 200 && response.statusCode < 300;
+      response.resume();
+      resolve(ok);
+    });
+    request.on('error', () => resolve(false));
+    request.on('timeout', () => { request.destroy(); resolve(false); });
+    request.end(body);
+  });
+}
+
+function probeGatewayBrowserCookie(cfg: PlatformConfig): Promise<boolean> {
+  return new Promise((resolve) => {
+    const secure = cfg.gateway.tls !== null;
+    const transport = secure ? https : http;
+    const request = transport.request(`${secure ? 'https' : 'http'}://127.0.0.1:${String(cfg.gateway.port)}/gateway/internal/upstream-auth/health`, {
+      method: 'GET',
+      headers: { 'x-internal-secret': cfg.internalSecret },
+      rejectUnauthorized: false,
+      timeout: 3000,
+    }, (response) => {
+      const ok = response.statusCode === 200;
+      response.resume();
+      resolve(ok);
+    });
+    request.on('error', () => resolve(false));
+    request.on('timeout', () => { request.destroy(); resolve(false); });
+    request.end();
+  });
+}
+
+function exchangeDshBrowserCookie(connection: unknown, baseUrl: string): Promise<UpstreamBrowserAuth> {
+  // alpha.1 补丁提供可重复调用的 Host-side Cookie 派生；优先使用它，避免
+  // 健康恢复或 dsh 代际切换时再次消费一次性 launch token。
+  const derived = deriveDshBrowserCookie(connection, baseUrl);
+  if (derived !== undefined) return Promise.resolve({ supported: true, cookie: derived });
+  // rc.2 及更早版本没有 alpha 的 BrowserAuth API：保持旧版匿名 loopback
+  // 上游行为，不能把“能力不存在”误报成 token 交换失败。
+  if (!isLoopbackUpstream(baseUrl)) {
+    // 保留原有跨容器/远程上游代理能力，但绝不把本机 dsh launch token
+    // 自动发送到非回环地址；远程拓扑必须通过显式 Cookie/外部认证流程接入。
+    return Promise.resolve({ supported: false, cookie: null });
+  }
+  if (connection === null || typeof connection !== 'object') return Promise.resolve({ supported: false, cookie: null });
+  const authenticatedUrl = (connection as { authenticatedUrl?: unknown }).authenticatedUrl;
+  if (typeof authenticatedUrl !== 'function') return Promise.resolve({ supported: false, cookie: null });
+  let launchUrl: string;
+  try {
+    launchUrl = String(authenticatedUrl.call(connection, baseUrl));
+  } catch (error) {
+    console.error('[dsh-passwords] 无法生成 dsh Web 一次性 token URL：', error);
+    return Promise.resolve({ supported: true, cookie: null });
+  }
+  let parsed: URL;
+  let base: URL;
+  try {
+    parsed = new URL(launchUrl);
+    base = new URL(baseUrl);
+  } catch {
+    console.error('[dsh-passwords] dsh Web token URL 无效，拒绝启动未认证上游代理');
+    return Promise.resolve({ supported: true, cookie: null });
+  }
+  if (
+    (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
+    parsed.username !== '' ||
+    parsed.password !== '' ||
+    !isLoopbackUpstream(launchUrl) ||
+    parsed.host !== base.host ||
+    parsed.protocol !== base.protocol ||
+    parsed.pathname !== '/'
+  ) {
+    console.error('[dsh-passwords] dsh Web token URL authority/path 不符合本机上游，拒绝启动未认证上游代理');
+    return Promise.resolve({ supported: true, cookie: null });
+  }
+  const transport = parsed.protocol === 'https:' ? https : http;
+  return new Promise((resolve) => {
+    const expectedCookieName = upstreamAuthCookieName(baseUrl);
+    if (expectedCookieName === null) {
+      resolve({ supported: true, cookie: null });
+      return;
+    }
+    const request = transport.request(parsed, { method: 'GET', headers: { host: parsed.host } }, (response) => {
+      const cookies = response.headers['set-cookie'] ?? [];
+      response.resume();
+      if (response.statusCode !== 303 || cookies.length === 0) {
+        console.error(`[dsh-passwords] dsh Web token 交换失败（HTTP ${String(response.statusCode ?? 0)}）`);
+        resolve({ supported: true, cookie: null });
+        return;
+      }
+      const cookie = cookies
+        .map((value) => value.split(';', 1)[0] ?? '')
+        .find((value) => value.startsWith(`${expectedCookieName}=`));
+      if (cookie === undefined || !new RegExp(`^${expectedCookieName.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}=[A-Za-z0-9._~-]+$`).test(cookie)) {
+        console.error('[dsh-passwords] dsh Web token 交换返回无效 cookie');
+        resolve({ supported: true, cookie: null });
+        return;
+      }
+      resolve({ supported: true, cookie });
+    });
+    request.setTimeout(3000, () => request.destroy(new Error('token exchange timeout')));
+    request.on('error', (error) => {
+      console.error('[dsh-passwords] dsh Web token 交换失败：', error.message);
+      resolve({ supported: true, cookie: null });
+    });
+    request.end();
+  });
+}
+
+/**
  * 自动拉起外部密码门：dsh 启动时（本插件被加载）spawn 网关子进程，
  * 无需任何额外启动命令。dsh 退出时（ctx.dispose）子进程随停；
  * 网关侧另有父进程看门狗兜底（宿主被强杀时自己退出）。
@@ -288,63 +542,131 @@ function startGateway(ctx: Context, cfg: PlatformConfig): void {
       if (process.env.DSH_PASSWORDS_NO_AUTOSTART === '1') return noop;
       let disposed = false;
       let child: ChildProcess | null = null;
+      let retryTimer: NodeJS.Timeout | null = null;
+      let launching = false;
+      let poll: NodeJS.Timeout | null = null;
+      let refreshInFlight: Promise<boolean> | null = null;
 
-      void gatewayAlreadyRunning(gatewayPort).then((running) => {
-        if (disposed) return;
-        if (running) {
-          console.error(`[dsh-passwords] 密码门已在运行（端口 ${String(gatewayPort)}），跳过自动拉起`);
-          return;
-        }
-        // 网关上游 = dsh 自己的 web 端口（webServer 服务在运行时可知；拿不到就退回默认 3080）。
-        // 用户显式配置过 MCP_GATEWAY_UPSTREAM（.env/环境变量）则尊重之，不自动覆盖。
-        let upstreamPort = 3080;
+      let upstreamPort = 3080;
+      try {
+        const wsPort = (ctx.webServer as unknown as { port?: number }).port;
+        if (typeof wsPort === 'number' && wsPort > 0) upstreamPort = wsPort;
+      } catch {
+        // 拿不到就用默认值
+      }
+      const explicitUpstream = process.env.MCP_GATEWAY_UPSTREAM?.trim() ?? '';
+      const upstreamUrl = explicitUpstream !== '' ? explicitUpstream : `http://127.0.0.1:${String(upstreamPort)}`;
+      const connection = (ctx as unknown as { connection?: unknown }).connection;
+
+      const refreshCookie = async (): Promise<boolean> => {
+        const derived = deriveDshBrowserCookie(connection, upstreamUrl);
+        if (derived === undefined) return true;
+        if (derived === null) return false;
+        return syncGatewayBrowserCookie(cfg, derived);
+      };
+
+      const startCookiePolling = (): void => {
+        if (poll !== null || deriveDshBrowserCookie(connection, upstreamUrl) === undefined) return;
+        poll = setInterval(() => {
+          if (disposed || refreshInFlight !== null) return;
+          refreshInFlight = probeGatewayBrowserCookie(cfg).then(async (healthy) => {
+            if (healthy) return true;
+            const refreshed = await refreshCookie();
+            if (!refreshed) console.error('[dsh-passwords] 上游认证 Cookie 健康检查失败，且 alpha Host Cookie 刷新未成功');
+            return refreshed;
+          }).finally(() => { refreshInFlight = null; });
+        }, 15_000);
+      };
+
+      const scheduleRetry = (): void => {
+        if (disposed || retryTimer !== null) return;
+        retryTimer = setTimeout(() => {
+          retryTimer = null;
+          void launch();
+        }, 1000);
+        retryTimer.unref();
+      };
+
+      const launch = async (): Promise<void> => {
+        if (disposed || launching || (child !== null && child.exitCode === null && child.signalCode === null)) return;
+        launching = true;
         try {
-          const wsPort = (ctx.webServer as unknown as { port?: number }).port;
-          if (typeof wsPort === 'number' && wsPort > 0) upstreamPort = wsPort;
-        } catch {
-          // 拿不到就用默认值
-        }
-        const explicitUpstream = process.env.MCP_GATEWAY_UPSTREAM?.trim() ?? '';
-        const gatewayArgs =
-          explicitUpstream !== ''
-            ? [cliPath, 'serve-gateway']
-            : [cliPath, 'serve-gateway', '--upstream', `http://127.0.0.1:${String(upstreamPort)}`];
-        child = spawn(process.execPath, gatewayArgs, {
-          cwd: installRoot,
-          env: {
-            ...process.env,
-            DSH_GATEWAY_PARENT_PID: String(process.pid),
-            DSH_PASSWORDS_ENV_FILE: gatewayEnvFile,
-          },
-          stdio: ['ignore', 'inherit', 'inherit'],
-        });
-        child.on('error', (error) => {
-          console.error('[dsh-passwords] 密码门拉起失败:', error);
-        });
-        child.on('exit', (code, signal) => {
-          if (disposed) return;
-          const reason = code ?? signal ?? 'unknown';
-          if (reason === EXIT_CERT_FAILED) {
-            console.error('[dsh-passwords] 密码门未启动（错误码 30：HTTPS 证书签发失败）。检查 80/443 端口与网络；或运行 scripts/start-http.mjs 改用明文 HTTP（有被嗅探风险）');
-          } else if (reason === EXIT_NO_DOMAIN) {
-            console.error('[dsh-passwords] 密码门未启动（错误码 31：无法确定公网 IP/域名）。或运行 scripts/start-http.mjs 改用明文 HTTP（有被嗅探风险）');
-          } else {
-            console.error(`[dsh-passwords] 密码门进程已退出（code=${String(reason)}）。重启 dsh 会自动再次拉起`);
+          // 已经是本插件的健康网关时复用它；不能仅凭“端口可连接”就跳过，
+          // 因为 dsh 重启时旧 child 可能正占着端口但即将退出。
+          if (await gatewayHealthz(cfg)) {
+            const ownerPid = await gatewayOwnerPid(cfg);
+            if (ownerPid === process.pid) {
+              const cookieReady = await refreshCookie();
+              if (!cookieReady) {
+                console.error('[dsh-passwords] 当前网关属于本 dsh，但上游 Cookie 刷新失败，暂不复用');
+                scheduleRetry();
+                return;
+              }
+              startCookiePolling();
+              console.error(`[dsh-passwords] 密码门已在运行（端口 ${String(gatewayPort)}），复用当前 dsh 实例`);
+              return;
+            }
+            console.error(`[dsh-passwords] 端口 ${String(gatewayPort)} 上存在旧/其他密码门实例，等待其释放后接管`);
           }
-        });
-      });
+          if (!(await waitForGatewayPortFree(gatewayPort))) {
+            console.error(`[dsh-passwords] 密码门端口 ${String(gatewayPort)} 被非本插件进程占用，等待超时；未终止占用者，将稍后重试`);
+            scheduleRetry();
+            return;
+          }
+          const browserAuth = await exchangeDshBrowserCookie(connection, upstreamUrl);
+          if (browserAuth.supported && browserAuth.cookie === null) {
+            console.error('[dsh-passwords] dsh Web 一次性 token 交换失败，拒绝启动未认证网关；稍后重试');
+            scheduleRetry();
+            return;
+          }
+          const gatewayArgs = explicitUpstream !== ''
+            ? [cliPath, 'serve-gateway']
+            : [cliPath, 'serve-gateway', '--upstream', upstreamUrl];
+          child = spawn(process.execPath, gatewayArgs, {
+            cwd: installRoot,
+            env: {
+              ...process.env,
+              DSH_GATEWAY_PARENT_PID: String(process.pid),
+              DSH_PASSWORDS_ENV_FILE: gatewayEnvFile,
+              ...(browserAuth.cookie === null ? {} : { DSH_UPSTREAM_AUTH_COOKIE: browserAuth.cookie }),
+            },
+            stdio: ['ignore', 'inherit', 'inherit'],
+          });
+          if (browserAuth.cookie !== null) startCookiePolling();
+          child.on('error', (error) => {
+            if (poll !== null) { clearInterval(poll); poll = null; }
+            console.error('[dsh-passwords] 密码门拉起失败:', error);
+            scheduleRetry();
+          });
+          child.on('exit', (code, signal) => {
+            if (poll !== null) { clearInterval(poll); poll = null; }
+            child = null;
+            if (disposed) return;
+            const reason = code ?? signal ?? 'unknown';
+            if (reason === EXIT_CERT_FAILED) {
+              console.error('[dsh-passwords] 密码门未启动（错误码 30：HTTPS 证书签发失败）。检查 80/443 端口与网络；或运行 scripts/start-http.mjs 改用明文 HTTP（有被嗅探风险）');
+            } else if (reason === EXIT_NO_DOMAIN) {
+              console.error('[dsh-passwords] 密码门未启动（错误码 31：无法确定公网 IP/域名）。检查公网 IP/域名；或运行 scripts/start-http.mjs 改用明文 HTTP（有被嗅探风险）');
+            } else {
+              console.error(`[dsh-passwords] 密码门进程已退出（code=${String(reason)}）。将在端口释放后重试`);
+              scheduleRetry();
+            }
+          });
+        } finally {
+          launching = false;
+        }
+      };
 
+      void launch();
       return () => {
         disposed = true;
+        if (retryTimer !== null) clearTimeout(retryTimer);
+        if (poll !== null) clearInterval(poll);
         if (child !== null && child.exitCode === null && child.signalCode === null) {
           child.kill('SIGTERM');
           const force = setTimeout(() => {
             if (child !== null && child.exitCode === null) {
-              try {
-                child.kill('SIGKILL');
-              } catch {
-                // 已退出
-              }
+              try { child.kill('SIGKILL'); } catch { /* 已退出 */ }
             }
           }, 3000);
           force.unref();

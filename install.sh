@@ -31,13 +31,23 @@ if [ -f "$SCRIPT_SOURCE" ]; then
 fi
 
 # ── 1. Node.js（缺了自动安装；版本不够直接报错） ──
-if command -v node >/dev/null 2>&1; then
-  NODE_MAJOR="$(node -v | sed -E 's/v([0-9]+).*/\1/')"
-  if [ "$NODE_MAJOR" -lt 22 ]; then
-    err "Node.js 版本过低（当前 $(node -v)），需要 22.5+。请升级后重跑本脚本。"
+check_node_version() {
+  NODE_VERSION="$(node -v 2>/dev/null || true)"
+  if ! printf '%s\n' "$NODE_VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+'; then
+    err "无法读取 Node.js 版本（当前：${NODE_VERSION:-unknown}），请安装 Node.js 22.5+ 后重跑。"
     exit 1
   fi
-  ok "Node.js $(node -v) ✓"
+  NODE_MAJOR="$(printf '%s\n' "$NODE_VERSION" | sed -E 's/^v([0-9]+)\..*/\1/')"
+  NODE_MINOR="$(printf '%s\n' "$NODE_VERSION" | sed -E 's/^v[0-9]+\.([0-9]+)\..*/\1/')"
+  if [ "$NODE_MAJOR" -lt 22 ] || { [ "$NODE_MAJOR" -eq 22 ] && [ "$NODE_MINOR" -lt 5 ]; }; then
+    err "Node.js 版本过低（当前 $NODE_VERSION），需要 22.5+。请升级后重跑本脚本。"
+    exit 1
+  fi
+  ok "Node.js $NODE_VERSION ✓"
+}
+
+if command -v node >/dev/null 2>&1; then
+  check_node_version
 else
   say "未找到 Node.js，正在自动安装…"
   if command -v apt-get >/dev/null 2>&1; then
@@ -60,7 +70,7 @@ else
     err "Node.js 装完仍不可用，可能需要新开一个终端再重跑本脚本。"
     exit 1
   fi
-  ok "Node.js $(node -v) ✓"
+  check_node_version
 fi
 
 # ── 2. git（缺了自动安装） ──

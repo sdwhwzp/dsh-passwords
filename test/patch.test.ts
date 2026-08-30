@@ -11,6 +11,7 @@ function makeDshRoot(
   apiproxyContent: string,
   settingsContent: string,
   workspaceContent?: string,
+  connectionContent?: string,
 ): { root: string; cleanup: () => void } {
   const root = mkdtempSync(path.join(tmpdir(), 'dshpw-patch-'));
   const settingsDir = path.join(root, 'node_modules', '@deepseek-ai', 'dsh-client-ui-settings', 'lib');
@@ -24,6 +25,11 @@ function makeDshRoot(
     mkdirSync(wsDir, { recursive: true });
     writeFileSync(path.join(wsDir, 'client.js'), workspaceContent);
   }
+  if (connectionContent !== undefined) {
+    const connectionDir = path.join(root, 'node_modules', '@deepseek-ai', 'dsh-client-connection', 'lib');
+    mkdirSync(connectionDir, { recursive: true });
+    writeFileSync(path.join(connectionDir, 'index.js'), connectionContent);
+  }
   return { root, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
@@ -32,6 +38,38 @@ const RC7_APIPROXY = 'export function describe(){return settings.describe({redac
 const RC7_SETTINGS_UNPATCHED =
   'const mode = connection.isLoopback ? "host" : "memory";\nexport default mode;\n';
 const RC7_SETTINGS_PATCHED = 'const mode = "host";\nexport default mode;\n';
+const ALPHA_CONNECTION_UNPATCHED = [
+  'class BrowserAuth {',
+  '  authenticatedUrl(baseUrl) { return baseUrl; }',
+  '  authorizeIndex(req, res) { return true; }',
+  '}',
+  'class HostConnectionService {',
+  '  authenticatedUrl(baseUrl) { return this.browserAuth.authenticatedUrl(baseUrl); }',
+  '}',
+].join('\n');
+const ALPHA_CONNECTION_PATCHED_MARK = 'dshpw-authenticated-cookie';
+const ALPHA_CONNECTION_PATCH_HARDEN_MARK = 'dshpw-authenticated-cookie-loopback-v2';
+
+const ALPHA_CONNECTION_OLD_PATCHED = [
+  'class BrowserAuth {',
+  '  authenticatedUrl(baseUrl) { return baseUrl; }',
+  '  /** dshpw-authenticated-cookie: trusted Host-side authority-bound Cookie mint. */',
+  '  authenticatedCookie(baseUrl) {',
+  '    const url = new URL(baseUrl);',
+  '    const authority = url.host;',
+  '    const issuedAt = Date.now();',
+  '    const expiresAt = issuedAt + this.maxAgeMilliseconds;',
+  '    const value = encodeCookie({ version: COOKIE_PAYLOAD_VERSION, authority, issuedAt, expiresAt }, this.secret);',
+  "    return cookieName(authority) + '=' + value;",
+  '  }',
+  '  authorizeIndex(req, res) { return true; }',
+  '}',
+  'class HostConnectionService {',
+  '  authenticatedUrl(baseUrl) { return this.browserAuth.authenticatedUrl(baseUrl); }',
+  '  /** dshpw-authenticated-cookie: expose only the derived Cookie pair to trusted Host plugins. */',
+  '  authenticatedCookie(baseUrl) { return this.browserAuth.authenticatedCookie(baseUrl); }',
+  '}',
+].join('\n');
 
 /** 与真实 dsh-client-ui-workspace client.js 相同的 click-outside 粘滞搜索块（制表符缩进） */
 const WORKSPACE_STICKY = [
@@ -139,6 +177,38 @@ test('补丁：工作区搜索粘滞态 → 无结果时点击别处自动收起
     // 幂等：再跑一次必须 unchanged
     const again = applyRemotePatch(root);
     assert.equal(again, 'unchanged', '幂等：二次应用不再改动');
+  } finally {
+    cleanup();
+  }
+});
+
+test('补丁：alpha.1 connection 增加受信任 Host Cookie 兑换入口且保持幂等', () => {
+  const { root, cleanup } = makeDshRoot(RC7_APIPROXY, RC7_SETTINGS_PATCHED, undefined, ALPHA_CONNECTION_UNPATCHED);
+  try {
+    assert.equal(applyRemotePatch(root), 'applied');
+    const file = path.join(root, 'node_modules', '@deepseek-ai', 'dsh-client-connection', 'lib', 'index.js');
+    const first = readFileSync(file, 'utf8');
+    assert.ok(first.includes(ALPHA_CONNECTION_PATCHED_MARK));
+    assert.ok(first.includes('authenticatedCookie('));
+    assert.ok(first.includes('new URL(baseUrl)'));
+    assert.equal(applyRemotePatch(root), 'unchanged');
+    assert.equal(readFileSync(file, 'utf8'), first);
+  } finally {
+    cleanup();
+  }
+});
+
+test('补丁：旧版 alpha Cookie bridge 自动升级为 loopback-v2 且保持原始 Host bridge', () => {
+  const { root, cleanup } = makeDshRoot(RC7_APIPROXY, RC7_SETTINGS_PATCHED, undefined, ALPHA_CONNECTION_OLD_PATCHED);
+  try {
+    assert.equal(applyRemotePatch(root), 'applied');
+    const file = path.join(root, 'node_modules', '@deepseek-ai', 'dsh-client-connection', 'lib', 'index.js');
+    const patched = readFileSync(file, 'utf8');
+    assert.ok(patched.includes(ALPHA_CONNECTION_PATCH_HARDEN_MARK));
+    assert.ok(patched.includes('requires a loopback authority'));
+    assert.ok(patched.includes('requires HTTP(S)'));
+    assert.ok(patched.includes('authenticatedCookie(baseUrl) { return this.browserAuth.authenticatedCookie(baseUrl); }'));
+    assert.equal(applyRemotePatch(root), 'unchanged');
   } finally {
     cleanup();
   }

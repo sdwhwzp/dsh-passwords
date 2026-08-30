@@ -61,6 +61,8 @@ let cookie = '';
 let tokenValue = '';
 /** 上游最后一次收到的请求头（F-15 回归测试用：验证网关 cookie 不被透传） */
 let lastUpstreamHeaders: http.IncomingHttpHeaders = {};
+/** 上游最后一次收到的请求 URL（凭据 query 清洗回归用） */
+let lastUpstreamUrl = '';
 
 /** mock 上游：刻意不设 content-length（write 分段写），Node 会以 chunked 分帧——
  *  这正是生产环境 dsh 的行为，也是触发原 bug 的前提 */
@@ -68,6 +70,7 @@ function startMockUpstream(): Promise<http.Server> {
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
       lastUpstreamHeaders = req.headers;
+      lastUpstreamUrl = req.url ?? '';
       const badJson = req.headers['x-test-mode'] === 'bad-json';
       if ((req.url ?? '').startsWith('/html')) {
         res.writeHead(200, { 'content-type': 'text/html' });
@@ -91,6 +94,7 @@ function startMockUpstream(): Promise<http.Server> {
     });
     server.on('upgrade', (req, socket) => {
       lastUpstreamHeaders = req.headers;
+      lastUpstreamUrl = req.url ?? '';
       socket.write('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n');
       socket.destroy();
     });
@@ -258,6 +262,16 @@ test('better-sidebar WebSocket：管理员可升级，未知路径被拒绝', as
     host: '127.0.0.1',
   });
   assert.match(denied.statusLine, /404/);
+});
+
+test('F-15：WebSocket 认证 query 不得转发，但业务 query 必须保留', async () => {
+  const result = await websocketHandshake('/sidebar/ws/terminal?keep=1&dsh_gateway_token=leaked&token=launch', {
+    cookie,
+    origin: 'http://127.0.0.1',
+    host: '127.0.0.1',
+  });
+  assert.match(result.statusLine, /101 Switching Protocols/);
+  assert.equal(lastUpstreamUrl, '/sidebar/ws/terminal?keep=1', '上游 WS 不能收到网关认证 query');
 });
 
 test('跨源 better-sidebar WebSocket 在升级前被拒绝', async () => {
@@ -506,6 +520,12 @@ test('F-15：网关会话 Cookie 不得转发给上游（信任边界最小化�
   );
 });
 
+test('F-15：网关认证 query 不得转发，但业务 query 必须保留', async () => {
+  const r = await gatewayReq('GET', '/api/workspace.list?keep=1&dsh_gateway_token=leaked&token=launch');
+  assert.equal(r.status, 200);
+  assert.equal(lastUpstreamUrl, '/api/workspace.list?keep=1', '上游只能收到业务 query，不能收到网关 JWT 或 launch token');
+});
+
 test('工作区创建权限关闭时拒绝 rc.2 目录选择器写入', async () => {
   const subUser = db.createUser('workspace-denied', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
@@ -579,7 +599,44 @@ test('F-15 例外：自身插件路由 /api/dsh-passwords/* 必须保留 Cookie�
   );
 });
 
-test('Cookie Chaos 加固（P3）：Unicode 空白前缀的会话 cookie 不再被归一化匹配 → 未认证', async () => {
+test('上游认证 Broker：loopback/internal-secret 更新 Cookie 并通过 health 探测', async () => {
+  const invalid = JSON.stringify({ cookie: 'dsh-auth-test=valid_cookie' });
+  const denied = await gatewayReq('POST', '/gateway/internal/upstream-auth', {
+    'content-type': 'application/json',
+    'x-internal-secret': 'wrong',
+    'content-length': String(Buffer.byteLength(invalid)),
+  }, invalid);
+  assert.equal(denied.status, 403);
+
+  const cookiePair = 'dsh-auth-test=valid_cookie';
+  const payload = JSON.stringify({ cookie: cookiePair });
+  const updated = await gatewayReq('POST', '/gateway/internal/upstream-auth', {
+    'content-type': 'application/json',
+    'x-internal-secret': 'test-internal',
+    'content-length': String(Buffer.byteLength(payload)),
+  }, payload);
+  assert.equal(updated.status, 200, updated.body);
+
+  const health = await gatewayReq('GET', '/gateway/internal/upstream-auth/health', {
+    'x-internal-secret': 'test-internal',
+  });
+  assert.equal(health.status, 200, health.body);
+  assert.equal(JSON.parse(health.body).authenticated, true);
+  assert.equal(lastUpstreamHeaders.cookie, cookiePair);
+});
+
+test('网关 owner 探针：仅正确 internal secret 返回 parent PID，错误密钥拒绝', async () => {
+  const denied = await gatewayReq('GET', '/gateway/internal/owner', { 'x-internal-secret': 'wrong' });
+  assert.equal(denied.status, 403);
+
+  const allowed = await gatewayReq('GET', '/gateway/internal/owner', { 'x-internal-secret': 'test-internal' });
+  assert.equal(allowed.status, 200, allowed.body);
+  const body = JSON.parse(allowed.body) as { ok: boolean; parentPid: number | null };
+  assert.equal(body.ok, true);
+  assert.equal(body.parentPid, null, '测试网关未设置 parent PID 时必须返回 null，而不是伪造 PID');
+});
+
+ test('Cookie Chaos 加固（P3）：Unicode 空白前缀的会话 cookie 不再被归一化匹配 → 未认证', async () => {
   const locationOf = (rh: string[]): string => {
     const i = rh.findIndex((v, idx) => idx % 2 === 0 && v.toLowerCase() === 'location');
     return i >= 0 ? rh[i + 1] ?? '' : '';

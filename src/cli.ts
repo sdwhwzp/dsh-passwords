@@ -223,6 +223,11 @@ async function boot() {
     if (!portExplicit) config.gateway.port = 443;
   }
 
+  if (config.gateway.autoTls && config.gateway.port === config.gateway.redirectPort) {
+    console.error(`[dsh-passwords] ${tr('cli.exitPortBusy', { code: 32, error: 'HTTPS 端口不能与 HTTP/ACME 重定向端口相同' })}`);
+    process.exit(32);
+  }
+
   // ── 远程设置补丁：强制启用，网关每次启动自动应用（幂等） ──
   try {
     const root = findDshRoot(config.patch.dshRoot);

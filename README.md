@@ -304,7 +304,9 @@ curl -so /dev/null -w "TLS:%{time_appconnect}s\n" https://地址/gateway/login
 
 </details>
 
-## 手动安装
+### 手动安装
+
+> v2.6.6 兼容 DSH `0.1.2-alpha.1`：安装器会严格检查 Node.js `22.5+`，并在安装完成后注册插件、探测 dsh 安装目录并应用兼容补丁。自动更新与设置页“重载补丁”会沿用同一补丁链路；当前发布不修改官方 npm/Docker 包。
 
 1. `git clone https://github.com/slywalker2006/dsh-passwords && cd dsh-passwords`
 2. `npm install && npm run build`

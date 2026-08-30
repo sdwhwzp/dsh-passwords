@@ -47,16 +47,26 @@ if errorlevel 1 (
 )
 
 :node_ok
-for /f "tokens=1 delims=v." %%a in ('node -v') do set "NODE_MAJOR=%%a"
+for /f "tokens=1-3 delims=v." %%a in ('node -v') do (
+  set "NODE_MAJOR=%%a"
+  set "NODE_MINOR=%%b"
+  set "NODE_PATCH=%%c"
+)
 if not defined NODE_MAJOR (
   echo [dsh-passwords] Could not read the Node.js version. Check your installation.
   exit /b 1
 )
+if not defined NODE_MINOR set "NODE_MINOR=0"
+if not defined NODE_PATCH set "NODE_PATCH=0"
 if %NODE_MAJOR% LSS 22 (
-  echo [dsh-passwords] Node.js is too old (v%NODE_MAJOR%), 22.5+ required. Upgrade and retry.
+  echo [dsh-passwords] Node.js is too old (v%NODE_MAJOR%.%NODE_MINOR%.%NODE_PATCH%), 22.5+ required. Upgrade and retry.
   exit /b 1
 )
-echo [dsh-passwords] Node.js v%NODE_MAJOR% OK
+if %NODE_MAJOR% EQU 22 if %NODE_MINOR% LSS 5 (
+  echo [dsh-passwords] Node.js is too old (v%NODE_MAJOR%.%NODE_MINOR%.%NODE_PATCH%), 22.5+ required. Upgrade and retry.
+  exit /b 1
+)
+echo [dsh-passwords] Node.js v%NODE_MAJOR%.%NODE_MINOR%.%NODE_PATCH% OK
 goto git_check
 
 :node_manual

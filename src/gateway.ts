@@ -4,7 +4,7 @@
 //   → 已认证请求反向代理到上游 dsh（HTTP + WebSocket，Host 改写为上游地址）
 import http, { type IncomingMessage, type IncomingHttpHeaders } from 'node:http';
 import https from 'node:https';
-import { createSecureContext } from 'node:tls';
+import { createSecureContext, connect as tlsConnect } from 'node:tls';
 import { readFileSync, createReadStream, realpathSync, openSync, fstatSync, closeSync, constants as fsConstants } from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
@@ -27,7 +27,13 @@ export function requestBodyLimitFor(role: 'admin' | 'user', allowLargeBody: bool
 
 const WebSocket = require('ws') as {
   OPEN: number;
-  WebSocketServer: new (options: { noServer: true }) => {
+  WebSocket: new (url: string, options?: {
+    headers?: Record<string, string>;
+    rejectUnauthorized?: boolean;
+    agent?: any;
+    maxPayload?: number;
+  }) => any;
+  WebSocketServer: new (options: { noServer: true; maxPayload?: number }) => {
     handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer, callback: (client: any) => void): void;
   };
 };
@@ -212,6 +218,21 @@ type OriginRequest = {
 
 function firstHeader(value: string | string[] | undefined): string {
   return Array.isArray(value) ? value[0] ?? '' : value ?? '';
+}
+
+function stripGatewayAuthQuery(rawUrl: string): string {
+  try {
+    const parsed = new URL(rawUrl, 'http://dsh-passwords.internal');
+    parsed.searchParams.delete(COOKIE_NAME);
+    // alpha launch token 只用于根路径的一次性换票；网关代理已完成自己的认证，
+    // 所有代理路径都不能把该凭据继续带入 dsh 或第三方插件。其他业务 query
+    // 参数原样保留；token 参数是 alpha 保留字，统一移除。
+    parsed.searchParams.delete('token');
+    const query = parsed.searchParams.toString();
+    return query === '' ? '' : `?${query}`;
+  } catch {
+    return '';
+  }
 }
 
 function originHostMatches(req: OriginRequest): boolean {
@@ -753,6 +774,82 @@ export function createGatewayServer(
     res.status(healthy ? 200 : 503).json({ ok: healthy, database: healthy });
   });
 
+  // 上游认证 Broker：仅允许同机插件提交已经由 dsh 官方 connection
+  // authenticatedUrl() 兑换出的 cookie-pair；不接受启动 token，不返回 Cookie。
+  const internalSecretMatches = (req: Request): boolean => {
+    const peer = req.socket.remoteAddress ?? '';
+    if (peer !== '127.0.0.1' && peer !== '::1' && peer !== '::ffff:127.0.0.1') return false;
+    const supplied = typeof req.headers['x-internal-secret'] === 'string' ? req.headers['x-internal-secret'] : '';
+    const expected = config.internalSecret;
+    const a = Buffer.from(supplied);
+    const b = Buffer.from(expected);
+    return a.length === b.length && timingSafeEqual(a, b);
+  };
+  app.get('/gateway/internal/upstream-auth/health', async (req, res) => {
+    if (!internalSecretMatches(req)) {
+      res.status(403).json({ ok: false, error: 'forbidden' });
+      return;
+    }
+    if (upstreamAuthCookie === '') {
+      res.status(503).json({ ok: false, authenticated: false });
+      return;
+    }
+    const request = upstreamTransport.request({
+      hostname: upstreamHost,
+      port: upstreamPort,
+      path: '/',
+      method: 'GET',
+      headers: { host: upstreamAuthority, cookie: upstreamAuthCookie },
+      agent: upstreamAgent,
+      timeout: 3000,
+    }, (upstreamRes) => {
+      const status = upstreamRes.statusCode ?? 502;
+      upstreamRes.resume();
+      res.status(status >= 200 && status < 300 ? 200 : 503).json({ ok: status >= 200 && status < 300, authenticated: status !== 401, upstreamStatus: status });
+    });
+    request.on('error', () => {
+      if (!res.headersSent) res.status(503).json({ ok: false, authenticated: false });
+    });
+    request.end();
+  });
+  // 启动协调探针：仅同机插件可读取当前网关绑定的 dsh parent PID。公开
+  // healthz 只能证明“有某个 dsh-passwords”，不能证明它属于当前 dsh 进程；
+  // 旧 dsh 重启期间必须据此进入等待，而不是误复用旧 child。
+  app.get('/gateway/internal/owner', (req, res) => {
+    if (!internalSecretMatches(req)) {
+      res.status(403).json({ ok: false, error: 'forbidden' });
+      return;
+    }
+    const rawParentPid = process.env.DSH_GATEWAY_PARENT_PID ?? '';
+    const parentPid = Number(rawParentPid);
+    res.json({
+      ok: true,
+      parentPid: Number.isInteger(parentPid) && parentPid > 0 ? parentPid : null,
+    });
+  });
+  app.post('/gateway/internal/upstream-auth', express.json({ limit: '1kb' }), (req, res) => {
+    const peer = req.socket.remoteAddress ?? '';
+    if (peer !== '127.0.0.1' && peer !== '::1' && peer !== '::ffff:127.0.0.1') {
+      res.status(403).json({ ok: false, error: 'forbidden' });
+      return;
+    }
+    const supplied = typeof req.headers['x-internal-secret'] === 'string' ? req.headers['x-internal-secret'] : '';
+    const expected = config.internalSecret;
+    const a = Buffer.from(supplied);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !timingSafeEqual(a, b)) {
+      res.status(403).json({ ok: false, error: 'forbidden' });
+      return;
+    }
+    const value = (req.body as { cookie?: unknown } | undefined)?.cookie;
+    if (typeof value !== 'string' || !/^[A-Za-z0-9_-]+=[A-Za-z0-9._~-]+$/.test(value)) {
+      res.status(400).json({ ok: false, error: 'invalid cookie' });
+      return;
+    }
+    upstreamAuthCookie = value;
+    res.json({ ok: true });
+  });
+
   // 登录/配置页安全响应头（仅 /gateway/* 自有页面；代理的 dsh 响应不强制
   // CSP，避免破坏 dsh 前端）：禁嗅探、禁嵌入、无 Referrer、禁缓存、禁索引
   app.use('/gateway', (_req, res, next) => {
@@ -773,11 +870,21 @@ export function createGatewayServer(
 
   const upstream = new URL(config.gateway.upstream);
   const upstreamHost = upstream.hostname;
-  const upstreamPort = Number(upstream.port || 80);
-
-  // 上游连接池：复用与 dsh 的 TCP 连接（keep-alive），
-  // 避免每个代理请求都新建一次 TCP 握手
-  const upstreamAgent = new http.Agent({ keepAlive: true, maxSockets: 64, keepAliveMsecs: 30_000 });
+  const upstreamAuthority = upstream.host;
+  const upstreamPort = Number(upstream.port || (upstream.protocol === 'https:' ? 443 : 80));
+  const upstreamIsHttps = upstream.protocol === 'https:';
+  const upstreamScheme = upstreamIsHttps ? 'https' : 'http';
+  // alpha 的 browser-auth Cookie 只在进程内保存并可由插件通过受保护的
+  // loopback/internal-secret 通道更新；外部 dsh-passwords JWT 永远不转发给 dsh。
+  let upstreamAuthCookie = (() => {
+    const value = process.env.DSH_UPSTREAM_AUTH_COOKIE?.trim() ?? '';
+    return /^[A-Za-z0-9_-]+=[A-Za-z0-9._~-]+$/.test(value) ? value : '';
+  })();
+  const upstreamTransport = upstreamIsHttps ? https : http;
+  // 限制在 loopback，远程拓扑必须自行提供已兑换 Cookie。
+  const upstreamAgent = upstreamIsHttps
+    ? new https.Agent({ keepAlive: true, maxSockets: 64, keepAliveMsecs: 30_000, rejectUnauthorized: process.env.MCP_GATEWAY_UPSTREAM_TLS_VERIFY !== '0' })
+    : new http.Agent({ keepAlive: true, maxSockets: 64, keepAliveMsecs: 30_000 });
 
   // workspaceId → 规范路径 映射：从 workspace.list 响应里收集，供 session.create 用 workspaceId 时解析路径
   const workspacePathById = new Map<string, string>();
@@ -1023,7 +1130,234 @@ export function createGatewayServer(
     return Buffer.from(JSON.stringify(envelope), 'utf8');
   };
 
-  /** 子用户 mux SSE 事件按会话授权快照过滤；未知/无归属事件一律丢弃（fail-closed）。 */
+  const REMOTE_MUX_MAX_PAYLOAD_BYTES = 1 * 1024 * 1024;
+  const REMOTE_MUX_MAX_STREAMS = 64;
+  const REMOTE_MUX_MAX_PENDING_BYTES = 2 * 1024 * 1024;
+
+  const upstreamWsOptions = (): {
+    headers: Record<string, string>;
+    rejectUnauthorized?: boolean;
+    agent?: any;
+    maxPayload: number;
+  } => ({
+    headers: {
+      host: upstreamAuthority,
+      origin: `${upstreamScheme}://${upstreamAuthority}`,
+      ...(upstreamAuthCookie === '' ? {} : { cookie: upstreamAuthCookie }),
+    },
+    ...(upstreamIsHttps ? {
+      rejectUnauthorized: process.env.MCP_GATEWAY_UPSTREAM_TLS_VERIFY !== '0',
+      agent: upstreamAgent,
+    } : {}),
+    maxPayload: REMOTE_MUX_MAX_PAYLOAD_BYTES,
+  });
+
+  /**
+   * alpha Remote mux 第一阶段适配：管理员使用经过协议校验的透明 stream bridge。
+   * 子用户不得走此路径，直到完成 streamId→endpoint→资源的完整授权过滤。
+   * 不能把此协议当作普通 WebSocket pipe：未知 endpoint、非法 frame、未知 stream
+   * ID 和上游畸形响应全部 fail-closed。
+   */
+  const remoteMuxStreamEndpoints = new Set(['session/control', 'session/follow', 'workspace/follow', '$events']);
+  const isRemoteMuxStreamId = (value: unknown): value is string =>
+    typeof value === 'string' && value.length > 0 && value.length <= 200 && /^[A-Za-z0-9_-]+$/.test(value);
+  const parseRemoteMuxClientFrame = (data: Buffer):
+    | { type: 'open'; streamId: string; endpoint: string; payload: unknown }
+    | { type: 'cancel'; streamId: string }
+    | null => {
+    let value: unknown;
+    try { value = JSON.parse(data.toString('utf8')); } catch { return null; }
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+    const row = value as Record<string, unknown>;
+    if (row.type === 'cancel' && Object.keys(row).length === 2 && isRemoteMuxStreamId(row.streamId)) {
+      return { type: 'cancel', streamId: row.streamId };
+    }
+    if (
+      row.type === 'open' && Object.keys(row).length === 4 && isRemoteMuxStreamId(row.streamId) &&
+      typeof row.endpoint === 'string' && remoteMuxStreamEndpoints.has(row.endpoint) &&
+      row.payload !== undefined
+    ) {
+      return { type: 'open', streamId: row.streamId, endpoint: row.endpoint, payload: row.payload };
+    }
+    return null;
+  };
+  type RemoteMuxServerFrame =
+    | { type: 'item'; streamId: string; value?: unknown }
+    | { type: 'end'; streamId: string }
+    | { type: 'error'; streamId: string; error: Record<string, unknown> };
+  const parseRemoteMuxServerFrame = (data: Buffer): RemoteMuxServerFrame | null => {
+    let value: unknown;
+    try { value = JSON.parse(data.toString('utf8')); } catch { return null; }
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+    const row = value as Record<string, unknown>;
+    if (row.type === 'end' && Object.keys(row).length === 2 && isRemoteMuxStreamId(row.streamId)) {
+      return { type: 'end', streamId: row.streamId };
+    }
+    if (row.type === 'item' && isRemoteMuxStreamId(row.streamId) &&
+      (Object.keys(row).length === 2 || Object.keys(row).length === 3)) {
+      return { type: 'item', streamId: row.streamId, ...(Object.hasOwn(row, 'value') ? { value: row.value } : {}) };
+    }
+    if (row.type === 'error' && Object.keys(row).length === 3 && isRemoteMuxStreamId(row.streamId) &&
+      row.error !== null && typeof row.error === 'object' && !Array.isArray(row.error)) {
+      const error = row.error as Record<string, unknown>;
+      if (Object.keys(error).length === 3 && typeof error.code === 'string' && typeof error.message === 'string' &&
+        error.details !== null && typeof error.details === 'object' && !Array.isArray(error.details)) {
+        return { type: 'error', streamId: row.streamId, error };
+      }
+    }
+    return null;
+  };
+
+  type RemoteMuxUserStreamState = {
+    endpoint: 'session/control' | 'workspace/follow';
+    /** Workspace path is retained only to re-check the current permission on each delta. */
+    visibleWorkspaces: Map<string, string>;
+  };
+
+  const isPlainJsonRecord = (value: unknown): value is Record<string, unknown> =>
+    value !== null && typeof value === 'object' && !Array.isArray(value) &&
+    (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
+  const remoteMuxEmptyArgs = (payload: unknown): boolean => {
+    if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) return false;
+    const row = payload as Record<string, unknown>;
+    const args = row.args;
+    return Object.keys(row).length === 1 && args !== null && typeof args === 'object' && !Array.isArray(args) &&
+      Object.keys(args as Record<string, unknown>).length === 0;
+  };
+
+  /**
+   * Filter alpha workspace/session Remote stream items for one subuser.
+   * A missing/invalid resource identity is dropped rather than guessed. The
+   * caller keeps the physical stream alive, but never forwards the unfiltered
+   * value. Workspace IDs are retained per logical stream so later remove/order
+   * frames cannot reintroduce an unseen workspace.
+   */
+  const filterRemoteMuxUserItem = (
+    userId: number,
+    fallbackPerms: UserPermissionsRow,
+    state: RemoteMuxUserStreamState,
+    value: unknown,
+  ): unknown | null => {
+    const perms = db.getPermissions(userId) ?? fallbackPerms;
+    const access = userSessionAccess.get(userId);
+    const currentGrants = new Set(db.listUserSessionGrants(userId));
+    const allowedSession = (id: unknown): id is string =>
+      typeof id === 'string' && access !== undefined && access.has(id) && currentGrants.has(id) && !perms.disabled_sessions.includes(id);
+    const workspaceAllowed = (row: Record<string, unknown>): boolean => {
+      const id = row.workspaceId;
+      const pathValue = row.path;
+      if (typeof id !== 'string' || typeof pathValue !== 'string' || !folderAllowed(pathValue, perms.allowed_folders)) return false;
+      const owners = db.listWorkspaceOwners();
+      if (owners.some((owner) => owner.userId !== userId && normalizePath(owner.path) === normalizePath(pathValue))) return false;
+      // 增量 upsert 允许当前用户新建且尚未出现在本连接 baseline 的工作区；
+      // 但未知 workspaceId 必须有当前用户的持久化登记，不能只凭目录白名单放行。
+      return state.visibleWorkspaces.has(id) || owners.some(
+        (owner) => owner.userId === userId && normalizePath(owner.path) === normalizePath(pathValue),
+      );
+    };
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+    const frame = value as Record<string, unknown>;
+    if (state.endpoint === 'workspace/follow') {
+      if (frame.type === 'baseline') {
+        const baseline = frame.value;
+        if (baseline === null || typeof baseline !== 'object' || Array.isArray(baseline)) return null;
+        const source = baseline as Record<string, unknown>;
+        if (!Array.isArray(source.items) || !Array.isArray(source.archivedSessionIds)) return null;
+        const grantsSeeded = db.isSessionGrantsSeeded(userId);
+        const currentGrants = new Set(db.listUserSessionGrants(userId));
+        state.visibleWorkspaces.clear();
+        const visibleAccess = new Map<string, string>();
+        const items: Record<string, unknown>[] = [];
+        for (const item of source.items) {
+          if (item === null || typeof item !== 'object' || Array.isArray(item)) continue;
+          const workspace = { ...(item as Record<string, unknown>) };
+          if (!workspaceAllowed(workspace) || !Array.isArray(workspace.sessionIds)) continue;
+          const id = workspace.workspaceId;
+          const workspacePath = workspace.path;
+          if (typeof id !== 'string' || typeof workspacePath !== 'string') continue;
+          const sessionIds = workspace.sessionIds.filter((sessionId): sessionId is string => typeof sessionId === 'string');
+          for (const sessionId of sessionIds) visibleAccess.set(sessionId, workspacePath);
+          // 首次迁移旧用户时，workspace baseline 本身就是旧行为的可见性来源；
+          // seed 完成后则严格回到持久化 grant，不能把后续新会话自动加入。
+          workspace.sessionIds = sessionIds.filter((sessionId) =>
+            !perms.disabled_sessions.includes(sessionId) && (!grantsSeeded || currentGrants.has(sessionId)),
+          );
+          state.visibleWorkspaces.set(id, workspacePath);
+          items.push(workspace);
+        }
+        // Remote baseline 是 alpha 客户端建立权限快照的第一条可靠数据源；
+        // 回写前重新读取当前 DB grant，不能把 workspace 中出现过的 ID 自动当成
+        // 永久授权。首次迁移旧用户时沿用 workspace.list 的一次性 seed 语义。
+        if (!grantsSeeded) {
+          db.replaceUserSessionGrants(userId, [...visibleAccess.keys()].filter((id) => !perms.disabled_sessions.includes(id)));
+          db.markSessionGrantsSeeded(userId);
+        }
+        const allowedAccess = new Map<string, string>();
+        for (const [sessionId, workspacePath] of visibleAccess) {
+          if ((!grantsSeeded || currentGrants.has(sessionId)) && !perms.disabled_sessions.includes(sessionId)) {
+            allowedAccess.set(sessionId, workspacePath);
+          }
+        }
+        replaceUserSessionAccess(userId, allowedAccess, userAccessRevisionFor(userId));
+        replaceUserWorkspaceIds(userId, new Set(items.map((item) => String(item.workspaceId))), userAccessRevisionFor(userId));
+        return { type: 'baseline', value: {
+          items,
+          archivedSessionIds: source.archivedSessionIds.filter((id) => allowedAccess.has(id) && !perms.disabled_sessions.includes(id)),
+        } };
+      }
+      if (frame.type === 'upsert') {
+        const workspace = frame.workspace;
+        if (workspace === null || typeof workspace !== 'object' || Array.isArray(workspace)) return null;
+        const row = { ...(workspace as Record<string, unknown>) };
+        if (!workspaceAllowed(row) || !Array.isArray(row.sessionIds) || typeof row.workspaceId !== 'string') return null;
+        row.sessionIds = row.sessionIds.filter(allowedSession);
+        state.visibleWorkspaces.set(row.workspaceId, String(row.path));
+        return { type: 'upsert', workspace: row };
+      }
+      if (frame.type === 'remove' && typeof frame.workspaceId === 'string') {
+        const workspacePath = state.visibleWorkspaces.get(frame.workspaceId);
+        if (workspacePath === undefined || !folderAllowed(workspacePath, perms.allowed_folders) ||
+          db.listWorkspaceOwners().some((owner) => owner.userId !== userId && normalizePath(owner.path) === normalizePath(workspacePath))) return null;
+        state.visibleWorkspaces.delete(frame.workspaceId);
+        return { type: 'remove', workspaceId: frame.workspaceId };
+      }
+      if (frame.type === 'order' && Array.isArray(frame.workspaceIds)) {
+        const ids = frame.workspaceIds.filter((id): id is string => {
+          if (typeof id !== 'string') return false;
+          const workspacePath = state.visibleWorkspaces.get(id);
+          return workspacePath !== undefined && folderAllowed(workspacePath, perms.allowed_folders) &&
+            !db.listWorkspaceOwners().some((owner) => owner.userId !== userId && normalizePath(owner.path) === normalizePath(workspacePath));
+        });
+        return { type: 'order', workspaceIds: ids };
+      }
+      if (frame.type === 'archived' && Array.isArray(frame.archivedSessionIds)) {
+        return { type: 'archived', archivedSessionIds: frame.archivedSessionIds.filter(allowedSession) };
+      }
+      return null;
+    }
+    if (frame.type === 'baseline') {
+      const baseline = frame.value;
+      if (baseline === null || typeof baseline !== 'object' || Array.isArray(baseline)) return null;
+      const source = baseline as Record<string, unknown>;
+      const queues = source.queues;
+      const jobs = source.jobs;
+      const projections = source.projections;
+      if (!isPlainJsonRecord(queues) || !isPlainJsonRecord(jobs) || !isPlainJsonRecord(projections)) return null;
+      const filterRecord = (input: Record<string, unknown>): Record<string, unknown> => {
+        const out: Record<string, unknown> = {};
+        for (const [id, item] of Object.entries(input)) if (allowedSession(id)) out[id] = item;
+        return out;
+      };
+      return { type: 'baseline', value: {
+        queues: filterRecord(queues), jobs: filterRecord(jobs), projections: filterRecord(projections),
+      } };
+    }
+    if ((frame.type === 'queue' || frame.type === 'jobs' || frame.type === 'projection') && allowedSession(frame.sessionId)) {
+      return frame;
+    }
+    return null;
+  };
+
   const muxEventFilter = (
     userId: number,
     perms: UserPermissionsRow,
@@ -2481,7 +2815,7 @@ export function createGatewayServer(
    */
   function applySandboxToSession(sessionId: string, mode: string): void {
     const body = JSON.stringify({ sessionId, mode });
-    const r = http.request(
+    const r = upstreamTransport.request(
       {
         hostname: upstreamHost,
         port: upstreamPort,
@@ -2516,11 +2850,11 @@ export function createGatewayServer(
     }
     const headers: Record<string, string | string[] | undefined> = { ...req.headers };
     // 改写 Host 为上游地址（过 dsh 的 browser-trust fence 第 1 道：Host 检查）
-    headers.host = `${upstreamHost}:${upstreamPort}`;
+    headers.host = upstreamAuthority;
     // 改写 Origin 为上游地址（过第 3 道：Origin 必须与 Host 同 host——
     // 浏览器发来的是网关地址 origin，与改写后的 Host 不一致会被 403）
     if (typeof headers.origin === 'string') {
-      headers.origin = `http://${upstreamHost}:${upstreamPort}`;
+      headers.origin = `${upstreamScheme}://${upstreamAuthority}`;
     }
     delete headers['content-length'];
     // 缓冲/改写路径用 end(body) 重写 content-length，chunked 的 transfer-encoding
@@ -2535,13 +2869,18 @@ export function createGatewayServer(
     const ownPluginRoute = normalizeDecodedPath(
       new URL(req.originalUrl, `http://${req.headers.host ?? 'localhost'}`).pathname,
     ).startsWith('/api/dsh-passwords/');
-    if (!ownPluginRoute) delete headers['cookie'];
+    if (!ownPluginRoute) {
+      delete headers['cookie'];
+      if (upstreamAuthCookie !== '') headers.cookie = upstreamAuthCookie;
+    }
     // 只允许 gzip/identity：HTML 注入与 workspace/session 过滤只处理 gzip，
     // 上游若返回 br 会损坏页面/导致过滤静默失效（brotli 不走代理缓冲）
     headers['accept-encoding'] = 'gzip';
 
     const parsedUrl = new URL(req.originalUrl, `http://${req.headers.host ?? 'localhost'}`);
-    // 代理后续所有路由分支与认证门卫共享同一口径，禁止编码分隔符制造判定差异。
+    // 外部网关 JWT 与 alpha 根路径 launch token 都是本层凭据，不能通过 query
+    // 泄露到 dsh 或第三方插件；其余业务 query 参数原样保留。
+    const upstreamSearch = stripGatewayAuthQuery(req.originalUrl);
     const proxyPath = normalizeDecodedPath(parsedUrl.pathname);
     // 请求上挂的用户/权限（子用户才有）
     const reqAs = req as Req;
@@ -2567,14 +2906,14 @@ export function createGatewayServer(
     const sessionAccessRequestRevision = reqAs.dshpwUser === undefined
       ? 0
       : userAccessRevisionFor(reqAs.dshpwUser);
-    const upstreamReq = http.request(
+    const upstreamReq = upstreamTransport.request(
       {
         hostname: upstreamHost,
         port: upstreamPort,
         // 规范化路径转发（与 dsh 的 new URL 解析行为一致，杜绝 ../ 混入上游）
         // F-03：与门卫同口径——pathname 解码后再归一化，编码变体（%2f/%2e）
         // 转发为等价规范路径，避免上游按自身规则解码导致路径语义漂移
-        path: proxyPath + parsedUrl.search,
+        path: proxyPath + upstreamSearch,
         method: req.method,
         headers,
         agent: upstreamAgent,
@@ -3487,7 +3826,7 @@ export function createGatewayServer(
       return;
     }
     const queryIndex = (req.url ?? '').indexOf('?');
-    const fwdPath = gatePath + (queryIndex >= 0 ? (req.url ?? '').slice(queryIndex) : '');
+    const fwdPath = gatePath + (queryIndex >= 0 ? stripGatewayAuthQuery(req.url ?? '/') : '');
     // WebSocket 同样是浏览器携带 Cookie 的状态变更通道，先拒绝跨源升级。
     if (!originHostMatches(req)) {
       socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
@@ -3539,13 +3878,99 @@ export function createGatewayServer(
     }
     // rc.2 的 events.host/events.mux 是 downlink-only WebSocket；子用户走网关
     // 协议过滤适配器，remote.mux 在 rc.2 不存在，仍默认拒绝。
+    // alpha.1 的所有 stream Remote 共用 /api/remote.mux。第一阶段只开放管理员；
+    // 子用户必须等完成 workspace/session/preset 逐帧授权后再开放，不能透明放行。
+    if (gatePath === '/api/remote.mux') {
+      const isSubuser = userRole === 'user';
+      const wsServer = new WebSocket.WebSocketServer({ noServer: true, maxPayload: REMOTE_MUX_MAX_PAYLOAD_BYTES });
+      wsServer.handleUpgrade(req, socket, head, (client: any) => {
+        const endpointUrl = `${upstream.protocol === 'https:' ? 'wss' : 'ws'}://${upstreamAuthority}${fwdPath}`;
+        const upstreamWs = new WebSocket.WebSocket(endpointUrl, upstreamWsOptions());
+        const active = new Map<string, RemoteMuxUserStreamState | null>();
+        let upstreamOpen = false;
+        const pending: string[] = [];
+        let pendingBytes = 0;
+        const closeBoth = (code?: number, reason?: string): void => {
+          try { if (client.readyState === WebSocket.OPEN) client.close(code, reason); } catch {}
+          try { upstreamWs.close(); } catch {}
+        };
+        client.on('message', (data: Buffer, isBinary: boolean) => {
+          if (isBinary) { closeBoth(1003, 'text messages required'); return; }
+          const frame = parseRemoteMuxClientFrame(Buffer.from(data));
+          if (frame === null) { closeBoth(1008, 'invalid Remote stream request'); return; }
+          if (frame.type === 'open') {
+            if (active.has(frame.streamId)) { closeBoth(1008, 'duplicate stream id'); return; }
+            if (active.size >= REMOTE_MUX_MAX_STREAMS) { closeBoth(1008, 'too many Remote streams'); return; }
+            if (isSubuser) {
+              if (frame.endpoint !== 'workspace/follow' && frame.endpoint !== 'session/control') {
+                closeBoth(1008, 'Remote endpoint not available for subusers');
+                return;
+              }
+              if (!remoteMuxEmptyArgs(frame.payload)) {
+                closeBoth(1008, 'invalid Remote stream payload');
+                return;
+              }
+              if (frame.endpoint === 'session/control' && userSessionAccess.get(authUserId!) === undefined) {
+                // alpha 的 session/control 与 workspace/follow 可能并发建立；先用
+                // 持久化显式 grant 建立仅含 session ID 的临时快照，workspace/follow
+                // 到达后再补全 cwd。未知 session 仍 fail-closed。
+                userSessionAccess.set(authUserId!, new Map(db.listUserSessionGrants(authUserId!).map((id) => [id, ''])));
+              }
+              active.set(frame.streamId, { endpoint: frame.endpoint, visibleWorkspaces: new Map() });
+            } else {
+              active.set(frame.streamId, null);
+            }
+          } else if (!active.has(frame.streamId)) {
+            return;
+          }
+          const text = JSON.stringify(frame);
+          const textBytes = Buffer.byteLength(text);
+          if (!upstreamOpen || upstreamWs.readyState !== WebSocket.OPEN) {
+            if (pendingBytes + textBytes > REMOTE_MUX_MAX_PENDING_BYTES) {
+              closeBoth(1009, 'Remote stream queue too large');
+              return;
+            }
+            pending.push(text);
+            pendingBytes += textBytes;
+          } else {
+            upstreamWs.send(text);
+          }
+          if (frame.type === 'cancel') active.delete(frame.streamId);
+        });
+        client.on('close', () => { try { upstreamWs.close(); } catch {} });
+        upstreamWs.on('open', () => {
+          upstreamOpen = true;
+          while (pending.length > 0 && upstreamWs.readyState === WebSocket.OPEN) {
+            const text = pending.shift()!;
+            pendingBytes -= Buffer.byteLength(text);
+            upstreamWs.send(text);
+          }
+        });
+        upstreamWs.on('message', (data: Buffer, isBinary: boolean) => {
+          if (isBinary) { closeBoth(1003, 'text messages required'); return; }
+          const frame = parseRemoteMuxServerFrame(Buffer.from(data));
+          const state = frame === null ? undefined : active.get(frame.streamId);
+          if (frame === null || state === undefined) { closeBoth(1011, 'invalid Remote stream response'); return; }
+          if (client.readyState !== WebSocket.OPEN) return;
+          if (frame.type === 'item' && state !== null) {
+            const filtered = filterRemoteMuxUserItem(authUserId!, effectivePermissions(authUserId!), state, frame.value);
+            if (filtered === null) return;
+            client.send(JSON.stringify({ type: 'item', streamId: frame.streamId, value: filtered }));
+          } else {
+            client.send(JSON.stringify(frame));
+          }
+          if (frame.type === 'end' || frame.type === 'error') active.delete(frame.streamId);
+        });
+        upstreamWs.on('error', () => closeBoth(1011, 'upstream error'));
+        upstreamWs.on('close', () => { if (client.readyState === WebSocket.OPEN) client.close(1011, 'upstream closed'); });
+      });
+      return;
+    }
     if (userRole === 'user' && (gatePath === '/api/events.host' || gatePath === '/api/events.mux')) {
       const channel = gatePath === '/api/events.host' ? 'host' : 'mux';
       const wsServer = new WebSocket.WebSocketServer({ noServer: true });
       wsServer.handleUpgrade(req, socket, head, (client: any) => {
-        const upstreamWs = new (require('ws'))(`${upstream.protocol === 'https:' ? 'wss' : 'ws'}://${upstreamHost}:${upstreamPort}${fwdPath}`, {
-          headers: { host: `${upstreamHost}:${upstreamPort}`, origin: `http://${upstreamHost}:${upstreamPort}` },
-        });
+        const upstreamWs = new WebSocket.WebSocket(`${upstream.protocol === 'https:' ? 'wss' : 'ws'}://${upstreamAuthority}${fwdPath}`, upstreamWsOptions());
         client.on('message', () => client.close(1008, 'downlink only'));
         client.on('close', () => { try { upstreamWs.close(); } catch {} });
         upstreamWs.on('open', () => {});
@@ -3584,22 +4009,41 @@ export function createGatewayServer(
     }
 
     // 转发升级请求（Host/Origin 改写，同 HTTP 路径；路径已规范化）
-    const upstreamSocket = net.connect(upstreamPort, upstreamHost, () => {
+    const upstreamSocket = upstreamIsHttps
+      ? tlsConnect({ host: upstreamHost, port: upstreamPort, servername: upstreamHost, rejectUnauthorized: process.env.MCP_GATEWAY_UPSTREAM_TLS_VERIFY !== '0' }, () => {
+          const lines: string[] = [`${req.method ?? 'GET'} ${fwdPath} HTTP/1.1`];
+          for (const [key, value] of Object.entries(req.headers)) {
+            const lower = key.toLowerCase();
+            if (lower === 'cookie') continue;
+            if (lower === 'host') lines.push(`Host: ${upstreamAuthority}`);
+            else if (lower === 'origin' && typeof value === 'string') lines.push(`Origin: ${upstreamScheme}://${upstreamAuthority}`);
+            else if (value !== undefined) lines.push(`${key}: ${Array.isArray(value) ? value.join(', ') : value}`);
+          }
+          if (upstreamAuthCookie !== '') lines.push(`Cookie: ${upstreamAuthCookie}`);
+          lines.push('', '');
+          upstreamSocket.write(lines.join('\r\n'));
+          if (head && head.length > 0) upstreamSocket.write(head);
+          socket.pipe(upstreamSocket);
+          upstreamSocket.pipe(socket);
+        })
+      : net.connect(upstreamPort, upstreamHost, () => {
       const lines: string[] = [
         `${req.method ?? 'GET'} ${fwdPath} HTTP/1.1`,
       ];
       for (const [key, value] of Object.entries(req.headers)) {
         const lower = key.toLowerCase();
-        // F-15：与 HTTP 代理同口径——不把网关会话 Cookie 转发给上游
+        // F-15：与 HTTP 代理同口径——不把外部网关 JWT 转发给上游；
+        // alpha 的官方 dsh-auth cookie 使用单独的受控值注入。
         if (lower === 'cookie') continue;
         if (lower === 'host') {
-          lines.push(`Host: ${upstreamHost}:${upstreamPort}`);
+          lines.push(`Host: ${upstreamAuthority}`);
         } else if (lower === 'origin' && typeof value === 'string') {
-          lines.push(`Origin: http://${upstreamHost}:${upstreamPort}`);
+          lines.push(`Origin: ${upstreamScheme}://${upstreamAuthority}`);
         } else if (value !== undefined) {
           lines.push(`${key}: ${Array.isArray(value) ? value.join(', ') : value}`);
         }
       }
+      if (upstreamAuthCookie !== '') lines.push(`Cookie: ${upstreamAuthCookie}`);
       lines.push('', '');
       upstreamSocket.write(lines.join('\r\n'));
       if (head && head.length > 0) upstreamSocket.write(head);

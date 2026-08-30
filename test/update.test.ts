@@ -151,9 +151,9 @@ function setup(root: string, autoEnabled: boolean, nowRef: { value: number }, re
   return { engine, db, ops, calls, restarts: () => restarts, setRestartAllowed: (allowed: boolean) => { restartAllowed = allowed; } };
 }
 
-test('test package flow targets 2.6.5 from a 2.6.4 baseline', () => {
+test('test package flow targets the current package version from a 2.6.4 baseline', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
-  assert.equal(pkg.version, '2.6.5');
+  assert.match(pkg.version, /^2\.6\.\d+$/);
   assert.equal(compareVersions(pkg.version, '2.6.4'), 1);
 });
 

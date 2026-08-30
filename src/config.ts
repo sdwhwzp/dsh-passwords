@@ -135,7 +135,10 @@ export function loadConfig(): PlatformConfig {
   const autoTls = !userCerts && !autoOff && (autoOn || autoTlsRaw === '');
   const acmeDir = path.join(path.dirname(dbPathResolved), 'acme');
 
-  const gatewayPortRaw = readEnv('MCP_GATEWAY_PORT', '8080').trim();
+  // 自动 HTTPS 的 CLI 默认监听 443；插件、网关 Broker 和健康轮询必须在
+  // 同一配置阶段看到这个端口，不能等 cli.ts 启动后再局部改写，否则插件会
+  // 把 Cookie 同步到 8080，而公网网关实际在 443。
+  const gatewayPortRaw = readEnv('MCP_GATEWAY_PORT', autoTls ? '443' : '8080').trim();
   const gatewayPortNum = Number(gatewayPortRaw);
   // 端口非法（非数字/越界）回退默认 8080，避免 listen(NaN) 的泛化报错
   const gatewayPort =
