@@ -57,6 +57,7 @@ test('restricted event downlinks filter other tenants and survive an upstream re
   db.setPermissions(customer.id, {
     allowedFolders: [ownRoot], hourlyTokenLimit: null, dailyMinutesLimit: null,
     monthlyBudgetMicros: 0, allowUpload: true, allowGitDownload: false, banned: false,
+    allowedWebSocketPaths: ['/plugin/ws/*'],
     sandboxMode: 'workspace-write', disabledSessions: [],
   });
   for (const sessionId of [
@@ -157,6 +158,7 @@ test('restricted event downlinks filter other tenants and survive an upstream re
     localWorkspace: { host: '127.0.0.1', port: 0, publicUrl: '', placeholderRoot: path.join(temporary, 'local') },
     managedWorkspaceRoot: path.join(temporary, 'managed'),
     patch: { dshRoot: '', restartService: '' },
+    webSocket: { adminAllowlist: [], userAllowlist: ['/plugin/ws/*'] },
   };
   const gateway = createGatewayServer(config, new AuthService(config, db), db);
   await new Promise<void>((resolve) => gateway.listen(0, '127.0.0.1', resolve));
@@ -285,11 +287,12 @@ test('restricted event downlinks stop after credential change, invalidation, or 
   const temporary = await mkdtemp(path.join(os.tmpdir(), 'dshpw-tenant-ws-revoke-'));
   const db = new Database(path.join(temporary, 'platform.db'), createFieldCrypto('enc', 'setup'));
   db.init();
-  db.createUser('admin', 'hash', 'admin');
+  const admin = db.createUser('admin', 'hash', 'admin');
   const customer = db.createUser('customer', 'hash', 'user');
   db.setPermissions(customer.id, {
     allowedFolders: [ownRoot], hourlyTokenLimit: null, dailyMinutesLimit: null,
     monthlyBudgetMicros: 0, allowUpload: true, allowGitDownload: false, banned: false,
+    allowedWebSocketPaths: ['/plugin/ws/*'],
     sandboxMode: 'workspace-write', disabledSessions: [],
   });
   db.claimSessionOwner('user-live', customer.id);
@@ -328,6 +331,7 @@ test('restricted event downlinks stop after credential change, invalidation, or 
     localWorkspace: { host: '127.0.0.1', port: 0, publicUrl: '', placeholderRoot: path.join(temporary, 'local') },
     managedWorkspaceRoot: path.join(temporary, 'managed'),
     patch: { dshRoot: '', restartService: '' },
+    webSocket: { adminAllowlist: [], userAllowlist: ['/plugin/ws/*'] },
   };
   const gateway = createGatewayServer(config, new AuthService(config, db), db);
   await new Promise<void>((resolve) => gateway.listen(0, '127.0.0.1', resolve));
@@ -335,6 +339,9 @@ test('restricted event downlinks stop after credential change, invalidation, or 
 
   const tokenFor = (credentialVersion: number, id: string) => jwt.sign({
     sub: String(customer.id), username: customer.username, cv: credentialVersion, jti: id,
+  }, config.jwtSecret, { expiresIn: '1h' });
+  const adminToken = jwt.sign({
+    sub: String(admin.id), username: admin.username, cv: 0, jti: 'admin',
   }, config.jwtSecret, { expiresIn: '1h' });
   const waitForUpstream = () => new Promise<WebSocket>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('upstream WebSocket timed out')), 1_000);
@@ -431,9 +438,25 @@ test('restricted event downlinks stop after credential change, invalidation, or 
     const logoutToken = tokenFor(1, 'logout');
     const loggedOut = await openDownlink(logoutToken);
     await receiveAllowedFrame(loggedOut.downstream, loggedOut.upstream);
+    const pluginUpstreamPromise = waitForUpstream();
+    const pluginSocket = new WebSocket(`ws://127.0.0.1:${String(gatewayPort)}/plugin/ws/live`, {
+      headers: { cookie: `dsh_gateway_token=${logoutToken}` },
+    });
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('plugin WebSocket open timed out')), 1_000);
+      pluginSocket.once('open', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      pluginSocket.once('error', reject);
+    });
+    const pluginUpstream = await pluginUpstreamPromise;
+    assert.equal(pluginUpstream.readyState, WebSocket.OPEN, 'plugin upstream must remain live until revocation');
     const logoutClose = waitForClose(loggedOut.downstream);
+    const pluginClose = waitForClose(pluginSocket);
     assert.equal(await post('/gateway/logout', logoutToken, {}), 302);
     assert.equal(await logoutClose, 1008);
+    await pluginClose;
     const connectionsAfterLogout = upstreamConnectionCount;
     await new Promise((resolve) => setTimeout(resolve, 250));
     assert.equal(upstreamConnectionCount, connectionsAfterLogout);

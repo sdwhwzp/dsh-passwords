@@ -8,7 +8,14 @@ import { AuthService } from '../src/auth.js';
 import { Database } from '../src/db.js';
 import { createFieldCrypto } from '../src/encrypt.js';
 import type { PlatformConfig } from '../src/config.js';
-import { ADMIN_REQUEST_BODY_BYTES, DEFAULT_USER_REQUEST_BODY_BYTES, requestBodyLimitFor } from '../src/gateway.js';
+import {
+  ADMIN_REQUEST_BODY_BYTES,
+  AIONUI_REQUEST_BODY_BYTES,
+  DEFAULT_USER_REQUEST_BODY_BYTES,
+  SESSION_SCOPED_REQUEST_BODY_BYTES,
+  proxyRequestBodyLimitFor,
+  requestBodyLimitFor,
+} from '../src/gateway.js';
 
 test('Issue #23: 请求体上限按角色和大请求体权限分档', () => {
   assert.equal(DEFAULT_USER_REQUEST_BODY_BYTES, 64 * 1024 * 1024);
@@ -16,6 +23,23 @@ test('Issue #23: 请求体上限按角色和大请求体权限分档', () => {
   assert.equal(requestBodyLimitFor('user', false), DEFAULT_USER_REQUEST_BODY_BYTES);
   assert.equal(requestBodyLimitFor('user', true), ADMIN_REQUEST_BODY_BYTES);
   assert.equal(requestBodyLimitFor('admin', false), ADMIN_REQUEST_BODY_BYTES);
+  assert.equal(
+    proxyRequestBodyLimitFor('user', true, 'POST', '/api/session.prompt'),
+    SESSION_SCOPED_REQUEST_BODY_BYTES,
+    'upload permission must not raise an ordinary RPC body ceiling',
+  );
+  assert.equal(
+    proxyRequestBodyLimitFor('user', true, 'POST', '/api/dsh-uploads'),
+    ADMIN_REQUEST_BODY_BYTES,
+  );
+  assert.equal(
+    proxyRequestBodyLimitFor('admin', false, 'POST', '/sidebar/upload'),
+    ADMIN_REQUEST_BODY_BYTES,
+  );
+  assert.equal(
+    proxyRequestBodyLimitFor('user', true, 'POST', '/aionui-panel/write'),
+    AIONUI_REQUEST_BODY_BYTES,
+  );
 });
 
 test('Issue #22: 正常新增子用户默认 allowed_agent_presets 为空数组（不允许任何 Agent preset）', async () => {
@@ -49,7 +73,7 @@ test('Issue #22: 正常新增子用户默认 allowed_agent_presets 为空数组�
     assert.ok(user, '子用户应已创建');
     const perms = db.getPermissions(user.id);
     assert.deepEqual(perms?.allowed_agent_presets, [], '新子用户默认不允许任何 Agent preset');
-    assert.equal(perms?.allow_upload, true, 'fork 默认允许子用户上传并使用大请求体档位');
+    assert.equal(perms?.allow_upload, true, 'fork 默认允许子用户使用明确的流式上传端点');
 
     // 历史数据兼容：显式 NULL 仍表示不限制
     db.setPermissions(user.id, {

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { mkdtempSync, rmSync } from 'node:fs';
 import jwt from 'jsonwebtoken';
 
@@ -24,15 +25,31 @@ let upstreamCalls: string[] = [];
 let selectBlocked = false;
 let successfulCreates = 0;
 
-function request(pathname: string, body = '{}', tokenCookie = cookie): Promise<{ status: number; body: string }> {
+function request(
+  pathname: string,
+  body = '{}',
+  tokenCookie = cookie,
+  extraHeaders: Record<string, string> = {},
+): Promise<{ status: number; body: string; headers: http.IncomingHttpHeaders }> {
   return new Promise((resolve, reject) => {
     const req = http.request({
       host: '127.0.0.1', port, path: pathname, method: 'POST',
-      headers: { cookie: tokenCookie, 'content-type': 'application/json', 'content-length': String(Buffer.byteLength(body)) },
+      headers: {
+        cookie: tokenCookie,
+        'content-type': 'application/json',
+        'content-length': String(Buffer.byteLength(body)),
+        ...extraHeaders,
+      },
     }, (res) => {
       const chunks: Buffer[] = [];
       res.on('data', (chunk: Buffer) => chunks.push(chunk));
-      res.on('end', () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') }));
+      res.on('end', () => {
+        const raw = Buffer.concat(chunks);
+        const decoded = String(res.headers['content-encoding'] ?? '').includes('gzip')
+          ? zlib.gunzipSync(raw)
+          : raw;
+        resolve({ status: res.statusCode ?? 0, body: decoded.toString('utf8'), headers: res.headers });
+      });
     });
     req.on('error', reject);
     req.end(body);
@@ -63,24 +80,43 @@ before(async () => {
     allowedAgentPresets: ['preset/other-only'], disabledSessions: [], banned: false, sandboxMode: null,
   });
   db.claimSessionOwner('existing-session', user.id);
+  db.claimSessionOwner('gzip-session', user.id);
   upstream = http.createServer((req, res) => {
     upstreamCalls.push(req.url ?? '');
+    const reply = (value: unknown) => {
+      const raw = Buffer.from(JSON.stringify(value), 'utf8');
+      if (req.headers['x-test-encoding'] === 'gzip-chunked') {
+        const compressed = zlib.gzipSync(raw);
+        res.writeHead(200, { 'content-type': 'application/json', 'content-encoding': 'gzip' });
+        const split = Math.max(1, Math.floor(compressed.length / 2));
+        res.write(compressed.subarray(0, split));
+        res.end(compressed.subarray(split));
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(raw);
+    };
     if (req.url?.startsWith('/api/workspace.list')) {
-      res.end(JSON.stringify({ result: { ok: true, value: { items: [{ workspaceId: 'workspace', path: '/work/allowed', title: 'Allowed', sessionIds: ['existing-session'], createdAt: '2026-08-28T00:00:00.000Z', updatedAt: '2026-08-28T00:00:00.000Z' }], archivedSessionIds: [] } } }));
+      reply({ result: { ok: true, value: { items: [{ workspaceId: 'workspace', path: '/work/allowed', title: 'Allowed', sessionIds: ['existing-session', 'gzip-session'], createdAt: '2026-08-28T00:00:00.000Z', updatedAt: '2026-08-28T00:00:00.000Z' }], archivedSessionIds: [] } } });
     } else if (req.url?.startsWith('/api/session.list')) {
-      res.end(JSON.stringify({ result: { ok: true, value: { items: [{ sessionId: 'existing-session', cwd: '/work/allowed', agentPreset: 'preset/allowed' }] } } }));
+      reply({ result: { ok: true, value: { items: [{ sessionId: 'existing-session', cwd: '/work/allowed', agentPreset: 'preset/allowed' }, { sessionId: 'gzip-session', cwd: '/work/allowed' }] } } });
     } else if (req.url?.startsWith('/api/session.create')) {
       successfulCreates += 1;
       const sessionId = successfulCreates === 1 ? 'restricted-session' : 'new-session';
-      res.end(JSON.stringify({ result: { ok: true, value: { sessionId, cwd: '/work/allowed' } } }));
+      reply({ result: { ok: true, value: { sessionId, cwd: '/work/allowed' } } });
     } else if (req.url?.startsWith('/api/agentPreset.select')) {
         if (selectBlocked) {
-        res.end(JSON.stringify({ result: { ok: false, error: { message: 'boom' } } }));
+        reply({ result: { ok: false, error: { message: 'boom' } } });
       } else {
-        res.end(JSON.stringify({ result: { ok: true, value: { agentPreset: 'preset/allowed' } } }));
+        reply({ result: { ok: true, value: { agentPreset: 'preset/allowed' } } });
       }
+    } else if (req.url?.startsWith('/api/agentPreset.list')) {
+      reply({ result: { ok: true, value: { items: [
+        { id: 'preset/allowed' },
+        { id: 'preset/blocked' },
+      ] } } });
     } else {
-      res.end(JSON.stringify({ ok: true }));
+      reply({ ok: true });
     }
   });
   await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
@@ -142,6 +178,34 @@ test('Issue #22: 授权 preset 允许创建会话，并登记缓存供 prompt �
   assert.equal(afterPrompt.status, 200, afterPrompt.body);
 });
 
+test('Agent preset gzip chunked responses are decoded before filtering and selection state updates', async () => {
+  const list = await request(
+    '/api/agentPreset.list',
+    '{}',
+    cookie,
+    { 'x-test-encoding': 'gzip-chunked', 'accept-encoding': 'gzip' },
+  );
+  assert.equal(list.status, 200, list.body);
+  assert.deepEqual(
+    JSON.parse(list.body).result.value.items,
+    [{ id: 'preset/allowed' }],
+  );
+  assert.equal(list.headers['content-encoding'], undefined, 'rewritten list response must be identity encoded');
+
+  const before = await request('/api/session.prompt', JSON.stringify({ sessionId: 'gzip-session', text: 'hi' }));
+  assert.equal(before.status, 403);
+  const select = await request(
+    '/api/agentPreset.select',
+    JSON.stringify({ sessionId: 'gzip-session', agentPreset: 'preset/allowed' }),
+    cookie,
+    { 'x-test-encoding': 'gzip-chunked', 'accept-encoding': 'gzip' },
+  );
+  assert.equal(select.status, 200, select.body);
+  assert.equal(select.headers['content-encoding'], 'gzip');
+  const after = await request('/api/session.prompt', JSON.stringify({ sessionId: 'gzip-session', text: 'hi' }));
+  assert.equal(after.status, 200, after.body);
+});
+
 test('Issue #22: Agent preset 会话缓存按用户隔离', async () => {
   upstreamCalls = [];
   const ownerList = await request('/api/session.list', '{}', cookie);
@@ -170,10 +234,10 @@ test('Issue #22: select 失败后不更新缓存，prompt 仍按旧缓存判断'
   }
 });
 
-test('Issue #22: approved preset permits session creation and a large prompt within the platform hard limit', async () => {
+test('Issue #22: approved preset permits a bounded session prompt below the inspected RPC limit', async () => {
   const create = await request('/api/session.create', JSON.stringify({ cwd: '/work/allowed', agentPreset: 'preset/allowed' }));
   assert.equal(create.status, 200, create.body);
-  const prompt = JSON.stringify({ sessionId: 'new-session', text: 'x'.repeat(1200 * 1024) });
+  const prompt = JSON.stringify({ sessionId: 'new-session', text: 'x'.repeat(768 * 1024) });
   const response = await request('/api/session.prompt', prompt);
   assert.equal(response.status, 200, response.body);
   assert.equal(upstreamCalls.some((url) => url.startsWith('/api/session.prompt')), true);

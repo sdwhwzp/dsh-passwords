@@ -18,7 +18,7 @@ import zlib from 'node:zlib';
 import { mkdtempSync, rmSync } from 'node:fs';
 import jwt from 'jsonwebtoken';
 
-import { DEFAULT_USER_REQUEST_BODY_BYTES, createGatewayServer } from '../src/gateway.js';
+import { createGatewayServer } from '../src/gateway.js';
 import { AuthService } from '../src/auth.js';
 import { Database } from '../src/db.js';
 import { createFieldCrypto } from '../src/encrypt.js';
@@ -39,6 +39,8 @@ const USAGE_HTML_BODY = `<html><head><script>globalThis["__DSH_BOOT__"] = ${JSON
 })}</script></head><body>usage shell</body></html>`;
 const HASHED_STATIC_BODY = 'export const repeatedPluginPayload = "compress-me";\n'.repeat(4_096);
 const LARGE_HISTORY_CHUNK = Buffer.alloc(256 * 1024, 0x78);
+const TEST_PROXY_REQUEST_MAX_BYTES = 256 * 1024;
+const REQUEST_STREAM_CHUNK = Buffer.alloc(32 * 1024, 0x78);
 const LARGE_HISTORY_BYTES = 20 * 1024 * 1024;
 const OVERSIZE_HISTORY_BYTES = 32 * 1024 * 1024 + 1;
 const WORKSPACES_JSON = JSON.stringify({
@@ -118,6 +120,8 @@ let lastUpstreamHeaders: http.IncomingHttpHeaders = {};
 let lastUpstreamMethod = '';
 let failWorkspaceList = false;
 let failSessionList = false;
+let sessionListRequestsSeen = 0;
+let uploadRequestsSeen = 0;
 
 /** Stream a valid large history response without retaining another full-size fixture buffer. */
 function sendLargeHistory(res: http.ServerResponse, historyBytes: number): void {
@@ -178,6 +182,7 @@ function startMockUpstream(): Promise<http.Server> {
         );
         res.end();
       } else if ((req.url ?? '').startsWith('/api/session.list')) {
+        sessionListRequestsSeen += 1;
         if (failSessionList) {
           setTimeout(() => req.socket.destroy(), 25);
           return;
@@ -298,6 +303,15 @@ function startMockUpstream(): Promise<http.Server> {
         }
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ ok: true, history: 'x'.repeat(16 * 1024) }));
+      } else if ((req.url ?? '').startsWith('/api/dsh-ssh/upload')) {
+        uploadRequestsSeen += 1;
+        let bytes = 0;
+        // dsh-ssh starts its progress response before it has drained the upload.
+        // The gateway must withhold this 200 until the inbound hard limit is known.
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.flushHeaders();
+        req.on('data', (chunk: Buffer) => { bytes += chunk.length; });
+        req.on('end', () => res.end(JSON.stringify({ ok: true, bytes })));
       } else if (req.url === '/api/test-upstream-error') {
         req.socket.destroy();
       } else {
@@ -349,6 +363,49 @@ function gatewayReq(
     );
     req.on('error', reject);
     req.end(body);
+  });
+}
+
+/** Send a chunked carrier without retaining a full request-sized fixture buffer. */
+function gatewayChunkedReq(
+  method: string,
+  url: string,
+  headers: Record<string, string>,
+  totalBytes: number,
+): Promise<{ status: number; rawHeaders: string[]; body: string }> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const req = http.request(
+      { host: '127.0.0.1', port: gatewayPort, method, path: url, headers: { cookie, ...headers } },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk: Buffer) => chunks.push(chunk));
+        res.on('end', () => {
+          settled = true;
+          resolve({
+            status: res.statusCode ?? 0,
+            rawHeaders: res.rawHeaders,
+            body: Buffer.concat(chunks).toString('utf8'),
+          });
+        });
+      },
+    );
+    req.on('error', (error) => {
+      if (!settled) reject(error);
+    });
+    let sent = 0;
+    const writeMore = () => {
+      while (sent < totalBytes) {
+        const size = Math.min(REQUEST_STREAM_CHUNK.length, totalBytes - sent);
+        sent += size;
+        if (!req.write(REQUEST_STREAM_CHUNK.subarray(0, size))) {
+          req.once('drain', writeMore);
+          return;
+        }
+      }
+      req.end();
+    };
+    writeMore();
   });
 }
 
@@ -449,7 +506,9 @@ before(async () => {
   };
 
   auth = new AuthService(config, db);
-  gateway = createGatewayServer(config, auth, db);
+  gateway = createGatewayServer(config, auth, db, {
+    proxyRequestMaxBytes: TEST_PROXY_REQUEST_MAX_BYTES,
+  });
   await new Promise<void>((resolve) => gateway.listen(0, '127.0.0.1', () => resolve()));
   gatewayPort = (gateway.address() as { port: number }).port;
 
@@ -773,13 +832,10 @@ test('API 拒绝与登录失效始终返回 JSON，不再把登录页或 403 HTM
   assert.match(rawHeader(expired.rawHeaders, 'content-type'), /^application\/json/);
   assert.equal(JSON.parse(expired.body).code, 'UNAUTHENTICATED');
 
-  const tooLarge = await gatewayReq('POST', '/api/session.prompt', {
+  const tooLarge = await gatewayChunkedReq('POST', '/api/session.prompt', {
     cookie: customerCookie,
     'content-type': 'application/json',
-  }, JSON.stringify({
-    sessionId: 's-owned',
-    content: 'x'.repeat(DEFAULT_USER_REQUEST_BODY_BYTES + 1),
-  }));
+  }, TEST_PROXY_REQUEST_MAX_BYTES + 1);
   assert.equal(tooLarge.status, 413);
   assert.match(rawHeader(tooLarge.rawHeaders, 'content-type'), /^application\/json/);
   assert.equal(JSON.parse(tooLarge.body).code, 'PAYLOAD_TOO_LARGE');
@@ -791,6 +847,57 @@ test('API 拒绝与登录失效始终返回 JSON，不再把登录页或 403 HTM
   assert.equal(unavailable.status, 502);
   assert.match(rawHeader(unavailable.rawHeaders, 'content-type'), /^application\/json/);
   assert.equal(JSON.parse(unavailable.body).code, 'UPSTREAM_UNAVAILABLE');
+});
+
+test('合成 GET 列表拒绝 chunked 请求体且不连接上游', async () => {
+  const before = sessionListRequestsSeen;
+  const response = await gatewayChunkedReq(
+    'GET',
+    '/api/session.list',
+    { cookie: customerCookie, 'transfer-encoding': 'chunked' },
+    TEST_PROXY_REQUEST_MAX_BYTES + 1,
+  );
+  assert.equal(response.status, 413, response.body);
+  assert.match(rawHeader(response.rawHeaders, 'content-type'), /^application\/json/);
+  assert.equal(JSON.parse(response.body).code, 'PAYLOAD_TOO_LARGE');
+  assert.equal(sessionListRequestsSeen, before, '带请求体的合成 GET 不得连接上游');
+});
+
+test('chunked proxy limits withhold an early upstream 200 and isolate concurrent counters', async () => {
+  const before = uploadRequestsSeen;
+  const [first, second] = await Promise.all([
+    gatewayChunkedReq('POST', '/api/dsh-ssh/upload?alias=a&remotePath=%2Ftmp%2Fa', {
+      'content-type': 'application/octet-stream',
+    }, Math.floor(TEST_PROXY_REQUEST_MAX_BYTES * 0.75)),
+    gatewayChunkedReq('POST', '/api/dsh-ssh/upload?alias=b&remotePath=%2Ftmp%2Fb', {
+      'content-type': 'application/octet-stream',
+    }, Math.floor(TEST_PROXY_REQUEST_MAX_BYTES * 0.5)),
+  ]);
+  assert.equal(first.status, 200, first.body);
+  assert.equal(second.status, 200, second.body);
+  assert.equal(JSON.parse(first.body).bytes, Math.floor(TEST_PROXY_REQUEST_MAX_BYTES * 0.75));
+  assert.equal(JSON.parse(second.body).bytes, Math.floor(TEST_PROXY_REQUEST_MAX_BYTES * 0.5));
+
+  const oversize = await gatewayChunkedReq(
+    'POST',
+    '/api/dsh-ssh/upload?alias=c&remotePath=%2Ftmp%2Fc',
+    { 'content-type': 'application/octet-stream' },
+    TEST_PROXY_REQUEST_MAX_BYTES + 1,
+  );
+  assert.equal(oversize.status, 413, oversize.body);
+  assert.match(rawHeader(oversize.rawHeaders, 'content-type'), /^application\/json/);
+  assert.equal(JSON.parse(oversize.body).code, 'PAYLOAD_TOO_LARGE');
+  assert.equal(uploadRequestsSeen, before + 3, 'all carriers reached the early-response upload handler');
+
+  const callsBeforeDeclaredReject = uploadRequestsSeen;
+  const declared = await gatewayReq('POST', '/api/dsh-ssh/upload?alias=d&remotePath=%2Ftmp%2Fd', {
+    'content-type': 'application/octet-stream',
+    'content-length': String(TEST_PROXY_REQUEST_MAX_BYTES + 1),
+    connection: 'close',
+  });
+  assert.equal(declared.status, 413, declared.body);
+  assert.equal(JSON.parse(declared.body).code, 'PAYLOAD_TOO_LARGE');
+  assert.equal(uploadRequestsSeen, callsBeforeDeclaredReject, 'declared oversize must fail before upstream connect');
 });
 
 test('租户过滤、at-file 与授权快照失败统一返回 JSON', async () => {

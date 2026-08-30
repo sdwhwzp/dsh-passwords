@@ -89,10 +89,28 @@ import { filterTenantEventEnvelope } from './tenant-events.js';
 
 export const DEFAULT_USER_REQUEST_BODY_BYTES = 64 * 1024 * 1024;
 export const ADMIN_REQUEST_BODY_BYTES = 300 * 1024 * 1024;
+export const DEFAULT_RPC_REQUEST_BODY_BYTES = 64 * 1024;
+export const SESSION_SCOPED_REQUEST_BODY_BYTES = 1024 * 1024;
+export const AIONUI_REQUEST_BODY_BYTES = 4 * 1024 * 1024;
 
-/** Resolve the alpha carrier ceiling for one authenticated account. */
+/** Resolve the streamed upload carrier ceiling for one authenticated account. */
 export function requestBodyLimitFor(role: 'admin' | 'user', allowLargeBody: boolean): number {
   return role === 'admin' || allowLargeBody ? ADMIN_REQUEST_BODY_BYTES : DEFAULT_USER_REQUEST_BODY_BYTES;
+}
+
+/**
+ * Resolve the transport ceiling without granting ordinary RPCs an upload-sized body.
+ * Large bodies are accepted only by explicit upload routes; inspected JSON remains small.
+ */
+export function proxyRequestBodyLimitFor(
+  role: 'admin' | 'user',
+  allowLargeBody: boolean,
+  method: string,
+  pathname: string,
+): number {
+  if (isUploadRequest(method, pathname)) return requestBodyLimitFor(role, allowLargeBody);
+  if (isAionuiPanel(pathname)) return AIONUI_REQUEST_BODY_BYTES;
+  return SESSION_SCOPED_REQUEST_BODY_BYTES;
 }
 
 /** 网关内部扩展请求：权限执行时把用户/权限附在 req 上，供后续中间件与代理读取 */
@@ -873,12 +891,31 @@ function resolveSshHostSafe(host: string): Promise<'private' | string | null> {
   });
 }
 
+/** Optional safety ceilings that may only lower the production hard limits. */
+export interface GatewayServerOptions {
+  /** Lower the managed-file upload ceiling, primarily for bounded integration tests. */
+  managedFileUploadMaxBytes?: number;
+  /** Lower every proxied request carrier ceiling, primarily for bounded integration tests. */
+  proxyRequestMaxBytes?: number;
+}
+
+function lowerSafetyLimit(requested: number | undefined, fixed: number): number {
+  return requested !== undefined && Number.isSafeInteger(requested) && requested > 0
+    ? Math.min(requested, fixed)
+    : fixed;
+}
+
 export function createGatewayServer(
   config: PlatformConfig,
   auth: AuthService,
   db: Database,
+  options: GatewayServerOptions = {},
 ): http.Server {
   const app = express();
+  const managedFileUploadMaxBytes = lowerSafetyLimit(
+    options.managedFileUploadMaxBytes,
+    MANAGED_FILE_UPLOAD_MAX_BYTES,
+  );
   const adminOnlyWebSocketPaths = [...new Set(config.webSocket?.adminAllowlist ?? [])];
   const userGrantableWebSocketPaths = [...new Set(config.webSocket?.userAllowlist ?? [])];
   // 不泄露框架信息
@@ -2200,7 +2237,7 @@ export function createGatewayServer(
     }
     const declaredRaw = req.headers['content-length'];
     const declared = typeof declaredRaw === 'string' ? Number(declaredRaw) : NaN;
-    if (Number.isFinite(declared) && declared > MANAGED_FILE_UPLOAD_MAX_BYTES) {
+    if (Number.isFinite(declared) && declared > managedFileUploadMaxBytes) {
       req.resume();
       res.status(413).json({ ok: false, code: 'FILE_TOO_LARGE', error: '单个文件不能超过 256 MiB' });
       return;
@@ -2230,13 +2267,16 @@ export function createGatewayServer(
     }
     const temporary = path.join(uploadDirectory, `.dsh-upload-${randomBytes(16).toString('hex')}`);
     let bytes = 0;
+    let tooLarge = false;
     const limiter = new Transform({
       transform(chunk: Buffer, _encoding, callback) {
         bytes += chunk.length;
-        if (bytes > MANAGED_FILE_UPLOAD_MAX_BYTES) {
-          const error = new Error('单个文件不能超过 256 MiB');
-          error.name = 'ManagedFileTooLargeError';
-          callback(error);
+        if (tooLarge || bytes > managedFileUploadMaxBytes) {
+          // Keep draining the request without writing more bytes. Raising a Transform
+          // error here would make pipeline destroy IncomingMessage and race away the
+          // JSON 413 response with ECONNRESET.
+          tooLarge = true;
+          callback();
           return;
         }
         callback(null, chunk);
@@ -2244,6 +2284,10 @@ export function createGatewayServer(
     });
     try {
       await pipeline(req, limiter, createWriteStream(temporary, { flags: 'wx', mode: 0o600 }));
+      if (tooLarge) {
+        res.status(413).json({ ok: false, code: 'FILE_TOO_LARGE', error: '单个文件不能超过 256 MiB' });
+        return;
+      }
       await link(temporary, destination.target);
       db.audit('managed_file_uploaded', {
         username: access.me.username,
@@ -2255,8 +2299,6 @@ export function createGatewayServer(
       if (!res.headersSent && !res.writableEnded) {
         if (code === 'EEXIST') {
           res.status(409).json({ ok: false, code: 'FILE_EXISTS', error: '同名文件已存在' });
-        } else if (error instanceof Error && error.name === 'ManagedFileTooLargeError') {
-          res.status(413).json({ ok: false, code: 'FILE_TOO_LARGE', error: error.message });
         } else {
           res.status(500).json({ ok: false, code: 'INTERNAL', error: '上传失败' });
         }
@@ -2504,6 +2546,10 @@ export function createGatewayServer(
       sandboxMode,
       disabledSessions,
     });
+    closeTenantConnections(
+      tenantConnectionsByUserId.get(userId),
+      banned ? 'account unavailable' : 'permissions changed',
+    );
     if (quotaChanged) {
       db.resetUsage(userId);
       // 清掉内存节流缓存：否则 15 秒节流可能跳过新记录的创建，配额暂时不生效
@@ -3396,12 +3442,18 @@ export function createGatewayServer(
     ) {
       reqAs.dshpwWorkspaceSnapshotRevision = ++nextWorkspaceSnapshotRevision;
     }
-    const requestBodyLimit = requestBodyLimitFor(
-      reqAs.dshpwIsAdmin === true ? 'admin' : 'user',
-      reqAs.dshpwPerms?.allow_upload === true,
+    const requestBodyLimit = lowerSafetyLimit(
+      options.proxyRequestMaxBytes,
+      proxyRequestBodyLimitFor(
+        reqAs.dshpwIsAdmin === true ? 'admin' : 'user',
+        reqAs.dshpwPerms?.allow_upload === true,
+        req.method,
+        proxyPath,
+      ),
     );
     const declaredRequestLength = Number(req.headers['content-length'] ?? '');
     if (Number.isFinite(declaredRequestLength) && declaredRequestLength > requestBodyLimit) {
+      req.resume();
       denyRequest(req, res, langOf(req), t(langOf(req), 'gw.bodyTooLarge'), 413);
       return;
     }
@@ -3421,10 +3473,45 @@ export function createGatewayServer(
           method: getListRpcMethod,
           payload: {},
         }), 'utf8');
+    if (
+      getListRpcBody !== null &&
+      (declaredRequestLength > 0 || req.headers['transfer-encoding'] !== undefined)
+    ) {
+      const rejectSyntheticGetBody = () => {
+        if (!res.headersSent && !res.writableEnded && !res.destroyed) {
+          denyRequest(req, res, langOf(req), t(langOf(req), 'gw.bodyTooLarge'), 413);
+        }
+      };
+      if (req.readableEnded) {
+        rejectSyntheticGetBody();
+        return;
+      }
+      req.once('end', rejectSyntheticGetBody);
+      req.once('error', () => {
+        if (!res.writableEnded) res.destroy();
+      });
+      req.resume();
+      return;
+    }
     if (getListRpcBody !== null) {
       headers['content-type'] = 'application/json';
       headers['content-length'] = String(getListRpcBody.length);
     }
+    let proxyRequestRejected = false;
+    let proxyRequestBodyComplete = false;
+    let resolveProxyRequestBody: () => void = () => {};
+    const proxyRequestBodyFinished = new Promise<void>((resolve) => {
+      resolveProxyRequestBody = resolve;
+    });
+    const completeProxyRequestBody = () => {
+      if (proxyRequestBodyComplete) return;
+      proxyRequestBodyComplete = true;
+      resolveProxyRequestBody();
+    };
+    const rejectProxyRequestBody = () => {
+      proxyRequestRejected = true;
+      completeProxyRequestBody();
+    };
     const upstreamReq = http.request(
       {
         hostname: upstreamHost,
@@ -3437,7 +3524,16 @@ export function createGatewayServer(
         headers,
         agent: upstreamAgent,
       },
-      (upstreamRes) => {
+      async (upstreamRes) => {
+        // A Host/plugin may reply before a chunked request reaches its hard limit.
+        // IncomingMessage stays paused while it has no data consumer, so defer every
+        // response branch until the request either finishes or is rejected. This keeps
+        // an oversize carrier's observable result at 413 instead of a truncated 200.
+        await proxyRequestBodyFinished;
+        if (proxyRequestRejected) {
+          upstreamRes.destroy();
+          return;
+        }
         const contentType = String(upstreamRes.headers['content-type'] ?? '');
         const encoding = String(upstreamRes.headers['content-encoding'] ?? '');
         const isSessionHistoryResponse =
@@ -3891,7 +3987,8 @@ export function createGatewayServer(
           bufferUpstream(upstreamRes, res, (raw) => {
             let businessOk = false;
             try {
-              const parsed = JSON.parse(raw.toString('utf8')) as Record<string, unknown>;
+              const decoded = encoding.includes('gzip') ? gunzipBounded(raw) : raw;
+              const parsed = JSON.parse(decoded.toString('utf8')) as Record<string, unknown>;
               const result = parsed.result;
               businessOk = result !== null && typeof result === 'object' &&
                 (result as Record<string, unknown>).ok === true;
@@ -3916,7 +4013,8 @@ export function createGatewayServer(
         ) {
           bufferUpstream(upstreamRes, res, (raw) => {
             try {
-              const parsed = JSON.parse(raw.toString('utf8')) as Record<string, unknown>;
+              const decoded = encoding.includes('gzip') ? gunzipBounded(raw) : raw;
+              const parsed = JSON.parse(decoded.toString('utf8')) as Record<string, unknown>;
               const allowed = new Set(reqAs.dshpwPerms!.allowed_agent_presets);
               const filterItems = (value: unknown): unknown => Array.isArray(value)
                 ? value.filter((item) => {
@@ -4065,8 +4163,13 @@ export function createGatewayServer(
         });
       },
     );
+    req.once('aborted', rejectProxyRequestBody);
+    upstreamReq.once('close', () => {
+      if (!proxyRequestBodyComplete) rejectProxyRequestBody();
+    });
     upstreamReq.on('error', (error) => {
       releaseSessionCreateReservation(reqAs);
+      if (proxyRequestRejected) return;
       if (!responseWritable()) {
         // 响应已开始转发：只能中断连接，避免 ERR_HTTP_HEADERS_SENT 崩溃
         if (!res.destroyed) res.destroy();
@@ -4083,7 +4186,10 @@ export function createGatewayServer(
     // 客户端中途断开：中止上游请求，避免悬挂连接
     res.on('close', () => {
       releaseSessionCreateReservation(reqAs);
-      if (!res.writableEnded) upstreamReq.destroy();
+      if (!res.writableEnded) {
+        rejectProxyRequestBody();
+        upstreamReq.destroy();
+      }
     });
     // 受限子用户的请求体缓冲检查（尽力而为）：
     //   1) 文件夹白名单：会话目录及子用户目录浏览/创建必须在授权根内
@@ -4153,6 +4259,8 @@ export function createGatewayServer(
       reqAs.dshpwPerms.allowed_agent_presets !== null &&
       agentPresetMutation
     ) {
+      rejectProxyRequestBody();
+      upstreamReq.destroy();
       denyRequest(req, res, langOf(req), t(langOf(req), 'gw.folderDenied'));
       return;
     }
@@ -4167,12 +4275,37 @@ export function createGatewayServer(
       /^\/api\/dsh-ssh[.\/](hosts|test)([.\/]|$)/.test(proxyPath);
 
     if (getListRpcBody !== null) {
+      completeProxyRequestBody();
       upstreamReq.end(getListRpcBody);
     } else if (needsFolderCheck || needsSandboxCheck || needsCommandCheck || needsApprovalCheck || needsOwnershipCheck || needsAgentPresetCheck || needsSshHostCheck) {
       const chunks: Buffer[] = [];
       let size = 0;
       let settled = false;
-      const bodyLimit = requestBodyLimit;
+      // Only file JSON and session-scoped prompts receive the larger inspected limits.
+      // All other authorization RPCs are small control messages and must never inherit
+      // the 64/300 MiB streamed-upload carrier ceiling.
+      const ownershipOnly = needsOwnershipCheck &&
+        !needsFolderCheck &&
+        !needsSandboxCheck &&
+        !needsCommandCheck &&
+        !needsApprovalCheck &&
+        !needsSshHostCheck;
+      const bodyLimit = Math.min(
+        requestBodyLimit,
+        isAionuiPanel(proxyPath)
+          ? AIONUI_REQUEST_BODY_BYTES
+          : ownershipOnly
+            ? SESSION_SCOPED_REQUEST_BODY_BYTES
+            : DEFAULT_RPC_REQUEST_BODY_BYTES,
+      );
+      if (Number.isFinite(declaredRequestLength) && declaredRequestLength > bodyLimit) {
+        settled = true;
+        rejectProxyRequestBody();
+        upstreamReq.destroy();
+        req.resume();
+        denyRequest(req, res, langOf(req), t(langOf(req), 'gw.bodyTooLarge'), 413);
+        return;
+      }
       req.on('data', (chunk: Buffer) => {
         if (settled) return;
         size += chunk.length;
@@ -4180,10 +4313,11 @@ export function createGatewayServer(
           // F-17：超限一律 fail-closed（413）——之前 aionui 写超大 body 会
           // 透传跳过白名单校验（fail-open），形成防御缺口
           settled = true;
+          rejectProxyRequestBody();
           const lang = langOf(req);
           // 先中止上游请求，否则上游响应到达时会对已发送的响应再 writeHead
           upstreamReq.destroy();
-          denyRequest(req, res, lang, t(lang, 'gw.folderDenied'), 413);
+          denyRequest(req, res, lang, t(lang, 'gw.bodyTooLarge'), 413);
           return;
         }
         chunks.push(chunk);
@@ -4193,8 +4327,9 @@ export function createGatewayServer(
         settled = true;
         const lang = langOf(req);
         let bodyObj: unknown = null;
+        let forwardBody = Buffer.concat(chunks, size);
         try {
-          bodyObj = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+          bodyObj = JSON.parse(forwardBody.toString('utf8') || '{}');
         } catch {
           bodyObj = null;
         }
@@ -4207,7 +4342,6 @@ export function createGatewayServer(
           return;
         }
         // 转发体默认原样；SSRF 校验或审批改写时会整体重建（重建必须同步更新 content-length）
-        let forwardBody = Buffer.concat(chunks);
 
         if (needsAgentPresetCheck) {
           const allowedPresets = new Set(reqAs.dshpwPerms!.allowed_agent_presets ?? []);
@@ -4572,15 +4706,39 @@ export function createGatewayServer(
           }
         }
 
+        completeProxyRequestBody();
         upstreamReq.end(forwardBody);
       });
       req.on('error', () => {
         if (!settled) {
           settled = true;
+          rejectProxyRequestBody();
           upstreamReq.destroy();
         }
       });
     } else {
+      // Passthrough bodies remain streaming: count bytes per request without retaining
+      // chunks, and enforce the same ceiling for Content-Length and chunked carriers.
+      // The closure is request-local, so concurrent uploads cannot share counters.
+      let streamedBytes = 0;
+      const rejectOversizeStream = () => {
+        if (proxyRequestRejected) return;
+        rejectProxyRequestBody();
+        req.unpipe(upstreamReq);
+        upstreamReq.destroy();
+        if (responseWritable()) {
+          denyRequest(req, res, langOf(req), t(langOf(req), 'gw.bodyTooLarge'), 413);
+        } else if (!res.destroyed) {
+          res.destroy();
+        }
+      };
+      req.on('data', (chunk: Buffer) => {
+        if (proxyRequestRejected) return;
+        streamedBytes += chunk.length;
+        if (streamedBytes > requestBodyLimit) rejectOversizeStream();
+      });
+      req.once('end', completeProxyRequestBody);
+      req.once('error', rejectProxyRequestBody);
       req.pipe(upstreamReq);
     }
   });
@@ -5039,7 +5197,7 @@ export function createGatewayServer(
     }
 
     const principalUser = authedUserId === null ? null : db.getUserById(authedUserId);
-    if (principalUser === null) {
+    if (principalUser === null || authedToken === null) {
       rejectUpgrade(socket, 403);
       return;
     }
@@ -5048,10 +5206,15 @@ export function createGatewayServer(
       username: principalUser.username,
       role: principalUser.role,
     }, config.internalSecret);
-    const releaseRemoteConnection = gatePath === '/api/remote.mux' && authedUserId !== null && authedToken !== null
-      ? registerTenantConnection(authedUserId, authedToken, () => socket.destroy())
-      : () => {};
-    socket.once('close', releaseRemoteConnection);
+    // Every authenticated proxy WebSocket participates in tenant revocation, not
+    // only remote.mux. Logout, credential changes, bans, and deletion must close
+    // plugin sockets even when the upstream plugin keeps its connection alive.
+    const releaseProxyConnection = registerTenantConnection(
+      principalUser.id,
+      authedToken,
+      () => socket.destroy(),
+    );
+    socket.once('close', releaseProxyConnection);
 
     // 转发升级请求（Host/Origin 改写，同 HTTP 路径；路径已规范化）
     const upstreamSocket = net.connect(upstreamPort, upstreamHost, () => {
@@ -5082,7 +5245,7 @@ export function createGatewayServer(
     upstreamSocket.on('error', () => socket.destroy());
     socket.on('error', () => upstreamSocket.destroy());
     socket.on('close', () => {
-      releaseRemoteConnection();
+      releaseProxyConnection();
       upstreamSocket.destroy();
     });
     upstreamSocket.on('close', () => socket.destroy());

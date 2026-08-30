@@ -636,7 +636,9 @@ export function isUploadRequest(method: string, pathname: string): boolean {
     pathname === '/api/dsh-uploads' ||
     pathname.startsWith('/api/dsh-uploads/') ||
     pathname === '/api/filePathBridge/importFile' ||
-    pathname === '/api/dsh-ssh/upload'
+    pathname === '/api/dsh-ssh/upload' ||
+    pathname === '/sidebar/upload' ||
+    pathname === '/describe-image/attach'
   );
 }
 
