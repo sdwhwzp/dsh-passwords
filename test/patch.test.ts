@@ -1,10 +1,11 @@
 // 补丁机制回归测试：兼容 rc.6（WEB_SETTINGS_NAMESPACES 白名单）与 rc.7（机制移除）
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, copyFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { applyRemotePatch, patchStatus } from '../src/patch.js';
+import { spawnSync } from 'node:child_process';
+import { applyRemotePatch, patchStatus, rollbackPatch } from '../src/patch.js';
 
 /** 构建一个模拟 dsh 根目录（含两个必选补丁目标文件 + 可选 workspace 文件），返回 root 与清理函数 */
 function makeDshRoot(
@@ -37,7 +38,9 @@ const RC6_APIPROXY = 'const WEB_SETTINGS_NAMESPACES = [\n\t"dsh-web-ui",\n\t"dsh
 const RC7_APIPROXY = 'export function describe(){return settings.describe({redactSecrets:true});}\n';
 const RC7_SETTINGS_UNPATCHED =
   'const mode = connection.isLoopback ? "host" : "memory";\nexport default mode;\n';
-const RC7_SETTINGS_PATCHED = 'const mode = "host";\nexport default mode;\n';
+const RC7_SETTINGS_PATCHED = 'const mode = "host";\nexport default mode;';
+const ALPHA3_SETTINGS_UNPATCHED = 'const persistence = ctx.remote.$host.isLoopback ? "host" : "memory";\n';
+const ALPHA3_SETTINGS_PATCHED = 'const persistence = "host";\n';
 const ALPHA_CONNECTION_UNPATCHED = [
   'class BrowserAuth {',
   '  authenticatedUrl(baseUrl) { return baseUrl; }',
@@ -150,6 +153,48 @@ test('补丁：rc.7 settings 未打 host 模式时会被打进（settings 子补
   }
 });
 
+test('补丁：alpha.3 settings 使用 remote.$host.isLoopback 时强制 host persistence', () => {
+  const { root, cleanup } = makeDshRoot(RC7_APIPROXY, ALPHA3_SETTINGS_UNPATCHED);
+  try {
+    assert.equal(patchStatus(root).settingsHostMode, false);
+    assert.equal(applyRemotePatch(root), 'applied');
+    const settings = readFileSync(path.join(root, 'node_modules', '@deepseek-ai', 'dsh-client-ui-settings', 'lib', 'client.js'), 'utf8');
+    assert.equal(settings, ALPHA3_SETTINGS_PATCHED);
+    assert.equal(patchStatus(root).settingsHostMode, true);
+  } finally {
+    cleanup();
+  }
+});
+
+test('补丁：当前 alpha.3 npm artifacts 的 settings 与 Cookie bridge 都可命中并保持语法有效', () => {
+  const { root, cleanup } = makeDshRoot(RC7_APIPROXY, RC7_SETTINGS_PATCHED);
+  try {
+    const packages = [
+      ['dsh-client-ui-settings', 'client.js'],
+      ['dsh-client-connection', 'index.js'],
+    ] as const;
+    for (const [packageName, fileName] of packages) {
+      const target = path.join(root, 'node_modules', '@deepseek-ai', packageName, 'lib', fileName);
+      const source = path.join(process.cwd(), 'node_modules', '@deepseek-ai', packageName, 'lib', fileName);
+      mkdirSync(path.dirname(target), { recursive: true });
+      copyFileSync(source, target);
+    }
+    assert.equal(patchStatus(root).settingsHostMode, false);
+    assert.equal(patchStatus(root).connectionCookieBridge, 'unsupported');
+    assert.equal(applyRemotePatch(root), 'applied');
+    const settings = path.join(root, 'node_modules', '@deepseek-ai', 'dsh-client-ui-settings', 'lib', 'client.js');
+    const connection = path.join(root, 'node_modules', '@deepseek-ai', 'dsh-client-connection', 'lib', 'index.js');
+    assert.ok(readFileSync(settings, 'utf8').includes('const persistence = "host"'));
+    assert.ok(readFileSync(connection, 'utf8').includes(ALPHA_CONNECTION_PATCH_HARDEN_MARK));
+    assert.equal(spawnSync(process.execPath, ['--check', settings]).status, 0);
+    assert.equal(spawnSync(process.execPath, ['--check', connection]).status, 0);
+    assert.equal(patchStatus(root).settingsHostMode, true);
+    assert.equal(patchStatus(root).connectionCookieBridge, 'patched');
+  } finally {
+    cleanup();
+  }
+});
+
 test('补丁：工作区搜索粘滞态 → 无结果时点击别处自动收起清空（消除“无匹配会话”滞留）', () => {
   const { root, cleanup } = makeDshRoot(RC7_APIPROXY, RC7_SETTINGS_PATCHED, WORKSPACE_STICKY);
   try {
@@ -209,6 +254,37 @@ test('补丁：旧版 alpha Cookie bridge 自动升级为 loopback-v2 且保持�
     assert.ok(patched.includes('requires HTTP(S)'));
     assert.ok(patched.includes('authenticatedCookie(baseUrl) { return this.browserAuth.authenticatedCookie(baseUrl); }'));
     assert.equal(applyRemotePatch(root), 'unchanged');
+  } finally {
+    cleanup();
+  }
+});
+
+test('补丁状态：connection Cookie bridge 明确区分 patched、native、unsupported 和 missing', () => {
+  const patched = makeDshRoot(RC7_APIPROXY, RC7_SETTINGS_PATCHED, undefined, ALPHA_CONNECTION_UNPATCHED);
+  const native = makeDshRoot(RC7_APIPROXY, RC7_SETTINGS_PATCHED, undefined, 'class BrowserAuth { authenticatedCookie(baseUrl) { return baseUrl; } }');
+  const unsupported = makeDshRoot(RC7_APIPROXY, RC7_SETTINGS_PATCHED, undefined, 'class BrowserAuth { authenticatedUrl(baseUrl) { return baseUrl; } }');
+  const missing = makeDshRoot(RC7_APIPROXY, RC7_SETTINGS_PATCHED);
+  try {
+    assert.equal(applyRemotePatch(patched.root), 'applied');
+    assert.equal(patchStatus(patched.root).connectionCookieBridge, 'patched');
+    assert.equal(patchStatus(native.root).connectionCookieBridge, 'native');
+    assert.equal(patchStatus(unsupported.root).connectionCookieBridge, 'unsupported');
+    assert.equal(patchStatus(missing.root).connectionCookieBridge, 'missing');
+  } finally {
+    patched.cleanup();
+    native.cleanup();
+    unsupported.cleanup();
+    missing.cleanup();
+  }
+});
+
+test('补丁：安全回滚仅恢复当前哈希仍匹配的目标', () => {
+  const { root, cleanup } = makeDshRoot(RC7_APIPROXY, RC7_SETTINGS_UNPATCHED);
+  try {
+    assert.equal(applyRemotePatch(root), 'applied');
+    assert.equal(rollbackPatch(root), 'rolled-back');
+    const settings = readFileSync(path.join(root, 'node_modules', '@deepseek-ai', 'dsh-client-ui-settings', 'lib', 'client.js'), 'utf8');
+    assert.equal(settings, RC7_SETTINGS_UNPATCHED);
   } finally {
     cleanup();
   }

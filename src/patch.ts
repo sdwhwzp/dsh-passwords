@@ -13,7 +13,7 @@
 // 仍会被主机侧栅栏拒绝）。无论本地直连还是远程，强制打此补丁影响都不大，
 // 因此不提供开关：网关每次启动自动应用（幂等），dsh 升级覆盖文件后重启
 // 网关自动重打，或在设置页点"重载补丁"。
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, unlinkSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
@@ -251,6 +251,10 @@ function bindAllEnabled(): boolean {
 }
 
 const SETTINGS_FROM = 'connection.isLoopback ? "host" : "memory"';
+// DSH 0.1.2-alpha.3 moved the loopback fact from the old connection service
+// to the Remote Host facts. Keep this as a distinct anchor: absence of the
+// legacy string alone must never be treated as a successful alpha patch.
+const SETTINGS_ALPHA_FROM = 'ctx.remote.$host.isLoopback ? "host" : "memory"';
 const SETTINGS_TO = '"host"';
 
 // dsh 上游行为：搜索 query 非空时点击侧栏外只 blur 不收起——无结果时
@@ -343,6 +347,7 @@ export function patchStatus(
   whitelist: boolean;
   workspaceSearch: boolean;
   bindAll: boolean;
+  connectionCookieBridge: 'patched' | 'native' | 'missing' | 'unsupported';
 } {
   const settingsFile = findDshBundleFile(dshRoot, SETTINGS_PACKAGE, SETTINGS_FILE);
   const wlFile = findDshBundleFile(dshRoot, WHITELIST_PACKAGE, WHITELIST_FILE);
@@ -350,10 +355,14 @@ export function patchStatus(
   let settingsHostMode = false;
   let whitelist = false;
   let workspaceSearch = false;
+  let connectionCookieBridge: 'patched' | 'native' | 'missing' | 'unsupported' = 'missing';
   try {
     if (settingsFile === null) throw new Error('settings bundle not found');
     const s = readFileSync(settingsFile, 'utf8');
-    settingsHostMode = !s.includes(SETTINGS_FROM) && s.includes(SETTINGS_TO);
+    settingsHostMode =
+      !s.includes(SETTINGS_FROM) &&
+      !s.includes(SETTINGS_ALPHA_FROM) &&
+      s.includes(SETTINGS_TO);
   } catch { /* 文件缺失按未打处理 */ }
   try {
     // rc.7+ / alpha 的 @Remote gateway 已移除旧 ApiProxy 白名单；旧包缺失
@@ -379,6 +388,21 @@ export function patchStatus(
       // 搜索框自动填充加固：v2 标记存在才算完成；旧 v1（仅 off+name）会自动升级
       (ws.includes(SEARCH_AUTOFILL_HARDEN_MARK) || !SEARCH_AUTOFILL_RE.test(ws));
   } catch { /* 同上 */ }
+  const connectionFile = findDshBundleFile(dshRoot, CONNECTION_PACKAGE, CONNECTION_FILE);
+  if (connectionFile !== null) {
+    try {
+      const connection = readFileSync(connectionFile, 'utf8');
+      if (connection.includes(AUTH_COOKIE_PATCH_HARDEN_MARK)) {
+        connectionCookieBridge = 'patched';
+      } else if (connection.includes('authenticatedCookie(baseUrl)')) {
+        connectionCookieBridge = 'native';
+      } else if (connection.includes('authenticatedUrl(baseUrl)')) {
+        connectionCookieBridge = 'unsupported';
+      }
+    } catch {
+      connectionCookieBridge = 'missing';
+    }
+  }
   let bindAll = true;
   try {
     if (bindAllEnabled()) {
@@ -392,7 +416,7 @@ export function patchStatus(
   } catch {
     bindAll = false;
   }
-  return { settingsHostMode, whitelist, workspaceSearch, bindAll };
+  return { settingsHostMode, whitelist, workspaceSearch, bindAll, connectionCookieBridge };
 }
 
 /** 应用补丁（幂等）：返回 'applied'（本次有改动）或 'unchanged' 或 'missing'（目标文件不在） */
@@ -450,11 +474,16 @@ export function applyRemotePatch(dshRoot: string): 'applied' | 'unchanged' | 'mi
   // 远程浏览器设置页报 "settings are unavailable in this browser"（Issue #8）。
   // split/join 全量替换，一轮打完。
   const s = readFileSync(settingsFile, 'utf8');
-  migrateLegacyBackup(settingsFile, s, (original) =>
-    original.includes(SETTINGS_FROM) ? original.split(SETTINGS_FROM).join(SETTINGS_TO) : null,
-  );
-  if (s.includes(SETTINGS_FROM)) {
-    const patched = s.split(SETTINGS_FROM).join(SETTINGS_TO);
+  migrateLegacyBackup(settingsFile, s, (original) => {
+    const patched = original
+      .split(SETTINGS_FROM).join(SETTINGS_TO)
+      .split(SETTINGS_ALPHA_FROM).join(SETTINGS_TO);
+    return patched === original ? null : patched;
+  });
+  if (s.includes(SETTINGS_FROM) || s.includes(SETTINGS_ALPHA_FROM)) {
+    const patched = s
+      .split(SETTINGS_FROM).join(SETTINGS_TO)
+      .split(SETTINGS_ALPHA_FROM).join(SETTINGS_TO);
     ensureOriginalBackup(settingsFile, s, patched);
     writeFileSync(settingsFile, patched);
     changed = true;
@@ -560,24 +589,27 @@ export function applyRemotePatch(dshRoot: string): 'applied' | 'unchanged' | 'mi
  * 回滚补丁：从 .bak-dshpw 备份恢复目标文件。
  * 备份不存在（从未打过补丁）时返回 'no-backup'。
  */
-export function rollbackPatch(dshRoot: string): 'rolled-back' | 'no-backup' | 'missing' {
+export function rollbackPatch(dshRoot: string): 'rolled-back' | 'no-backup' | 'missing' | 'modified' {
   const settingsFile = findDshBundleFile(dshRoot, SETTINGS_PACKAGE, SETTINGS_FILE);
   const wlFile = findDshBundleFile(dshRoot, WHITELIST_PACKAGE, WHITELIST_FILE);
   if (settingsFile === null) return 'missing';
   const wsFile = findDshBundleFile(dshRoot, WORKSPACE_PACKAGE, WORKSPACE_FILE);
   const stFile = findDshBundleFile(dshRoot, STARTUP_PACKAGE, STARTUP_FILE);
   const connectionFile = findDshBundleFile(dshRoot, CONNECTION_PACKAGE, CONNECTION_FILE);
-  let changed = false;
-  for (const target of [settingsFile, wlFile, wsFile, stFile, connectionFile]) {
-    if (target === null) continue;
-    // 只恢复带哈希元数据且内容未被篡改的当前版本原始备份；历史遗留的
-    // .bak-dshpw 没有元数据时拒绝恢复，避免跨 dsh 版本回滚污染。
-    if (currentMatchesPatchedBackup(target)) {
-      writeFileSync(target, readFileSync(target + BAK_SUFFIX));
-      changed = true;
-    }
+  const targets = [settingsFile, wlFile, wsFile, stFile, connectionFile].filter((target): target is string => target !== null);
+
+  // Preflight every target before writing any file. A partial rollback would leave
+  // DSH in an undocumented mixed state when another tool has changed one bundle.
+  const backedUp = targets.filter((target) => readBackupMeta(target) !== null);
+  if (backedUp.some((target) => !currentMatchesPatchedBackup(target))) return 'modified';
+  if (backedUp.length === 0) return 'no-backup';
+
+  for (const target of backedUp) {
+    writeFileSync(target, readFileSync(target + BAK_SUFFIX));
+    unlinkSync(target + BAK_SUFFIX);
+    unlinkSync(backupMetaPath(target));
   }
-  return changed ? 'rolled-back' : 'no-backup';
+  return 'rolled-back';
 }
 
 /** 延迟重启 dsh 网页服务（补丁生效需要 dsh 重新加载模块）；仅适用于常驻进程

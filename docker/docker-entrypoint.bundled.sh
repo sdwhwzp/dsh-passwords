@@ -17,26 +17,9 @@ if ! node /opt/dsh-passwords/dist/cli.js patch; then
 fi
 echo "[dsh-passwords] dsh patch applied; starting dsh so it loads the patched web bundle."
 
-# Start the gateway first. When dsh loads the plugin it sees the occupied port
-# and skips spawning a second gateway process.
-node /opt/dsh-passwords/dist/cli.js serve-gateway &
-gateway_pid=$!
-dsh web --no-open &
-dsh_pid=$!
-
-cleanup() {
-  trap - INT TERM
-  kill "$dsh_pid" "$gateway_pid" 2>/dev/null || true
-  wait "$dsh_pid" 2>/dev/null || true
-  wait "$gateway_pid" 2>/dev/null || true
-}
-
-# The gateway is useful only while its bundled dsh upstream is alive. Monitor
-# both processes so a failed upstream cannot leave a healthy-looking container.
-trap "cleanup; exit 0" INT TERM
-while kill -0 "$dsh_pid" 2>/dev/null && kill -0 "$gateway_pid" 2>/dev/null; do
-  sleep 1
-done
-cleanup
-exit 1
+# The plugin owns the gateway lifecycle. It first exchanges the alpha browser
+# auth token for an authority-bound Cookie, then spawns the gateway with both
+# that Cookie and DSH_GATEWAY_PARENT_PID. Starting a gateway here would occupy
+# the port without either value, preventing the plugin from safely taking over.
+exec dsh web --no-open
 '

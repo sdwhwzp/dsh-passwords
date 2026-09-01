@@ -6,7 +6,7 @@
 #   2) 先 clone 再装: git clone https://github.com/slywalker2006/dsh-passwords && cd dsh-passwords && bash install.sh
 # Windows 用户请运行 install.bat。
 #
-# 做什么：检查 Node.js 22.5+ / git / dsh，缺了自动装（apt/dnf/brew）；
+# 做什么：检查 Node.js 22.19+ 或 24+ / git / dsh，缺了自动装（apt/dnf/brew）；
 # 然后下载项目，交给 scripts/install.mjs 完成安装（pnpm 缺了也会自动装）。
 set -euo pipefail
 
@@ -34,13 +34,13 @@ fi
 check_node_version() {
   NODE_VERSION="$(node -v 2>/dev/null || true)"
   if ! printf '%s\n' "$NODE_VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+'; then
-    err "无法读取 Node.js 版本（当前：${NODE_VERSION:-unknown}），请安装 Node.js 22.5+ 后重跑。"
+    err "无法读取 Node.js 版本（当前：${NODE_VERSION:-unknown}），请安装 Node.js 22.19+ 或 24+ 后重跑。"
     exit 1
   fi
   NODE_MAJOR="$(printf '%s\n' "$NODE_VERSION" | sed -E 's/^v([0-9]+)\..*/\1/')"
   NODE_MINOR="$(printf '%s\n' "$NODE_VERSION" | sed -E 's/^v[0-9]+\.([0-9]+)\..*/\1/')"
-  if [ "$NODE_MAJOR" -lt 22 ] || { [ "$NODE_MAJOR" -eq 22 ] && [ "$NODE_MINOR" -lt 5 ]; }; then
-    err "Node.js 版本过低（当前 $NODE_VERSION），需要 22.5+。请升级后重跑本脚本。"
+  if [ "$NODE_MAJOR" -lt 22 ] || [ "$NODE_MAJOR" -eq 23 ] || { [ "$NODE_MAJOR" -eq 22 ] && [ "$NODE_MINOR" -lt 19 ]; }; then
+    err "Node.js 版本不受支持（当前 $NODE_VERSION），需要 22.19+ 或 24+。请升级后重跑本脚本。"
     exit 1
   fi
   ok "Node.js $NODE_VERSION ✓"
@@ -53,17 +53,17 @@ else
   if command -v apt-get >/dev/null 2>&1; then
     # Debian/Ubuntu：用 NodeSource 装 22.x
     curl -fsSL https://deb.nodesource.com/setup_22.x | bash - || {
-      err "NodeSource 安装失败，请手动安装 Node.js 22.5+（https://nodejs.org/）。"; exit 1; }
+      err "NodeSource 安装失败，请手动安装 Node.js 22.19+ 或 24+（https://nodejs.org/）。"; exit 1; }
     apt-get install -y nodejs || {
       err "apt 安装 nodejs 失败（可能需要 sudo 试试：sudo apt-get install -y nodejs）。"; exit 1; }
   elif command -v dnf >/dev/null 2>&1; then
     dnf install -y nodejs || {
-      err "dnf 安装 nodejs 失败，请手动安装 Node.js 22.5+（https://nodejs.org/）。"; exit 1; }
+      err "dnf 安装 nodejs 失败，请手动安装 Node.js 22.19+ 或 24+（https://nodejs.org/）。"; exit 1; }
   elif command -v brew >/dev/null 2>&1; then
     brew install node@22 || {
-      err "brew 安装 node 失败，请手动安装 Node.js 22.5+（https://nodejs.org/）。"; exit 1; }
+      err "brew 安装 node 失败，请手动安装 Node.js 22.19+ 或 24+（https://nodejs.org/）。"; exit 1; }
   else
-    err "没有可用的包管理器，请手动安装 Node.js 22.5+（https://nodejs.org/）后重跑。"
+    err "没有可用的包管理器，请手动安装 Node.js 22.19+ 或 24+（https://nodejs.org/）后重跑。"
     exit 1
   fi
   if ! command -v node >/dev/null 2>&1; then
@@ -105,8 +105,8 @@ else
   say "未找到 dsh（DeepSeek Harness），正在自动安装…"
   # dsh 依赖原生构建，npm 新版会拦截脚本，先放行再装
   npm config set allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user || true
-  npm install -g @deepseek-ai/dsh || {
-    err "dsh 自动安装失败，请手动执行：npm install -g @deepseek-ai/dsh"
+  npm install -g @deepseek-ai/dsh@0.1.2-alpha.3 || {
+    err "dsh 自动安装失败，请手动执行：npm install -g @deepseek-ai/dsh@0.1.2-alpha.3"
     err "然后用 DEEPSEEK_API_KEY=sk-你的key dsh web 先跑一次确认能用，再重跑本脚本。"
     exit 1; }
   ok "dsh ✓"

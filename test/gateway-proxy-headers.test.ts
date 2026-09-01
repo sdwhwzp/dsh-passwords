@@ -264,14 +264,35 @@ test('better-sidebar WebSocket：管理员可升级，未知路径被拒绝', as
   assert.match(denied.statusLine, /404/);
 });
 
-test('F-15：WebSocket 认证 query 不得转发，但业务 query 必须保留', async () => {
-  const result = await websocketHandshake('/sidebar/ws/terminal?keep=1&dsh_gateway_token=leaked&token=launch', {
+test('F-15：WebSocket 网关认证 query 不得转发，插件业务 token 必须保留', async () => {
+  const result = await websocketHandshake('/sidebar/ws/terminal?keep=1&dsh_gateway_token=leaked&token=plugin-business-token', {
     cookie,
     origin: 'http://127.0.0.1',
     host: '127.0.0.1',
   });
   assert.match(result.statusLine, /101 Switching Protocols/);
-  assert.equal(lastUpstreamUrl, '/sidebar/ws/terminal?keep=1', '上游 WS 不能收到网关认证 query');
+  assert.equal(lastUpstreamUrl, '/sidebar/ws/terminal?keep=1&token=plugin-business-token');
+});
+
+test('F-15：WebSocket 保留第三方 Cookie，但不转发网关 JWT', async () => {
+  const result = await websocketHandshake('/sidebar/ws/terminal', {
+    cookie: `${cookie}; plugin_session=abc; preference=dark`,
+    origin: 'http://127.0.0.1',
+    host: '127.0.0.1',
+  });
+  assert.match(result.statusLine, /101 Switching Protocols/);
+  assert.equal(lastUpstreamHeaders.cookie, 'plugin_session=abc; preference=dark');
+});
+
+test('Issue #24：WebSocket combo URL 保留第二个问号和 rev', async () => {
+  const result = await websocketHandshake('/sidebar/ws/terminal??module-a&module-b&rev=abc123', {
+    cookie,
+    origin: 'http://127.0.0.1',
+    host: '127.0.0.1',
+  });
+  assert.match(result.statusLine, /101 Switching Protocols/);
+  assert.equal(lastUpstreamUrl, '/sidebar/ws/terminal??module-a&module-b&rev=abc123');
+  assert.ok(!lastUpstreamUrl.includes('%3F'));
 });
 
 test('跨源 better-sidebar WebSocket 在升级前被拒绝', async () => {
@@ -508,22 +529,42 @@ test('JSON 解析失败回退路径：不得同时出现 CL+TE，body 原样透�
   assert.equal(r.body, 'not-json{');
 });
 
-test('F-15：网关会话 Cookie 不得转发给上游（信任边界最小化）', async () => {
-  const r = await gatewayReq('GET', '/api/workspace.list');
+test('F-15：网关会话 Cookie 不得转发给上游，第三方 Cookie 必须保留', async () => {
+  const r = await gatewayReq('GET', '/api/workspace.list', { cookie: `${cookie}; plugin_session=abc; preference=dark` });
   assert.equal(r.status, 200);
-  // 上游收到的请求头里不得出现 cookie（含 dsh_gateway_token JWT）——
-  // 否则上游/插件被入侵时可收割全部活动会话并回放
-  assert.equal(
-    lastUpstreamHeaders['cookie'],
-    undefined,
-    `上游收到网关 Cookie：${JSON.stringify(lastUpstreamHeaders['cookie'])}`,
-  );
+  assert.equal(lastUpstreamHeaders['cookie'], 'plugin_session=abc; preference=dark');
+  assert.ok(!String(lastUpstreamHeaders['cookie']).includes('dsh_gateway_token'));
 });
 
-test('F-15：网关认证 query 不得转发，但业务 query 必须保留', async () => {
-  const r = await gatewayReq('GET', '/api/workspace.list?keep=1&dsh_gateway_token=leaked&token=launch');
+test('F-15：根路径认证 query 不得转发，但业务 query 必须保留', async () => {
+  const r = await gatewayReq('GET', '/?keep=1&dsh_gateway_token=leaked&token=launch');
   assert.equal(r.status, 200);
-  assert.equal(lastUpstreamUrl, '/api/workspace.list?keep=1', '上游只能收到业务 query，不能收到网关 JWT 或 launch token');
+  assert.equal(lastUpstreamUrl, '/?keep=1', '上游不能收到网关 JWT 或 alpha launch token');
+});
+
+test('Issue #24：HTTP combo URL 保留第二个问号和原始业务 query', async () => {
+  const r = await gatewayReq('GET', '/plugins/??module-a&module-b&rev=abc123');
+  assert.equal(r.status, 200);
+  assert.equal(lastUpstreamUrl, '/plugins/??module-a&module-b&rev=abc123');
+  assert.ok(!lastUpstreamUrl.includes('%3F'));
+});
+
+test('Issue #24：HTTP combo URL 删除网关认证键但保留插件业务 token', async () => {
+  const r = await gatewayReq('GET', '/plugins/??module-a&dsh_gateway_token=leaked&module-b&token=plugin-business-token&rev=abc123');
+  assert.equal(r.status, 200);
+  assert.equal(lastUpstreamUrl, '/plugins/??module-a&module-b&token=plugin-business-token&rev=abc123');
+});
+
+test('Issue #24：HTTP query 不误伤相似键和原始编码', async () => {
+  const r = await gatewayReq('GET', '/plugins?mytoken=1&tokenize=2&dsh_gateway_token_extra=3&x=%2F%3F&space=+&empty=');
+  assert.equal(r.status, 200);
+  assert.equal(lastUpstreamUrl, '/plugins?mytoken=1&tokenize=2&dsh_gateway_token_extra=3&x=%2F%3F&space=+&empty=');
+});
+
+test('F-15：编码网关认证键会删除，但 combo URL 原始字节保持不变', async () => {
+  const r = await gatewayReq('GET', '/plugins/??module-a&%64sh_gateway_token=leaked&x=%2F%3F&space=+&empty=&rev=abc123');
+  assert.equal(r.status, 200);
+  assert.equal(lastUpstreamUrl, '/plugins/??module-a&x=%2F%3F&space=+&empty=&rev=abc123');
 });
 
 test('工作区创建权限关闭时拒绝 rc.2 目录选择器写入', async () => {

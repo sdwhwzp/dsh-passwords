@@ -220,19 +220,50 @@ function firstHeader(value: string | string[] | undefined): string {
   return Array.isArray(value) ? value[0] ?? '' : value ?? '';
 }
 
-function stripGatewayAuthQuery(rawUrl: string): string {
+function decodedQueryKey(rawKey: string): string | null {
   try {
-    const parsed = new URL(rawUrl, 'http://dsh-passwords.internal');
-    parsed.searchParams.delete(COOKIE_NAME);
-    // alpha launch token 只用于根路径的一次性换票；网关代理已完成自己的认证，
-    // 所有代理路径都不能把该凭据继续带入 dsh 或第三方插件。其他业务 query
-    // 参数原样保留；token 参数是 alpha 保留字，统一移除。
-    parsed.searchParams.delete('token');
-    const query = parsed.searchParams.toString();
-    return query === '' ? '' : `?${query}`;
+    return decodeURIComponent(rawKey.replace(/\+/g, ' '));
   } catch {
-    return '';
+    return null;
   }
+}
+
+function stripGatewayAuthQuery(rawUrl: string, pathname: string): string {
+  const queryIndex = rawUrl.indexOf('?');
+  if (queryIndex < 0) return '';
+  const rawQuery = rawUrl.slice(queryIndex + 1);
+  if (rawQuery === '') return '';
+
+  // DSH uses /plugins/??<module-list>&rev=<hash>. URLSearchParams normalizes the
+  // second '?' to %3F and rewrites otherwise-valid business query bytes. Decode
+  // keys only for credential matching; output always keeps the original bytes.
+  // `token` is an alpha launch credential only at the index entrypoint. Plugins
+  // commonly use a business `token` query parameter, which must not be removed.
+  const stripLaunchToken = pathname === '/' || pathname === '/index.html';
+  const kept = rawQuery.split('&').filter((part) => {
+    const equalsIndex = part.indexOf('=');
+    const rawKey = equalsIndex < 0 ? part : part.slice(0, equalsIndex);
+    const key = decodedQueryKey(rawKey);
+    return key !== COOKIE_NAME && !(stripLaunchToken && key === 'token');
+  });
+  return kept.length === 0 ? '' : `?${kept.join('&')}`;
+}
+
+function upstreamCookieHeader(browserCookie: string | undefined, authoritativeCookie: string): string | undefined {
+  const authoritativeName = authoritativeCookie.split('=', 1)[0] ?? '';
+  const kept: string[] = [];
+  for (const part of (browserCookie ?? '').split(';')) {
+    const trimmed = part.replace(/^[ \t]+/, '');
+    const equalsIndex = trimmed.indexOf('=');
+    if (equalsIndex <= 0) continue;
+    const name = trimmed.slice(0, equalsIndex);
+    // The gateway JWT and DSH browser-auth cookies never belong to arbitrary
+    // upstream plugins. Other plugin cookies retain their original pair bytes.
+    if (name === COOKIE_NAME || name.startsWith('dsh-auth-') || name === authoritativeName) continue;
+    kept.push(trimmed);
+  }
+  if (authoritativeCookie !== '') kept.push(authoritativeCookie);
+  return kept.length === 0 ? undefined : kept.join('; ');
 }
 
 function originHostMatches(req: OriginRequest): boolean {
@@ -2749,6 +2780,13 @@ export function createGatewayServer(
     }
   }
 
+  function decodeUpstreamBody(input: Buffer, contentEncoding: string): Buffer {
+    const encoding = contentEncoding.trim().toLowerCase();
+    if (encoding === '' || encoding === 'identity') return input;
+    if (encoding === 'gzip') return gunzipBounded(input);
+    throw new Error(`unsupported content-encoding: ${encoding}`);
+  }
+
   /**
    * 缓冲上游响应：正常路径在 'end' 时调用 onEnd(body) 做改写/过滤；
    * 若超过 MAX_BUFFER_BYTES（异常大的 HTML/JSON），自动放弃缓冲，
@@ -2865,13 +2903,18 @@ export function createGatewayServer(
     // 活动会话 JWT 并回放。白盒确认 dsh-host-webserver / dsh-anonymous-user-id
     // 均无 cookie 逻辑。
     // 例外：/api/dsh-passwords/* 是本网关自身插件路由，其 guard 靠 Cookie 中
-    // 的 JWT 鉴权（同一信任域、自己签发的服务），必须保留；其余上游面全剥。
+    // 的 JWT 鉴权（同一信任域、自己签发的服务），必须保留；其他上游面移除
+    // 网关 JWT 和浏览器伪造的 dsh-auth Cookie，但保留第三方插件自己的 Cookie。
     const ownPluginRoute = normalizeDecodedPath(
       new URL(req.originalUrl, `http://${req.headers.host ?? 'localhost'}`).pathname,
     ).startsWith('/api/dsh-passwords/');
     if (!ownPluginRoute) {
-      delete headers['cookie'];
-      if (upstreamAuthCookie !== '') headers.cookie = upstreamAuthCookie;
+      const forwardedCookie = upstreamCookieHeader(
+        typeof req.headers.cookie === 'string' ? req.headers.cookie : undefined,
+        upstreamAuthCookie,
+      );
+      if (forwardedCookie === undefined) delete headers.cookie;
+      else headers.cookie = forwardedCookie;
     }
     // 只允许 gzip/identity：HTML 注入与 workspace/session 过滤只处理 gzip，
     // 上游若返回 br 会损坏页面/导致过滤静默失效（brotli 不走代理缓冲）
@@ -2880,8 +2923,8 @@ export function createGatewayServer(
     const parsedUrl = new URL(req.originalUrl, `http://${req.headers.host ?? 'localhost'}`);
     // 外部网关 JWT 与 alpha 根路径 launch token 都是本层凭据，不能通过 query
     // 泄露到 dsh 或第三方插件；其余业务 query 参数原样保留。
-    const upstreamSearch = stripGatewayAuthQuery(req.originalUrl);
     const proxyPath = normalizeDecodedPath(parsedUrl.pathname);
+    const upstreamSearch = stripGatewayAuthQuery(req.originalUrl, proxyPath);
     // 请求上挂的用户/权限（子用户才有）
     const reqAs = req as Req;
     // rc.2 client-connection 的统一 carrier 上限：管理员和子用户保持同一平台契约。
@@ -3246,7 +3289,8 @@ export function createGatewayServer(
           bufferUpstream(upstreamRes, res, (raw) => {
             let businessOk = false;
             try {
-              const parsed = JSON.parse(raw.toString('utf8')) as Record<string, unknown>;
+              const body = decodeUpstreamBody(raw, String(upstreamRes.headers['content-encoding'] ?? ''));
+              const parsed = JSON.parse(body.toString('utf8')) as Record<string, unknown>;
               const result = parsed.result;
               businessOk = result !== null && typeof result === 'object' && (result as Record<string, unknown>).ok === true;
             } catch {
@@ -3306,7 +3350,8 @@ export function createGatewayServer(
         if (req.method === 'POST' && reqAs.dshpwPerms !== undefined && reqAs.dshpwPerms.allowed_agent_presets !== null && /^\/api\/agentPreset[.\/]list$/.test(proxyPath)) {
           bufferUpstream(upstreamRes, res, (raw) => {
             try {
-              const parsed = JSON.parse(raw.toString('utf8')) as Record<string, unknown>;
+              const body = decodeUpstreamBody(raw, String(upstreamRes.headers['content-encoding'] ?? ''));
+              const parsed = JSON.parse(body.toString('utf8')) as Record<string, unknown>;
               const allowed = new Set(reqAs.dshpwPerms!.allowed_agent_presets);
               const filterItems = (value: unknown): unknown => {
                 if (!Array.isArray(value)) return value;
@@ -3826,7 +3871,7 @@ export function createGatewayServer(
       return;
     }
     const queryIndex = (req.url ?? '').indexOf('?');
-    const fwdPath = gatePath + (queryIndex >= 0 ? stripGatewayAuthQuery(req.url ?? '/') : '');
+    const fwdPath = gatePath + (queryIndex >= 0 ? stripGatewayAuthQuery(req.url ?? '/', gatePath) : '');
     // WebSocket 同样是浏览器携带 Cookie 的状态变更通道，先拒绝跨源升级。
     if (!originHostMatches(req)) {
       socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
@@ -4019,7 +4064,8 @@ export function createGatewayServer(
             else if (lower === 'origin' && typeof value === 'string') lines.push(`Origin: ${upstreamScheme}://${upstreamAuthority}`);
             else if (value !== undefined) lines.push(`${key}: ${Array.isArray(value) ? value.join(', ') : value}`);
           }
-          if (upstreamAuthCookie !== '') lines.push(`Cookie: ${upstreamAuthCookie}`);
+          const forwardedCookie = upstreamCookieHeader(req.headers.cookie, upstreamAuthCookie);
+          if (forwardedCookie !== undefined) lines.push(`Cookie: ${forwardedCookie}`);
           lines.push('', '');
           upstreamSocket.write(lines.join('\r\n'));
           if (head && head.length > 0) upstreamSocket.write(head);
@@ -4043,7 +4089,8 @@ export function createGatewayServer(
           lines.push(`${key}: ${Array.isArray(value) ? value.join(', ') : value}`);
         }
       }
-      if (upstreamAuthCookie !== '') lines.push(`Cookie: ${upstreamAuthCookie}`);
+      const forwardedCookie = upstreamCookieHeader(req.headers.cookie, upstreamAuthCookie);
+      if (forwardedCookie !== undefined) lines.push(`Cookie: ${forwardedCookie}`);
       lines.push('', '');
       upstreamSocket.write(lines.join('\r\n'));
       if (head && head.length > 0) upstreamSocket.write(head);

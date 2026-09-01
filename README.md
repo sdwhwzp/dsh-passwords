@@ -39,7 +39,7 @@
 
 <div align="center">
 
-[功能](#功能) · [快速开始](#快速开始) · [首次配置](#首次配置) · [自动 HTTPS](#自动-https) · [部署拓扑](#部署拓扑) · [配置参考](#配置参考) · [常见问题](#常见问题) · [安全与隐私](#安全与隐私) · [参与贡献](#参与贡献)
+[功能](#功能) · [快速开始](#快速开始) · [首次配置](#首次配置) · [卸载](#卸载) · [自动 HTTPS](#自动-https) · [部署拓扑](#部署拓扑) · [配置参考](#配置参考) · [常见问题](#常见问题) · [安全与隐私](#安全与隐私) · [参与贡献](#参与贡献)
 
 </div>
 
@@ -76,7 +76,7 @@ dsh 自带的网页界面没有登录与权限控制，公网部署后任何拿�
 
 ### 前置条件
 
-宿主机安装需要 Node.js 22.5+、可正常运行的 dsh 和 git。请让本插件与 dsh 宿主使用同一 Node 主线版本，官方 dsh 当前运行在 Node 22/24 上。Docker 安装只需要 Docker Engine 或 Docker Desktop 和一个 DeepSeek API key。
+宿主机安装需要 Node.js 22.19+ 或 24+、可正常运行的 dsh 和 git。请让本插件与 dsh 宿主使用同一 Node 主线版本；DSH `0.1.2-alpha.3` 的官方运行要求也是 22.19+ 或 24+。Docker 安装只需要 Docker Engine 或 Docker Desktop 和一个 DeepSeek API key。
 
 ### 安装
 
@@ -127,6 +127,20 @@ docker run -d \
 首次配置成功后 `setup-key.txt` 自动删除，`.env` 中的密钥自动固化并轮换。
 
 Docker 用户需要先用 nginx 或 Caddy 把 80/443 反代到 `http://127.0.0.1:3088`；一次性 SETUP_KEY 用 `docker exec dsh-passwords cat /data/dsh-passwords/setup-key.txt` 读取。
+
+## 卸载
+
+宿主机安装可在 dsh-passwords 安装目录执行：
+
+```bash
+node dist/cli.js uninstall
+# 全局 npm 安装也可直接执行：
+dsh-passwords uninstall
+```
+
+该命令只从 DSH web profile 移除 `dsh-passwords` 的 link 与 bundle，并回滚本插件管理的 dsh 补丁；其他插件和 bundle 会保留。完成后按提示重启 `dsh-web`。
+
+卸载不会删除安装目录、`.env`、数据库、TLS/ACME 证书或其他插件。profile 依赖重建或补丁回滚失败时会恢复原 profile，避免留下半卸载状态。Docker 部署请按所用 Compose 或容器编排停止并移除容器；不要删除命名卷，除非也要永久清除数据。
 
 ## 自动 HTTPS
 
@@ -306,7 +320,7 @@ curl -so /dev/null -w "TLS:%{time_appconnect}s\n" https://地址/gateway/login
 
 ### 手动安装
 
-> v2.6.6 兼容 DSH `0.1.2-alpha.1`：安装器会严格检查 Node.js `22.5+`，并在安装完成后注册插件、探测 dsh 安装目录并应用兼容补丁。自动更新与设置页“重载补丁”会沿用同一补丁链路；当前发布不修改官方 npm/Docker 包。
+> v2.6.7 的兼容层覆盖 DSH `0.1.2-alpha.1` 至 `alpha.3` 的源码运行时；alpha.1 未发布 npm 包，npm/Docker 可安装基线为 `alpha.2+`，当前锁定并验收 `alpha.3`。安装器会严格检查 Node.js `22.19+` 或 `24+`，并在安装完成后注册插件、探测 dsh 安装目录并应用兼容补丁。自动更新与设置页“重载补丁”会沿用同一补丁链路。
 
 1. `git clone https://github.com/slywalker2006/dsh-passwords && cd dsh-passwords`
 2. `npm install && npm run build`
@@ -333,7 +347,7 @@ curl -so /dev/null -w "TLS:%{time_appconnect}s\n" https://地址/gateway/login
 
 ## 版本兼容
 
-当前版本 2.6.4，与 dsh 0.1.1-rc.2 兼容，同样兼容 dsh 0.1.0-rc.6 及以上。npm 包含预构建 dist、TypeScript 源码与全部脚本；Docker 镜像与 npm 包出自同一份源码。
+当前版本 2.6.7。已验证 DSH `0.1.2-alpha.3` 源码部署；兼容层同时保留 `alpha.1` 与 `alpha.2` 的已知结构适配。npm 包包含预构建 dist、TypeScript 源码与全部脚本；Docker 镜像与 npm 包出自同一份源码，bundled Docker 默认使用 `0.1.2-alpha.3`。
 
 ## 参与贡献
 

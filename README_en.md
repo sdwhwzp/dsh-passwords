@@ -39,7 +39,7 @@
 
 <div align="center">
 
-[Features](#features) · [Quick start](#quick-start) · [First-run setup](#first-run-setup) · [Automatic HTTPS](#automatic-https) · [Deployment topologies](#deployment-topologies) · [Configuration](#configuration-reference) · [FAQ](#faq) · [Security](#security-and-privacy) · [Contributing](#contributing)
+[Features](#features) · [Quick start](#quick-start) · [First-run setup](#first-run-setup) · [Uninstall](#uninstall) · [Automatic HTTPS](#automatic-https) · [Deployment topologies](#deployment-topologies) · [Configuration](#configuration-reference) · [FAQ](#faq) · [Security](#security-and-privacy) · [Contributing](#contributing)
 
 </div>
 
@@ -76,7 +76,7 @@ The stock dsh web UI has no login or access control. Exposed to a network, anyon
 
 ### Prerequisites
 
-Host installs need Node.js 22.5+, a working dsh installation, and git. Keep this plugin on the same Node major line as the dsh host; official dsh currently runs on Node 22/24. Docker installs only need Docker Engine or Docker Desktop and a DeepSeek API key.
+Host installs need Node.js 22.19+ or 24+, a working dsh installation, and git. Keep this plugin on the same Node major line as the dsh host; DSH `0.1.2-alpha.3` has the same official Node requirement. Docker installs only need Docker Engine or Docker Desktop and a DeepSeek API key.
 
 ### Install
 
@@ -127,6 +127,20 @@ Notes:
 After setup completes, `setup-key.txt` is deleted automatically and the keys in `.env` are consolidated and rotated.
 
 Docker users need nginx or Caddy to proxy 80/443 to `http://127.0.0.1:3088` first; read the one-time SETUP_KEY with `docker exec dsh-passwords cat /data/dsh-passwords/setup-key.txt`.
+
+## Uninstall
+
+For a host installation, run this from the dsh-passwords installation directory:
+
+```bash
+node dist/cli.js uninstall
+# A global npm installation can also use:
+dsh-passwords uninstall
+```
+
+The command removes only the `dsh-passwords` link and bundle from the DSH web profile, then rolls back dsh patches managed by this plugin. Other plugins and bundles remain in place. Restart `dsh-web` when prompted.
+
+It does not delete the installation directory, `.env`, database, TLS/ACME certificates, or other plugins. If profile dependency reconciliation or patch rollback fails, the original profile is restored to avoid a partial uninstall. For Docker, stop and remove the deployment using its Compose or container configuration; do not remove named volumes unless you also intend to permanently erase data.
 
 ## Automatic HTTPS
 
@@ -305,7 +319,7 @@ The bottleneck is usually the network path to the server.
 
 ## Manual install
 
-> v2.6.6 is compatible with the DSH `0.1.2-alpha.1` runtime path: the installers strictly require Node.js `22.5+`, register the plugin, detect the dsh installation and apply the compatibility patch. Automatic updates and settings-page patch reload use the same patch path; this release does not modify the official npm/Docker packages.
+> The v2.6.7 compatibility layer covers the DSH `0.1.2-alpha.1` through `alpha.3` source runtime. Alpha.1 was never published as an npm package, so the npm/Docker install baseline is `alpha.2+`; this worktree is locked and validated against `alpha.3`. The installers strictly require Node.js `22.19+` or `24+`, register the plugin, detect the dsh installation and apply the compatibility patch. Automatic updates and settings-page patch reload use the same patch path.
 
 1. `git clone https://github.com/slywalker2006/dsh-passwords && cd dsh-passwords`
 2. `npm install && npm run build`
@@ -332,7 +346,7 @@ The UI is bilingual zh/en and follows the dsh language setting. The login page h
 
 ## Version compatibility
 
-Current version 2.6.4, compatible with dsh 0.1.1-rc.2 and dsh 0.1.0-rc.6 and above. The npm package ships prebuilt dist, TypeScript sources and all scripts; the Docker image is built from the same source.
+Current version: 2.6.7. The DSH `0.1.2-alpha.3` source deployment is verified; the compatibility layer retains adapters for the known `alpha.1` and `alpha.2` layouts. The npm package ships prebuilt dist, TypeScript sources and all scripts; the bundled Docker image is built from the same source and defaults to `0.1.2-alpha.3`.
 
 ## Contributing
 

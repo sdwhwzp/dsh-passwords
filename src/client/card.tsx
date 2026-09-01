@@ -32,6 +32,8 @@ export interface PatchState {
   settingsHostMode: boolean;
   whitelist: boolean;
   workspaceSearch: boolean;
+  bindAll: boolean;
+  connectionCookieBridge: 'patched' | 'native' | 'missing' | 'unsupported';
 }
 
 export function readPatchState(response: unknown): PatchState | null {
@@ -40,11 +42,17 @@ export function readPatchState(response: unknown): PatchState | null {
   if (typeof status !== 'object' || status === null ||
     !('settingsHostMode' in status) || typeof status.settingsHostMode !== 'boolean' ||
     !('whitelist' in status) || typeof status.whitelist !== 'boolean' ||
-    !('workspaceSearch' in status) || typeof status.workspaceSearch !== 'boolean') return null;
+    !('workspaceSearch' in status) || typeof status.workspaceSearch !== 'boolean' ||
+    !('bindAll' in status) || typeof status.bindAll !== 'boolean' ||
+    !('connectionCookieBridge' in status) ||
+    (status.connectionCookieBridge !== 'patched' && status.connectionCookieBridge !== 'native' &&
+      status.connectionCookieBridge !== 'missing' && status.connectionCookieBridge !== 'unsupported')) return null;
   return {
     settingsHostMode: status.settingsHostMode,
     whitelist: status.whitelist,
     workspaceSearch: status.workspaceSearch,
+    bindAll: status.bindAll,
+    connectionCookieBridge: status.connectionCookieBridge,
   };
 }
 
@@ -691,7 +699,9 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
     patchState !== null &&
     patchState.settingsHostMode &&
     patchState.whitelist &&
-    patchState.workspaceSearch;
+    patchState.workspaceSearch &&
+    patchState.connectionCookieBridge !== 'missing' &&
+    patchState.connectionCookieBridge !== 'unsupported';
   const patchText =
     patchState === null ? t('patchUnknown') : patchOk ? t('patchOk') : t('patchBad');
   const managedUsers = overview?.users.filter((u) => u.role === 'user') ?? [];

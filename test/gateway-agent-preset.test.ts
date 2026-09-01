@@ -4,6 +4,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { mkdtempSync, rmSync } from 'node:fs';
+import zlib from 'node:zlib';
 import jwt from 'jsonwebtoken';
 
 import { AuthService } from '../src/auth.js';
@@ -22,6 +23,7 @@ let restrictedCookie = '';
 let otherCookie = '';
 let upstreamCalls: string[] = [];
 let selectBlocked = false;
+let gzipAgentPresetResponses = false;
 
 function request(pathname: string, body = '{}', tokenCookie = cookie): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
@@ -68,11 +70,23 @@ before(async () => {
       res.end(JSON.stringify({ result: { value: { items: [{ sessionId: 'existing-session', cwd: '/work/allowed', agentPreset: 'preset/allowed' }] } } }));
     } else if (req.url?.startsWith('/api/session.create')) {
       res.end(JSON.stringify({ result: { value: { sessionId: 'new-session', cwd: '/work/allowed' } } }));
-    } else if (req.url?.startsWith('/api/agentPreset.select')) {
-        if (selectBlocked) {
-        res.end(JSON.stringify({ result: { ok: false, error: { message: 'boom' } } }));
+    } else if (req.url?.startsWith('/api/agentPreset.list')) {
+      const response = JSON.stringify({ result: { value: { items: [{ id: 'preset/allowed' }, { id: 'preset/blocked' }] } } });
+      if (gzipAgentPresetResponses) {
+        res.writeHead(200, { 'content-encoding': 'gzip', 'content-type': 'application/json' });
+        res.end(zlib.gzipSync(response));
       } else {
-        res.end(JSON.stringify({ result: { ok: true, value: { agentPreset: 'preset/allowed' } } }));
+        res.end(response);
+      }
+    } else if (req.url?.startsWith('/api/agentPreset.select')) {
+      const response = selectBlocked
+        ? JSON.stringify({ result: { ok: false, error: { message: 'boom' } } })
+        : JSON.stringify({ result: { ok: true, value: { agentPreset: 'preset/allowed' } } });
+      if (gzipAgentPresetResponses) {
+        res.writeHead(200, { 'content-encoding': 'gzip', 'content-type': 'application/json' });
+        res.end(zlib.gzipSync(response));
+      } else {
+        res.end(response);
       }
     } else {
       res.end(JSON.stringify({ ok: true }));
@@ -135,6 +149,30 @@ test('Issue #22: 授权 preset 允许创建会话，并登记缓存供 prompt �
   assert.equal(select.status, 200, select.body);
   const afterPrompt = await request('/api/session.prompt', JSON.stringify({ sessionId: 'existing-session', text: 'hi' }));
   assert.equal(afterPrompt.status, 200, afterPrompt.body);
+});
+
+test('Issue #22: gzip 的 Agent preset list 响应仍按权限过滤', async () => {
+  gzipAgentPresetResponses = true;
+  try {
+    const response = await request('/api/agentPreset.list', '{}', restrictedCookie);
+    assert.equal(response.status, 200, response.body);
+    const parsed = JSON.parse(response.body) as { result: { value: { items: Array<{ id: string }> } } };
+    assert.deepEqual(parsed.result.value.items, []);
+  } finally {
+    gzipAgentPresetResponses = false;
+  }
+});
+
+test('Issue #22: gzip 的 Agent preset select 成功响应仍登记会话缓存', async () => {
+  gzipAgentPresetResponses = true;
+  try {
+    const select = await request('/api/agentPreset.select', JSON.stringify({ sessionId: 'existing-session', agentPreset: 'preset/allowed' }));
+    assert.equal(select.status, 200, select.body);
+    const prompt = await request('/api/session.prompt', JSON.stringify({ sessionId: 'existing-session', text: 'hi' }));
+    assert.equal(prompt.status, 200, prompt.body);
+  } finally {
+    gzipAgentPresetResponses = false;
+  }
 });
 
 test('Issue #22: Agent preset 会话缓存按用户隔离', async () => {

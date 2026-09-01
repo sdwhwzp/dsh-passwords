@@ -114,6 +114,20 @@ function runAudit(argv: string[]): void {
 
 /** 服务名白名单：systemctl restart <service> 拼到 shell 命令里，必须校验字符集 */
 const SERVICE_NAME_RE = /^[A-Za-z0-9_.@-]+$/;
+const EXIT_DSH_ROOT_UNAVAILABLE = 34;
+const EXIT_ALPHA3_SETTINGS_UNAVAILABLE = 35;
+const EXIT_PATCH_VERIFICATION_FAILED = 36;
+
+function requiresCookieBridge(dshRoot: string): boolean {
+  try {
+    const packageJson = JSON.parse(readFileSync(path.join(dshRoot, 'package.json'), 'utf8')) as { version?: unknown };
+    // alpha.3 changed the client module/connection contract. Its public Host API
+    // still has no cookie export, so a missing private bridge must fail closed.
+    return typeof packageJson.version === 'string' && /^0\.1\.2-alpha\.(?:[3-9]|[1-9][0-9]+)$/.test(packageJson.version);
+  } catch {
+    return false;
+  }
+}
 
 /** 补丁管理命令：node dist/cli.js patch [status]（补丁强制启用；无参数=立即重载） */
 function runPatch(argv: string[]): void {
@@ -122,7 +136,8 @@ function runPatch(argv: string[]): void {
   const root = findDshRoot(config.patch.dshRoot);
   if (!root) {
     console.error(`[dsh-passwords] ${tr('cli.noDshRoot')}`);
-    process.exit(1);
+    // Stable machine-readable code: uninstall must not parse localized stderr.
+    process.exit(EXIT_DSH_ROOT_UNAVAILABLE);
   }
   // 服务名注入防护：与 patch.ts 的 restartDshWeb 同口径，CLI 路径也校验
   if (config.patch.restartService && !SERVICE_NAME_RE.test(config.patch.restartService)) {
@@ -150,6 +165,7 @@ function runPatch(argv: string[]): void {
     console.log(
       `  ${tr('cli.bindAll')}: ${status.bindAll ? tr('cli.patched') : tr('cli.notPatched')}`,
     );
+    console.log(`  connection cookie bridge: ${status.connectionCookieBridge}`);
     return;
   }
   console.log(`${tr('cli.dshDir')}: ${root}`);
@@ -174,7 +190,11 @@ function runPatch(argv: string[]): void {
     // 回滚补丁：从 .bak-dshpw 恢复原始文件（补丁导致设置页异常时用）
     const result = rollbackPatch(root);
     console.log(`  ${tr('cli.result')}: ${result}`);
-    if (result === 'rolled-back' && config.patch.restartService) {
+    if (result === 'modified') {
+      console.error('[dsh-passwords] patch rollback refused: a patched DSH bundle was modified by another tool');
+      process.exit(1);
+    }
+    if (result === 'rolled-back' && config.patch.restartService && !argv.includes('--no-restart')) {
       console.log(`  ${tr('cli.restarting', { service: config.patch.restartService })}`);
       try {
         const restarted = spawnSync('systemctl', ['restart', config.patch.restartService], { stdio: 'inherit' });
@@ -229,21 +249,38 @@ async function boot() {
   }
 
   // ── 远程设置补丁：强制启用，网关每次启动自动应用（幂等） ──
+  // The public gateway has no useful or safe degraded mode without its DSH
+  // contract. Root discovery, patching, and post-patch verification must all
+  // finish before any database, redirect, TLS, or public listener is created.
+  const root = findDshRoot(config.patch.dshRoot);
+  if (!root) {
+    console.error(`[dsh-passwords] ${config.patch.dshRoot ? tr('cli.dshRootMissing') : tr('cli.noDshRoot')}`);
+    process.exit(EXIT_DSH_ROOT_UNAVAILABLE);
+  }
   try {
-    const root = findDshRoot(config.patch.dshRoot);
-    if (root) {
-      const result = applyRemotePatch(root);
-      if (result === 'applied') {
-        console.error(`[dsh-passwords] ${tr('cli.patchApplied')}`);
-        if (config.patch.restartService) restartDshWeb(config.patch.restartService, 800);
-      } else if (result === 'missing') {
-        console.error(`[dsh-passwords] ${tr('cli.patchTargetMissing')}`);
+    const result = applyRemotePatch(root);
+    if (result === 'missing') {
+      console.error(`[dsh-passwords] ${tr('cli.patchTargetMissing')}`);
+      process.exit(EXIT_ALPHA3_SETTINGS_UNAVAILABLE);
+    }
+    if (result === 'applied') {
+      console.error(`[dsh-passwords] ${tr('cli.patchApplied')}`);
+      if (config.patch.restartService) restartDshWeb(config.patch.restartService, 800);
+    }
+    const status = patchStatus(root);
+    if (requiresCookieBridge(root)) {
+      if (!status.settingsHostMode) {
+        console.error('[dsh-passwords] alpha.3 settings patch is missing or unsupported; refusing to start the public gateway');
+        process.exit(EXIT_ALPHA3_SETTINGS_UNAVAILABLE);
       }
-    } else if (config.patch.dshRoot) {
-      console.error(`[dsh-passwords] ${tr('cli.dshRootMissing')}`);
+      if (status.connectionCookieBridge !== 'patched' && status.connectionCookieBridge !== 'native') {
+        console.error('[dsh-passwords] alpha.3 requires an authenticated Cookie bridge; refusing to start the public gateway');
+        process.exit(33);
+      }
     }
   } catch (error) {
     console.error(`[dsh-passwords] ${tr('cli.patchSyncFailed')}:`, error);
+    process.exit(EXIT_PATCH_VERIFICATION_FAILED);
   }
 
   const db = new Database(config.dbPath, createFieldCrypto(config.dbEncKey, config.setupKey));
@@ -428,6 +465,20 @@ function runInstall(): void {
   process.exit(result.status ?? 1);
 }
 
+/** 从 profile 安全注销本插件；保留部署目录、配置、数据库和证书。 */
+function runUninstall(): void {
+  const script = path.join(PACKAGE_ROOT, 'scripts', 'uninstall.mjs');
+  if (!existsSync(script)) {
+    console.error(`[dsh-passwords] uninstall script missing: ${script}`);
+    process.exit(1);
+  }
+  const result = spawnSync(process.execPath, [script], {
+    cwd: PACKAGE_ROOT,
+    stdio: 'inherit',
+  });
+  process.exit(result.status ?? 1);
+}
+
 /** Docker 专用初始化：状态卷、profile、反代 HTTP 配置与补丁校验。 */
 function runDockerInit(): void {
   const script = path.join(PACKAGE_ROOT, 'scripts', 'docker-init.mjs');
@@ -442,7 +493,7 @@ function runDockerInit(): void {
   process.exit(result.status ?? 1);
 }
 
-// CLI 分发：install | docker-init | audit | patch | serve-gateway（--version/-v 打印版本）
+// CLI 分发：install | uninstall | docker-init | audit | patch | serve-gateway（--version/-v 打印版本）
 if (process.argv[2] === '--version' || process.argv[2] === '-v' || process.argv[2] === 'version') {
   try {
     const pkg = JSON.parse(readFileSync(path.join(PACKAGE_ROOT, 'package.json'), 'utf8')) as {
@@ -454,6 +505,8 @@ if (process.argv[2] === '--version' || process.argv[2] === '-v' || process.argv[
   }
 } else if (process.argv[2] === 'install') {
   runInstall();
+} else if (process.argv[2] === 'uninstall') {
+  runUninstall();
 } else if (process.argv[2] === 'docker-init') {
   runDockerInit();
 } else if (process.argv[2] === 'audit') {

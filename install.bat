@@ -9,7 +9,7 @@ rem      showing the SETUP_KEY.
 rem   2) Already cloned: run install.bat inside the project directory
 rem      (skips dependency install and download).
 rem
-rem Checks Node.js 22.5+ / git / dsh and installs what is missing (winget / npm),
+rem Checks Node.js 22.19+ or 24+ / git / dsh and installs what is missing (winget / npm),
 rem then hands off to scripts\install.mjs which finishes the install (pnpm is
 rem auto-installed there as well).
 rem
@@ -59,11 +59,15 @@ if not defined NODE_MAJOR (
 if not defined NODE_MINOR set "NODE_MINOR=0"
 if not defined NODE_PATCH set "NODE_PATCH=0"
 if %NODE_MAJOR% LSS 22 (
-  echo [dsh-passwords] Node.js is too old (v%NODE_MAJOR%.%NODE_MINOR%.%NODE_PATCH%), 22.5+ required. Upgrade and retry.
+  echo [dsh-passwords] Node.js is unsupported (v%NODE_MAJOR%.%NODE_MINOR%.%NODE_PATCH%), 22.19+ or 24+ required. Upgrade and retry.
   exit /b 1
 )
-if %NODE_MAJOR% EQU 22 if %NODE_MINOR% LSS 5 (
-  echo [dsh-passwords] Node.js is too old (v%NODE_MAJOR%.%NODE_MINOR%.%NODE_PATCH%), 22.5+ required. Upgrade and retry.
+if %NODE_MAJOR% EQU 23 (
+  echo [dsh-passwords] Node.js is unsupported (v%NODE_MAJOR%.%NODE_MINOR%.%NODE_PATCH%), 22.19+ or 24+ required. Upgrade and retry.
+  exit /b 1
+)
+if %NODE_MAJOR% EQU 22 if %NODE_MINOR% LSS 19 (
+  echo [dsh-passwords] Node.js is unsupported (v%NODE_MAJOR%.%NODE_MINOR%.%NODE_PATCH%), 22.19+ or 24+ required. Upgrade and retry.
   exit /b 1
 )
 echo [dsh-passwords] Node.js v%NODE_MAJOR%.%NODE_MINOR%.%NODE_PATCH% OK
@@ -71,7 +75,7 @@ goto git_check
 
 :node_manual
 echo [dsh-passwords] Could not install Node.js automatically.
-echo [dsh-passwords] Install 22.5+ manually (https://nodejs.org/) and run this installer again.
+echo [dsh-passwords] Install Node.js 22.19+ or 24+ manually (https://nodejs.org/) and run this installer again.
 exit /b 1
 
 :git_check
@@ -107,7 +111,7 @@ if not errorlevel 1 goto dsh_ok
 echo [dsh-passwords] dsh (DeepSeek Harness) not found, installing...
 rem dsh needs native builds; newer npm blocks install scripts, allow them first
 call npm config set allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user
-call npm install -g @deepseek-ai/dsh
+call npm install -g @deepseek-ai/dsh@0.1.2-alpha.3
 if errorlevel 1 goto dsh_manual
 where dsh >nul 2>nul
 if errorlevel 1 (
@@ -122,7 +126,7 @@ goto prepare_dest
 
 :dsh_manual
 echo [dsh-passwords] dsh auto-install failed. Run it manually:
-echo [dsh-passwords]   npm install -g @deepseek-ai/dsh
+echo [dsh-passwords]   npm install -g @deepseek-ai/dsh@0.1.2-alpha.3
 echo [dsh-passwords] then verify with: DEEPSEEK_API_KEY=sk-your-key dsh web
 echo [dsh-passwords] and run this installer again.
 exit /b 1
