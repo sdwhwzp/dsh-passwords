@@ -9,7 +9,7 @@
 // dsh 设置里的语言（Settings → General → Language）。t seat 由注册时的
 // `locale: 'dshpw'` 声明注入。
 import { createElement as h, useEffect, useRef, useState } from 'react';
-import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots';
+import type { PropsLocale, Translate } from '@deepseek-ai/dsh-client-ui-slots';
 import { publishChatEntryChanged } from './events';
 import { submitLogoutNavigation } from './account-logout';
 import { LocalWorkspacePanel } from './local-workspace';
@@ -157,7 +157,7 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
   const t = props.t;
   // errText 需要接收动态 key（err.<code>），而 dshpw 词典 t 的 key 是受限联合类型：
   // 这里包一层宽松签名适配器（运行时行为不变）
-  const trErr = (key: string, params?: Record<string, string | number>) => t(key as never, params);
+  const trErr: Translate = (key, params) => t(key as never, params);
 
   const [data, setData] = useState<StateData | null>(null);
   const [patchState, setPatchState] = useState<PatchState | null>(null);

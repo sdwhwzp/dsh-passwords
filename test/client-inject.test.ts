@@ -25,6 +25,7 @@ test('browser entrypoint can read a sibling-provided Remote service through Cord
       ctx.provide('locale', {});
       ctx.provide('sessions', {});
       ctx.provide('workspaces', {});
+      ctx.provide('uiWorkspace', {});
     },
   });
 
@@ -81,6 +82,7 @@ test('mounted password namespace is retained through an exact nested inject', as
       ctx.provide('locale', {});
       ctx.provide('sessions', {});
       ctx.provide('workspaces', {});
+      ctx.provide('uiWorkspace', {});
     },
   });
 
@@ -130,7 +132,18 @@ test('password state loader rejects a Remote failure instead of presenting an em
 
 test('browser entrypoint returns the mounted Remote disposer', () => {
   const source = readFileSync(new URL('../src/client/index.tsx', import.meta.url), 'utf8');
+  const buildSource = readFileSync(new URL('../scripts/build-client.mjs', import.meta.url), 'utf8');
+  const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+    dsh: { client: { inject: string[] } };
+  };
   assert.match(source, /const disposeRemote = await remote\.\$mount\(DSH_PASSWORDS_REMOTE\)/);
   assert.match(source, /loadState: \(\) => loadDshPasswordsState\(dshPasswords\)/);
+  assert.match(source, /@deepseek-ai\/dsh-client-ui-renderer\/client/);
+  assert.match(source, /@deepseek-ai\/dsh-client-ui-workspace\/client/);
+  assert.doesNotMatch(source, /@deepseek-ai\/dsh-client-ui-slots\/client/);
+  assert.doesNotMatch(buildSource, /@deepseek-ai\/dsh-client-ui-slots\/client/);
+  assert.ok(manifest.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-renderer'));
+  assert.ok(manifest.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-workspace'));
+  assert.ok(!manifest.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-slots'));
   assert.match(source, /return disposeRemote;/);
 });

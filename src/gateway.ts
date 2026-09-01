@@ -1357,7 +1357,7 @@ export function createGatewayServer(
       ) return null;
       const event = record.event as Record<string, unknown>;
       const validKeys = record.type === 'event'
-        ? hasOnlyKeys(event, ['type', 'seq', 'time', 'data'], ['sourceEventSeqs', 'surfaceOp'])
+        ? hasOnlyKeys(event, ['type', 'seq', 'time', 'data'], ['ignorable', 'sourceEventSeqs', 'surfaceOp'])
         : hasExactKeys(event, ['type', 'seq', 'time', 'data']);
       if (
         !validKeys ||
@@ -1369,6 +1369,7 @@ export function createGatewayServer(
         (beforeSeq !== undefined && (event.seq as number) >= beforeSeq) ||
         typeof event.time !== 'number' || !Number.isFinite(event.time)
       ) return null;
+      if (Object.hasOwn(event, 'ignorable') && event.ignorable !== true) return null;
       if (
         Object.hasOwn(event, 'sourceEventSeqs') &&
         (!Array.isArray(event.sourceEventSeqs) || !event.sourceEventSeqs.every(
@@ -1485,7 +1486,8 @@ export function createGatewayServer(
                   typeof (error as Record<string, unknown>).details !== 'object' ||
                   Array.isArray((error as Record<string, unknown>).details)
                 ) throw new Error('session ownership page returned an invalid error');
-                if (allowPastCursor && (error as Record<string, unknown>).code === 'bad-request') {
+                const errorCode = (error as Record<string, unknown>).code;
+                if (allowPastCursor && (errorCode === 'gateway/bad-request' || errorCode === 'bad-request')) {
                   resolve({ kind: 'past-cursor' });
                   return;
                 }
@@ -2781,6 +2783,9 @@ export function createGatewayServer(
     try {
       await pipeline(req, limiter, createWriteStream(temporary, { flags: 'wx', mode: 0o600 }));
       if (tooLarge) {
+        // Complete temporary-file cleanup before the response can tell the
+        // caller that the rejected upload has left no partial file behind.
+        await unlink(temporary).catch(() => undefined);
         res.status(413).json({ ok: false, code: 'FILE_TOO_LARGE', error: '单个文件不能超过 256 MiB' });
         return;
       }

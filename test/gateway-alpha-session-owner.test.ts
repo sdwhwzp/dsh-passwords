@@ -52,10 +52,21 @@ function readJsonBody(req: http.IncomingMessage): Promise<Record<string, unknown
   });
 }
 
-function eventRecord(seq: number, type = 'fixture/event', data: unknown = {}): Record<string, unknown> {
+function eventRecord(
+  seq: number,
+  type = 'fixture/event',
+  data: unknown = {},
+  ignorable = false,
+): Record<string, unknown> {
   return {
     type: 'event',
-    event: { type, seq, time: 1_800_000_000_000 + seq, data },
+    event: {
+      type,
+      seq,
+      time: 1_800_000_000_000 + seq,
+      data,
+      ...(ignorable ? { ignorable: true } : {}),
+    },
   };
 }
 
@@ -71,7 +82,7 @@ function sendResponse(
 function sendPastCursor(res: http.ServerResponse, rpcId: string): void {
   sendResponse(res, rpcId, {
     ok: false,
-    error: { code: 'bad-request', message: 'throughSeq is past the log cursor', details: {} },
+    error: { code: 'gateway/bad-request', message: 'throughSeq is past the log cursor', details: {} },
   });
 }
 
@@ -85,7 +96,7 @@ function requestValueOf(body: Record<string, unknown>): Record<string, unknown> 
   return request as Record<string, unknown>;
 }
 
-test('alpha.1 session/page adopts only complete oldest-prefix ownership evidence', async () => {
+test('Alpha.3 session/page adopts only complete oldest-prefix ownership evidence', async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), 'dshpw-alpha-owner-'));
   const sessionCwd = path.join(temporary, 'customer-workspace');
   await mkdir(sessionCwd);
@@ -241,7 +252,7 @@ test('alpha.1 session/page adopts only complete oldest-prefix ownership evidence
                 },
                 content: 'later prompt must not replace the first identity',
               }),
-              eventRecord(3),
+              eventRecord(3, 'fixture/informational', {}, true),
             ],
             hasMore: false,
           },

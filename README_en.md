@@ -330,6 +330,19 @@ The UI is bilingual (Chinese/English) and follows dsh's language setting:
 
 ## Release notes
 
+### v2.6.14 (2026-09-01)
+
+- Updates the runtime, browser, and compiler dependency set to DeepSeek Harness `0.1.2-alpha.3`. Account directories, Sessions, and Workspaces remain tenant-isolated through Host-verified caller identities and principal-access authorization.
+
+### v2.6.13 (2026-09-01)
+
+- On Linux, locates the actual running dsh CLI from the process command line even when the plugin loader rewrites JavaScript arguments; each candidate accepts only its owning dsh package, preventing selection of stale dependencies in a plugin directory's ancestors.
+
+### v2.6.12 (2026-09-01)
+
+- Unwraps Remote call results before rendering the current identity and account list; remote failures retain their error codes and details instead of appearing as an empty account state.
+- When the configured directory has no direct dsh installation, resolves the package owned by the active CLI so split Profile and immutable-runtime deployments do not incorrectly report partial functionality.
+
 ### v2.6.11 (2026-09-01)
 
 - Resolves the `dshPasswords` client only through its exact Cordis v4 nested dependency after mounting the Remote namespace, so the password-gate settings card no longer renders empty; unloading the plugin also disposes the mounted namespace.

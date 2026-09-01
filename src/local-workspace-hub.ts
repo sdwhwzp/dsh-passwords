@@ -2,6 +2,7 @@
 
 import type { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
+import type {} from '@deepseek-ai/dsh-system-prompt';
 import type { ToolDefinition, ToolResult } from '@deepseek-ai/dsh-tools';
 import type { WorkspaceRegistry } from '@deepseek-ai/dsh-workspace';
 import { createHash, randomBytes, randomInt, randomUUID } from 'node:crypto';

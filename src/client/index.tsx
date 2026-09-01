@@ -7,8 +7,11 @@ import type { Context as ClientContext } from '@deepseek-ai/cordis';
 import type {} from '@deepseek-ai/dsh-api-gateway/client';
 import type {} from '@deepseek-ai/dsh-api-session-controller/client';
 import type {} from '@deepseek-ai/dsh-api-workspace-controller/client';
-import type {} from '@deepseek-ai/dsh-client-ui-slots/client';
+import type {} from '@deepseek-ai/dsh-client-ui-conversation/client';
+import type {} from '@deepseek-ai/dsh-client-ui-layout/client';
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client';
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client';
+import type {} from '@deepseek-ai/dsh-client-ui-workspace/client';
 import type {} from '@deepseek-ai/dsh-client-locale/client';
 import { DshPasswordsCard } from './card';
 import { DshPasswordsSection } from './section';
@@ -25,10 +28,9 @@ export { inject } from './inject';
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface SlotMap {
-    'sidebar.workspaces.action': {
+    'dsh-passwords.plugin.item': {
       kind: 'list';
       scope: 'root';
-      owner: { wide: boolean };
     };
   }
 }
@@ -205,10 +207,8 @@ export async function apply(ctx: ClientContext): Promise<() => void | Promise<vo
       {
         name: 'settings.general.item',
         id: 'dsh-passwords-account-logout',
-        key: 'dsh-passwords-account-logout',
         order: 1000,
         locale: 'dshpw',
-        inject: () => ({}),
       },
       AccountLogoutRow,
     ),
@@ -222,7 +222,6 @@ export async function apply(ctx: ClientContext): Promise<() => void | Promise<vo
       {
         name: 'settings.section',
         id: 'dsh-passwords',
-        key: 'dsh-passwords',
         order: 105,
         label: () => ctx.locale.bind('dshpw')('sectionTitle'),
         locale: 'dshpw',
@@ -238,7 +237,6 @@ export async function apply(ctx: ClientContext): Promise<() => void | Promise<vo
       {
         name: 'dsh-passwords.plugin.item',
         id: 'dsh-passwords-card',
-        key: 'dsh-passwords-card',
         order: 55,
         locale: 'dshpw',
         inject: () => ({ loadState: () => loadDshPasswordsState(dshPasswords) }),
@@ -253,10 +251,8 @@ export async function apply(ctx: ClientContext): Promise<() => void | Promise<vo
       {
         name: 'shell.overlay',
         id: 'dsh-passwords-chat',
-        key: 'dsh-passwords-chat',
         order: 100,
         locale: 'dshpw',
-        inject: () => ({}),
       },
       ChatLauncher,
     ),
@@ -266,7 +262,7 @@ export async function apply(ctx: ClientContext): Promise<() => void | Promise<vo
   // 读取 dsh 的 tokenUsage 投影并把增量上报给密码门，用于子用户每小时 token 配额。
   ctx.slots.inject('conversation.composer.dock', () =>
     ctx.slots.register(
-      { name: 'conversation.composer.dock', id: 'dsh-passwords-token', key: 'dsh-passwords-token', order: 90 },
+      { name: 'conversation.composer.dock', id: 'dsh-passwords-token', order: 90 },
       TokenReporter,
     ),
   );
@@ -277,7 +273,6 @@ export async function apply(ctx: ClientContext): Promise<() => void | Promise<vo
       {
         name: 'conversation.input.bootstrap',
         id: 'dsh-passwords-local-workspace-launcher',
-        key: 'dsh-passwords-local-workspace-launcher',
         order: 30,
         locale: 'dshpw',
         inject: () => ({
@@ -307,7 +302,10 @@ export async function apply(ctx: ClientContext): Promise<() => void | Promise<vo
                 else listener();
               });
             }
-            const sessionId = await ctx.workspaces.connectWorkspace(workspace.workspaceId);
+            if (workspace === undefined) {
+              throw new Error(ctx.locale.bind('dshpw')('localOpenConversationFailed'));
+            }
+            const sessionId = await ctx.uiWorkspace.connectWorkspace(workspace.workspaceId);
             ctx.sessions.open(sessionId);
           },
         }),
@@ -322,10 +320,8 @@ export async function apply(ctx: ClientContext): Promise<() => void | Promise<vo
       {
         name: 'sidebar.workspaces.action',
         id: 'dsh-passwords-managed-files',
-        key: 'dsh-passwords-managed-files',
         order: 10,
         locale: 'dshpw',
-        inject: () => ({}),
       },
       ManagedFilesLauncher,
     ),
