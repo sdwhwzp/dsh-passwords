@@ -218,7 +218,6 @@ node scripts/start-http.mjs [端口]    # 默认 8080，需确认风险提示
 | `MCP_GATEWAY_TLS_CERT` / `MCP_GATEWAY_TLS_KEY` | 空 | 自有证书，优先于自动 HTTPS |
 | `MCP_GATEWAY_PUBLIC_HOST` | 空 | 固定跳转地址，防 Host 伪造 |
 | `MCP_GATEWAY_ACME_EMAIL` / `MCP_GATEWAY_ACME_STAGING` | 空 / 关 | 证书提醒邮箱 / LE 测试环境 |
-
 | `MCP_DSH_ROOT` | 自动探测 | dsh 安装目录 |
 | `MCP_DSH_RESTART_SERVICE` | `dsh-web` | 重载补丁后重启的 systemd 服务名 |
 | `MCP_DSH_AUTO_UPDATE` | 开 | 部署级自动更新总开关 |
