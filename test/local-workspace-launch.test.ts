@@ -137,6 +137,9 @@ test('launch 建库期间断线会回滚，随后同 workspaceId 可用新票据
     async resolveByPath(): Promise<undefined> {
       return undefined;
     },
+    list(): [] {
+      return [];
+    },
     async delete(): Promise<void> {},
   };
   const harness = await startHub({}, registry);

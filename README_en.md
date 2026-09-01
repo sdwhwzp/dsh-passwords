@@ -330,6 +330,11 @@ The UI is bilingual (Chinese/English) and follows dsh's language setting:
 
 ## Release notes
 
+### v2.6.11 (2026-09-01)
+
+- Resolves the `dshPasswords` client only through its exact Cordis v4 nested dependency after mounting the Remote namespace, so the password-gate settings card no longer renders empty; unloading the plugin also disposes the mounted namespace.
+- Idempotently migrates active local-workspace placeholders to `MCP_LOCAL_WORKSPACE_PLACEHOLDER_ROOT` at startup. It confirms the stable Host registration first, atomically updates the SQLite/MySQL row, and then removes only Host registrations whose release path, owner, and workspace-id digest all match. Old directories, files, and session logs remain untouched, and an interrupted cleanup can continue on the next restore.
+
 ### v2.6.10 (2026-09-01)
 
 - Fixes the missing Cordis dependency declaration for the Alpha.1 client `remote` service, which prevented `dsh-passwords` from loading in the browser.

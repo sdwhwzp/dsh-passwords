@@ -168,6 +168,9 @@ test('审批期间设备断线会清连接并回滚未交付 token 的 provision
     async resolveByPath(): Promise<undefined> {
       return undefined;
     },
+    list(): [] {
+      return [];
+    },
     async delete(): Promise<void> {},
   };
   const harness = await startHub({ deviceCode: () => '987654' }, registry);

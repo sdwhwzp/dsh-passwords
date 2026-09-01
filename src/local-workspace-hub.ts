@@ -5,7 +5,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { ToolDefinition, ToolResult } from '@deepseek-ai/dsh-tools';
 import type { WorkspaceRegistry } from '@deepseek-ai/dsh-workspace';
 import { createHash, randomBytes, randomInt, randomUUID } from 'node:crypto';
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir, readFile, realpath } from 'node:fs/promises';
 import http from 'node:http';
 import type { IncomingMessage } from 'node:http';
 import https from 'node:https';
@@ -146,6 +146,7 @@ export class LocalWorkspaceHub {
   private readonly approvalFailures = new Map<number, ApprovalFailures>();
   private readonly connections = new Map<string, CompanionConnection>();
   private readonly placeholderRoot: string;
+  private workspaceMutationTail: Promise<void> = Promise.resolve();
   private readonly now: () => number;
   private readonly launchTicketTtlMs: number;
   private readonly deviceCode: () => string;
@@ -242,10 +243,20 @@ export class LocalWorkspaceHub {
   }
 
   /** Recreate durable placeholder workspaces once the DSH workspace service is available. */
-  async restoreWorkspaces(registry: WorkspaceRegistry): Promise<void> {
-    for (const workspace of this.db.listLocalWorkspaces()) {
-      await this.ensureWorkspaceRegistered(registry, workspace);
-    }
+  restoreWorkspaces(registry: WorkspaceRegistry): Promise<void> {
+    return this.enqueueWorkspaceMutation(async () => {
+      const failures: unknown[] = [];
+      for (const workspace of this.db.listLocalWorkspaces()) {
+        try {
+          await this.ensureWorkspaceRegisteredNow(registry, workspace);
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+      if (failures.length > 0) {
+        throw new AggregateError(failures, `${String(failures.length)} 个本机工作区恢复失败`);
+      }
+    });
   }
 
   /** Public connection metadata for the authenticated browser; contains no pairing secret. */
@@ -372,17 +383,21 @@ export class LocalWorkspaceHub {
   }
 
   /** Revoke a caller-owned device token and stop its active connection. */
-  async revoke(userId: number, id: string): Promise<boolean> {
-    const changed = this.db.revokeLocalWorkspace(userId, id);
-    if (!changed) return false;
-    const connection = this.connections.get(id);
-    if (connection !== undefined) connection.socket.close(1008, 'pairing revoked');
-    const registry = this.ctx.get('workspaceRegistry');
-    if (registry !== undefined) {
-      const workspace = await registry.resolveByPath(this.placeholderPath(userId, id)).catch(() => undefined);
-      if (workspace !== undefined) await registry.delete(workspace.id);
-    }
-    return true;
+  revoke(userId: number, id: string): Promise<boolean> {
+    return this.enqueueWorkspaceMutation(async () => {
+      const workspace = this.db.getLocalWorkspace(id);
+      if (workspace === null || workspace.user_id !== userId || workspace.revoked_at !== null) return false;
+
+      const registry = this.ctx.get('workspaceRegistry');
+      if (registry !== undefined) {
+        await this.removeWorkspaceRegistrations(registry, workspace);
+      }
+      const changed = this.db.revokeLocalWorkspace(userId, id);
+      if (!changed) return false;
+      const connection = this.connections.get(id);
+      if (connection !== undefined) connection.socket.close(1008, 'pairing revoked');
+      return true;
+    });
   }
 
   /** Disconnect every live companion owned by a deleted user. */
@@ -533,10 +548,10 @@ export class LocalWorkspaceHub {
       platform: hello.platform,
       shellEnabled: hello.shellEnabled,
     });
-    const workspace = this.db.getLocalWorkspace(authenticated.id) ?? authenticated;
-    await mkdir(workspace.placeholder_path, { recursive: true, mode: 0o700 });
+    let workspace = this.db.getLocalWorkspace(authenticated.id) ?? authenticated;
     const registry = this.ctx.get('workspaceRegistry');
-    if (registry !== undefined) await this.ensureWorkspaceRegistered(registry, workspace);
+    if (registry !== undefined) workspace = await this.ensureWorkspaceRegistered(registry, workspace);
+    else await mkdir(workspace.placeholder_path, { recursive: true, mode: 0o700 });
     if (socket.readyState !== WebSocket.OPEN) throw new Error('device disconnected during authentication');
     return { connection: this.publishConnection(socket, workspace) };
   }
@@ -610,7 +625,7 @@ export class LocalWorkspaceHub {
     await mkdir(placeholderPath, { recursive: true, mode: 0o700 });
     if (socket.readyState !== WebSocket.OPEN) throw new Error('device disconnected during approval');
     const token = randomBytes(32).toString('base64url');
-    const workspace = this.db.createLocalWorkspace({
+    let workspace = this.db.createLocalWorkspace({
       id: hello.workspaceId,
       userId,
       token,
@@ -623,7 +638,7 @@ export class LocalWorkspaceHub {
     });
     try {
       const registry = this.ctx.get('workspaceRegistry');
-      if (registry !== undefined) await this.ensureWorkspaceRegistered(registry, workspace);
+      if (registry !== undefined) workspace = await this.ensureWorkspaceRegistered(registry, workspace);
       if (socket.readyState !== WebSocket.OPEN) throw new Error('device disconnected during approval');
       return { workspace, token };
     } catch (error) {
@@ -748,9 +763,102 @@ export class LocalWorkspaceHub {
     return null;
   }
 
-  private async ensureWorkspaceRegistered(registry: WorkspaceRegistry, workspace: LocalWorkspaceRow): Promise<void> {
-    await mkdir(workspace.placeholder_path, { recursive: true, mode: 0o700 });
-    await registry.create(workspace.placeholder_path, `${workspace.workspace_name} · ${workspace.device_name}`);
+  private ensureWorkspaceRegistered(
+    registry: WorkspaceRegistry,
+    workspace: LocalWorkspaceRow,
+  ): Promise<LocalWorkspaceRow> {
+    return this.enqueueWorkspaceMutation(() => this.ensureWorkspaceRegisteredNow(registry, workspace));
+  }
+
+  /**
+   * Register the stable placeholder before replacing the database path, then
+   * remove only legacy Host registrations proven to belong to this active
+   * pairing. Registry deletion retains directories and session logs.
+   */
+  private async ensureWorkspaceRegisteredNow(
+    registry: WorkspaceRegistry,
+    workspace: LocalWorkspaceRow,
+  ): Promise<LocalWorkspaceRow> {
+    const latest = this.db.getLocalWorkspace(workspace.id);
+    if (latest === null || latest.revoked_at !== null || latest.user_id !== workspace.user_id) {
+      throw new Error(`本机工作区 ${workspace.id} 在恢复时已撤销或变更归属`);
+    }
+    const stablePath = await this.stablePlaceholderPath(latest.user_id, latest.id);
+    await registry.create(stablePath, `${latest.workspace_name} · ${latest.device_name}`);
+
+    if (!sameFilesystemPath(latest.placeholder_path, stablePath)) {
+      const migrated = this.db.migrateLocalWorkspacePlaceholderPath(
+        latest.id,
+        latest.user_id,
+        latest.placeholder_path,
+        stablePath,
+      );
+      if (!migrated) {
+        const concurrent = this.db.getLocalWorkspace(latest.id);
+        if (
+          concurrent === null
+          || concurrent.revoked_at !== null
+          || concurrent.user_id !== latest.user_id
+          || !sameFilesystemPath(concurrent.placeholder_path, stablePath)
+        ) {
+          throw new Error(`本机工作区 ${latest.id} 的占位路径并发迁移失败`);
+        }
+      }
+    }
+
+    for (const registration of registry.list()) {
+      if (!legacyLocalWorkspaceRegistration(registration.path, stablePath, latest.user_id, latest.id)) continue;
+      await registry.delete(registration.id);
+    }
+    const migrated = this.db.getLocalWorkspace(latest.id);
+    if (
+      migrated === null
+      || migrated.revoked_at !== null
+      || migrated.user_id !== latest.user_id
+      || !sameFilesystemPath(migrated.placeholder_path, stablePath)
+    ) {
+      throw new Error(`本机工作区 ${latest.id} 的稳定占位路径未持久化`);
+    }
+    return migrated;
+  }
+
+  private async stablePlaceholderPath(userId: number, workspaceId: string): Promise<string> {
+    const stablePath = this.placeholderPath(userId, workspaceId);
+    await mkdir(stablePath, { recursive: true, mode: 0o700 });
+    return realpath(stablePath);
+  }
+
+  /** Remove stable and proven legacy Host registrations without touching their directories. */
+  private async removeWorkspaceRegistrations(
+    registry: WorkspaceRegistry,
+    workspace: LocalWorkspaceRow,
+  ): Promise<void> {
+    const configuredStablePath = await existingRealPath(
+      this.placeholderPath(workspace.user_id, workspace.id),
+    );
+    const durablePath = await existingRealPath(workspace.placeholder_path);
+    for (const registration of registry.list()) {
+      if (
+        !sameFilesystemPath(registration.path, configuredStablePath)
+        && !sameFilesystemPath(registration.path, durablePath)
+        && !legacyLocalWorkspaceRegistration(
+          registration.path,
+          configuredStablePath,
+          workspace.user_id,
+          workspace.id,
+        )
+      ) continue;
+      // A false result means another registry mutation already removed the
+      // same id. Thrown storage failures abort before the token is revoked so
+      // the complete cleanup remains retryable.
+      await registry.delete(registration.id);
+    }
+  }
+
+  private enqueueWorkspaceMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.workspaceMutationTail.then(operation, operation);
+    this.workspaceMutationTail = result.then(() => undefined, () => undefined);
+    return result;
   }
 
   private consumePairing(code: string): PairingGrant {
@@ -1399,6 +1507,57 @@ function peerKey(request: IncomingMessage): string {
   if (address === undefined || address === '') return 'unknown';
   const withoutZone = address.split('%', 1)[0] ?? address;
   return withoutZone.startsWith('::ffff:') ? withoutZone.slice(7) : withoutZone.toLowerCase().slice(0, 128);
+}
+
+/**
+ * Identify a release-scoped Host registration belonging to one active local
+ * pairing. The full suffix includes package, data root, user id and the digest
+ * derived from the opaque workspace id; a coincidental basename is not enough.
+ *
+ * @param candidate - Registered Host workspace path.
+ * @param stablePath - New stable registration path, which is never removed.
+ * @param userId - Durable owner of the active pairing.
+ * @param workspaceId - Durable opaque pairing id.
+ * @returns Whether only the Host registration is safe to remove.
+ */
+export function legacyLocalWorkspaceRegistration(
+  candidate: string,
+  stablePath: string,
+  userId: number,
+  workspaceId: string,
+): boolean {
+  const resolved = path.resolve(candidate);
+  if (sameFilesystemPath(resolved, stablePath)) return false;
+  const digest = createHash('sha256').update(workspaceId).digest('hex').slice(0, 24);
+  if (path.basename(resolved) !== digest) return false;
+  const userDirectory = path.dirname(resolved);
+  if (path.basename(userDirectory) !== `u${String(userId)}`) return false;
+  const placeholderRoot = path.dirname(userDirectory);
+  if (path.basename(placeholderRoot) !== 'local-workspaces') return false;
+  const dataDirectory = path.dirname(placeholderRoot);
+  if (path.basename(dataDirectory) !== 'data') return false;
+  return path.basename(path.dirname(dataDirectory)) === 'dsh-passwords';
+}
+
+function sameFilesystemPath(left: string, right: string): boolean {
+  const normalizedLeft = path.resolve(left);
+  const normalizedRight = path.resolve(right);
+  return process.platform === 'win32'
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
+}
+
+function isErrnoCode(error: unknown, code: string): boolean {
+  return error instanceof Error && 'code' in error && error.code === code;
+}
+
+async function existingRealPath(candidate: string): Promise<string> {
+  try {
+    return await realpath(candidate);
+  } catch (error) {
+    if (!isErrnoCode(error, 'ENOENT')) throw error;
+    return path.resolve(candidate);
+  }
 }
 
 function positiveInteger(value: number | undefined, fallback: number): number {

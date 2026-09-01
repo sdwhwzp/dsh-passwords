@@ -41,7 +41,7 @@ export const DSH_PASSWORDS_REMOTE = {
 };
 
 export interface DshPasswordsRemoteClient {
-  $mount(contribution: typeof DSH_PASSWORDS_REMOTE): Promise<() => void>;
+  $mount(contribution: typeof DSH_PASSWORDS_REMOTE): Promise<() => void | Promise<void>>;
   dshPasswords: {
     state(): Promise<StateData>;
   };

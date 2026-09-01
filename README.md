@@ -334,6 +334,11 @@ dsh-local-workspace                      # 使用已保存的设备令牌恢复�
 
 ## 更新日志
 
+### v2.6.11（2026-09-01）
+
+- 密码门设置卡片在 Remote 命名空间挂载后再通过 Cordis v4 精确子依赖取得 `dshPasswords` 客户端，避免卡片空白；插件卸载时同步释放 Remote 命名空间。
+- 启动时将未撤销的本机工作区幂等迁移到 `MCP_LOCAL_WORKSPACE_PLACEHOLDER_ROOT` 稳定目录：先确认新 Host 注册，再原子更新 SQLite/MySQL 记录，最后仅撤销用户、工作区 ID 摘要与旧发布路径都精确匹配的 Host 注册。旧目录、文件和会话日志不删除，部分清理失败可在下次恢复时继续。
+
 ### v2.6.10（2026-09-01）
 
 - 修复 Alpha.1 客户端中 `remote` 服务未声明为 Cordis 依赖，导致 `dsh-passwords` 在浏览器启动时加载失败。

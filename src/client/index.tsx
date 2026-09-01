@@ -19,6 +19,7 @@ import { ManagedFilesLauncher } from './managed-files-launcher';
 import { zh, en } from './locales';
 import { AccountLogoutRow, installDesktopLauncherSuppression } from './account-logout';
 import { DSH_PASSWORDS_REMOTE, type DshPasswordsRemoteClient } from './remote';
+import { resolveDshPasswordsClient } from './dsh-passwords-client';
 
 export { inject } from './inject';
 
@@ -155,9 +156,10 @@ button.dshpw-managed-files-name:hover{color:var(--dsw-alias-brand-primary)}
 @media(max-width:640px){.dshpw-local-download,.dshpw-local-launcher-main,.dshpw-general-row{align-items:stretch;flex-direction:column}.dshpw-general-row-copy{padding-right:0}.dshpw-general-logout{justify-content:center}.dshpw-local-workspace{grid-template-columns:minmax(0,1fr) auto}.dshpw-local-workspace>.dshpw-switch-copy{grid-column:1/-1}.dshpw-managed-files-row{grid-template-columns:minmax(0,1fr) auto}.dshpw-managed-files-row>.dshpw-hint{display:none}.dshpw-local-launcher-seat>.dshpw-local-launcher{width:calc(100vw - 28px)}.dshpw-local-guide-backdrop{padding:12px}.dshpw-local-guide-dialog{max-height:calc(100vh - 24px);padding:18px}.dshpw-local-guide-actions{align-items:stretch;flex-direction:column}.dshpw-local-guide-actions>*{justify-content:center;width:100%;box-sizing:border-box;text-align:center}}
 `;
 
-export async function apply(ctx: ClientContext): Promise<void> {
+export async function apply(ctx: ClientContext): Promise<() => void | Promise<void>> {
   const remote = ctx.remote as unknown as DshPasswordsRemoteClient;
-  await remote.$mount(DSH_PASSWORDS_REMOTE);
+  const disposeRemote = await remote.$mount(DSH_PASSWORDS_REMOTE);
+  const dshPasswords = await resolveDshPasswordsClient(ctx);
   let gatewayDetected: boolean | null = null;
   const isBehindGateway = async (): Promise<boolean> => {
     if (gatewayDetected !== null) return gatewayDetected;
@@ -239,7 +241,7 @@ export async function apply(ctx: ClientContext): Promise<void> {
         key: 'dsh-passwords-card',
         order: 55,
         locale: 'dshpw',
-        inject: () => ({ loadState: () => remote.dshPasswords.state() }),
+        inject: () => ({ loadState: () => dshPasswords.state() }),
       },
       DshPasswordsCard,
     ),
@@ -361,4 +363,5 @@ export async function apply(ctx: ClientContext): Promise<void> {
   // 双语词典（zh/en）：卡片文字跟随 dsh 设置里的语言
   // （设置 → 通用 → 语言 / Settings → General → Language），切换即时生效
   ctx.effect(() => ctx.locale.register('dshpw', { zh, en }), 'dsh-passwords: dicts');
+  return disposeRemote;
 }

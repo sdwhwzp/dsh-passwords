@@ -1390,6 +1390,25 @@ export class Database {
     );
   }
 
+  /**
+   * Move one active pairing from its recorded placeholder to a stable path.
+   * The expected old path makes concurrent startup restores a compare-and-swap;
+   * SQLite and MySQL both expose the affected-row count through `SqlRunResult`.
+   */
+  migrateLocalWorkspacePlaceholderPath(
+    id: string,
+    userId: number,
+    expectedPath: string,
+    stablePath: string,
+  ): boolean {
+    const result = this.stmt(
+      `UPDATE local_workspaces
+       SET placeholder_path = ?
+       WHERE id = ? AND user_id = ? AND revoked_at IS NULL AND placeholder_path = ?`,
+    ).run(stablePath, id, userId, expectedPath);
+    return Number(result.changes) > 0;
+  }
+
   /** 刷新伴随连接上报的展示事实，并记录最近在线时间。 */
   touchLocalWorkspace(
     id: string,
