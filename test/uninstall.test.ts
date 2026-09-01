@@ -77,9 +77,19 @@ test('uninstall succeeds in English when DSH is already absent', () => {
   } else {
     writeFileSync(path.join(bin, 'pnpm'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
   }
+  const envFile = path.join(root, '.env');
+  writeFileSync(envFile, [
+    'SETUP_KEY=test-setup-key',
+    `MCP_DSH_ROOT=${path.join(root, 'absent-dsh')}`,
+  ].join('\n') + '\n');
   try {
     const result = spawnSync(process.execPath, [uninstallScript], {
-      env: { ...commandEnvironment(bin), DSH_HOME: dshHome, MCP_DSH_ROOT: path.join(root, 'absent-dsh'), LANG: 'en_US.UTF-8' },
+      env: {
+        ...commandEnvironment(bin),
+        DSH_HOME: dshHome,
+        DSH_PASSWORDS_ENV_FILE: envFile,
+        LANG: 'en_US.UTF-8',
+      },
       encoding: 'utf8',
     });
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
