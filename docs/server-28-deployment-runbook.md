@@ -848,3 +848,28 @@ dsh-passwords `2.5.15` 仅把 `session.history` 改写分支的原始响应上�
 发布按 runtime、dsh-web 和业务插件三个不可变目录分别构建并原子切换，回滚点为 `/home/tzwl3/apps/dsh-backups/20260901-162732-alpha3` 与 `/home/tzwl3/apps/dsh-backups/20260901-171539-dsh-passwords-2.6.15`。上线后 PM2 为 online，3080 未认证返回 401，3081 未登录返回 302，3082 正常监听；Workspace 删除聚焦测试 34/34，通过 dsh-passwords 全量测试 354 项、跳过 13 项、失败 0 项和构建。只读生产验收有 42 项当前行为检查通过，另保留一项旧子代理会话归属 `sessionOwnerBootstrap=partial` 警告；该旧会话的分页接口被拒绝并保持隔离，不影响公开 readiness、账号/会话/工作区/历史/WebDAV/下载/Spend/订阅隐藏和插件 bundle 检查。
 
 源码远端已确认包含本次部署提交。完成本手册提交和 dsh-web 上游同步后，远端分支快照为：Harness `tzwl` `b66a316`；dsh-web `dev` `80a7f61`、`master` `83a4ff0`，线上 `0f9116c` 是其祖先；dsh-passwords `feature/principal-budget-webdav` 包含线上 `d67159a` 及后续部署文档提交；subscriptions `dev` `d3f549f`；genui `dev` `2597912`；spend `feature/principal-budget-webdav` `a0d1648`；weknora `main` `619c1d0`；at-file `dev` `45a5cbe`；NAS `main` `ef3b9eb`；品牌插件 `main` `af49ba6`。Office `0.1.3` 和 better-sidebar `0.18.0-alpha.0` 是固定第三方安装包，没有自有源码提交，以本节上方 SHA-256 和实际安装包为恢复依据。
+
+## 24. 2026-09-01 插件源码提交与推送收尾
+
+本轮完成源码收尾，不执行 28 服务器部署或进程重启。dsh-web 的 `dev` 继续只跟踪 fork 上游，客户定制开发合并到 `master`；`master` 新增 better-sidebar 右侧编辑器的统一下载入口，所有文件类型都通过当前会话生成同源 `/sidebar/file` 地址，点击时重新读取当前文件路径和 Session，且在上游已有原生下载入口时不重复显示。
+
+dsh-passwords 的普通文件下载和 HTML 预览现在都绑定到当前账号持久拥有、未禁用且目录仍获授权的 Session。网关不再让共享 Host 按浏览器传入路径重新打开文件，而是在规范路径校验后以 `O_NOFOLLOW` 和非阻塞模式打开，核对实际打开对象仍位于授权工作区，再从同一文件描述符读取。实现同时拒绝跨账号 Session、伪造 cwd、路径越界、编码前缀别名、符号链接逃逸、FIFO 阻塞、带正文的读取请求和不支持的方法；响应按 Cookie 私有禁缓存，HTML 下载保持原始字节，HTML 预览保留 sandbox CSP，客户端断开时主动销毁读取流。
+
+远端分支在本轮收尾前后核对如下。表中的 SHA 是功能代码提交；dsh-passwords 还会在其后追加本节文档提交。
+
+| 仓库 | 分支 | 功能提交 |
+|---|---|---|
+| `sdwhwzp/dsh-web` | `dev` | `80a7f61dc24aecc1fdce96e43235ea6af23df6df` |
+| `sdwhwzp/dsh-web` | `master` | `501d586981d30b89730e058eacc9b27ed8b2a020` |
+| `sdwhwzp/dsh-passwords` | `feature/principal-budget-webdav` | `8a1e413507e59cb23a45b932e3b4d6f8847ce61d` |
+| `sdwhwzp/dsh-spend` | `feature/principal-budget-webdav` | `a0d16483697305a2a7d272bf7ed49a7cff4cbab5` |
+| `sdwhwzp/dsh-plugin-subscriptions` | `dev` | `d3f549f85b8b90a725a589acfafdbbcf44c244b3` |
+| `sdwhwzp/dsh-at-file` | `dev` | `45a5cbe6c8362eda137186fd617effc05cf898a5` |
+| `sdwhwzp/dsh-weknora` | `main` | `619c1d089d153a552a9b64fee9df1978ed84c149` |
+| `sdwhwzp/dsh-genui` | `dev` | `2597912d5237e0b0ebf7346bbdb4a4978d933792` |
+| `deepseek-harness/nas` | `main` | `ef3b9eb4bface16a4dedfe3bdab430347128d015` |
+| `deepseek-harness/dsh-shandong-tizhi-brand` | `main` | `af49ba6f38d4126b42eb14135f859ecf961b01d1` |
+
+本机验证结果：dsh-web 聚焦测试、包构建、全仓类型检查、文档检查、i18n 检查、全量测试、脚本测试和安装包内容检查均通过；dsh-passwords 全量测试为 375 项，其中 362 通过、13 跳过、0 失败，构建与 `git diff --check` 通过，两轮独立安全复核均未发现高、中级阻断。
+
+28 的运行态仍保持本手册第 3 节记录的 cohort：Harness `b66a316`、业务插件 `d67159a`、dsh-web `0f9116c`。后续上线必须重新创建不可变发布目录，核对 Profile 实际解析的插件来源和包内源码标识，通过 3080/3081、主账号、子账号、Workspace 删除、HTML 预览及各类文件下载验收后再原子切换；不能把本节“已推送”误认为“已部署”。
