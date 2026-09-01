@@ -330,6 +330,10 @@ The UI is bilingual (Chinese/English) and follows dsh's language setting:
 
 ## Release notes
 
+### v2.6.10 (2026-09-01)
+
+- Fixes the missing Cordis dependency declaration for the Alpha.1 client `remote` service, which prevented `dsh-passwords` from loading in the browser.
+
 ### v2.6.9 (2026-08-30)
 
 - Supports newer Harness slash RPCs, the `workspace/follow` Remote workspace snapshot, and cold-safe legacy ownership recovery through `session/page`; stream frames, methods, immutable page cuts, and readiness probes are validated strictly and fail closed.

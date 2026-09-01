@@ -20,6 +20,8 @@ import { zh, en } from './locales';
 import { AccountLogoutRow, installDesktopLauncherSuppression } from './account-logout';
 import { DSH_PASSWORDS_REMOTE, type DshPasswordsRemoteClient } from './remote';
 
+export { inject } from './inject';
+
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface SlotMap {
     'sidebar.workspaces.action': {
@@ -152,8 +154,6 @@ button.dshpw-managed-files-name:hover{color:var(--dsw-alias-brand-primary)}
 .dshpw-local-launcher-workspace small{color:var(--dsw-alias-label-tertiary)}
 @media(max-width:640px){.dshpw-local-download,.dshpw-local-launcher-main,.dshpw-general-row{align-items:stretch;flex-direction:column}.dshpw-general-row-copy{padding-right:0}.dshpw-general-logout{justify-content:center}.dshpw-local-workspace{grid-template-columns:minmax(0,1fr) auto}.dshpw-local-workspace>.dshpw-switch-copy{grid-column:1/-1}.dshpw-managed-files-row{grid-template-columns:minmax(0,1fr) auto}.dshpw-managed-files-row>.dshpw-hint{display:none}.dshpw-local-launcher-seat>.dshpw-local-launcher{width:calc(100vw - 28px)}.dshpw-local-guide-backdrop{padding:12px}.dshpw-local-guide-dialog{max-height:calc(100vh - 24px);padding:18px}.dshpw-local-guide-actions{align-items:stretch;flex-direction:column}.dshpw-local-guide-actions>*{justify-content:center;width:100%;box-sizing:border-box;text-align:center}}
 `;
-
-export const inject = ['slots', 'locale', 'sessions', 'workspaces'] as const;
 
 export async function apply(ctx: ClientContext): Promise<void> {
   const remote = ctx.remote as unknown as DshPasswordsRemoteClient;

@@ -334,6 +334,10 @@ dsh-local-workspace                      # 使用已保存的设备令牌恢复�
 
 ## 更新日志
 
+### v2.6.10（2026-09-01）
+
+- 修复 Alpha.1 客户端中 `remote` 服务未声明为 Cordis 依赖，导致 `dsh-passwords` 在浏览器启动时加载失败。
+
 ### v2.6.9（2026-08-30）
 
 - 支持新版 Harness 的 slash RPC、`workspace/follow` Remote 工作区快照和 `session/page` 冷会话归属恢复；协议帧、请求方法、分页截面与就绪探针均按严格格式校验，异常时拒绝暴露未过滤数据。
