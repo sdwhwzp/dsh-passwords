@@ -1,6 +1,6 @@
 # 28 服务器部署与运维手册
 
-本文记录 28 服务器（Tailscale `100.64.0.5`，局域网 `192.168.10.28`）上 DeepSeek Harness 多用户服务的功能、运行结构、数据位置、部署步骤、验收方法和故障处理。内容依据 2026-08-28 的实际服务器盘点整理，不包含密码、API Key、OAuth Token、Tailscale Auth Key 或数据库口令。
+本文记录 28 服务器（Tailscale `100.64.0.5`，局域网 `192.168.10.28`）上 DeepSeek Harness 多用户服务的功能、运行结构、数据位置、部署步骤、验收方法和故障处理。内容依据 2026-09-01 的 Harness Alpha.3 实际服务器盘点整理，不包含密码、API Key、OAuth Token、Tailscale Auth Key 或数据库口令。
 
 ## 1. 使用范围
 
@@ -51,15 +51,16 @@ DeepSeek Harness Web + Web Profile + 插件
 | DNS | `114.114.114.114`、`223.5.5.5`，Tailscale DNS `100.100.100.100` |
 | Tailscale 地址 | `100.64.0.5` |
 | Node.js | `22.21.1` |
-| pnpm | `11.7.0` |
+| pnpm | `11.24.0` |
 | PM2 | `6.0.13` |
 | Tailscale | `1.102.3` |
-| dsh | `0.1.1-rc.2`，含本地定制构建 |
-| dsh-passwords | `2.5.17` |
-| dsh-spend | `0.4.9`，提交 `9c55954` |
-| dsh-nas-webdav | `0.2.1`，提交 `3ff3e15` |
-| Office 侧栏预览 | `@huanlin/dsh-plugin-better-sidebar-plugin-office@0.1.2` |
-| dsh-web 插件族 | `0.3.2` |
+| dsh | `0.1.2-alpha.3`，线上构建标识 `0.1.2-alpha.3-b66a316` |
+| dsh-passwords | `2.6.15`，提交 `d67159a` |
+| dsh-spend | `0.6.4`，提交 `a0d1648` |
+| dsh-nas-webdav | `0.2.5`，提交 `ef3b9eb` |
+| dsh-plugin-subscriptions | `0.6.2`，提交 `d3f549f` |
+| Office 侧栏预览 | `@huanlin/dsh-plugin-better-sidebar-plugin-office@0.1.3` |
+| dsh-web 插件族 | `@linxin666/dsh-web-all@0.3.10`，提交 `0f9116c` |
 | 数据库 | MySQL，`192.168.10.95:3306/dsh_passwords_platform` |
 
 ### 3.1 端口
@@ -107,13 +108,20 @@ DeepSeek Harness Web + Web Profile + 插件
 
 `dsh-plugin-subscriptions` 提供 ChatGPT、Claude 和 Grok 订阅登录及模型路由。盘点时 ChatGPT Pro 和 Grok 已登录，Claude 未登录；登录状态会随授权和 Token 刷新变化，不应写入安装脚本。
 
-子账号在 ChatGPT（Codex）提供方下只允许看到并调用以下模型，其他提供方模型不受该筛选影响：
+子账号在 ChatGPT（Codex）提供方下只允许看到并调用以下模型：
 
 - `gpt-5.6-sol`
 - `gpt-5.6-terra`
 - `gpt-5.6-luna`
 
 服务端同时执行同一限制，不能通过手写 RPC 绕过。主账号不受此客户模型限制。订阅登录、退出、手动授权和订阅用量只对管理员显示，子账号不能调用相应凭证管理或用量 RPC。
+
+Grok 的客户模型目录、配置、模型池、缓存、解析和流式调用统一只允许以下两个聊天模型；旧选择或手写其他 Grok 聊天模型 ID 返回 `UNKNOWN_MODEL`：
+
+- `grok-4.6`
+- `grok-4.5`
+
+Grok 插件内部使用的图片生成、视频生成和搜索模型不属于聊天模型选择器，不受该列表限制。Claude、DeepSeek、GLM、Qwen、Kimi 和自建提供方继续按各自配置保留。
 
 ### 4.4 Spend 计量与内部价格
 
@@ -169,7 +177,7 @@ WeKnora 知识库插件已纳入跨机器安装清单，来源固定为 `github:
 
 模型访问 WebDAV 文件时使用 `webdav_list`、`webdav_read_text`、`excel_inspect`、`excel_read_range`、`excel_apply_changes` 和 `excel_append_rows`。Excel 写入使用精确 ETag 和 `If-Match`，检测到其他客户端已修改时拒绝覆盖。右侧 File 面板的显示能力与模型工具分开：`.xlsx` 的可视预览由 Office 侧栏插件提供，缺少该插件时会显示“此文件类型不支持预览 / 下载查看”，但不代表 Excel 工具本身不可用。
 
-当前 Web Profile 已固定安装 Office 预览 `0.1.2` 并加入 `dsh.profile.bundles`。跨机器安装清单位于 dsh-passwords 的 `scripts/profile-plugins.json`，同时把 dsh-web 来源固定为 `master`；`dev` 只用于跟随上游 fork，不作为客户部署分支。
+当前 Web Profile 已固定安装 Office 预览 `0.1.3` 并加入 `dsh.profile.bundles`。跨机器安装清单位于 dsh-passwords 的 `scripts/profile-plugins.json`，同时把 dsh-web 来源固定为 `master`；`dev` 只用于跟随上游 fork，不作为客户部署分支。
 
 ### 4.7 kmMac 本地模型服务
 
@@ -272,7 +280,7 @@ sudo apt install -y build-essential ca-certificates git curl openssh-client sshp
 ```bash
 export PATH=/home/tzwl3/.local/opt/node-v22.21.1-linux-x64/bin:/home/tzwl3/.local/bin:$PATH
 corepack enable
-corepack prepare pnpm@11.7.0 --activate
+corepack prepare pnpm@11.24.0 --activate
 npm install -g pm2@6.0.13
 ```
 
@@ -302,7 +310,7 @@ Auth Key 必须从部署环境注入，不得写入脚本或本文。28 当前�
 - `https://github.com/sdwhwzp/dsh-weknora.git`
 - `http://gr.gr-iot.cn:30000/deepseek-harness/nas.git`
 
-部署前必须确认这些仓库的改动已经 commit 和 push。dsh-web 的客户开发与部署分支是 `master`；同步上游时先更新 fork 的 `dev`，验证后再合并到 `master`。本次 principal、WebDAV 和 Spend 兼容修复分别以 `5007b5c`、`3ff3e15` 和 `9c55954` 为可重复部署基线。
+部署前必须确认这些仓库的改动已经 commit 和 push。dsh-web 的客户开发与部署分支是 `master`；同步上游时先更新 fork 的 `dev`，验证后再合并到 `master`。2026-09-01 Alpha.3 的可重复部署基线为：Harness `b66a316`、dsh-web `0f9116c`、dsh-passwords `d67159a`、dsh-plugin-subscriptions `d3f549f`、dsh-genui `2597912`、dsh-spend `a0d1648`、dsh-weknora `619c1d0`、dsh-at-file `45a5cbe`、dsh-nas-webdav `ef3b9eb` 和品牌插件 `af49ba6`。
 
 ### 7.4 构建
 
@@ -384,7 +392,7 @@ node /home/tzwl3/apps/dsh-runtime/current/node_modules/@deepseek-ai/dsh/lib/bin.
   --profile web --dump-config >/tmp/dsh-web-config.yml
 ```
 
-该清单会安装 `dsh-at-file` 的 `dev` 分支、`@huanlin/dsh-plugin-better-sidebar-plugin-office@0.1.2` 和 `@wxg-prc-cpg/dsh-weknora`。安装后检查 `~/.dsh/profiles/web/package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`cordis.patch.yml` 和 `node_modules` 都指向新发布，且三个包同时存在于 dependencies 和 `dsh.profile.bundles`。`dsh-at-file` 的搜索端点必须经过会话归属校验，子账号只能读取本人获准工作区的过滤设置并且不能修改共享设置；插件索引和手工 `@path` 引用都必须拒绝规范目标位于工作区外部的符号链接。清单安装器只为实际命中相邻源码的插件执行本地构建；Profile 中指向 `/home/tzwl3/apps/dsh-web/current` 等独立发布目录的既有链接会原样保留，不会再误查 `dsh-passwords` 旁边不存在的 `dsh-web`。发布目录内已有 `dsh-plugin-subscriptions` 和 `dsh-at-file` 时优先使用相邻链接，服务器无需安装 Git；只有源码缺失时才拉取 GitHub `dev`。本地 at-file 链接安装前会运行 `scripts/link-runtime-peers.mjs`，从 `~/apps/dsh-runtime/current/node_modules` 解析当前版本的 Typert、Settings、LLM 和 Invariants Host 包，并把 `protobufjs` 加入 Profile 的 `allowBuilds`；非标准布局必须设置 `DSH_RUNTIME_NODE_MODULES`。不要手工只改 `package.json` 而不更新锁文件和依赖目录。已有服务器采用独立不可变发布目录时，先备份整套 Profile，再用清单脚本更新依赖和锁文件；验证失败时同时恢复 Profile 备份和 plugins `current` 软链接。
+该清单会安装 `dsh-at-file` 的 `dev` 分支、`@huanlin/dsh-plugin-better-sidebar-plugin-office@0.1.3` 和 `@wxg-prc-cpg/dsh-weknora`。安装后检查 `~/.dsh/profiles/web/package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`cordis.patch.yml` 和 `node_modules` 都指向新发布，且三个包同时存在于 dependencies 和 `dsh.profile.bundles`。`dsh-at-file` 的搜索端点必须经过会话归属校验，子账号只能读取本人获准工作区的过滤设置并且不能修改共享设置；插件索引和手工 `@path` 引用都必须拒绝规范目标位于工作区外部的符号链接。清单安装器只为实际命中相邻源码的插件执行本地构建；Profile 中指向 `/home/tzwl3/apps/dsh-web/current` 等独立发布目录的既有链接会原样保留，不会再误查 `dsh-passwords` 旁边不存在的 `dsh-web`。发布目录内已有 `dsh-plugin-subscriptions` 和 `dsh-at-file` 时优先使用相邻链接，服务器无需安装 Git；只有源码缺失时才拉取 GitHub `dev`。本地 at-file 链接安装前会运行 `scripts/link-runtime-peers.mjs`，从 `~/apps/dsh-runtime/current/node_modules` 解析当前版本的 Typert、Settings、LLM 和 Invariants Host 包，并把 `protobufjs` 加入 Profile 的 `allowBuilds`；非标准布局必须设置 `DSH_RUNTIME_NODE_MODULES`。不要手工只改 `package.json` 而不更新锁文件和依赖目录。已有服务器采用独立不可变发布目录时，先备份整套 Profile，再用清单脚本更新依赖和锁文件；验证失败时同时恢复 Profile 备份和 plugins `current` 软链接。
 
 WeKnora 配置必须通过 PM2 进程环境或仅部署人员可读的环境文件注入，并在 `pm2 restart dsh-web --update-env` 后生效：
 
@@ -572,7 +580,7 @@ grep -q 'xlsx' /tmp/dsh-office-preview-client.js
 
 - 管理员可使用账号密码登录 3081，并能进入账号管理。
 - 子账号可登录，但看不到订阅登录、退出和订阅用量。
-- 子账号的 Codex 模型只有 Sol、Terra、Luna；Claude、Grok、DeepSeek 和自建提供方按各自配置保留。
+- 子账号的 Codex 模型只有 Sol、Terra、Luna；Grok 聊天模型只有 4.6 和 4.5；Claude、DeepSeek 和自建提供方按各自配置保留。
 - 月额度为 0 的子账号提问时收到明确额度不足提示。
 - 子账号刷新 Spend 后只看到自己的调用和金额，不显示订阅计划用量；旧日志中的已认证 `user/message` 能正确回填到该账号。
 - 子账号不能访问 SSH、皮肤管理、共享上传列表或其他账号工作区。
@@ -700,10 +708,16 @@ cat /home/tzwl3/.local/state/kmMac-model-monitor/status
 
 确认驱动为 MySQL、主机和库名正确、28 能连接 192.168.10.95:3306，并检查 `.env` 的用户和密码。SQLite 和 MySQL 不会自动互相迁移；驱动切错会表现为进入另一个空账号库。
 
+### 11.14 子账号删除自己的 Workspace 返回 403
+
+确认实际加载的是 dsh-passwords `2.6.15` 或更高版本，并检查目标 Workspace 的规范目录仍属于当前子账号的允许范围。网关只允许子账号移除本人拥有且当前获准的 Workspace 登记；其他账号拥有、没有 durable owner、路径不再获准或请求身份缺失时继续返回 403。
+
+“删除工作区”只删除 Host 的 Workspace 登记，不删除目录、文件、会话或本机助手配对记录。若本机助手仍保持配对，后续重连或服务重启可以重新注册该目录；要永久停止自动恢复，应在“本机工作区”中撤销对应设备或目录授权。
+
 ## 12. 上传 Git 前检查
 
-1. 确认 dsh-passwords、dsh-spend 和 dsh-nas-webdav 的包版本与提交号一致，避免同一版本号对应不同内容。
-2. 将 deepseek-harness、dsh-passwords、dsh-web、dsh-spend、nas 和 dsh-plugin-subscriptions 的部署改动分别 commit 并 push。
+1. 确认 dsh-passwords、dsh-spend、dsh-nas-webdav、dsh-plugin-subscriptions、dsh-at-file、dsh-genui、dsh-weknora、品牌插件和 dsh-web 的包版本与提交号一致，避免同一版本号对应不同内容。
+2. 将 deepseek-harness 和所有自有插件仓库的部署改动分别 commit 并 push；第三方固定安装包只记录来源版本和 SHA-256，不虚构自有提交。
 3. 在本文记录最终 Git commit 或 release tag；不要把未提交工作树当作可重复部署源。
 4. 检查没有提交 `.env`、`settings.yaml`、`.credentials.yaml`、`auth.json`、`mac.md`、数据库 dump、PM2 dump、SSH 私钥或 Tailscale Auth Key。
 5. 对文档执行敏感词和私钥头检查：
@@ -719,20 +733,25 @@ rg -n '(PASSWORD|SECRET|TOKEN|AUTH_KEY|API_KEY)=.+|BEGIN .*PRIVATE KEY' \
 
 | 组件 | 当前目标 |
 |---|---|
-| runtime | `/home/tzwl3/apps/dsh-runtime/releases/deploy-28-20260826-conversation-bootstrap-all-copies` |
-| plugins | `/home/tzwl3/apps/dsh-plugins/releases/20260828-194748-dsh-passwords-2.5.17-archived-history` |
-| dsh-web | `/home/tzwl3/apps/dsh-web/releases/20260828-1110-pet-default-off-fixed` |
-| conversation bundle | SHA-1 `2440832da50b0eb887ac0ff05b1e4462f9109123` |
-| dsh-passwords gateway bundle | SHA-1 `8262267ae4ad0e636ad1396301d3ae82ff2ab1c8` |
-| dsh-passwords client bundle | SHA-1 `ed90595fdbe831026025b3c4cfee55ac6aca6b1e` |
-| dsh-nas-webdav client bundle | SHA-1 `6fa1f333a1b76b241756eee42568292e0c0ee782` |
-| Office preview client bundle | SHA-1 `48cc39dc0df93b99e287c1889cf6096552b90cb6` |
-| WeKnora | `@wxg-prc-cpg/dsh-weknora@0.1.1`，未配置 `WEKNORA_BASE_URL` 时禁用 |
-| dsh-at-file client bundle | SHA-256 `9c2c0e1b74c94556acd23526908d6756b4fb5349197662c7061faacea6999222` |
-| dsh-passwords 2.5.17 安装包 | SHA-256 `3c9ce7dc7e89468a208517ccc26f37c024823fad609e30875c0293871ff5538e` |
-| Web Profile 回滚备份 | `/home/tzwl3/apps/deploy-backups/20260828-194748-dsh-passwords-2.5.17-archived-history` |
+| runtime | `/home/tzwl3/apps/dsh-runtime/releases/20260901-162100-b66a316-alpha3` |
+| plugins | `/home/tzwl3/apps/dsh-plugins/releases/20260901-170745-d67159a-alpha3` |
+| dsh-web | `/home/tzwl3/apps/dsh-web/releases/20260901-140500-0f9116c3-alpha3` |
+| runtime 源提交 | `b66a31652d47db8683916c3284521f1029b7f232` |
+| dsh-web 源提交 | `0f9116c33ce6ab2a5bb5d8162e53e4fea3cb7467` |
+| dsh-passwords 安装包 | SHA-256 `ed3083151e1374927044538a151964c6f7d3d3a30e96b447419b35c5426547b7` |
+| dsh-plugin-subscriptions 安装包 | SHA-256 `c0ad6a0fb025c96aace7cf8049a995c275e27cdccbb999dbdc1e6c1b14998553` |
+| dsh-spend 安装包 | SHA-256 `dbcc1b89db6277a3caaf54a88854d7f945f37049f6b93b92f981ca9a7db7bde1` |
+| dsh-nas-webdav 安装包 | SHA-256 `c849bb27ab623e887385646b8b37f130e20551464e592adbf2ec5172ed1eb31b` |
+| dsh-at-file 安装包 | SHA-256 `39871f3d5377ae02fa83dc26a1b0e204298fb5176aa0a34fb47491c7cbfcdb48` |
+| dsh-genui 安装包 | SHA-256 `f0c447f0b64d63e78c4ac9de1836101389d9d03e0094f20523b367bc404ad98b` |
+| dsh-weknora 安装包 | SHA-256 `ebfd99d18df709b03f0dc2d97cab662c42132eb1bf326cae1b8810bc614adca0` |
+| 品牌插件安装包 | SHA-256 `15d3d51ca465ca76574995d3b0fae6a953aa507d2acda043815d895bbe150a11` |
+| Office 预览安装包 | SHA-256 `0f85a98a2470eef6d372c1c31ad2dc6a88ed642b2a1e2100910b8fcb4c779230` |
+| better-sidebar 安装包 | SHA-256 `f464ce910b591245a667a5c48c637170f3eeb25b7b2712a3fcdd92580c9b7932` |
+| Alpha.3 整体回滚备份 | `/home/tzwl3/apps/dsh-backups/20260901-162732-alpha3` |
+| dsh-passwords 2.6.15 回滚备份 | `/home/tzwl3/apps/dsh-backups/20260901-171539-dsh-passwords-2.6.15` |
 
-这些标识用于确认 2026-08-28 的服务器快照。任何后续构建都应创建新的发布标识和内容哈希，不应复用目录名或把新内容覆盖到旧发布中。
+这些标识用于确认 2026-09-01 的 Alpha.3 服务器快照。任何后续构建都应创建新的发布标识和内容哈希，不应复用目录名或把新内容覆盖到旧发布中。插件发布目录内的 `DEPLOYMENT.json` 是完整包版本、源码提交和 SHA-256 的权威清单。
 
 ## 14. 2026-08-27 principal、Spend 与 Excel 预览部署记录
 
@@ -817,3 +836,15 @@ dsh-passwords `2.5.15` 仅把 `session.history` 改写分支的原始响应上�
 本机 Node 22 聚焦测试 79/79、全量测试 251/251、`npm run build` 和 `git diff --check` 通过；独立复审未发现 HIGH 或 MEDIUM 级跨账号绕过。不可变发布目录为 `/home/tzwl3/apps/dsh-plugins/releases/20260828-194748-dsh-passwords-2.5.17-archived-history`，安装包 SHA-256 为 `3c9ce7dc7e89468a208517ccc26f37c024823fad609e30875c0293871ff5538e`，gateway/client SHA-1 分别为 `8262267ae4ad0e636ad1396301d3ae82ff2ab1c8` 和 `ed90595fdbe831026025b3c4cfee55ac6aca6b1e`，Profile 回滚备份位于 `/home/tzwl3/apps/deploy-backups/20260828-194748-dsh-passwords-2.5.17-archived-history`。
 
 上线后的真实账号验收为：管理员看到 17 个会话和 4 个未分组会话；目标子账号看到 9 个会话，其中 1 个为本人未分组会话；该会话出现在列表且 `session.history` 返回 HTTP 200 和业务成功，活动会话对照同样返回 200。其余 3 个未分组会话对该子账号均返回 403，管理员对照返回 200。PM2 保持 online，3080 返回 200，3081 匿名访问返回 302，运行版本为 `2.5.17`。
+
+## 23. 2026-09-01 Harness Alpha.3、构建版本、Grok 模型范围与工作区删除修复
+
+本轮把运行时升级到 Harness `0.1.2-alpha.3`，线上源提交为 `b66a31652d47db8683916c3284521f1029b7f232`。展开侧栏底部由 Harness 外壳显示精确构建版本 `0.1.2-alpha.3-b66a316`，该标识不由品牌插件拥有，因此自定义品牌不能遮蔽。dsh-web 使用 `@linxin666/dsh-web-all@0.3.10` 和源提交 `0f9116c33ce6ab2a5bb5d8162e53e4fea3cb7467`；业务插件按本节上方 `DEPLOYMENT.json` 对应的版本、提交和安装包哈希组成同一 Alpha.3 cohort。
+
+`dsh-plugin-subscriptions@0.6.2` 把 Grok 客户聊天模型统一收紧为 `grok-4.6` 和 `grok-4.5`。目录发现、设置、模型池、缓存、解析和流式请求共用同一允许列表，旧选择或手写其他 Grok 聊天模型 ID 返回 `UNKNOWN_MODEL`；图片、视频和搜索工具内部使用的模型不进入客户聊天模型选择器。Codex 客户范围仍为 Sol、Terra 和 Luna，其他厂商按各自配置保留。
+
+`dsh-passwords@2.6.15` 修复子账号删除本人 Workspace 时被上游 403 拒绝的问题。网关只为当前身份转发本人拥有且当前获准的 Workspace 删除，并继续拒绝跨账号、未归属和未授权目录。操作只移除 Workspace 登记，目录、文件、会话和本机助手配对记录保留；仍处于配对状态的助手可以在后续连接时重新注册目录。
+
+发布按 runtime、dsh-web 和业务插件三个不可变目录分别构建并原子切换，回滚点为 `/home/tzwl3/apps/dsh-backups/20260901-162732-alpha3` 与 `/home/tzwl3/apps/dsh-backups/20260901-171539-dsh-passwords-2.6.15`。上线后 PM2 为 online，3080 未认证返回 401，3081 未登录返回 302，3082 正常监听；Workspace 删除聚焦测试 34/34，通过 dsh-passwords 全量测试 354 项、跳过 13 项、失败 0 项和构建。只读生产验收有 42 项当前行为检查通过，另保留一项旧子代理会话归属 `sessionOwnerBootstrap=partial` 警告；该旧会话的分页接口被拒绝并保持隔离，不影响公开 readiness、账号/会话/工作区/历史/WebDAV/下载/Spend/订阅隐藏和插件 bundle 检查。
+
+源码远端已确认包含本次部署提交：Harness `tzwl` 为 `b66a316`，dsh-web `master` 为 `0f9116c`，dsh-passwords `feature/principal-budget-webdav` 为 `d67159a`，subscriptions `dev` 为 `d3f549f`，genui `dev` 为 `2597912`，spend `feature/principal-budget-webdav` 为 `a0d1648`，weknora `main` 为 `619c1d0`，at-file `dev` 为 `45a5cbe`，NAS `main` 为 `ef3b9eb`，品牌插件 `main` 为 `af49ba6`。Office `0.1.3` 和 better-sidebar `0.18.0-alpha.0` 是固定第三方安装包，没有自有源码提交，以本节上方 SHA-256 和实际安装包为恢复依据。
