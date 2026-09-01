@@ -34,6 +34,29 @@ function findFrom(start: string): string | null {
   }
 }
 
+function findOwningDshRoot(start: string): string | null {
+  let directory = path.resolve(start);
+  for (;;) {
+    const direct = dshPackageRoot(directory);
+    if (direct !== null) return direct;
+    const parent = path.dirname(directory);
+    if (parent === directory) return null;
+    directory = parent;
+  }
+}
+
+function runtimeEntrypoints(): string[] {
+  const entrypoints = typeof process.argv[1] === 'string' ? [process.argv[1]] : [];
+  if (process.platform === 'linux') {
+    try {
+      entrypoints.push(...readFileSync('/proc/self/cmdline', 'utf8').split('\0').slice(1));
+    } catch {
+      // Linux environments may mount procfs without exposing this process's command line.
+    }
+  }
+  return [...new Set(entrypoints.filter((entrypoint) => entrypoint !== ''))];
+}
+
 function findConfiguredRoot(configured: string): string | null {
   const resolved = path.resolve(configured);
   return dshPackageRoot(resolved)
@@ -41,14 +64,15 @@ function findConfiguredRoot(configured: string): string | null {
 }
 
 /** Resolve an explicit profile, running CLI, local, or global `@deepseek-ai/dsh` installation. */
-export function findDshRoot(explicit: string): string | null {
+export function findDshRoot(explicit: string, entrypoints = runtimeEntrypoints()): string | null {
   if (explicit !== '') {
     const fromExplicit = findConfiguredRoot(explicit);
     if (fromExplicit !== null) return fromExplicit;
   }
-  const entrypoint = process.argv[1];
-  if (typeof entrypoint === 'string' && entrypoint !== '') {
-    const fromEntrypoint = findFrom(path.dirname(entrypoint));
+  for (const entrypoint of entrypoints) {
+    const resolvedEntrypoint = path.resolve(entrypoint);
+    if (!existsSync(resolvedEntrypoint)) continue;
+    const fromEntrypoint = findOwningDshRoot(path.dirname(resolvedEntrypoint));
     if (fromEntrypoint !== null) return fromEntrypoint;
   }
   try {

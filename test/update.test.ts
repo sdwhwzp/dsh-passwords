@@ -151,10 +151,10 @@ function setup(root: string, autoEnabled: boolean, nowRef: { value: number }, re
   return { engine, db, ops, calls, restarts: () => restarts, setRestartAllowed: (allowed: boolean) => { restartAllowed = allowed; } };
 }
 
-test('test package flow targets 2.6.12 from a 2.6.11 baseline', () => {
+test('test package flow targets 2.6.13 from a 2.6.12 baseline', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
-  assert.equal(pkg.version, '2.6.12');
-  assert.equal(compareVersions(pkg.version, '2.6.11'), 1);
+  assert.equal(pkg.version, '2.6.13');
+  assert.equal(compareVersions(pkg.version, '2.6.12'), 1);
 });
 
 test('source archives without .git still use the npm update runtime', () => {
