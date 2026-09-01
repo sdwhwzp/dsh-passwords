@@ -151,10 +151,10 @@ function setup(root: string, autoEnabled: boolean, nowRef: { value: number }, re
   return { engine, db, ops, calls, restarts: () => restarts, setRestartAllowed: (allowed: boolean) => { restartAllowed = allowed; } };
 }
 
-test('test package flow targets 2.6.14 from a 2.6.13 baseline', () => {
+test('test package flow targets 2.6.15 from a 2.6.14 baseline', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
-  assert.equal(pkg.version, '2.6.14');
-  assert.equal(compareVersions(pkg.version, '2.6.13'), 1);
+  assert.equal(pkg.version, '2.6.15');
+  assert.equal(compareVersions(pkg.version, '2.6.14'), 1);
 });
 
 test('Harness peer and compiler dependencies stay pinned to Alpha.3', () => {

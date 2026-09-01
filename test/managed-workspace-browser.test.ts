@@ -48,30 +48,42 @@ async function runScenario(
     child: string;
     outside: string;
     shared: string;
+    ownedLocal: string;
+    otherLocal: string;
     escapedLink: string | null;
     upstreamCalls: Array<{ method: string; payload: Record<string, unknown> }>;
+    localWorkspaceOwned(candidate: string): boolean;
     request(method: string, payload: Record<string, unknown>): Promise<GatewayResponse>;
+    otherRequest(method: string, payload: Record<string, unknown>): Promise<GatewayResponse>;
+    adminRequest(method: string, payload: Record<string, unknown>): Promise<GatewayResponse>;
   }) => Promise<void>,
 ): Promise<void> {
   const tempDir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-managed-browser-'));
   const rootPath = path.join(tempDir, 'managed', 'u2');
   const outsidePath = path.join(tempDir, 'outside');
   const sharedPath = path.join(tempDir, 'shared');
+  const ownedLocalPath = path.join(tempDir, 'local-workspaces', 'owned');
+  const otherLocalPath = path.join(tempDir, 'local-workspaces', 'other');
   mkdirSync(path.join(rootPath, 'projects'), { recursive: true });
   mkdirSync(outsidePath, { recursive: true });
   mkdirSync(sharedPath, { recursive: true });
+  mkdirSync(ownedLocalPath, { recursive: true });
+  mkdirSync(otherLocalPath, { recursive: true });
   const root = realpathSync(rootPath);
   const child = path.join(root, 'projects');
   const outside = realpathSync(outsidePath);
   const shared = realpathSync(sharedPath);
+  const ownedLocal = realpathSync(ownedLocalPath);
+  const otherLocal = realpathSync(otherLocalPath);
   const escapedLink = process.platform === 'win32' ? null : path.join(root, 'escaped-link');
   if (escapedLink !== null) symlinkSync(outside, escapedLink, 'dir');
 
   const dbPath = path.join(tempDir, 'data', 'platform.db');
   const db = new Database(dbPath, createFieldCrypto('test-key', 'test-key'));
   db.init();
-  db.createUser('admin', '$2a$10$dummyhashdummyhashdummyhashdu', 'admin');
+  const admin = db.createUser('admin', '$2a$10$dummyhashdummyhashdummyhashdu', 'admin');
   const user = db.createUser('subuser', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  const otherUser = db.createUser('other-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setManagedWorkspace(user.id, root);
   db.setPermissions(user.id, {
     allowedFolders: [root, shared],
@@ -83,6 +95,28 @@ async function runScenario(
     banned: false,
     sandboxMode: 'workspace-write',
     disabledSessions: [],
+  });
+  db.createLocalWorkspace({
+    id: 'local-owned',
+    userId: user.id,
+    token: 'owned-local-workspace-token',
+    deviceName: 'DESKTOP-OWNED',
+    workspaceName: 'owned-project',
+    remoteRoot: 'C:\\owned-project',
+    placeholderPath: ownedLocal,
+    platform: 'win32',
+    shellEnabled: true,
+  });
+  db.createLocalWorkspace({
+    id: 'local-other',
+    userId: otherUser.id,
+    token: 'other-local-workspace-token',
+    deviceName: 'DESKTOP-OTHER',
+    workspaceName: 'other-project',
+    remoteRoot: 'C:\\other-project',
+    placeholderPath: otherLocal,
+    platform: 'win32',
+    shellEnabled: true,
   });
 
   const upstreamCalls: Array<{ method: string; payload: Record<string, unknown> }> = [];
@@ -178,6 +212,18 @@ async function runScenario(
             title: path.basename(shared),
             sessionIds: [],
           },
+          {
+            workspaceId: 'workspace-local-owned',
+            path: ownedLocal,
+            title: 'owned-project · DESKTOP-OWNED',
+            sessionIds: ['owned-local-session'],
+          },
+          {
+            workspaceId: 'workspace-local-other',
+            path: otherLocal,
+            title: 'other-project · DESKTOP-OTHER',
+            sessionIds: ['other-local-session'],
+          },
         ];
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(rpcResponse(envelope.rpcId, { workspaces, archivedSessionIds: [] }));
@@ -219,8 +265,22 @@ async function runScenario(
     config.jwtSecret,
     { expiresIn: '12h' },
   );
+  const adminToken = jwt.sign(
+    { sub: String(admin.id), username: admin.username, cv: 0 },
+    config.jwtSecret,
+    { expiresIn: '12h' },
+  );
+  const otherToken = jwt.sign(
+    { sub: String(otherUser.id), username: otherUser.username, cv: 0 },
+    config.jwtSecret,
+    { expiresIn: '12h' },
+  );
 
-  const request = (method: string, payload: Record<string, unknown>): Promise<GatewayResponse> =>
+  const authenticatedRequest = (
+    authToken: string,
+    method: string,
+    payload: Record<string, unknown>,
+  ): Promise<GatewayResponse> =>
     new Promise((resolve, reject) => {
       const alphaPayload = method.includes('/')
         ? {
@@ -242,7 +302,7 @@ async function runScenario(
           method: 'POST',
           path: `/api/${method}`,
           headers: {
-            cookie: `dsh_gateway_token=${token}`,
+            cookie: `dsh_gateway_token=${authToken}`,
             'content-type': 'application/json',
             'content-length': String(Buffer.byteLength(body)),
           },
@@ -261,9 +321,28 @@ async function runScenario(
       req.on('error', reject);
       req.end(body);
     });
+  const request = (method: string, payload: Record<string, unknown>) =>
+    authenticatedRequest(token, method, payload);
+  const otherRequest = (method: string, payload: Record<string, unknown>) =>
+    authenticatedRequest(otherToken, method, payload);
+  const adminRequest = (method: string, payload: Record<string, unknown>) =>
+    authenticatedRequest(adminToken, method, payload);
 
   try {
-    await run({ root, child, outside, shared, escapedLink, upstreamCalls, request });
+    await run({
+      root,
+      child,
+      outside,
+      shared,
+      ownedLocal,
+      otherLocal,
+      escapedLink,
+      upstreamCalls,
+      localWorkspaceOwned: (candidate) => db.localWorkspaceOwnerForPath(candidate) === user.id,
+      request,
+      otherRequest,
+      adminRequest,
+    });
   } finally {
     await close(gateway);
     await close(upstream);
@@ -338,6 +417,53 @@ test('subuser can create, adopt, and remove a private workspace registration but
       upstreamCalls.filter((call) => call.method === 'workspace.delete').length,
       deleteCallsBeforeOutside,
     );
+  });
+});
+
+test('slash workspace deletion accepts only account-owned registrations and leaves local data intact', async () => {
+  await runScenario(async ({
+    ownedLocal,
+    otherLocal,
+    shared,
+    upstreamCalls,
+    localWorkspaceOwned,
+    request,
+    otherRequest,
+    adminRequest,
+  }) => {
+    const deleted = await request('workspace/delete', { workspaceId: 'workspace-local-owned' });
+    assert.equal(deleted.status, 200, String(deleted.body));
+    assert.deepEqual(upstreamCalls.at(-1), {
+      method: 'workspace/delete',
+      payload: { workspaceId: 'workspace-local-owned' },
+    });
+    assert.equal(existsSync(ownedLocal), true);
+    assert.equal(localWorkspaceOwned(ownedLocal), true);
+    assert.equal(upstreamCalls.some((call) => /^session[./]delete$/.test(call.method)), false);
+
+    const deleteCallsBeforeDenials = upstreamCalls.filter((call) => call.method === 'workspace/delete').length;
+    assert.equal((await request('workspace/delete', { workspaceId: 'workspace-local-other' })).status, 403);
+    assert.equal((await request('workspace/delete', {
+      workspaceId: 'workspace-local-other',
+      path: ownedLocal,
+    })).status, 403);
+    assert.equal((await request('workspace/delete', { workspaceId: 'workspace-shared' })).status, 403);
+    assert.equal(existsSync(otherLocal), true);
+    assert.equal(localWorkspaceOwned(otherLocal), false);
+    assert.equal(
+      upstreamCalls.filter((call) => call.method === 'workspace/delete').length,
+      deleteCallsBeforeDenials,
+    );
+
+    const localOnlyDeleted = await otherRequest('workspace/delete', {
+      workspaceId: 'workspace-local-other',
+    });
+    assert.equal(localOnlyDeleted.status, 200, String(localOnlyDeleted.body));
+    assert.equal(existsSync(otherLocal), true);
+
+    const adminDeleted = await adminRequest('workspace/delete', { workspaceId: 'workspace-shared' });
+    assert.equal(adminDeleted.status, 200, String(adminDeleted.body));
+    assert.equal(existsSync(shared), true);
   });
 });
 

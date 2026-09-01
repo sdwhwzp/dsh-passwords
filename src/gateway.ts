@@ -152,7 +152,7 @@ const DIRECTORY_PICKER_LIST_RE = /^\/api\/(?:host[.\/]listDirectory|directoryPic
 const DIRECTORY_PICKER_CREATE_RE = /^\/api\/(?:host[.\/]createDirectory|directoryPicker[.\/]createDirectory)$/;
 const DIRECTORY_PICKER_NATIVE_RE = /^\/api\/directoryPicker[.\/]pick$/;
 const WORKSPACE_CREATE_RE = /^\/api\/workspace[.\/]create$/;
-const WORKSPACE_DELETE_RE = /^\/api\/workspace[.\/]delete$/;
+const WORKSPACE_REMOVE_RE = /^\/api\/workspace[.\/](?:remove|delete)$/;
 const MODEL_CATALOG_RE = /^\/api\/(?:(?:llm|session)[.\/]models|session[.\/]modelCatalog)$/;
 const AGENT_PRESET_SELECT_RE = /^\/api\/agentPresets?[.\/]select$/;
 const SESSION_OPEN_WORKSPACE_PATH_RE = /^\/api\/session[.\/]openWorkspacePath$/;
@@ -1933,6 +1933,13 @@ export function createGatewayServer(
     });
   }
 
+  /** A subuser may remove only a registration backed by its own private workspace record. */
+  function workspaceRegistrationOwnedBy(userId: number, candidate: string): boolean {
+    const localOwner = db.localWorkspaceOwnerForPath(candidate);
+    if (localOwner !== null) return localOwner === userId;
+    return managedWorkspaceAccessFor(userId, candidate) === true;
+  }
+
   /** Canonicalize one existing or prospective path and confine it to this user's managed root. */
   function managedPathFor(userId: number, candidate: string): string | null {
     const managed = db.getManagedWorkspace(userId);
@@ -3455,9 +3462,11 @@ export function createGatewayServer(
         const grantedWorkspaceMutation = perms.allow_workspace_create && (
           isWorkspaceCreate(requestPath) || isWorkspaceDeleteOrRename(requestPath)
         );
+        const privateWorkspaceRemoval = WORKSPACE_REMOVE_RE.test(requestPath);
         if (
           isWorkspaceWrite(requestPath) &&
           !WORKSPACE_ARCHIVE_SESSION_RE.test(requestPath) &&
+          !privateWorkspaceRemoval &&
           !managedWorkspaceMutation &&
           !grantedWorkspaceMutation
         ) {
@@ -5252,7 +5261,7 @@ export function createGatewayServer(
         DIRECTORY_PICKER_LIST_RE.test(proxyPath) ||
         DIRECTORY_PICKER_CREATE_RE.test(proxyPath) ||
         isWorkspaceCreate(proxyPath) ||
-        isWorkspaceDeleteOrRename(proxyPath)
+        (isWorkspaceDeleteOrRename(proxyPath) && !WORKSPACE_REMOVE_RE.test(proxyPath))
       );
     const needsFolderCheck =
       reqAs.dshpwPerms !== undefined &&
@@ -5558,7 +5567,11 @@ export function createGatewayServer(
               return;
             }
           } else {
-            targetPath = extractPathFromBody(authorizationPayload);
+            // Removal is addressed by workspaceId. An extra caller-supplied path must not
+            // authorize a different registration after the Host strips unknown fields.
+            targetPath = WORKSPACE_REMOVE_RE.test(proxyPath)
+              ? null
+              : extractPathFromBody(authorizationPayload);
             if (targetPath === null) {
               const workspaceId = extractWorkspaceId(authorizationPayload);
               if (workspaceId !== null) {
@@ -5607,14 +5620,8 @@ export function createGatewayServer(
             reqAs.dshpwOpenWorkspacePath = canonical;
           }
           if (
-            /^\/api\/workspace[.\/](remove|delete)([.\/]|$)/.test(proxyPath) &&
-            (
-              targetPath === null ||
-              (
-                reqAs.dshpwManagedWorkspaceRoot !== undefined &&
-                managedPathFor(reqAs.dshpwUser!, targetPath) === null
-              )
-            )
+            WORKSPACE_REMOVE_RE.test(proxyPath) &&
+            (targetPath === null || !workspaceRegistrationOwnedBy(reqAs.dshpwUser!, targetPath))
           ) {
             upstreamReq.destroy();
             denyRequest(req, res, lang, t(lang, 'gw.workspaceDenied'));

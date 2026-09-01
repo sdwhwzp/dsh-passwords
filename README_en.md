@@ -35,7 +35,7 @@ Listed in [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek
 
 The owner can configure, per subuser, from the settings page:
 
-- **Workspace and session permissions**: the owner enables workspaces per subuser with switches; enabled workspaces expose active sessions by default, with per-session checkboxes to turn individual sessions off. Removing a workspace registration moves that user's sessions to Ungrouped without deleting them, and they remain readable while their directory stays authorized. Archived sessions are excluded from the settings list
+- **Workspace and session permissions**: the owner enables workspaces per subuser with switches; enabled workspaces expose active sessions by default, with per-session checkboxes to turn individual sessions off. A subuser may remove registrations backed by that account's managed directory or paired local computer, but not a shared grant or another account's private directory. Removal moves that user's sessions to Ungrouped without deleting directories, files, pairing records, or Session logs; the Sessions remain readable while their directory stays authorized. Archived sessions are excluded from the settings list
 - **Session and message isolation**: subusers only see sessions in enabled workspaces plus their own Ungrouped sessions. Their archived sessions remain readable because archive state affects organization, not account ownership. Messages are limited to broadcasts, messages addressed to them, and messages they sent
 - **DM-by-default messages**: subuser messages go to the owner by default; broadcasting is owner-only and must be explicitly chosen
 - **Hourly token limit** and **daily usage-time limit**: requests are rejected once the cap is hit
@@ -329,6 +329,10 @@ The UI is bilingual (Chinese/English) and follows dsh's language setting:
 - **CLI**: follows the `LANG` / `LC_ALL` environment variables (`en` prefix = English).
 
 ## Release notes
+
+### v2.6.15 (2026-09-01)
+
+- Allows a subuser to remove its own managed or paired-local Workspace registration through the newer `/api/workspace/delete` endpoint. Shared grants and another account's private directories remain denied; physical directories, files, local pairing records, and Sessions stay intact. Owner deletion semantics are unchanged.
 
 ### v2.6.14 (2026-09-01)
 
