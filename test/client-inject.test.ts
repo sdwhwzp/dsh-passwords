@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { Context, Service } from '@deepseek-ai/cordis';
 import { inject } from '../src/client/inject.ts';
-import { resolveDshPasswordsClient } from '../src/client/dsh-passwords-client.ts';
+import { loadDshPasswordsState, resolveDshPasswordsClient } from '../src/client/dsh-passwords-client.ts';
 
 test('browser entrypoint can read a sibling-provided Remote service through Cordis v4 injection', async (t) => {
   const root = new Context();
@@ -46,7 +46,10 @@ test('mounted password namespace is retained through an exact nested inject', as
 
   const dshPasswords = {
     async state() {
-      return { me: { username: 'admin', role: 'admin' as const }, users: [] };
+      return {
+        ok: true as const,
+        value: { me: { username: 'admin', role: 'admin' as const }, users: [] },
+      };
     },
   };
   let disposeCalls = 0;
@@ -93,7 +96,7 @@ test('mounted password namespace is retained through an exact nested inject', as
         /cannot get property "remote\.dshPasswords" without inject/,
       );
       const client = await resolveDshPasswordsClient(ctx);
-      deferredLoad = () => client.state();
+      deferredLoad = () => loadDshPasswordsState(client);
       return disposeRemote;
     },
   });
@@ -107,8 +110,27 @@ test('mounted password namespace is retained through an exact nested inject', as
   assert.equal(disposeCalls, 1);
 });
 
+test('password state loader rejects a Remote failure instead of presenting an empty account', async () => {
+  const client = {
+    state: async () => ({
+      ok: false as const,
+      error: { code: 'forbidden', message: 'principal required', details: { retryable: false } },
+    }),
+  };
+  await assert.rejects(
+    loadDshPasswordsState(client),
+    (error: Error & { code?: string; details?: unknown }) => {
+      assert.equal(error.message, 'principal required');
+      assert.equal(error.code, 'forbidden');
+      assert.deepEqual(error.details, { retryable: false });
+      return true;
+    },
+  );
+});
+
 test('browser entrypoint returns the mounted Remote disposer', () => {
   const source = readFileSync(new URL('../src/client/index.tsx', import.meta.url), 'utf8');
   assert.match(source, /const disposeRemote = await remote\.\$mount\(DSH_PASSWORDS_REMOTE\)/);
+  assert.match(source, /loadState: \(\) => loadDshPasswordsState\(dshPasswords\)/);
   assert.match(source, /return disposeRemote;/);
 });

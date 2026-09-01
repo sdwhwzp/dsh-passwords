@@ -101,6 +101,17 @@ test('settings card renders account and patch controls for a healthy response', 
   assert.doesNotMatch(card.text(), /card-crashed/);
 });
 
+test('settings card reports degraded remote settings when every patch flag is false', async (t) => {
+  const card = await mountCard(t, {}, {
+    '/api/dsh-passwords/patch/status': {
+      status: { settingsHostMode: false, whitelist: false, workspaceSearch: false },
+    },
+  });
+  assert.match(card.text(), /test-admin/);
+  assert.match(card.text(), /patchBad/);
+  assert.doesNotMatch(card.text(), /patchUnknown|card-crashed/);
+});
+
 test('settings card synchronizes the large request body permission to the visible checkbox and save API', async (t) => {
   const card = await mountCard(t, {
     '/gateway/api/permissions': () => Response.json({ ok: true }),

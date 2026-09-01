@@ -40,9 +40,19 @@ export const DSH_PASSWORDS_REMOTE = {
   }],
 };
 
+export interface DshPasswordsRemoteFailure {
+  code: string;
+  message: string;
+  details?: unknown;
+}
+
+export type DshPasswordsRemoteResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; error: DshPasswordsRemoteFailure };
+
 export interface DshPasswordsRemoteClient {
   $mount(contribution: typeof DSH_PASSWORDS_REMOTE): Promise<() => void | Promise<void>>;
   dshPasswords: {
-    state(): Promise<StateData>;
+    state(): Promise<DshPasswordsRemoteResult<StateData>>;
   };
 }

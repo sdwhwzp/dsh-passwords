@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { applyRemotePatch, patchStatus, rollbackPatch } from '../src/patch.js';
+import { applyRemotePatch, findDshRoot, patchStatus, rollbackPatch } from '../src/patch.js';
 
 function nativeRoot(version = '0.1.2-alpha.1'): string {
   const root = mkdtempSync(path.join(os.tmpdir(), 'dshpw-native-'));
@@ -40,6 +40,35 @@ test('pre-alpha installations fail closed instead of rewriting removed packages'
     });
     assert.equal(rollbackPatch(root), 'missing');
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('profile configuration resolves the package owning the running dsh CLI', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'dshpw-split-runtime-'));
+  const profile = path.join(root, 'profile');
+  const staleRuntime = path.join(root, 'node_modules', '@deepseek-ai', 'dsh');
+  const runtime = path.join(root, 'runtime', 'node_modules', '@deepseek-ai', 'dsh');
+  const entrypoint = path.join(runtime, 'lib', 'bin.js');
+  const previousEntrypoint = process.argv[1];
+  try {
+    mkdirSync(profile, { recursive: true });
+    mkdirSync(staleRuntime, { recursive: true });
+    mkdirSync(path.dirname(entrypoint), { recursive: true });
+    writeFileSync(path.join(profile, 'package.json'), `${JSON.stringify({ private: true })}\n`);
+    writeFileSync(
+      path.join(staleRuntime, 'package.json'),
+      `${JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.1-alpha.1' })}\n`,
+    );
+    writeFileSync(
+      path.join(runtime, 'package.json'),
+      `${JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.2-alpha.1' })}\n`,
+    );
+    writeFileSync(entrypoint, '');
+    process.argv[1] = entrypoint;
+    assert.equal(findDshRoot(profile), runtime);
+  } finally {
+    process.argv[1] = previousEntrypoint;
     rmSync(root, { recursive: true, force: true });
   }
 });

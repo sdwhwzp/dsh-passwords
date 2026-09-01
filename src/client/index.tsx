@@ -19,7 +19,7 @@ import { ManagedFilesLauncher } from './managed-files-launcher';
 import { zh, en } from './locales';
 import { AccountLogoutRow, installDesktopLauncherSuppression } from './account-logout';
 import { DSH_PASSWORDS_REMOTE, type DshPasswordsRemoteClient } from './remote';
-import { resolveDshPasswordsClient } from './dsh-passwords-client';
+import { loadDshPasswordsState, resolveDshPasswordsClient } from './dsh-passwords-client';
 
 export { inject } from './inject';
 
@@ -241,7 +241,7 @@ export async function apply(ctx: ClientContext): Promise<() => void | Promise<vo
         key: 'dsh-passwords-card',
         order: 55,
         locale: 'dshpw',
-        inject: () => ({ loadState: () => dshPasswords.state() }),
+        inject: () => ({ loadState: () => loadDshPasswordsState(dshPasswords) }),
       },
       DshPasswordsCard,
     ),
