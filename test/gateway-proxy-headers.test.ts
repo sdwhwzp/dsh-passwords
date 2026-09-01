@@ -12,10 +12,11 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { spawn } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import jwt from 'jsonwebtoken';
 
 import { createGatewayServer } from '../src/gateway.js';
@@ -116,6 +117,7 @@ const MODELS_RESPONSE = {
 };
 
 let tempDir: string;
+let sidebarWorkspace: string;
 let db: Database;
 let auth: AuthService;
 let upstream: http.Server;
@@ -211,6 +213,7 @@ function startMockUpstream(): Promise<http.Server> {
             value: {
               items: [
                 { sessionId: 's-owned', cwd: '/workspaces/a' },
+                { sessionId: 's-sidebar-owned', cwd: sidebarWorkspace },
                 { sessionId: 's-other', cwd: '/workspaces/b' },
                 { sessionId: 's-legacy-admin', cwd: '/workspaces/a' },
               ],
@@ -327,6 +330,15 @@ function startMockUpstream(): Promise<http.Server> {
         }
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ ok: true, history: 'x'.repeat(16 * 1024) }));
+      } else if (
+        (req.url ?? '').startsWith('/sidebar/file') &&
+        new URL(req.url ?? '/', 'http://localhost').searchParams.get('path')?.endsWith('/admin-page.html') === true
+      ) {
+        res.writeHead(200, {
+          'content-type': 'text/html; charset=utf-8',
+          'content-disposition': 'attachment; filename="admin-page.html"',
+        });
+        res.end('<!doctype html><html><head><title>admin file</title></head><body>unchanged</body></html>');
       } else if ((req.url ?? '').startsWith('/api/dsh-ssh/upload')) {
         uploadRequestsSeen += 1;
         let bytes = 0;
@@ -388,6 +400,24 @@ function gatewayReq(
     req.on('error', reject);
     req.end(body);
   });
+}
+
+/** Build one encoded sidebar media URL from the filesystem-backed test workspace. */
+function sidebarFileUrl(
+  sessionId: string,
+  filePath: string,
+  options: { cwd?: string | null; download?: boolean } = {},
+): string {
+  const params = new URLSearchParams({ sessionId, path: filePath });
+  if (options.cwd !== null) params.set('cwd', options.cwd ?? sidebarWorkspace);
+  if (options.download !== false) params.set('download', '1');
+  return `/sidebar/file?${params.toString()}`;
+}
+
+/** Encode one better-sidebar HTML document or relative asset URL. */
+function sidebarHtmlUrl(sessionId: string, filePath: string): string {
+  const segments = filePath.split(/[\\/]+/).filter((segment) => segment !== '');
+  return `/sidebar/html/${encodeURIComponent(sessionId)}/${segments.map(encodeURIComponent).join('/')}`;
 }
 
 /** Send a chunked carrier without retaining a full request-sized fixture buffer. */
@@ -473,13 +503,27 @@ function assertNoClTe(rawHeaders: string[]): void {
 
 before(async () => {
   tempDir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-test-'));
+  sidebarWorkspace = path.join(tempDir, 'sidebar-workspace');
+  mkdirSync(path.join(sidebarWorkspace, 'reports'), { recursive: true });
+  writeFileSync(path.join(sidebarWorkspace, 'reports', 'result.xlsx'), 'spreadsheet bytes');
+  writeFileSync(
+    path.join(sidebarWorkspace, 'page.html'),
+    '<!doctype html><html><head><title>workspace file</title></head><body>unchanged</body></html>',
+  );
+  writeFileSync(path.join(sidebarWorkspace, 'shell.html'), USAGE_HTML_BODY);
+  mkdirSync(path.join(sidebarWorkspace, 'preview'), { recursive: true });
+  writeFileSync(
+    path.join(sidebarWorkspace, 'preview', 'index.html'),
+    '<!doctype html><html><head><title>preview</title></head><body><img src="asset.png"></body></html>',
+  );
+  writeFileSync(path.join(sidebarWorkspace, 'preview', 'asset.png'), 'PNG fixture');
   db = new Database(path.join(tempDir, 'test.db'), createFieldCrypto('testkey', 'testkey'));
   db.init(); // 建表（构造函数不建表）
   const user = db.createUser('admin', '$2a$10$dummyhashdummyhashdummyhashdu', 'admin');
   const customer = db.createUser('customer', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   customerId = customer.id;
   db.setPermissions(customer.id, {
-    allowedFolders: ['/workspaces/a'],
+    allowedFolders: ['/workspaces/a', sidebarWorkspace],
     hourlyTokenLimit: null,
     dailyMinutesLimit: null,
     monthlyBudgetMicros: 0,
@@ -490,6 +534,7 @@ before(async () => {
     disabledSessions: [],
   });
   db.claimSessionOwner('s-owned', customer.id);
+  db.claimSessionOwner('s-sidebar-owned', customer.id);
   db.claimSessionOwner('s-archived', customer.id);
   db.claimSessionOwner('s-other', user.id);
   const secondCustomer = db.createUser('customer-2', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
@@ -698,6 +743,333 @@ test('dsh-at-file：子用户只读取获准工作区设置且不能修改共享
     'content-type': 'application/json',
   }, JSON.stringify({ update: { field: 'enabled', value: false } }));
   assert.equal(update.status, 403);
+});
+
+test('better-sidebar 文件下载绑定到子用户自己的 Session 工作区', async () => {
+  const registry = await gatewayReq('POST', '/api/workspace.list', {
+    cookie: customerCookie,
+    'content-type': 'application/json',
+  }, '{}');
+  assert.equal(registry.status, 200);
+
+  const reportPath = path.join(sidebarWorkspace, 'reports', 'result.xlsx');
+  const own = await gatewayReq(
+    'GET',
+    sidebarFileUrl('s-sidebar-owned', reportPath),
+    { cookie: customerCookie },
+  );
+  assert.equal(own.status, 200);
+  assert.equal(own.body, 'spreadsheet bytes');
+  assert.equal(rawHeader(own.rawHeaders, 'content-type'), 'application/octet-stream');
+  assert.match(rawHeader(own.rawHeaders, 'content-disposition'), /^attachment;/);
+  assert.match(rawHeader(own.rawHeaders, 'cache-control'), /(?:^|,)\s*private(?:,|$)/);
+  assert.match(rawHeader(own.rawHeaders, 'cache-control'), /(?:^|,)\s*no-store(?:,|$)/);
+  assert.match(rawHeader(own.rawHeaders, 'vary'), /(?:^|,)\s*Cookie\s*(?:,|$)/i);
+
+  const otherSession = await gatewayReq(
+    'GET',
+    '/sidebar/file?sessionId=s-other&cwd=%2Fworkspaces%2Fb&path=%2Fworkspaces%2Fb%2Fsecret.md&download=1',
+    { cookie: customerCookie },
+  );
+  assert.equal(otherSession.status, 403);
+
+  const forgedCwd = await gatewayReq(
+    'GET',
+    '/sidebar/file?sessionId=s-owned&cwd=%2Fworkspaces%2Fb&path=%2Fworkspaces%2Fb%2Fsecret.md&download=1',
+    { cookie: customerCookie },
+  );
+  assert.equal(forgedCwd.status, 403);
+
+  const invalidCwd = await gatewayReq(
+    'GET',
+    sidebarFileUrl('s-sidebar-owned', reportPath, { cwd: '/invalid\0' }),
+    { cookie: customerCookie },
+  );
+  assert.equal(invalidCwd.status, 403);
+
+  const escapedPath = await gatewayReq(
+    'GET',
+    '/sidebar/file?sessionId=s-owned&cwd=%2Fworkspaces%2Fa&path=%2Fworkspaces%2Fb%2Fsecret.md&download=1',
+    { cookie: customerCookie },
+  );
+  assert.equal(escapedPath.status, 403);
+
+  const missingCwd = await gatewayReq(
+    'GET',
+    sidebarFileUrl('s-sidebar-owned', reportPath, { cwd: null }),
+    { cookie: customerCookie },
+  );
+  assert.equal(missingCwd.status, 200);
+  assert.equal(missingCwd.body, 'spreadsheet bytes');
+
+  const requestBody = await gatewayReq(
+    'GET',
+    sidebarFileUrl('s-sidebar-owned', reportPath),
+    {
+      cookie: customerCookie,
+      'content-type': 'application/octet-stream',
+      'content-length': String(Buffer.byteLength('unexpected body')),
+    },
+    'unexpected body',
+  );
+  assert.equal(requestBody.status, 413);
+
+  const unsupportedMethod = await gatewayReq(
+    'POST',
+    sidebarFileUrl('s-sidebar-owned', reportPath),
+    { cookie: customerCookie },
+  );
+  assert.equal(unsupportedMethod.status, 403);
+
+  const relativePath = await gatewayReq(
+    'GET',
+    '/sidebar/file?sessionId=s-owned&cwd=%2Fworkspaces%2Fa&path=reports%2Fresult.xlsx&download=1',
+    { cookie: customerCookie },
+  );
+  assert.equal(relativePath.status, 403);
+
+  for (const route of ['/sidebar/file/child', '/sidebar%2Ffile%2Fchild']) {
+    const prefixedBypass = await gatewayReq(
+      'GET',
+      `${route}?sessionId=s-other&cwd=%2Fetc&path=%2Fetc%2Fpasswd&download=1`,
+      { cookie: customerCookie },
+    );
+    assert.equal(prefixedBypass.status, 403, route);
+
+    const ownedPrefix = await gatewayReq(
+      'GET',
+      `${route}?${new URLSearchParams({
+        sessionId: 's-sidebar-owned',
+        cwd: sidebarWorkspace,
+        path: reportPath,
+        download: '1',
+      }).toString()}`,
+      { cookie: customerCookie },
+    );
+    assert.equal(ownedPrefix.status, 403, `${route} must not alias the exact media route`);
+  }
+});
+
+test('better-sidebar 文件下载对未登录请求返回 JSON，管理员保持运维访问', async () => {
+  const unauthenticated = await gatewayReq(
+    'GET',
+    '/sidebar/file?sessionId=s-owned&cwd=%2Fworkspaces%2Fa&path=%2Fworkspaces%2Fa%2Freport.md',
+    { cookie: '' },
+  );
+  assert.equal(unauthenticated.status, 401);
+  assert.equal(JSON.parse(unauthenticated.body).code, 'UNAUTHENTICATED');
+
+  const admin = await gatewayReq(
+    'GET',
+    '/sidebar/file?sessionId=unknown&cwd=%2Fetc&path=%2Fetc%2Fhosts&download=1',
+  );
+  assert.equal(admin.status, 200);
+
+  const adminHtml = await gatewayReq(
+    'GET',
+    '/sidebar/file?sessionId=unknown&cwd=%2Ftmp&path=%2Ftmp%2Fadmin-page.html&download=1',
+  );
+  assert.equal(adminHtml.status, 200);
+  assert.match(adminHtml.body, /<title>admin file<\/title>/);
+  assert.doesNotMatch(adminHtml.body, /randomUUID/);
+  assert.match(rawHeader(adminHtml.rawHeaders, 'cache-control'), /(?:^|,)\s*private(?:,|$)/);
+  assert.match(rawHeader(adminHtml.rawHeaders, 'vary'), /(?:^|,)\s*Cookie\s*(?:,|$)/i);
+});
+
+test('better-sidebar 文件下载拒绝管理员已关闭的子用户 Session', async () => {
+  const registry = await gatewayReq('POST', '/api/workspace.list', {
+    cookie: customerCookie,
+    'content-type': 'application/json',
+  }, '{}');
+  assert.equal(registry.status, 200);
+  const current = db.getPermissions(customerId)!;
+  db.setPermissions(current.user_id, {
+    allowedFolders: current.allowed_folders,
+    hourlyTokenLimit: current.hourly_token_limit,
+    dailyMinutesLimit: current.daily_minutes_limit,
+    monthlyBudgetMicros: current.monthly_budget_micros,
+    allowUpload: current.allow_upload,
+    allowGitDownload: current.allow_git_download,
+    banned: current.banned,
+    sandboxMode: current.sandbox_mode,
+    disabledSessions: ['s-sidebar-owned'],
+  });
+  try {
+    const response = await gatewayReq(
+      'GET',
+      sidebarFileUrl('s-sidebar-owned', path.join(sidebarWorkspace, 'reports', 'result.xlsx'), {
+        download: false,
+      }),
+      { cookie: customerCookie },
+    );
+    assert.equal(response.status, 403);
+  } finally {
+    db.setPermissions(current.user_id, {
+      allowedFolders: current.allowed_folders,
+      hourlyTokenLimit: current.hourly_token_limit,
+      dailyMinutesLimit: current.daily_minutes_limit,
+      monthlyBudgetMicros: current.monthly_budget_micros,
+      allowUpload: current.allow_upload,
+      allowGitDownload: current.allow_git_download,
+      banned: current.banned,
+      sandboxMode: current.sandbox_mode,
+      disabledSessions: current.disabled_sessions,
+    });
+  }
+});
+
+test('better-sidebar HTML 文件下载保持原始字节且仍隔离浏览器缓存', async () => {
+  const registry = await gatewayReq('POST', '/api/workspace.list', {
+    cookie: customerCookie,
+    'content-type': 'application/json',
+  }, '{}');
+  assert.equal(registry.status, 200);
+  const response = await gatewayReq(
+    'GET',
+    sidebarFileUrl('s-sidebar-owned', path.join(sidebarWorkspace, 'page.html')),
+    { cookie: customerCookie },
+  );
+  assert.equal(response.status, 200);
+  assert.equal(
+    response.body,
+    '<!doctype html><html><head><title>workspace file</title></head><body>unchanged</body></html>',
+  );
+  assert.doesNotMatch(response.body, /randomUUID/);
+  assert.equal(rawHeader(response.rawHeaders, 'content-type'), 'text/html');
+  assert.match(rawHeader(response.rawHeaders, 'content-disposition'), /^attachment;/);
+  assert.match(rawHeader(response.rawHeaders, 'cache-control'), /(?:^|,)\s*no-store(?:,|$)/);
+  assert.match(rawHeader(response.rawHeaders, 'vary'), /(?:^|,)\s*Cookie\s*(?:,|$)/i);
+
+  const nonAttachment = await gatewayReq(
+    'GET',
+    sidebarFileUrl('s-sidebar-owned', path.join(sidebarWorkspace, 'shell.html'), { download: false }),
+    { cookie: customerCookie },
+  );
+  assert.equal(nonAttachment.status, 200);
+  assert.match(nonAttachment.body, /randomUUID/);
+  assert.doesNotMatch(nonAttachment.body, /@linxin666\/dsh-usage/);
+});
+
+test('better-sidebar HTML 预览及相对资源绑定到子用户自己的 Session', async () => {
+  const registry = await gatewayReq('POST', '/api/workspace.list', {
+    cookie: customerCookie,
+    'content-type': 'application/json',
+  }, '{}');
+  assert.equal(registry.status, 200);
+
+  const documentPath = path.join(sidebarWorkspace, 'preview', 'index.html');
+  const own = await gatewayReq(
+    'GET',
+    sidebarHtmlUrl('s-sidebar-owned', documentPath),
+    { cookie: customerCookie },
+  );
+  assert.equal(own.status, 200);
+  assert.match(own.body, /<title>preview<\/title>/);
+  assert.doesNotMatch(own.body, /randomUUID/);
+  assert.equal(rawHeader(own.rawHeaders, 'content-type'), 'text/html; charset=utf-8');
+  assert.match(rawHeader(own.rawHeaders, 'content-security-policy'), /^sandbox /);
+  assert.equal(rawHeader(own.rawHeaders, 'referrer-policy'), 'no-referrer');
+  assert.match(rawHeader(own.rawHeaders, 'cache-control'), /(?:^|,)\s*private(?:,|$)/);
+  assert.match(rawHeader(own.rawHeaders, 'vary'), /(?:^|,)\s*Cookie\s*(?:,|$)/i);
+
+  const asset = await gatewayReq(
+    'GET',
+    sidebarHtmlUrl('s-sidebar-owned', path.join(sidebarWorkspace, 'preview', 'asset.png')),
+    { cookie: customerCookie },
+  );
+  assert.equal(asset.status, 200);
+  assert.equal(asset.body, 'PNG fixture');
+  assert.equal(rawHeader(asset.rawHeaders, 'content-type'), 'image/png');
+
+  const otherSession = await gatewayReq(
+    'GET',
+    sidebarHtmlUrl('s-other', documentPath),
+    { cookie: customerCookie },
+  );
+  assert.equal(otherSession.status, 403);
+
+  const outside = path.join(tempDir, 'outside-preview.html');
+  writeFileSync(outside, '<!doctype html><title>other account</title>');
+  const escaped = await gatewayReq(
+    'GET',
+    sidebarHtmlUrl('s-sidebar-owned', outside),
+    { cookie: customerCookie },
+  );
+  assert.equal(escaped.status, 403);
+  assert.doesNotMatch(escaped.body, /other account/);
+
+  const encodedPrefix = sidebarHtmlUrl('s-sidebar-owned', documentPath)
+    .replace('/sidebar/html/', '/sidebar%2Fhtml/');
+  const encoded = await gatewayReq('GET', encodedPrefix, { cookie: customerCookie });
+  assert.equal(encoded.status, 403);
+
+  const unauthenticated = await gatewayReq('GET', sidebarHtmlUrl('s-sidebar-owned', documentPath), {
+    cookie: '',
+  });
+  assert.equal(unauthenticated.status, 401);
+
+  const body = 'unexpected body';
+  const withBody = await gatewayReq(
+    'GET',
+    sidebarHtmlUrl('s-sidebar-owned', documentPath),
+    {
+      cookie: customerCookie,
+      'content-type': 'application/octet-stream',
+      'content-length': String(Buffer.byteLength(body)),
+    },
+    body,
+  );
+  assert.equal(withBody.status, 413);
+});
+
+test('better-sidebar 文件读取拒绝离开会话工作区的符号链接', {
+  skip: process.platform === 'win32' ? 'Windows CI may not grant symlink creation' : false,
+}, async () => {
+  const outside = path.join(tempDir, 'other-account-secret.txt');
+  const linked = path.join(sidebarWorkspace, 'linked-secret.txt');
+  writeFileSync(outside, 'other account secret');
+  symlinkSync(outside, linked);
+
+  const response = await gatewayReq(
+    'GET',
+    sidebarFileUrl('s-sidebar-owned', linked),
+    { cookie: customerCookie },
+  );
+  assert.equal(response.status, 403);
+  assert.doesNotMatch(response.body, /other account secret/);
+});
+
+test('better-sidebar 文件读取以非阻塞方式拒绝 FIFO', {
+  skip: process.platform === 'win32' ? 'Windows does not provide mkfifo' : false,
+}, async () => {
+  const fifo = path.join(sidebarWorkspace, 'blocked-reader.fifo');
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn('mkfifo', [fifo], { stdio: 'ignore' });
+    child.once('error', reject);
+    child.once('exit', (code) => code === 0 ? resolve() : reject(new Error(`mkfifo exited ${String(code)}`)));
+  });
+  // If the gateway forgets O_NONBLOCK, its synchronous open waits for this independent
+  // writer and stalls the event loop for two seconds. The writer opens read/write so it
+  // also completes when the fixed gateway has already rejected and closed its read fd.
+  const writer = spawn('sh', ['-c', 'sleep 2; exec 3<> "$1"; sleep 0.1', 'sh', fifo], {
+    stdio: 'ignore',
+  });
+  const writerFinished = new Promise<void>((resolve, reject) => {
+    writer.once('error', reject);
+    writer.once('exit', () => resolve());
+  });
+
+  const started = Date.now();
+  const response = await gatewayReq(
+    'GET',
+    sidebarFileUrl('s-sidebar-owned', fifo),
+    { cookie: customerCookie },
+  );
+  const elapsed = Date.now() - started;
+  await writerFinished;
+
+  assert.equal(response.status, 403);
+  assert.ok(elapsed < 1_000, `FIFO open blocked the gateway for ${String(elapsed)}ms`);
 });
 
 test('dsh-at-file：搜索请求按 agentId 校验会话归属', async () => {

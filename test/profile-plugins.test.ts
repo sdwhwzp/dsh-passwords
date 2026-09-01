@@ -12,6 +12,13 @@ import {
   resolveProfilePlugins,
 } from '../scripts/profile-plugins.mjs';
 
+test('recorded deployment stack installs the dsh-web aggregate from the master subdirectory', () => {
+  const plugins = loadProfilePlugins(new URL('../scripts/profile-plugins.json', import.meta.url));
+  const web = plugins.find(plugin => plugin.name === '@linxin666/dsh-web-all');
+  assert.equal(web?.defaultSpecifier, 'github:sdwhwzp/dsh-web#master&path:/packages/dsh-web-all');
+  assert.deepEqual(web?.localCandidates, ['../dsh-web/packages/dsh-web-all']);
+});
+
 test('recorded deployment stack includes the WeKnora bundle and portable source', () => {
   const plugins = loadProfilePlugins(new URL('../scripts/profile-plugins.json', import.meta.url));
   const weknora = plugins.find(plugin => plugin.name === '@wxg-prc-cpg/dsh-weknora');

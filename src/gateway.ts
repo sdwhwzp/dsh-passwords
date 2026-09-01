@@ -13,6 +13,7 @@ import {
   createWriteStream,
   realpathSync,
   openSync,
+  readSync,
   fstatSync,
   closeSync,
   constants as fsConstants,
@@ -158,8 +159,12 @@ const AGENT_PRESET_SELECT_RE = /^\/api\/agentPresets?[.\/]select$/;
 const SESSION_OPEN_WORKSPACE_PATH_RE = /^\/api\/session[.\/]openWorkspacePath$/;
 const SESSION_SELECT_MODEL_RE = /^\/api\/session[.\/]selectModel$/;
 const WORKSPACE_ARCHIVE_SESSION_RE = /^\/api\/workspace[.\/]archiveSession$/;
+const SIDEBAR_FILE_RE = /^\/sidebar\/file(?:\/|$)/;
+const SIDEBAR_HTML_RE = /^\/sidebar\/html(?:\/|$)/;
 const PRINCIPAL_SCOPED_RESPONSE_RE = /^(?:\/api\/workspace[.\/]list|\/api\/session[.\/](?:list|search|history|page))$/;
 const MANAGED_FILE_UPLOAD_MAX_BYTES = 256 * 1024 * 1024;
+/** Match dsh-better-sidebar's default media ceiling while the gateway owns subuser reads. */
+const SIDEBAR_FILE_MAX_BYTES = 20 * 1024 * 1024;
 const MANAGED_FILE_LIST_MAX_ENTRIES = 1_000;
 const WORKSPACE_SNAPSHOT_REFRESH_INTERVAL_MS = 15_000;
 const WORKSPACE_SNAPSHOT_RETRY_DELAY_MS = 5_000;
@@ -176,6 +181,50 @@ const ADMIN_ONLY_CLIENT_ENTRY_IDS = new Set([
   'ui-cordis',
   '@deepseek-ai/dsh-client-ui-cordis',
 ]);
+
+/** Content types exposed by dsh-better-sidebar's media route. */
+const SIDEBAR_MEDIA_TYPES: Readonly<Record<string, string>> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.svg': 'image/svg+xml',
+  '.bmp': 'image/bmp',
+  '.ico': 'image/x-icon',
+  '.avif': 'image/avif',
+  '.pdf': 'application/pdf',
+  '.html': 'text/html',
+  '.htm': 'text/html',
+};
+
+/** Return the sidebar media type without trusting a caller-provided MIME value. */
+function sidebarMediaTypeForPath(filePath: string): string {
+  return SIDEBAR_MEDIA_TYPES[path.extname(filePath).toLowerCase()] ?? 'application/octet-stream';
+}
+
+/** Decode better-sidebar's path-scoped HTML preview URL. */
+function decodeSidebarHtmlRoute(pathname: string): { sessionId: string; filePath: string } | null {
+  const prefix = '/sidebar/html/';
+  if (!pathname.startsWith(prefix)) return null;
+  let segments: string[];
+  try {
+    segments = pathname.slice(prefix.length).split('/').map((segment) => decodeURIComponent(segment));
+  } catch {
+    return null;
+  }
+  const [sessionId, ...pathSegments] = segments;
+  if (sessionId === undefined || sessionId === '') return null;
+  const unc = pathSegments[0] === '';
+  const tail = unc ? pathSegments.slice(1) : pathSegments;
+  if (tail.length === 0 || tail.some((segment) => segment === '')) return null;
+  const filePath = unc
+    ? `//${tail.join('/')}`
+    : /^[A-Za-z]:$/.test(tail[0] ?? '')
+      ? tail.join('/')
+      : `/${tail.join('/')}`;
+  return path.isAbsolute(filePath) ? { sessionId, filePath } : null;
+}
 
 /** Background update polling does not count as interactive gateway activity. */
 export function isBackgroundUpdateRequest(gatePath: string): boolean {
@@ -2077,6 +2126,8 @@ export function createGatewayServer(
     return requestPath.startsWith('/api/') ||
       requestPath.startsWith('/aionui-panel/') ||
       requestPath.startsWith('/sidebar/api/') ||
+      SIDEBAR_FILE_RE.test(requestPath) ||
+      SIDEBAR_HTML_RE.test(requestPath) ||
       requestPath.startsWith('/describe-image/');
   }
 
@@ -3494,6 +3545,100 @@ export function createGatewayServer(
             return;
           }
         }
+        // better-sidebar previews and downloads use this route. Its cwd query is
+        // caller-controlled, so the gateway binds it to a trusted, owned Session and reads
+        // the authorized descriptor itself instead of making the shared Host reopen a path.
+        if (SIDEBAR_FILE_RE.test(requestPath)) {
+          if (rejectSidebarRequestBody(req, res, lang)) return;
+          if (
+            requestPath !== '/sidebar/file' ||
+            (req.method !== 'GET' && req.method !== 'HEAD')
+          ) {
+            denyRequest(req, res, lang, t(lang, 'gw.folderDenied'));
+            return;
+          }
+          const sessionId = parsed.searchParams.get('sessionId');
+          const requestedCwd = parsed.searchParams.get('cwd');
+          const requestedPath = parsed.searchParams.get('path');
+          if (
+            sessionId === null || sessionId === '' ||
+            (requestedCwd !== null && !path.isAbsolute(requestedCwd)) ||
+            requestedPath === null || !path.isAbsolute(requestedPath)
+          ) {
+            denyRequest(req, res, lang, t(lang, 'gw.folderDenied'));
+            return;
+          }
+          try {
+            await ensureSessionAccessSnapshot(sessionId);
+          } catch (error) {
+            console.warn(
+              '[dsh-passwords] sidebar 文件授权快照刷新失败:',
+              error instanceof Error ? error.message : String(error),
+            );
+            sendApiError(res, 502, 'UPSTREAM_UNAVAILABLE', 'workspace registry is unavailable');
+            return;
+          }
+          const trustedCwd = sessionCwdById.get(sessionId);
+          const canonicalCwd = trustedCwd === undefined ? null : canonicalCandidate(trustedCwd);
+          const canonicalRequestedCwd = requestedCwd === null ? null : canonicalCandidate(requestedCwd);
+          if (
+            !subuserCanAccessSession(user.userId, perms, sessionId) ||
+            canonicalCwd === null ||
+            (requestedCwd !== null && canonicalRequestedCwd !== canonicalCwd)
+          ) {
+            denyRequest(req, res, lang, t(lang, 'gw.folderDenied'));
+            return;
+          }
+          serveSubuserSidebarFile(
+            req,
+            res,
+            canonicalCwd,
+            requestedPath,
+            {
+              download: parsed.searchParams.get('download') === '1',
+              htmlPreview: false,
+            },
+          );
+          return;
+        }
+        // HTML previews encode the Session and absolute file path in the URL so relative
+        // assets retain the same scope. Decode that vocabulary locally, then apply the same
+        // owner and descriptor checks as the media route for every document and asset.
+        if (SIDEBAR_HTML_RE.test(requestPath)) {
+          if (rejectSidebarRequestBody(req, res, lang)) return;
+          if (req.method !== 'GET') {
+            denyRequest(req, res, lang, t(lang, 'gw.folderDenied'));
+            return;
+          }
+          const decoded = decodeSidebarHtmlRoute(parsed.pathname);
+          if (decoded === null) {
+            denyRequest(req, res, lang, t(lang, 'gw.folderDenied'));
+            return;
+          }
+          try {
+            await ensureSessionAccessSnapshot(decoded.sessionId);
+          } catch (error) {
+            console.warn(
+              '[dsh-passwords] sidebar HTML 授权快照刷新失败:',
+              error instanceof Error ? error.message : String(error),
+            );
+            sendApiError(res, 502, 'UPSTREAM_UNAVAILABLE', 'session registry is unavailable');
+            return;
+          }
+          const trustedCwd = sessionCwdById.get(decoded.sessionId);
+          if (
+            !subuserCanAccessSession(user.userId, perms, decoded.sessionId) ||
+            trustedCwd === undefined
+          ) {
+            denyRequest(req, res, lang, t(lang, 'gw.folderDenied'));
+            return;
+          }
+          serveSubuserSidebarFile(req, res, trustedCwd, decoded.filePath, {
+            download: false,
+            htmlPreview: true,
+          });
+          return;
+        }
         if (!isStaticAsset(requestPath) && !isPollingRequest(requestPath)) {
           // 配额计时从子用户“说第一句话”（发消息锚点）才开始：
           // 未使用过的子用户（无当日记录且非锚点请求）不创建记录、不受配额限制
@@ -4397,6 +4542,174 @@ export function createGatewayServer(
       pathAllowedFor(userId, cwd, perms.allowed_folders);
   }
 
+  /** Reject and drain bodies on sidebar read routes before they bypass the proxy carrier. */
+  function rejectSidebarRequestBody(req: Request, res: Response, lang: Lang): boolean {
+    const declaredLength = req.headers['content-length'];
+    const rejected = req.headers['transfer-encoding'] !== undefined || (
+      declaredLength !== undefined && (!/^\d+$/.test(declaredLength) || BigInt(declaredLength) > 0n)
+    );
+    if (!rejected) return false;
+    req.resume();
+    denyRequest(req, res, lang, t(lang, 'gw.bodyTooLarge'), 413);
+    return true;
+  }
+
+  /**
+   * Resolve the file currently held by an open descriptor. Linux exposes the exact opened
+   * object through /proc; other platforms prove that the current path still names the same
+   * device/inode before treating it as the descriptor's path.
+   */
+  function openedSidebarFilePath(fd: number, openedPath: string): string | null {
+    if (process.platform === 'linux') {
+      try {
+        return realpathSync(`/proc/self/fd/${String(fd)}`);
+      } catch {
+        return null;
+      }
+    }
+    try {
+      const currentPath = realpathSync(openedPath);
+      const current = statSync(currentPath);
+      const opened = fstatSync(fd);
+      return current.dev === opened.dev && current.ino === opened.ino ? currentPath : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Serve a subuser sidebar file from the descriptor authorized by this process. Keeping
+   * authorization and I/O on one descriptor prevents a writable path from being swapped to
+   * another account's file between the gateway check and the Host read.
+   */
+  function serveSubuserSidebarFile(
+    req: Request,
+    res: Response,
+    trustedCwd: string,
+    requestedPath: string,
+    options: { download: boolean; htmlPreview: boolean },
+  ): void {
+    let canonicalCwd: string;
+    let canonicalPath: string;
+    try {
+      canonicalCwd = realpathSync(trustedCwd);
+      canonicalPath = realpathSync(requestedPath);
+    } catch {
+      sendApiError(res, 403, 'FORBIDDEN', 'file is outside the authorized workspace');
+      return;
+    }
+    if (!pathWithin(canonicalCwd, canonicalPath)) {
+      sendApiError(res, 403, 'FORBIDDEN', 'file is outside the authorized workspace');
+      return;
+    }
+
+    let fd: number;
+    try {
+      const noFollow = process.platform === 'win32' ? 0 : (fsConstants.O_NOFOLLOW ?? 0);
+      const nonBlocking = process.platform === 'win32' ? 0 : (fsConstants.O_NONBLOCK ?? 0);
+      fd = openSync(canonicalPath, fsConstants.O_RDONLY | noFollow | nonBlocking);
+    } catch {
+      sendApiError(res, 403, 'FORBIDDEN', 'file is unavailable');
+      return;
+    }
+    let info: ReturnType<typeof fstatSync>;
+    try {
+      info = fstatSync(fd);
+    } catch {
+      closeSync(fd);
+      sendApiError(res, 403, 'FORBIDDEN', 'file is unavailable');
+      return;
+    }
+
+    const openedPath = openedSidebarFilePath(fd, canonicalPath);
+    if (
+      openedPath === null ||
+      !pathWithin(canonicalCwd, openedPath) ||
+      !info.isFile() ||
+      info.size > SIDEBAR_FILE_MAX_BYTES
+    ) {
+      closeSync(fd);
+      sendApiError(res, 403, 'FORBIDDEN', 'file is unavailable');
+      return;
+    }
+
+    const mediaType = sidebarMediaTypeForPath(openedPath);
+    const contentType = options.htmlPreview && mediaType === 'text/html'
+      ? 'text/html; charset=utf-8'
+      : mediaType;
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-DSH-Gateway', '1');
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.setHeader('Vary', 'Cookie');
+    if (options.htmlPreview) {
+      res.setHeader('Referrer-Policy', 'no-referrer');
+      res.setHeader(
+        'Content-Security-Policy',
+        "sandbox allow-scripts allow-popups allow-downloads allow-modals; object-src 'none'",
+      );
+    }
+    if (options.download) {
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename*=UTF-8''${encodeURIComponent(path.basename(openedPath))}`,
+      );
+    }
+
+    if (req.method === 'HEAD') {
+      res.setHeader('Content-Length', String(info.size));
+      closeSync(fd);
+      res.status(200).end();
+      return;
+    }
+
+    if (mediaType === 'text/html' && !options.download && !options.htmlPreview) {
+      try {
+        const bytes = Buffer.alloc(info.size);
+        let offset = 0;
+        while (offset < bytes.length) {
+          const read = readSync(fd, bytes, offset, bytes.length - offset, offset);
+          if (read === 0) break;
+          offset += read;
+        }
+        const html = bytes.subarray(0, offset).toString('utf8');
+        const visibleHtml = filterSubuserBootGraph(html);
+        const injected = visibleHtml.replace(/<head[^>]*>/i, (match) => match + INJECT_SCRIPT);
+        const body = Buffer.from(injected, 'utf8');
+        res.setHeader('Content-Length', String(body.length));
+        res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+        res.setHeader('Content-Security-Policy', "frame-ancestors 'self'");
+        closeSync(fd);
+        res.status(200).end(body);
+      } catch {
+        closeSync(fd);
+        sendApiError(res, 502, 'UPSTREAM_UNAVAILABLE', 'sidebar HTML is invalid');
+      }
+      return;
+    }
+
+    if (info.size === 0) {
+      closeSync(fd);
+      res.status(200).end();
+      return;
+    }
+    res.status(200);
+    const stream = createReadStream(openedPath, {
+      fd,
+      autoClose: true,
+      start: 0,
+      end: info.size - 1,
+    });
+    stream.on('error', () => {
+      if (!res.headersSent) sendApiError(res, 502, 'UPSTREAM_UNAVAILABLE', 'file read failed');
+      else res.destroy();
+    });
+    res.once('close', () => stream.destroy());
+    stream.pipe(res);
+  }
+
   /**
    * F-26：向 dsh 注入会话沙盒（loopback + 内部密钥，fire-and-forget）。
    * 受限子用户（sandbox_mode 非空）建会话后，dsh 默认给 workspace-write 沙盒——
@@ -4595,13 +4908,21 @@ export function createGatewayServer(
         }
         const contentType = String(upstreamRes.headers['content-type'] ?? '');
         const encoding = String(upstreamRes.headers['content-encoding'] ?? '');
+        const isSidebarHtmlAttachment =
+          SIDEBAR_FILE_RE.test(proxyPath) &&
+          parsedUrl.searchParams.get('download') === '1' &&
+          /^attachment(?:;|$)/i.test(String(upstreamRes.headers['content-disposition'] ?? ''));
         const isSessionHistoryResponse =
           req.method === 'POST' && /^\/api\/session[.\/](?:history|page)$/.test(proxyPath);
         const isRestrictedSessionHistoryResponse =
           isSessionHistoryResponse && reqAs.dshpwPerms !== undefined;
         if (
           reqAs.dshpwUser !== undefined &&
-          (contentType.includes('text/html') || PRINCIPAL_SCOPED_RESPONSE_RE.test(proxyPath))
+          (
+            contentType.includes('text/html') ||
+            PRINCIPAL_SCOPED_RESPONSE_RE.test(proxyPath) ||
+            SIDEBAR_FILE_RE.test(proxyPath)
+          )
         ) {
           isolatePrincipalResponse(upstreamRes.headers);
         }
@@ -4650,7 +4971,7 @@ export function createGatewayServer(
         }
 
         // ── HTML 响应：缓冲 + 注入兼容脚本（crypto.randomUUID polyfill 等） ──
-        if (contentType.includes('text/html')) {
+        if (contentType.includes('text/html') && !isSidebarHtmlAttachment) {
           bufferUpstream(upstreamRes, res, (raw) => {
             try {
               let body = raw;
