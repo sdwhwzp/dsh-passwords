@@ -42,7 +42,6 @@ const WORKSPACE = `packages:
   - .
 
 nodeLinker: hoisted
-autoInstallPeers: false
 `;
 
 mkdirSync(profileDir, { recursive: true });

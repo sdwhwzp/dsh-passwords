@@ -133,6 +133,7 @@ let tokenValue = '';
 /** 上游最后一次收到的请求头（F-15 回归测试用：验证网关 cookie 不被透传） */
 let lastUpstreamHeaders: http.IncomingHttpHeaders = {};
 let lastUpstreamMethod = '';
+let lastUpstreamUrl = '';
 let failWorkspaceList = false;
 let failSessionList = false;
 let sessionListRequestsSeen = 0;
@@ -165,6 +166,7 @@ function startMockUpstream(): Promise<http.Server> {
     const server = http.createServer((req, res) => {
       lastUpstreamHeaders = req.headers;
       lastUpstreamMethod = req.method ?? '';
+      lastUpstreamUrl = req.url ?? '';
       const testMode = req.headers['x-test-mode'];
       const badJson = testMode === 'bad-json';
       if ((req.url ?? '').startsWith('/html')) {
@@ -1819,6 +1821,32 @@ test('F-15 例外：自身插件路由只重建已校验 JWT 与 Host Cookie', a
     `${cookie}; ${HOST_BROWSER_COOKIE}`,
     '插件 guard 需要网关 JWT，Host 同时需要内部浏览器 Cookie',
   );
+});
+
+test('F-15：根路径认证 query 不转发，业务 query 保留原始字节', async () => {
+  const response = await gatewayReq('GET', '/?keep=1&dsh_gateway_token=leaked&token=launch');
+  assert.equal(response.status, 200);
+  assert.equal(lastUpstreamUrl, '/?keep=1');
+
+  const plugin = await gatewayReq(
+    'GET',
+    '/plugins/??module-a&%64sh_gateway_token=leaked&x=%2F%3F&token=plugin-business&space=+&rev=abc123',
+  );
+  assert.equal(plugin.status, 200);
+  assert.equal(
+    lastUpstreamUrl,
+    '/plugins/??module-a&x=%2F%3F&token=plugin-business&space=+&rev=abc123',
+  );
+  assert.ok(!lastUpstreamUrl.includes('%3Fmodule-a'));
+});
+
+test('F-15：相似 query 键不被误删', async () => {
+  const response = await gatewayReq(
+    'GET',
+    '/plugins?mytoken=1&tokenize=2&dsh_gateway_token_extra=3&empty=',
+  );
+  assert.equal(response.status, 200);
+  assert.equal(lastUpstreamUrl, '/plugins?mytoken=1&tokenize=2&dsh_gateway_token_extra=3&empty=');
 });
 
 test('Cookie Chaos 加固（P3）：Unicode 空白前缀的会话 cookie 不再被归一化匹配 → 未认证', async () => {

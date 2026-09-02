@@ -17,7 +17,7 @@ if [ -f "$SCRIPT_SOURCE" ]; then
   fi
 fi
 
-command -v node >/dev/null 2>&1 || { echo "[dsh-passwords] 未找到 Node.js（需要 22.5+），请先安装"; exit 1; }
+command -v node >/dev/null 2>&1 || { echo "[dsh-passwords] 未找到 Node.js（需要 22.19+ 或 24+），请先安装"; exit 1; }
 command -v git  >/dev/null 2>&1 || { echo "[dsh-passwords] 未找到 git，请先安装（apt-get install -y git）"; exit 1; }
 
 if [ "$(id -u)" = "0" ]; then

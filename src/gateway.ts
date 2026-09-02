@@ -477,6 +477,30 @@ function safeNext(next: string | undefined): string {
   return decoded;
 }
 
+function decodedQueryKey(rawKey: string): string | null {
+  try {
+    return decodeURIComponent(rawKey.replace(/\+/g, ' '));
+  } catch {
+    return null;
+  }
+}
+
+/** Remove gateway credentials without normalizing plugin combo-query bytes. */
+function stripGatewayAuthQuery(rawUrl: string, pathname: string): string {
+  const queryIndex = rawUrl.indexOf('?');
+  if (queryIndex < 0) return '';
+  const rawQuery = rawUrl.slice(queryIndex + 1);
+  if (rawQuery === '') return '';
+  const stripLaunchToken = pathname === '/' || pathname === '/index.html';
+  const kept = rawQuery.split('&').filter((part) => {
+    const equalsIndex = part.indexOf('=');
+    const rawKey = equalsIndex < 0 ? part : part.slice(0, equalsIndex);
+    const key = decodedQueryKey(rawKey);
+    return key !== COOKIE_NAME && !(stripLaunchToken && key === 'token');
+  });
+  return kept.length === 0 ? '' : `?${kept.join('&')}`;
+}
+
 /**
  * 同源判定（浏览器 Origin vs 请求 Host），网关写路由与登出共用同一口径。
  * 跨源攻击的本质是跨主机（攻击者无法在受害者主机名上托管内容），因此只比
@@ -4806,6 +4830,7 @@ export function createGatewayServer(
     const parsedUrl = new URL(req.originalUrl, `http://${req.headers.host ?? 'localhost'}`);
     // 代理后续所有路由分支与认证门卫共享同一口径，禁止编码分隔符制造判定差异。
     const proxyPath = normalizeDecodedPath(parsedUrl.pathname);
+    const upstreamSearch = stripGatewayAuthQuery(req.originalUrl, proxyPath);
     // 请求上挂的用户/权限（子用户才有）
     const reqAs = req as Req;
     if (
@@ -4891,7 +4916,7 @@ export function createGatewayServer(
         // 规范化路径转发（与 dsh 的 new URL 解析行为一致，杜绝 ../ 混入上游）
         // F-03：与门卫同口径——pathname 解码后再归一化，编码变体（%2f/%2e）
         // 转发为等价规范路径，避免上游按自身规则解码导致路径语义漂移
-        path: proxyPath + parsedUrl.search,
+        path: proxyPath + upstreamSearch,
         method: getListRpcBody === null ? req.method : 'POST',
         headers,
         agent: upstreamAgent,
@@ -6768,7 +6793,7 @@ export function createGatewayServer(
       return;
     }
     const queryIndex = (req.url ?? '').indexOf('?');
-    const fwdPath = gatePath + (queryIndex >= 0 ? (req.url ?? '').slice(queryIndex) : '');
+    const fwdPath = gatePath + (queryIndex >= 0 ? stripGatewayAuthQuery(req.url ?? '/', gatePath) : '');
     // 认证检查（复用 Cookie；与 HTTP 侧一致：校验 cv + banned + 登出吊销）
     const token = readCookie(req.headers.cookie, COOKIE_NAME);
     let authed = false;

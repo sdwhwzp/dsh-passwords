@@ -88,8 +88,8 @@ MySQL 模式会在空闲超时、服务重启或短暂网络断开后自动替�
 
 ### 0. 前置条件（三样）
 
-1. **Node.js 22.5+**：`node -v` 查看（Linux：`curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs`；Windows：nodejs.org 下载安装包）
-2. **dsh 已装好**：`npm install -g @deepseek-ai/dsh`，并已能正常对话（dsh 自身的模型连接配置好即可；本插件不需要任何额外配置）
+1. **Node.js 22.19+ 或 24+**：`node -v` 查看（Linux：`curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs`；Windows：nodejs.org 下载安装包）
+2. **dsh 已装好**：`npm install -g @deepseek-ai/dsh@0.1.2-alpha.3`，并已能正常对话（dsh 自身的模型连接配置好即可；本插件不需要任何额外配置）
 3. **git**：Linux 没装就 `apt-get install -y git`；Windows 去 git-scm.com 下载（pnpm 缺了脚本会自动装）
 
 ### 1. 安装（按平台）
@@ -128,6 +128,10 @@ WeKnora 插件注册知识库列表、检索、文档读取和问答工具。未
 `dsh-shandong-tizhi-brand` 和 `dsh-nas-webdav` 也在清单中，但目前只有本机源码，没有可公开拉取的远程分支。新机器部署前分别设置 `DSH_PLUGIN_BRAND_SPEC` 和 `DSH_PLUGIN_NAS_SPEC` 为可访问的 NPM、Git 或 `link:` 来源；未设置时安装器会明确提示并跳过，其他插件继续安装。
 
 结束时会显示首次配置用的 `SETUP_KEY`，并在安装目录写入 `setup-key.txt`。首次配置完成后，这个文件会自动删除；`.env` 中实际使用的密钥会被保留为独立值。
+
+## 卸载
+
+在 dsh-passwords 安装目录执行 `node dist/cli.js uninstall`；全局 npm 安装也可执行 `dsh-passwords uninstall`。该命令只从 DSH Web Profile 移除本插件并回滚本插件管理的兼容处理，其他插件、安装目录、`.env`、数据库和证书都会保留。Profile 依赖重建失败时会恢复卸载前状态。
 
 ### 2. 三步完成首次配置
 
@@ -288,7 +292,7 @@ dsh-local-workspace                      # 使用已保存的设备令牌恢复�
 - **本机工作区已连接但没有输入框？** 回到新会话页，展开输入框上方、“选择模式”旁边的“一键选择本机文件夹”，在在线目录旁点击“打开对话”。`¥0` 表示禁止模型调用；客户提问后会在会话中直接看到额度已用完的说明。
 - **点“一键选择本机文件夹”没有弹出窗口？** 先展开按钮下方的“助手没有打开？”，下载 EXE 并双击一次完成协议注册，然后回到原网页重试。不要移动或删除已注册的 EXE；如已移动，在新位置再双击一次即可更新注册。网页不会打开 `about:blank`，原对话会一直保留。
 - **dsh 启动报 `duplicate loader entry id`？** 你在 profile 里用过 `dsh plugin add`。它会把 profile 里**所有**声明 `dsh.bundle` 的依赖全部加进 bundles 层，与已装的其它插件重复时 dsh 直接启动失败。改用 `node scripts/register-plugin.mjs` 按 `scripts/profile-plugins.json` 精确同步；它只追加清单明确声明的 bundle，并保留其它配置。
-- **npm 装 dsh 报 allow-scripts / node-pty 错？** npm 新版会拦截安装脚本，先放行再重装：`npm config set allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user`，然后重新 `npm install -g @deepseek-ai/dsh`（本项目自身没这个问题，是 dsh 的依赖要跑原生构建）。
+- **npm 装 dsh 报 allow-scripts / node-pty 错？** npm 新版会拦截安装脚本，先放行再重装：`npm config set allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user`，然后重新 `npm install -g @deepseek-ai/dsh@0.1.2-alpha.3`（本项目自身没这个问题，是 dsh 的依赖要跑原生构建）。
 - **npm 用 `--prefix` 安装后运行 `dsh-passwords install` 报 TS5058？** 升级到 `dsh-passwords@2.5.4`。新版能正确识别被 npm 提升到 `<prefix>/node_modules` 的运行时依赖，不会再误触发源码编译。
 - **dsh 报 `crypto.randomUUID is not a function`？** 旧版网关没有 HTML 注入兼容层，更新代码后**强刷浏览器**（Ctrl+Shift+R）。
 - **数据库文件被偷了要紧吗？** 不要紧。敏感字段全是密文或散列，没有 `.env` 里的密钥解不开；密码本身只有 bcrypt 哈希，本来就没有明文。
@@ -333,6 +337,10 @@ dsh-local-workspace                      # 使用已保存的设备令牌恢复�
 - **命令行（CLI）**：跟随 `LANG` / `LC_ALL` 环境变量（`en` 开头即英文）。
 
 ## 更新日志
+
+### v2.6.16（2026-09-02）
+
+- 同步上游 v2.6.7 的 Node 22.19/24 运行要求、确定性 `npm-shrinkwrap.json`、Docker 初始化与可回滚卸载流程，同时保留 MySQL、多租户工作区、预算、WebDAV、会话归属和 Alpha.3 Host 身份隔离。
 
 ### v2.6.15（2026-09-01）
 

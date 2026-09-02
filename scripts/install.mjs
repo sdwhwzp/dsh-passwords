@@ -97,10 +97,10 @@ if (!existsSync(pkgPath)) {
   process.exit(1);
 }
 
-// ── 1. Node.js 22.5+ ──
+// ── 1. Node.js（与 DSH 0.1.2-alpha.3 官方 engines 对齐） ──
 const [nodeMajor, nodeMinor] = process.versions.node.split('.').map(Number);
-if (nodeMajor < 22 || (nodeMajor === 22 && nodeMinor < 5)) {
-  err(`Node.js 版本过低（当前 v${process.versions.node}），需要 22.5+。`);
+if ((nodeMajor === 22 && nodeMinor < 19) || nodeMajor < 22 || nodeMajor === 23) {
+  err(`Node.js 版本不受支持（当前 v${process.versions.node}），需要 22.19+ 或 24+。`);
   err('  安装方法见 README「快速安装」一节。');
   process.exit(1);
 }
@@ -109,7 +109,7 @@ say(`Node.js v${process.versions.node} ✓`);
 // ── 2. dsh（DeepSeek Harness）──
 if (run('dsh', ['--version'], { quiet: true }) !== 0) {
   err('未找到 dsh。请先安装 DeepSeek Harness：');
-  err('  npm install -g @deepseek-ai/dsh');
+  err('  npm install -g @deepseek-ai/dsh@0.1.2-alpha.3');
   err('  然后用 DEEPSEEK_API_KEY=sk-你的key dsh web 先跑一次确认能用');
   process.exit(1);
 }
@@ -158,9 +158,9 @@ if (prebuilt) {
   say('检测到已构建产物，跳过依赖安装与编译');
 } else {
   say('安装依赖…');
-  // 源码 clone 含 lock 时用 npm ci：严格按已审计依赖树安装且更快；npm 包场景
-  // 可能不带 lock，退回 npm install 仍可完成自修复安装。
-  const installArgs = existsSync(path.join(root, 'package-lock.json'))
+  // npm-shrinkwrap.json 是源码、Docker 与 npm 发布包共享的确定性依赖契约。
+  // 旧发布包可能不带它，退回 npm install 仍可完成自修复安装。
+  const installArgs = existsSync(path.join(root, 'npm-shrinkwrap.json'))
     ? ['ci', '--no-audit', '--no-fund']
     : ['install', '--no-audit', '--no-fund'];
   mustRun('npm', installArgs, '依赖安装失败，请修复 npm 输出后重试');
@@ -179,14 +179,23 @@ if (prebuilt) {
   }
 }
 
-// ── 5. 生成 .env（已存在则不覆盖，重跑安全） ──
+// ── 5. 生成/修复 .env（重跑不覆盖既有配置） ──
 let setupKey = '';
+let recoveredSetupKey = false;
 if (!isFirstInstall && existsSync(envPath)) {
   for (const line of readFileSync(envPath, 'utf8').split(/\r?\n/)) {
     const match = /^\s*SETUP_KEY\s*=\s*(.*?)\s*$/.exec(line);
     if (match && !line.trimStart().startsWith('#')) {
       setupKey = match[1].replace(/\s+#.*$/, '').replace(/^['"]|['"]$/g, '').trim();
     }
+  }
+  if (setupKey === '') {
+    // 旧版/中断安装可能留下没有 SETUP_KEY 的 .env。保留其余配置并只补齐
+    // 缺项；直接拒绝会让安装器无法从这一可恢复状态继续执行。
+    setupKey = randomBytes(24).toString('hex');
+    writeFileSync(envPath, `${readFileSync(envPath, 'utf8').replace(/\s*$/, '')}\nSETUP_KEY=${setupKey}\n`);
+    recoveredSetupKey = true;
+    say('.env 缺少 SETUP_KEY，已保留现有配置并生成新的首次配置密钥');
   }
   if (!isWin) chmodSync(envPath, 0o600);
   tightenWindowsAcl(envPath);
@@ -212,7 +221,7 @@ if (setupKey === '') {
   err('未能读取 SETUP_KEY；请检查 .env 后重试');
   process.exit(1);
 }
-if (isFirstInstall) {
+if (isFirstInstall || recoveredSetupKey) {
   writeFileSync(
     keyFile,
     [
@@ -266,7 +275,7 @@ if (patchResult.status !== 0) {
 say('');
 say('★ 安装完成！');
 say('');
-if (isFirstInstall) {
+if (isFirstInstall || recoveredSetupKey) {
   say('  首次配置密钥（SETUP_KEY）：');
   say(`      ${setupKey}`);
   say(`      （同时保存在 ${keyFile}，初始化完成后请删除该文件）`);

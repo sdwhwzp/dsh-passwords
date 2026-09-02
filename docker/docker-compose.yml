@@ -2,9 +2,9 @@ services:
   dsh-passwords:
     build:
       context: ..
-      dockerfile: docker/Dockerfile
+      dockerfile: docker/Dockerfile.bundled
       args:
-        DSH_VERSION: ${DSH_VERSION:-0.1.1-rc.2}
+        DSH_VERSION: ${DSH_VERSION:-0.1.2-alpha.3}
     restart: unless-stopped
     environment:
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?set DEEPSEEK_API_KEY in docker/.env}

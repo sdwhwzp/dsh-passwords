@@ -64,8 +64,12 @@ export function initializeDocker({
     secureFile(envFile);
     setupKey = envValue(readFileSync(envFile, 'utf8'), 'SETUP_KEY');
     if (setupKey === '') {
-      error(`[dsh-passwords] ${envFile} exists but has no usable SETUP_KEY; refusing to replace persistent configuration`);
-      return false;
+      // A volume can contain a partially written .env after an interrupted
+      // first boot. Keep all existing state and add only the missing key.
+      setupKey = randomBytes(24).toString('hex');
+      appendMissingEnv(envFile, { SETUP_KEY: setupKey });
+      firstInitialization = true;
+      log(`[dsh-passwords] ${envFile} had no usable SETUP_KEY; generated one without replacing existing configuration`);
     }
     appendMissingEnv(envFile, {
       MCP_DB_ENC_KEY: randomBytes(32).toString('hex'),
@@ -102,20 +106,7 @@ export function initializeDocker({
   }
 
   if (firstInitialization && !existsSync(setupKeyFile)) {
-    writeFileSync(
-      setupKeyFile,
-      [
-        'dsh-passwords Docker first-time setup key',
-        '=========================================',
-        '',
-        `SETUP_KEY = ${setupKey}`,
-        '',
-        'Open the HTTPS address served by your reverse proxy, then use this key once to create the owner account.',
-        'Delete this file after setup.',
-        '',
-      ].join('\n'),
-      { encoding: 'utf8', mode: 0o600 },
-    );
+    writeFileSync(setupKeyFile, `${setupKey}\n`, { encoding: 'utf8', mode: 0o600 });
     secureFile(setupKeyFile);
     log(`[dsh-passwords] first-time setup key written to ${setupKeyFile}`);
   }
