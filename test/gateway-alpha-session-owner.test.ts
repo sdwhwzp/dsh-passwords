@@ -96,7 +96,7 @@ function requestValueOf(body: Record<string, unknown>): Record<string, unknown> 
   return request as Record<string, unknown>;
 }
 
-test('Alpha.3 session/page adopts only complete oldest-prefix ownership evidence', async () => {
+test('Alpha.4 session/page adopts only complete oldest-prefix ownership evidence', async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), 'dshpw-alpha-owner-'));
   const sessionCwd = path.join(temporary, 'customer-workspace');
   await mkdir(sessionCwd);

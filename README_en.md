@@ -88,7 +88,7 @@ External file services and their accounts, passwords and databases are managed b
 ### 0. Prerequisites (three things)
 
 1. **Node.js 22.19+ or 24+**: check with `node -v` (Linux: `curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs`; Windows: download from nodejs.org)
-2. **dsh installed**: `npm install -g @deepseek-ai/dsh@0.1.2-alpha.3`, with your model connection working (dsh's own model config is enough; this plugin needs no extra configuration)
+2. **dsh installed**: `npm install -g @deepseek-ai/dsh@0.1.2-alpha.4`, with your model connection working (dsh's own model config is enough; this plugin needs no extra configuration)
 3. **git**: Linux: `apt-get install -y git`; Windows: download from git-scm.com (pnpm is auto-installed by the script when missing)
 
 ### 1. Install (by platform)
@@ -288,7 +288,7 @@ dsh-local-workspace                           # reconnect with the saved local d
 - **The local workspace is online but has no composer?** Return to the new-conversation screen, expand **Choose a local folder** beside the mode selector above the input, and click **Open conversation** beside the online folder. `¥0` disables model calls; after submitting a question, the customer sees an explicit exhausted-allowance notice in the conversation.
 - **Nothing opens after clicking “Choose a local folder”?** Expand **Companion did not open?**, download the EXE, and double-click it once to register the protocol, then retry on the original page. Do not move or delete the registered EXE; if you move it, double-click it again at the new location. The web flow never opens `about:blank`, so the current conversation remains intact.
 - **dsh fails to start with `duplicate loader entry id`?** You used `dsh plugin add` in the profile. It reconciles ALL dependencies declaring `dsh.bundle` into the bundles layer, which crashes dsh when they overlap with already-installed plugins. Use `node scripts/register-plugin.mjs` to sync `scripts/profile-plugins.json` precisely; it appends only the bundles named by the manifest and preserves all other configuration.
-- **npm fails installing dsh (allow-scripts / node-pty)?** Newer npm blocks install scripts. Allow them first, then reinstall: `npm config set allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user` followed by `npm install -g @deepseek-ai/dsh@0.1.2-alpha.3` again (this project itself has no such issue — it's dsh's dependencies that run native builds).
+- **npm fails installing dsh (allow-scripts / node-pty)?** Newer npm blocks install scripts. Allow them first, then reinstall: `npm config set allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user` followed by `npm install -g @deepseek-ai/dsh@0.1.2-alpha.4` again (this project itself has no such issue — it's dsh's dependencies that run native builds).
 - **`dsh-passwords install` reports TS5058 after an npm `--prefix` install?** Upgrade to `dsh-passwords@2.5.4`. It correctly detects runtime dependencies hoisted to `<prefix>/node_modules` and no longer falls back to a source build.
 - **dsh reports `crypto.randomUUID is not a function`?** An older gateway build lacks the HTML injection compat layer — update the code and **hard-refresh the browser** (Ctrl+Shift+R).
 - **Is it a problem if the database file is stolen?** No. Sensitive fields are encrypted or hashed; without the keys in `.env` they can't be read, and passwords only exist as bcrypt hashes anyway.
@@ -333,6 +333,10 @@ The UI is bilingual (Chinese/English) and follows dsh's language setting:
 - **CLI**: follows the `LANG` / `LC_ALL` environment variables (`en` prefix = English).
 
 ## Release notes
+
+### v2.6.17 (2026-09-02)
+
+- Adds formal compatibility with DeepSeek Harness `0.1.2-alpha.4`: runtime peers and compiler dependencies remain pinned to the same exact release, installation guidance and Docker defaults advance together, and the optional principal-access authorization API also requires Alpha.4.
 
 ### v2.6.16 (2026-09-02)
 
