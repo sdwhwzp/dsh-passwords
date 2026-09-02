@@ -251,7 +251,7 @@ function bindAllEnabled(): boolean {
 }
 
 const SETTINGS_FROM = 'connection.isLoopback ? "host" : "memory"';
-// DSH 0.1.2-alpha.3 moved the loopback fact from the old connection service
+// DSH 0.1.2-alpha.5 moved the loopback fact from the old connection service
 // to the Remote Host facts. Keep this as a distinct anchor: absence of the
 // legacy string alone must never be treated as a successful alpha patch.
 const SETTINGS_ALPHA_FROM = 'ctx.remote.$host.isLoopback ? "host" : "memory"';

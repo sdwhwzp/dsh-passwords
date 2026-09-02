@@ -70,7 +70,7 @@ before(async () => {
       res.end(JSON.stringify({ result: { value: { items: [{ sessionId: 'existing-session', cwd: '/work/allowed', agentPreset: 'preset/allowed' }] } } }));
     } else if (req.url?.startsWith('/api/session.create')) {
       res.end(JSON.stringify({ result: { value: { sessionId: 'new-session', cwd: '/work/allowed' } } }));
-    } else if (req.url?.startsWith('/api/agentPreset.list')) {
+    } else if (req.url?.startsWith('/api/agentPresets/list')) {
       const response = JSON.stringify({ result: { value: { items: [{ id: 'preset/allowed' }, { id: 'preset/blocked' }] } } });
       if (gzipAgentPresetResponses) {
         res.writeHead(200, { 'content-encoding': 'gzip', 'content-type': 'application/json' });
@@ -78,7 +78,7 @@ before(async () => {
       } else {
         res.end(response);
       }
-    } else if (req.url?.startsWith('/api/agentPreset.select')) {
+    } else if (req.url?.startsWith('/api/agentPresets/select')) {
       const response = selectBlocked
         ? JSON.stringify({ result: { ok: false, error: { message: 'boom' } } })
         : JSON.stringify({ result: { ok: true, value: { agentPreset: 'preset/allowed' } } });
@@ -145,7 +145,10 @@ test('Issue #22: 授权 preset 允许创建会话，并登记缓存供 prompt �
   const beforePrompt = await request('/api/session.prompt', JSON.stringify({ sessionId: 'existing-session', text: 'hi' }));
   assert.equal(beforePrompt.status, 403);
   // select 成功后 prompt 放行
-  const select = await request('/api/agentPreset.select', JSON.stringify({ sessionId: 'existing-session', agentPreset: 'preset/allowed' }));
+  const select = await request('/api/agentPresets/select', JSON.stringify({
+    type: 'client-request', rpcId: 'preset-select-1', method: 'agentPresets/select',
+    payload: { args: { agentId: 'existing-session', agentPreset: 'preset/allowed' } },
+  }));
   assert.equal(select.status, 200, select.body);
   const afterPrompt = await request('/api/session.prompt', JSON.stringify({ sessionId: 'existing-session', text: 'hi' }));
   assert.equal(afterPrompt.status, 200, afterPrompt.body);
@@ -154,7 +157,9 @@ test('Issue #22: 授权 preset 允许创建会话，并登记缓存供 prompt �
 test('Issue #22: gzip 的 Agent preset list 响应仍按权限过滤', async () => {
   gzipAgentPresetResponses = true;
   try {
-    const response = await request('/api/agentPreset.list', '{}', restrictedCookie);
+    const response = await request('/api/agentPresets/list', JSON.stringify({
+      type: 'client-request', rpcId: 'preset-list-1', method: 'agentPresets/list', payload: { args: {} },
+    }), restrictedCookie);
     assert.equal(response.status, 200, response.body);
     const parsed = JSON.parse(response.body) as { result: { value: { items: Array<{ id: string }> } } };
     assert.deepEqual(parsed.result.value.items, []);
@@ -166,7 +171,10 @@ test('Issue #22: gzip 的 Agent preset list 响应仍按权限过滤', async () 
 test('Issue #22: gzip 的 Agent preset select 成功响应仍登记会话缓存', async () => {
   gzipAgentPresetResponses = true;
   try {
-    const select = await request('/api/agentPreset.select', JSON.stringify({ sessionId: 'existing-session', agentPreset: 'preset/allowed' }));
+    const select = await request('/api/agentPresets/select', JSON.stringify({
+      type: 'client-request', rpcId: 'preset-select-2', method: 'agentPresets/select',
+      payload: { args: { agentId: 'existing-session', agentPreset: 'preset/allowed' } },
+    }));
     assert.equal(select.status, 200, select.body);
     const prompt = await request('/api/session.prompt', JSON.stringify({ sessionId: 'existing-session', text: 'hi' }));
     assert.equal(prompt.status, 200, prompt.body);
@@ -194,7 +202,10 @@ test('Issue #22: select 失败后不更新缓存，prompt 仍按旧缓存判断'
   // 上游失败：select 本身经网关放行后由上游返回 500，网关不得登记该 preset
   selectBlocked = true;
   try {
-    const failedSelect = await request('/api/agentPreset.select', JSON.stringify({ sessionId: 'existing-session', agentPreset: 'preset/allowed' }));
+    const failedSelect = await request('/api/agentPresets/select', JSON.stringify({
+      type: 'client-request', rpcId: 'preset-select-3', method: 'agentPresets/select',
+      payload: { args: { agentId: 'existing-session', agentPreset: 'preset/allowed' } },
+    }));
     assert.equal(failedSelect.status, 200, failedSelect.body);
     const afterPrompt = await request('/api/session.prompt', JSON.stringify({ sessionId: 'existing-session', text: 'hi' }));
     assert.equal(afterPrompt.status, 200, 'select 失败不得污染既有缓存');

@@ -73,6 +73,7 @@ import {
   SESSION_SCOPED_RE,
   extractSessionId,
   collectSessionIds,
+  clientConnectionArgs,
   replaceArchivedSessionSnapshot,
   collectArchivedSessionIds,
   filterArchivedSessionIds,
@@ -114,6 +115,37 @@ type Req = Request & {
   dshpwAgentPreset?: string;
   dshpwSelectedSessionId?: string;
 };
+
+const AGENT_PRESET_SELECT_RE = /^\/api\/agentPresets?[.\/]select$/;
+const AGENT_PRESET_LIST_RE = /^\/api\/agentPresets?[.\/]list$/;
+const AGENT_PRESET_MUTATION_RE = /^\/api\/agentPresets?[.\/](?:copy|openDocument|remove|read|deletePreset)$/;
+
+function rpcRequestPayload(value: unknown): Record<string, unknown> | null {
+  const args = clientConnectionArgs(value);
+  if (args === null) return null;
+  const request = args.request;
+  return request !== null && typeof request === 'object' && !Array.isArray(request)
+    ? request as Record<string, unknown>
+    : null;
+}
+
+function agentPresetFromRequest(value: unknown): string | null {
+  const request = rpcRequestPayload(value);
+  return request !== null && typeof request.agentPreset === 'string' && request.agentPreset.length > 0
+    ? request.agentPreset
+    : findStringField(value, 'agentPreset');
+}
+
+function hasImageAttachment(value: unknown): boolean {
+  const visit = (current: unknown, depth: number): boolean => {
+    if (depth > 8 || current === null || typeof current !== 'object') return false;
+    if (Array.isArray(current)) return current.some((item) => visit(item, depth + 1));
+    const row = current as Record<string, unknown>;
+    if (row.type === 'image' && typeof row.data === 'string') return true;
+    return Object.values(row).some((item) => visit(item, depth + 1));
+  };
+  return visit(value, 0);
+}
 
 const COOKIE_NAME = 'dsh_gateway_token';
 /** 语言偏好 cookie（用户在登录页手动切换后持久化） */
@@ -931,28 +963,101 @@ export function createGatewayServer(
 
   // 普通用户各自独立的会话授权快照：不能用全局 sessionId → cwd 映射，
   // 否则一个用户的 workspace.list 会给另一个用户的 session RPC 提供授权依据。
+  // A subuser's filtered workspace baseline is the authority for all later
+  // workspaceId and sessionId checks. alpha.3 obtains it through Remote
+  // workspace/follow, whereas older clients can still populate it via HTTP.
   const userSessionAccess = new Map<number, Map<string, string>>();
   const userSessionAccessRevision = new Map<number, number>();
   const userWorkspaceIds = new Map<number, Set<string>>();
+  const userWorkspacePaths = new Map<number, Map<string, string>>();
   const userWorkspaceIdsRevision = new Map<number, number>();
+  const userArchivedSessionIds = new Map<number, Set<string>>();
+  const userSessionAccessWaiters = new Map<number, Set<() => void>>();
+  const notifyUserSessionAccessWaiters = (userId: number): void => {
+    const waiters = userSessionAccessWaiters.get(userId);
+    if (waiters === undefined) return;
+    userSessionAccessWaiters.delete(userId);
+    for (const resolve of waiters) resolve();
+  };
+  // alpha.3 opens session.list and workspace/follow independently. session.list must
+  // wait for the latter's filtered baseline, but an invalidated old baseline is not a
+  // valid replacement. Only replaceUserSessionAccess may wake this wait.
+  const waitForUserSessionAccess = (userId: number, timeoutMs = 5_000): Promise<boolean> => {
+    if (userSessionAccess.has(userId)) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (ready: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        const waiters = userSessionAccessWaiters.get(userId);
+        waiters?.delete(onReady);
+        if (waiters?.size === 0) userSessionAccessWaiters.delete(userId);
+        resolve(ready);
+      };
+      const onReady = () => finish(true);
+      const timeout = setTimeout(() => finish(false), timeoutMs);
+      const waiters = userSessionAccessWaiters.get(userId) ?? new Set<() => void>();
+      waiters.add(onReady);
+      userSessionAccessWaiters.set(userId, waiters);
+    });
+  };
   const userSessionAccessFor = (userId: number): Map<string, string> => userSessionAccess.get(userId) ?? new Map();
   const userAccessRevisionFor = (userId: number): number => userSessionAccessRevision.get(userId) ?? 0;
   const replaceUserSessionAccess = (userId: number, access: Map<string, string>, revision: number): void => {
     if (revision < (userSessionAccessRevision.get(userId) ?? 0)) return;
     userSessionAccess.set(userId, access);
     userSessionAccessRevision.set(userId, revision);
+    notifyUserSessionAccessWaiters(userId);
   };
   const invalidateUserSessionAccess = (userId: number, revision: number): void => {
     if (revision < (userSessionAccessRevision.get(userId) ?? 0)) return;
     userSessionAccess.delete(userId);
     userSessionAccessRevision.set(userId, revision);
     userWorkspaceIds.delete(userId);
+    userWorkspacePaths.delete(userId);
+    userWorkspaceIdsRevision.set(userId, revision);
+    userArchivedSessionIds.delete(userId);
+  };
+  const replaceUserWorkspacePaths = (userId: number, paths: Map<string, string>, revision: number): void => {
+    if (revision < (userWorkspaceIdsRevision.get(userId) ?? 0)) return;
+    userWorkspacePaths.set(userId, paths);
+    userWorkspaceIds.set(userId, new Set(paths.keys()));
     userWorkspaceIdsRevision.set(userId, revision);
   };
-  const replaceUserWorkspaceIds = (userId: number, ids: Set<string>, revision: number): void => {
-    if (revision < (userWorkspaceIdsRevision.get(userId) ?? 0)) return;
-    userWorkspaceIds.set(userId, ids);
-    userWorkspaceIdsRevision.set(userId, revision);
+  // alpha.3 的 Remote workspace/session 订阅在单条 WebSocket 上长期存活。权限
+  // 保存后，仅清掉服务端快照不会让浏览器重新请求 baseline；旧连接会继续以授权前的
+  // 空状态渲染，并在用户选择工作区时将其清退。因此对目标用户主动触发可恢复重连。
+  const remoteMuxClientsByUser = new Map<number, Set<any>>();
+  const userWebSocketClients = new Map<number, Set<{ close: () => void }>>();
+  const registerUserWebSocketClient = (userId: number, client: { close: () => void }): (() => void) => {
+    const clients = userWebSocketClients.get(userId) ?? new Set<{ close: () => void }>();
+    clients.add(client);
+    userWebSocketClients.set(userId, clients);
+    return () => {
+      clients.delete(client);
+      if (clients.size === 0 && userWebSocketClients.get(userId) === clients) userWebSocketClients.delete(userId);
+    };
+  };
+  const closeUserWebSocketClients = (userId: number): void => {
+    const clients = userWebSocketClients.get(userId);
+    if (clients === undefined) return;
+    userWebSocketClients.delete(userId);
+    for (const client of clients) {
+      try { client.close(); } catch {}
+    }
+  };
+  const closeUserRemoteMuxClients = (userId: number): void => {
+    const clients = remoteMuxClientsByUser.get(userId);
+    if (clients === undefined) return;
+    remoteMuxClientsByUser.delete(userId);
+    for (const client of clients) {
+      try {
+        if (client.readyState === WebSocket.OPEN) client.close(1012, 'Permissions changed');
+      } catch {
+        // The close event removes already-closed clients; a racing close needs no recovery.
+      }
+    }
   };
 
   // sessionId → cwd 映射: 从 session.list/workspace.list/session.create 响应里收集，
@@ -982,6 +1087,22 @@ export function createGatewayServer(
     for (const child of Object.values(row)) collectSessionAgentPresets(child, target, depth + 1);
   };
 
+  // user_workspaces records subuser-created private workspaces and historical
+  // administrator workspaces. Administrators are trusted sharers; another
+  // subuser (or an orphaned record) remains an ownership conflict.
+  const workspaceOwnedByAnotherSubuser = (userId: number, workspacePath: string): boolean => {
+    const normalizedPath = normalizePath(workspacePath);
+    return db.listWorkspaceOwners().some((owner) =>
+      owner.userId !== userId &&
+      normalizePath(owner.path) === normalizedPath &&
+      db.getUserById(owner.userId)?.role !== 'admin',
+    );
+  };
+  const workspaceOwnedByUser = (userId: number, workspacePath: string): boolean => {
+    const normalizedPath = normalizePath(workspacePath);
+    return db.listUserWorkspacePaths(userId).some((ownedPath) => normalizePath(ownedPath) === normalizedPath);
+  };
+
   /** 子用户 host SSE 事件按 workspace.list 建立的快照过滤；快照缺失时敏感事件一律丢弃。 */
   const hostEventFilter = (userId: number, perms: UserPermissionsRow): Transform => {
     let pending = '';
@@ -989,12 +1110,7 @@ export function createGatewayServer(
       const currentPerms = db.getPermissions(userId) ?? perms;
       if (!folderAllowed(candidate, currentPerms.allowed_folders)) return false;
 
-      const normalized = normalizePath(candidate);
-      return !db.listWorkspaceOwners().some(
-        (owner) =>
-          owner.userId !== userId &&
-          normalizePath(owner.path) === normalized,
-      );
+      return !workspaceOwnedByAnotherSubuser(userId, candidate);
     };
 
     // 连接级工作区快照副本：同一用户并行多个 SSE 连接时，单个连接收到
@@ -1140,7 +1256,7 @@ export function createGatewayServer(
         if (typeof row.workspaceId !== 'string' || !workspaceIds.has(row.workspaceId) || typeof row.path !== 'string') return null;
         const workspacePath = row.path;
         if (!folderAllowed(workspacePath, current.allowed_folders)) return null;
-        if (db.listWorkspaceOwners().some((owner) => owner.userId !== userId && normalizePath(owner.path) === normalizePath(workspacePath))) return null;
+        if (workspaceOwnedByAnotherSubuser(userId, workspacePath)) return null;
         if (Array.isArray(row.sessionIds)) row.sessionIds = row.sessionIds.filter(allowedSession);
       } else if (type === 'host/workspace-removed') {
         const id = typeof event.workspaceId === 'string' ? event.workspaceId : event.id;
@@ -1240,9 +1356,11 @@ export function createGatewayServer(
   };
 
   type RemoteMuxUserStreamState = {
-    endpoint: 'session/control' | 'workspace/follow';
+    endpoint: 'session/control' | 'session/follow' | 'workspace/follow' | '$events';
     /** Workspace path is retained only to re-check the current permission on each delta. */
     visibleWorkspaces: Map<string, string>;
+    /** The protocol has one bootstrap item; later ready frames are never data-plane events. */
+    remoteEventsReady?: boolean;
   };
 
   const isPlainJsonRecord = (value: unknown): value is Record<string, unknown> =>
@@ -1254,6 +1372,39 @@ export function createGatewayServer(
     const args = row.args;
     return Object.keys(row).length === 1 && args !== null && typeof args === 'object' && !Array.isArray(args) &&
       Object.keys(args as Record<string, unknown>).length === 0;
+  };
+  // alpha.3 opens session/follow as { args: { request: { address }, maxMessages? } }.
+  // It is a single ordinary-session history stream, not an empty control/workspace
+  // subscription; accept only its exact address shape before checking its persisted grant.
+  const remoteMuxFollowSessionId = (payload: unknown): string | null => {
+    if (!isPlainJsonRecord(payload) || !isPlainJsonRecord(payload.args)) return null;
+    const args = payload.args;
+    const request = args.request;
+    if (!isPlainJsonRecord(request)) return null;
+    const address = request.address;
+    if (!isPlainJsonRecord(address) || address.kind !== 'session' || typeof address.sessionId !== 'string') return null;
+    if (address.sessionId.length === 0 || address.sessionId.length > 200) return null;
+    const maxMessages = request.maxMessages;
+    if (maxMessages !== undefined && (typeof maxMessages !== 'number' || !Number.isInteger(maxMessages) || maxMessages < 1 || maxMessages > 1_000)) return null;
+    return address.sessionId;
+  };
+  const remoteMuxEventSessionId = (event: string, args: unknown[]): string | null => {
+    if (event === 'api-session/added') {
+      const summary = args[0];
+      if (!isPlainJsonRecord(summary)) return null;
+      return typeof summary.sessionId === 'string'
+        ? summary.sessionId
+        : typeof summary.id === 'string'
+          ? summary.id
+          : null;
+    }
+    if (
+      event === 'api-session/activity' ||
+      event === 'api-session/error' ||
+      event === 'api-session/removed' ||
+      event === 'api-session/status'
+    ) return typeof args[0] === 'string' ? args[0] : null;
+    return null;
   };
 
   /**
@@ -1270,16 +1421,54 @@ export function createGatewayServer(
     value: unknown,
   ): unknown | null => {
     const perms = db.getPermissions(userId) ?? fallbackPerms;
+    // `$events` establishes the browser connection, but it is also a broadcast
+    // carrier. Never transparently forward its later notifications: a Remote
+    // event stream is shared by every DSH session on the Host.
+    if (state.endpoint === '$events') {
+      if (!isPlainJsonRecord(value)) return null;
+      if (value.type === 'ready') {
+        if (state.remoteEventsReady || Object.keys(value).length !== 3 || typeof value.clientId !== 'string' ||
+          !isPlainJsonRecord(value.host) || Object.keys(value.host).length !== 1 || typeof value.host.home !== 'string') return null;
+        state.remoteEventsReady = true;
+        return value;
+      }
+      if (!state.remoteEventsReady || value.type !== 'emit' || Object.keys(value).length !== 3 ||
+        typeof value.event !== 'string' || !Array.isArray(value.args)) return null;
+      const sessionId = remoteMuxEventSessionId(value.event, value.args);
+      const currentGrants = new Set(db.listUserSessionGrants(userId));
+      const access = userSessionAccess.get(userId);
+      const sessionPath = sessionId === null || access === undefined ? undefined : access.get(sessionId);
+      if (
+        sessionId === null ||
+        sessionPath === undefined ||
+        !currentGrants.has(sessionId) ||
+        perms.disabled_sessions.includes(sessionId) ||
+        !folderAllowed(sessionPath, perms.allowed_folders) ||
+        workspaceOwnedByAnotherSubuser(userId, sessionPath)
+      ) return null;
+      if (value.event !== 'api-session/added') return value;
+      const summary = value.args[0] as Record<string, unknown>;
+      const { cwd: _cwd, parentSessionId: _parentSessionId, ...safeSummary } = summary;
+      return { ...value, args: [safeSummary, ...value.args.slice(1)] };
+    }
+    // session/follow is opened only after its request sessionId was checked
+    // against the user's persisted explicit grant. Keeping this independent of
+    // the transient workspace baseline is necessary during alpha.3 reconnect.
+    if (state.endpoint === 'session/follow') return value;
     const access = userSessionAccess.get(userId);
     const currentGrants = new Set(db.listUserSessionGrants(userId));
     const allowedSession = (id: unknown): id is string =>
       typeof id === 'string' && access !== undefined && access.has(id) && currentGrants.has(id) && !perms.disabled_sessions.includes(id);
-    const workspaceAllowed = (row: Record<string, unknown>): boolean => {
-      const id = row.workspaceId;
+    const workspacePathAllowed = (row: Record<string, unknown>): boolean => {
       const pathValue = row.path;
-      if (typeof id !== 'string' || typeof pathValue !== 'string' || !folderAllowed(pathValue, perms.allowed_folders)) return false;
+      if (typeof row.workspaceId !== 'string' || typeof pathValue !== 'string' || !folderAllowed(pathValue, perms.allowed_folders)) return false;
+      return !workspaceOwnedByAnotherSubuser(userId, pathValue);
+    };
+    const workspaceAllowed = (row: Record<string, unknown>): boolean => {
+      if (!workspacePathAllowed(row)) return false;
+      const id = row.workspaceId as string;
+      const pathValue = row.path as string;
       const owners = db.listWorkspaceOwners();
-      if (owners.some((owner) => owner.userId !== userId && normalizePath(owner.path) === normalizePath(pathValue))) return false;
       // 增量 upsert 允许当前用户新建且尚未出现在本连接 baseline 的工作区；
       // 但未知 workspaceId 必须有当前用户的持久化登记，不能只凭目录白名单放行。
       return state.visibleWorkspaces.has(id) || owners.some(
@@ -1302,7 +1491,12 @@ export function createGatewayServer(
         for (const item of source.items) {
           if (item === null || typeof item !== 'object' || Array.isArray(item)) continue;
           const workspace = { ...(item as Record<string, unknown>) };
-          if (!workspaceAllowed(workspace) || !Array.isArray(workspace.sessionIds)) continue;
+          // 首个 baseline 本身就是 DSH 提供的全量工作区快照；管理员授予的
+          // 既有工作区不会预先出现在 state.visibleWorkspaces 或 user_workspaces，
+          // 不能套用增量 upsert 的“已知 workspaceId”门槛，否则新授权工作区会
+          // 连同其会话一起被全部过滤掉（Issue #25）。baseline 只需执行路径白名单
+          // 与跨用户所有权校验；后续 upsert 继续使用更严格的 workspaceAllowed。
+          if (!workspacePathAllowed(workspace) || !Array.isArray(workspace.sessionIds)) continue;
           const id = workspace.workspaceId;
           const workspacePath = workspace.path;
           if (typeof id !== 'string' || typeof workspacePath !== 'string') continue;
@@ -1329,8 +1523,20 @@ export function createGatewayServer(
             allowedAccess.set(sessionId, workspacePath);
           }
         }
-        replaceUserSessionAccess(userId, allowedAccess, userAccessRevisionFor(userId));
-        replaceUserWorkspaceIds(userId, new Set(items.map((item) => String(item.workspaceId))), userAccessRevisionFor(userId));
+        const revision = userAccessRevisionFor(userId);
+        replaceUserSessionAccess(userId, allowedAccess, revision);
+        const workspacePaths = new Map<string, string>();
+        for (const item of items) {
+          const workspaceId = item.workspaceId;
+          const workspacePath = item.path;
+          if (typeof workspaceId === 'string' && typeof workspacePath === 'string') workspacePaths.set(workspaceId, workspacePath);
+        }
+        replaceUserWorkspacePaths(userId, workspacePaths, revision);
+        userArchivedSessionIds.set(userId, new Set(
+          source.archivedSessionIds.filter((id): id is string =>
+            typeof id === 'string' && allowedAccess.has(id) && !perms.disabled_sessions.includes(id),
+          ),
+        ));
         return { type: 'baseline', value: {
           items,
           archivedSessionIds: source.archivedSessionIds.filter((id) => allowedAccess.has(id) && !perms.disabled_sessions.includes(id)),
@@ -1348,7 +1554,7 @@ export function createGatewayServer(
       if (frame.type === 'remove' && typeof frame.workspaceId === 'string') {
         const workspacePath = state.visibleWorkspaces.get(frame.workspaceId);
         if (workspacePath === undefined || !folderAllowed(workspacePath, perms.allowed_folders) ||
-          db.listWorkspaceOwners().some((owner) => owner.userId !== userId && normalizePath(owner.path) === normalizePath(workspacePath))) return null;
+          workspaceOwnedByAnotherSubuser(userId, workspacePath)) return null;
         state.visibleWorkspaces.delete(frame.workspaceId);
         return { type: 'remove', workspaceId: frame.workspaceId };
       }
@@ -1357,7 +1563,7 @@ export function createGatewayServer(
           if (typeof id !== 'string') return false;
           const workspacePath = state.visibleWorkspaces.get(id);
           return workspacePath !== undefined && folderAllowed(workspacePath, perms.allowed_folders) &&
-            !db.listWorkspaceOwners().some((owner) => owner.userId !== userId && normalizePath(owner.path) === normalizePath(workspacePath));
+            !workspaceOwnedByAnotherSubuser(userId, workspacePath);
         });
         return { type: 'order', workspaceIds: ids };
       }
@@ -2133,7 +2339,7 @@ export function createGatewayServer(
   });
 
   // ── 更新某子用户权限（仅主用户） ─────────────────────────────
-  app.post('/gateway/api/permissions', jsonBody, (req, res) => {
+  app.post('/gateway/api/permissions', jsonBody, async (req, res) => {
     const me = apiAuth(req, res, true);
     if (!me) return;
     const body = (req.body ?? {}) as Record<string, unknown>;
@@ -2200,11 +2406,29 @@ export function createGatewayServer(
     if (allowWorkspaceCreate === null) return;
     const banned = readBooleanPermission('banned', body.banned, currentPermissions.banned);
     if (banned === null) return;
-    const rawSandbox = typeof body.sandboxMode === 'string' ? body.sandboxMode : '';
-    const sandboxMode =
-      rawSandbox === 'read-only' || rawSandbox === 'workspace-write' || rawSandbox === 'danger-full-access'
-        ? rawSandbox
-        : null;
+    let sandboxMode: 'read-only' | 'workspace-write' | 'danger-full-access' | null;
+    if (body.sandboxMode === undefined) {
+      // 权限卡片/旧客户端可能只提交部分字段；省略沙盒字段必须保留既有
+      // 收紧策略，不能把已有 read-only 静默变成“不限制”。显式 null 才表示清除。
+      // 损坏的历史值按最严格的 read-only 处理，不能借部分更新把它放宽。
+      sandboxMode = currentPermissions.sandbox_mode === 'read-only' ||
+        currentPermissions.sandbox_mode === 'workspace-write' ||
+        currentPermissions.sandbox_mode === 'danger-full-access'
+        ? currentPermissions.sandbox_mode
+        : currentPermissions.sandbox_mode === null
+          ? null
+          : 'read-only';
+    } else if (body.sandboxMode === null) {
+      sandboxMode = null;
+    } else if (
+      typeof body.sandboxMode === 'string' &&
+      (body.sandboxMode === 'read-only' || body.sandboxMode === 'workspace-write' || body.sandboxMode === 'danger-full-access')
+    ) {
+      sandboxMode = body.sandboxMode as 'read-only' | 'workspace-write' | 'danger-full-access';
+    } else {
+      res.status(400).json({ ok: false, code: 'INVALID', error: 'sandboxMode 无效' });
+      return;
+    }
     const submittedAgentPresets = body.allowedAgentPresets;
     if (submittedAgentPresets !== undefined && submittedAgentPresets !== null && !Array.isArray(submittedAgentPresets)) {
       res.status(400).json({ ok: false, code: 'INVALID', error: 'Agent preset 权限必须是数组或 null' });
@@ -2240,8 +2464,21 @@ export function createGatewayServer(
     const allowedWebSocketPaths = submittedWebSocketPaths === undefined
       ? existingWebSocketPaths
       : [...new Set(submittedWebSocketPaths as string[])];
-    const disabledSessions = stringArray(body.disabledSessions, 2000)
-      .filter((id) => id.length > 0 && id.length <= 200);
+    let disabledSessions: string[];
+    if (body.disabledSessions === undefined) {
+      // 同样遵循部分更新语义。省略 disabledSessions 不得恢复此前被主用户
+      // 关闭的会话；显式数组才替换当前集合。
+      disabledSessions = [...currentPermissions.disabled_sessions];
+    } else if (
+      !Array.isArray(body.disabledSessions) ||
+      body.disabledSessions.length > 2000 ||
+      body.disabledSessions.some((id) => typeof id !== 'string' || id.length === 0 || id.length > 200)
+    ) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: '禁用会话列表无效' });
+      return;
+    } else {
+      disabledSessions = [...new Set(body.disabledSessions as string[])];
+    }
     if (body.allowedSessionIds !== undefined && !Array.isArray(body.allowedSessionIds)) {
       res.status(400).json({ ok: false, code: 'INVALID', error: '允许的会话必须是数组' });
       return;
@@ -2255,8 +2492,9 @@ export function createGatewayServer(
       res.status(400).json({ ok: false, code: 'INVALID', error: '允许的会话列表无效' });
       return;
     }
+    const previousAllowedSessionIds = db.listUserSessionGrants(userId);
     const allowedSessionIds = body.allowedSessionIds === undefined
-      ? db.listUserSessionGrants(userId)
+      ? previousAllowedSessionIds
       : [...new Set(body.allowedSessionIds as string[])];
     if (allowedWebSocketPaths.some((rule) => !registeredWebSocketPaths.has(rule))) {
       res.status(400).json({ ok: false, code: 'INVALID', error: 'WebSocket 权限必须来自服务器已登记的用户路径' });
@@ -2282,12 +2520,41 @@ export function createGatewayServer(
       disabledSessions,
       allowedSessionIds,
     });
+    // alpha.3 在每次工具执行时从 session log 的 sandbox/mode 折叠真实策略。
+    // 只在确定为收紧时改写已有会话，绝不由权限保存隐式提升旧 session。
+    // A null historical setting predates this control and may have inherited DSH's
+    // broadest mode, so an explicit restrictive setting must be applied to old grants.
+    const previousSandboxRank = prevPerms.sandbox_mode === 'read-only'
+      ? SANDBOX_RANK['read-only']
+      : prevPerms.sandbox_mode === 'workspace-write'
+        ? SANDBOX_RANK['workspace-write']
+        : SANDBOX_RANK['danger-full-access'];
+    const sandboxTightened = sandboxMode !== null && SANDBOX_RANK[sandboxMode] < previousSandboxRank;
+    let sandboxRevokedSessionIds: string[] = [];
+    if (sandboxTightened && sandboxMode !== null) {
+      // A newly shared session can belong to the administrator. Do not mutate its
+      // global DSH sandbox merely because it was granted to this child account.
+      // Only propagate a tightening to sessions this child could already access.
+      const previouslyGranted = new Set(previousAllowedSessionIds);
+      const existingGrantedSessions = allowedSessionIds.filter((id) => previouslyGranted.has(id));
+      sandboxRevokedSessionIds = await applySandboxToSessions(existingGrantedSessions, sandboxMode);
+      if (sandboxRevokedSessionIds.length > 0) {
+        const revoked = new Set(sandboxRevokedSessionIds);
+        db.replaceUserSessionGrants(userId, allowedSessionIds.filter((id) => !revoked.has(id)));
+      }
+    }
     // 权限行与显式 grant 已在数据库层同一事务提交成功后，才失效旧访问快照。
     // 管理员显式保存（含故意置空=回收全部）后标记已初始化，避免后续被重新种子化。
     db.markSessionGrantsSeeded(userId);
     // 工作区白名单、禁用会话、显式 grant 或封禁状态变化后，旧会话授权快照不能继续生效；
     // 递增全局请求序号，让在此之前发出的 workspace.list 响应也不能恢复旧授权。
     invalidateUserSessionAccess(userId, ++workspaceListRequestRevision);
+    // Remote mux 的 workspace/session baseline 不会在数据库变更后自动刷新。关闭旧
+    // 订阅令 DSH 重新连接并建立新快照，避免子用户停留在授权前的“无工作区”状态。
+    closeUserRemoteMuxClients(userId);
+    // 统一撤销 legacy events 与获授权第三方 WebSocket；Remote mux 另有 1012
+    // 语义关闭，避免将其作为原始 socket 直接销毁。
+    closeUserWebSocketClients(userId);
     if (quotaChanged) {
       db.resetUsage(userId);
       // 清掉内存节流缓存：否则 15 秒节流可能跳过新记录的创建，配额暂时不生效
@@ -2316,6 +2583,7 @@ export function createGatewayServer(
       allowedFolders,
       allowedSessionIds: db.listUserSessionGrants(userId),
       disabledSessions,
+      sandboxRevokedSessionIds,
     });
   });
 
@@ -2658,19 +2926,24 @@ export function createGatewayServer(
           return;
         }
 
+        if (!perms.allow_upload && (isUploadRequest(req.method, requestPath) || isAionuiFileWrite(req.method, requestPath))) {
+          res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.noUpload')));
+          return;
+        }
         if (!perms.allow_git_download && (isGitRequest(requestPath) || isAionuiFileRead(req.method, requestPath))) {
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.noGit')));
           return;
         }
 
-        const workspaceManagementAllowed =
-          perms.allow_workspace_create &&
-          (isWorkspaceCreate(requestPath) || isWorkspaceDeleteOrRename(requestPath));
+        const isManagedWorkspaceWrite = isWorkspaceCreate(requestPath) || isWorkspaceDeleteOrRename(requestPath);
+        const workspaceManagementAllowed = perms.allow_workspace_create && isManagedWorkspaceWrite;
         // 新建工作区的目录选择器会先调用 host.createDirectory；它不属于
         // workspace.* RPC。该调用必须复用同一开关，否则子用户虽不能登记
         // 工作区，仍能在服务器文件系统中创建目录。
+        // `allowWorkspaceCreate` 只覆盖创建/删除/重命名；import/move/materialize/
+        // adopt 等其它 workspace 写操作不能因共享同一个总写谓词而被顺带放行。
         if (
-          (isWorkspaceWrite(requestPath) && !workspaceManagementAllowed) ||
+          (isWorkspaceWrite(requestPath) && (!isManagedWorkspaceWrite || !workspaceManagementAllowed)) ||
           (isWorkspaceDirectoryCreate(requestPath) && !perms.allow_workspace_create)
         ) {
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.workspaceDenied')));
@@ -2796,7 +3069,7 @@ export function createGatewayServer(
   function bufferUpstream(
     upstreamRes: http.IncomingMessage,
     res: Response,
-    onEnd: (body: Buffer) => void,
+    onEnd: (body: Buffer) => void | Promise<void>,
     onOversize: 'stream' | 'fail' = 'fail',
   ): void {
     const chunks: Buffer[] = [];
@@ -2833,7 +3106,10 @@ export function createGatewayServer(
     const onEndHandler = () => {
       if (settled) return;
       settled = true;
-      onEnd(Buffer.concat(chunks));
+      Promise.resolve(onEnd(Buffer.concat(chunks))).catch(() => {
+        if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response unprocessable');
+        else res.destroy();
+      });
     };
     const onError = () => {
       if (settled) return;
@@ -2846,35 +3122,70 @@ export function createGatewayServer(
   }
 
   /**
-   * F-26：向 dsh 注入会话沙盒（loopback + 内部密钥，fire-and-forget）。
-   * 受限子用户（sandbox_mode 非空）建会话后，dsh 默认给 workspace-write 沙盒——
-   * 这里通知 dsh 插件把该会话的 sandbox/mode 事件追加为其真实授权级别。
-   * 插件侧校验 loopback + x-internal-secret（与 SETUP_KEY 同源派生）。
+   * F-26：向 dsh 注入会话沙盒，并等待插件确认。
+   * 受限子用户的新会话在确认前仍是 DSH 默认 sandbox；若此处 fire-and-forget，
+   * 内部调用失败后会把比授权更宽松的会话成功交给用户。因此失败必须让创建请求
+   * 失败，不能把未确认的会话当作可用会话返回。
    */
-  function applySandboxToSession(sessionId: string, mode: string): void {
-    const body = JSON.stringify({ sessionId, mode });
-    const r = upstreamTransport.request(
-      {
-        hostname: upstreamHost,
-        port: upstreamPort,
-        path: '/api/dsh-passwords/internal/sandbox',
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'content-length': String(Buffer.byteLength(body)),
-          'x-internal-secret': config.internalSecret,
+  function applySandboxToSession(sessionId: string, mode: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      const body = JSON.stringify({ sessionId, mode });
+      let settled = false;
+      const finish = (ok: boolean) => {
+        if (settled) return;
+        settled = true;
+        resolve(ok);
+      };
+      const r = upstreamTransport.request(
+        {
+          hostname: upstreamHost,
+          port: upstreamPort,
+          path: '/api/dsh-passwords/internal/sandbox',
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'content-length': String(Buffer.byteLength(body)),
+            'x-internal-secret': config.internalSecret,
+          },
+          timeout: 3000,
         },
-        timeout: 3000,
-      },
-      () => {},
-    );
-    r.on('error', (error) => {
-      // 沙盒注入失败（dsh 重启窗口期/插件未部署）静默 = 受限子用户新会话拿到默认
-      // workspace-write 沙盒（比授权高一档的提权）且无人知晓——必须留日志
-      console.error(`[dsh-passwords] 沙盒注入失败 session=${sessionId} mode=${mode}: ${error?.message ?? error}`);
+        (response) => {
+          response.resume();
+          finish((response.statusCode ?? 500) >= 200 && (response.statusCode ?? 500) < 300);
+        },
+      );
+      r.on('error', (error) => {
+        console.error(`[dsh-passwords] 沙盒注入失败 session=${sessionId} mode=${mode}: ${error?.message ?? error}`);
+        finish(false);
+      });
+      r.on('timeout', () => {
+        r.destroy();
+        finish(false);
+      });
+      r.end(body);
     });
-    r.on('timeout', () => r.destroy());
-    r.end(body);
+  }
+
+  /**
+   * Do not serialize up to 2,000 internal requests behind a permission-save HTTP
+   * request. A small fixed pool bounds upstream pressure while preserving the
+   * fail-closed contract: every failed confirmation is returned for grant revocation.
+   */
+  async function applySandboxToSessions(sessionIds: readonly string[], mode: string): Promise<string[]> {
+    const failed: string[] = [];
+    let cursor = 0;
+    const workerCount = Math.min(16, sessionIds.length);
+    const worker = async (): Promise<void> => {
+      while (true) {
+        const index = cursor;
+        cursor += 1;
+        if (index >= sessionIds.length) return;
+        const sessionId = sessionIds[index];
+        if (!(await applySandboxToSession(sessionId, mode))) failed.push(sessionId);
+      }
+    };
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    return failed;
   }
 
   app.use((req, res) => {
@@ -2949,6 +3260,9 @@ export function createGatewayServer(
     const sessionAccessRequestRevision = reqAs.dshpwUser === undefined
       ? 0
       : userAccessRevisionFor(reqAs.dshpwUser);
+    // 无 Content-Length 的 chunked 请求不能绕过与声明长度相同的硬上限。
+    // 该标志同时阻止 upstreamReq 的 error 处理器把主动的 413 误报成 502。
+    let requestBodyRejected = false;
     const upstreamReq = upstreamTransport.request(
       {
         hostname: upstreamHost,
@@ -3034,22 +3348,47 @@ export function createGatewayServer(
         }
 
         // ── workspace 管理响应：成功后同步工作区登记 ──
-        // 创建 → 登记创建者工作区并加入其目录白名单；重命名/删除同步登记表。
-        // 会话级授权由显式 grant（Issue #19）与 session.create/fork 登记负责。
-        if (
-          reqAs.dshpwWorkspacePath !== undefined &&
-          (upstreamRes.statusCode ?? 500) >= 200 &&
-          (upstreamRes.statusCode ?? 500) < 300 &&
-          reqAs.dshpwUser !== undefined
-        ) {
-          if (reqAs.dshpwWorkspaceCreate === true) {
-            db.addUserWorkspace(reqAs.dshpwUser, reqAs.dshpwWorkspacePath);
-            db.addAllowedFolder(reqAs.dshpwUser, reqAs.dshpwWorkspacePath);
-          } else if (reqAs.dshpwWorkspaceOldPath !== undefined && reqAs.dshpwWorkspaceNewPath !== undefined) {
-            db.renameUserWorkspace(reqAs.dshpwUser, reqAs.dshpwWorkspaceOldPath, reqAs.dshpwWorkspaceNewPath);
-          } else if (/(?:remove|delete)(?:[./]|$)/.test(proxyPath)) {
-            db.removeUserWorkspace(reqAs.dshpwUser, reqAs.dshpwWorkspacePath);
-          }
+        // DSH Remote business failures also use HTTP 200. In particular,
+        // workspace/create reports { created: false } when resolving an existing
+        // administrator workspace; that must never turn a shared workspace into a
+        // subuser-owned one.
+        if (reqAs.dshpwWorkspacePath !== undefined && reqAs.dshpwUser !== undefined) {
+          bufferUpstream(upstreamRes, res, (raw) => {
+            let businessOk = false;
+            let created = false;
+            let createdPath: string | null = null;
+            try {
+              const body = decodeUpstreamBody(raw, String(upstreamRes.headers['content-encoding'] ?? ''));
+              const parsed = JSON.parse(body.toString('utf8')) as Record<string, unknown>;
+              const result = parsed.result;
+              if (isPlainJsonRecord(result) && result.ok === true) {
+                businessOk = true;
+                const value = result.value;
+                if (isPlainJsonRecord(value) && value.created === true && isPlainJsonRecord(value.workspace) && typeof value.workspace.path === 'string') {
+                  created = true;
+                  createdPath = value.workspace.path;
+                }
+              }
+            } catch {
+              // No ownership state may be changed from an unparseable result.
+            }
+            if (businessOk) {
+              if (reqAs.dshpwWorkspaceCreate === true) {
+                if (created && createdPath !== null && normalizePath(createdPath) === reqAs.dshpwWorkspacePath) {
+                  db.addUserWorkspace(reqAs.dshpwUser!, reqAs.dshpwWorkspacePath);
+                  db.addAllowedFolder(reqAs.dshpwUser!, reqAs.dshpwWorkspacePath);
+                }
+              } else if (reqAs.dshpwWorkspaceOldPath !== undefined && reqAs.dshpwWorkspaceNewPath !== undefined) {
+                db.renameUserWorkspace(reqAs.dshpwUser!, reqAs.dshpwWorkspaceOldPath, reqAs.dshpwWorkspaceNewPath);
+              } else if (/(?:remove|delete)(?:[./]|$)/.test(proxyPath) && reqAs.dshpwWorkspacePath !== undefined) {
+                db.removeUserWorkspace(reqAs.dshpwUser!, reqAs.dshpwWorkspacePath);
+              }
+            }
+            const respHeaders = headersForStreaming(upstreamRes.headers);
+            if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+            if (!res.writableEnded) res.end(raw);
+          });
+          return;
         }
 
         // ── workspace.list 响应：收集 id→path 缓存 + 受限子用户过滤白名单外的工作区 ──
@@ -3078,11 +3417,7 @@ export function createGatewayServer(
               const workspaceVisible = (candidate: string): boolean => {
                 if (!folderAllowed(candidate, reqAs.dshpwPerms?.allowed_folders ?? [])) return false;
                 if (reqAs.dshpwUser === undefined || reqAs.dshpwIsAdmin === true) return true;
-                const owners = db.listWorkspaceOwners();
-                const normalizedCandidate = normalizePath(candidate);
-                return !owners.some(
-                  (owner) => normalizePath(owner.path) === normalizedCandidate && owner.userId !== reqAs.dshpwUser,
-                );
+                return !workspaceOwnedByAnotherSubuser(reqAs.dshpwUser, candidate);
               };
               const outBody = reqAs.dshpwUser !== undefined
                 ? filterByPathFieldWithPredicate(parsed, 'path', workspaceVisible)
@@ -3122,21 +3457,14 @@ export function createGatewayServer(
                   if (disabled.has(id)) access.delete(id);
                 }
                 replaceUserSessionAccess(reqAs.dshpwUser!, access, requestRevision);
-                const workspaceIds = new Set<string>();
-                const visit = (value: unknown, depth = 0): void => {
-                  if (depth > 8 || value === null || typeof value !== 'object') return;
-                  if (Array.isArray(value)) {
-                    for (const item of value) visit(item, depth + 1);
-                    return;
-                  }
-                  const obj = value as Record<string, unknown>;
-                  if (typeof obj.workspaceId === 'string' && typeof obj.path === 'string') {
-                    workspaceIds.add(obj.workspaceId);
-                  }
-                  for (const child of Object.values(obj)) visit(child, depth + 1);
-                };
-                visit(outBody);
-                replaceUserWorkspaceIds(reqAs.dshpwUser!, workspaceIds, requestRevision);
+                replaceUserWorkspacePaths(
+                  reqAs.dshpwUser!,
+                  collectIdPathPairs(outBody),
+                  requestRevision,
+                );
+                userArchivedSessionIds.set(reqAs.dshpwUser!, new Set(
+                  [...archivedSessionSnapshot].filter((id) => access.has(id)),
+                ));
               }
               const out = Buffer.from(JSON.stringify(outBody), 'utf8');
               const respHeaders = headersForRewrittenBody(upstreamRes.headers);
@@ -3167,13 +3495,22 @@ export function createGatewayServer(
         // 响应体不变；已通过目录/源会话校验的新会话写入显式授权（未禁用时），
         // 其可见性由显式 grant + 工作区白名单 + 逐会话禁用共同决定。
         if (req.method === 'POST' && /^\/api\/session[.\/](create|fork)$/.test(proxyPath)) {
-          bufferUpstream(upstreamRes, res, (raw) => {
+          bufferUpstream(upstreamRes, res, async (raw) => {
             try {
               const enc = String(upstreamRes.headers['content-encoding'] ?? '');
               const decoded = enc.includes('gzip') ? gunzipBounded(raw) : raw;
               const parsed = JSON.parse(decoded.toString('utf8'));
               const sessionId = extractSessionId(parsed);
               if (sessionId !== null && reqAs.dshpwUser !== undefined) {
+                // 沙盒必须先确认，再建立子用户的 session grant/access 快照。
+                // 若注入失败，不能留下一个可由该子用户继续访问的默认 workspace-write 会话。
+                if (reqAs.dshpwPerms !== undefined && reqAs.dshpwPerms.sandbox_mode !== null) {
+                  const applied = await applySandboxToSession(sessionId, reqAs.dshpwPerms.sandbox_mode);
+                  if (!applied) {
+                    if (!res.headersSent) res.status(502).type('text/plain').send('502 Sandbox enforcement failed');
+                    return;
+                  }
+                }
                 if (reqAs.dshpwAgentPreset !== undefined) sessionAgentPresetMapFor(reqAs.dshpwUser).set(sessionId, reqAs.dshpwAgentPreset);
                 else collectSessionAgentPresets(parsed, sessionAgentPresetMapFor(reqAs.dshpwUser));
                 const reqCwd = reqAs.dshpwSessionCwd;
@@ -3198,9 +3535,6 @@ export function createGatewayServer(
                     }
                     replaceUserSessionAccess(reqAs.dshpwUser, access, sessionAccessRequestRevision);
                   }
-                }
-                if (reqAs.dshpwPerms !== undefined && reqAs.dshpwPerms.sandbox_mode !== null) {
-                  applySandboxToSession(sessionId, reqAs.dshpwPerms.sandbox_mode);
                 }
               }
               const respHeaders = headersForStreaming(upstreamRes.headers);
@@ -3230,34 +3564,33 @@ export function createGatewayServer(
           req.method === 'POST' &&
           /^\/api\/session[.\/]list$/.test(proxyPath)
         ) {
-          bufferUpstream(upstreamRes, res, (raw) => {
+          bufferUpstream(upstreamRes, res, async (raw) => {
             try {
               let body = raw;
               const enc = String(upstreamRes.headers['content-encoding'] ?? '');
               if (enc.includes('gzip')) body = gunzipBounded(body);
               const parsed = JSON.parse(body.toString('utf8'));
-              // 管理员需要全局 cwd 映射；普通用户必须使用 workspace.list 建立的
-              // 按用户访问快照，不能从未过滤的 session.list 反向获得授权。
+              // Admin retains the legacy global cache. A subuser waits briefly
+              // for alpha.3's independent workspace/follow baseline instead of
+              // treating normal stream ordering as an authorization failure.
               if (reqAs.dshpwIsAdmin === true) collectSessionCwd(parsed, sessionCwdById);
+              const userId = reqAs.dshpwUser!;
+              if (!userSessionAccess.has(userId) && !(await waitForUserSessionAccess(userId))) {
+                if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response unprocessable');
+                return;
+              }
 
-              // 子用户按工作区开关过滤：关闭工作区后，其会话一并从侧栏消失，
-              // 不产生「未分组」孤儿项。
               const perms = reqAs.dshpwPerms!;
               const cwdAllowed = isWorkspaceRestricted(perms.allowed_folders)
                 ? (cwd: string) => folderAllowed(cwd, perms.allowed_folders)
                 : null;
               const disabled = new Set(perms.disabled_sessions);
-              // workspace.list 是 rc.8 workspace registry 的权威归档来源。
-              // session.list 中同名字段可能来自旧响应，不能无版本覆盖全局快照。
-              const access = userSessionAccessFor(reqAs.dshpwUser!);
-              if (!archivedSessionSnapshotReady || !userSessionAccess.has(reqAs.dshpwUser!)) {
-                if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response unprocessable');
-                return;
-              }
-              collectSessionAgentPresets(parsed, sessionAgentPresetMapFor(reqAs.dshpwUser!));
+              const access = userSessionAccessFor(userId);
+              const archived = userArchivedSessionIds.get(userId) ?? new Set<string>();
+              collectSessionAgentPresets(parsed, sessionAgentPresetMapFor(userId));
               const filtered = filterSessionItems(
                 parsed,
-                (id) => access.has(id) && !disabled.has(id) && !archivedSessionSnapshot.has(id),
+                (id) => access.has(id) && !disabled.has(id) && !archived.has(id),
                 cwdAllowed,
               );
               const out = Buffer.from(JSON.stringify(filtered), 'utf8');
@@ -3283,7 +3616,7 @@ export function createGatewayServer(
 
         // ── Agent preset 成功响应后登记会话当前 preset ──
         // DSH RPC 的业务失败可以使用 HTTP 200，因此必须解析 result.ok，不能只看状态码。
-        if (req.method === 'POST' && /^\/api\/agentPreset[.\/]select$/.test(proxyPath) && reqAs.dshpwAgentPreset !== undefined) {
+        if (req.method === 'POST' && AGENT_PRESET_SELECT_RE.test(proxyPath) && reqAs.dshpwAgentPreset !== undefined) {
           const sessionId = reqAs.dshpwSelectedSessionId;
           const selectedAgentPreset = reqAs.dshpwAgentPreset;
           bufferUpstream(upstreamRes, res, (raw) => {
@@ -3347,7 +3680,7 @@ export function createGatewayServer(
         }
 
         // ── 受限用户 Agent preset 列表过滤 ──
-        if (req.method === 'POST' && reqAs.dshpwPerms !== undefined && reqAs.dshpwPerms.allowed_agent_presets !== null && /^\/api\/agentPreset[.\/]list$/.test(proxyPath)) {
+        if (req.method === 'POST' && reqAs.dshpwPerms !== undefined && reqAs.dshpwPerms.allowed_agent_presets !== null && AGENT_PRESET_LIST_RE.test(proxyPath)) {
           bufferUpstream(upstreamRes, res, (raw) => {
             try {
               const body = decodeUpstreamBody(raw, String(upstreamRes.headers['content-encoding'] ?? ''));
@@ -3428,6 +3761,7 @@ export function createGatewayServer(
       },
     );
     upstreamReq.on('error', (error) => {
+      if (requestBodyRejected) return;
       if (res.headersSent) {
         // 响应已开始转发：只能中断连接，避免 ERR_HTTP_HEADERS_SENT 崩溃
         res.destroy();
@@ -3446,10 +3780,11 @@ export function createGatewayServer(
     //   1) 文件夹白名单：session.create/fork 的 cwd/workspaceId 必须在授权目录内
     //   2) 沙盒权限：settings.mutate 试图把 defaultPreset 切到高于授权级别 → 403
     const workspaceManagementRequest = isWorkspaceCreate(proxyPath) || isWorkspaceDeleteOrRename(proxyPath);
+    const workspaceDirectoryCreateRequest = isWorkspaceDirectoryCreate(proxyPath);
     const needsFolderCheck =
       reqAs.dshpwPerms !== undefined &&
       (req.method === 'POST' || req.method === 'PUT' || (req.method === 'DELETE' && isAionuiPanel(proxyPath))) &&
-      (WORKSPACE_ENDPOINT_RE.test(proxyPath) || (isWorkspaceRestricted(reqAs.dshpwPerms.allowed_folders) && isAionuiPanel(proxyPath)) || workspaceManagementRequest);
+      (WORKSPACE_ENDPOINT_RE.test(proxyPath) || (isWorkspaceRestricted(reqAs.dshpwPerms.allowed_folders) && isAionuiPanel(proxyPath)) || workspaceManagementRequest || workspaceDirectoryCreateRequest);
     const needsSandboxCheck =
       reqAs.dshpwPerms !== undefined &&
       reqAs.dshpwPerms.sandbox_mode !== null &&
@@ -3476,7 +3811,7 @@ export function createGatewayServer(
     const needsOwnershipCheck =
       reqAs.dshpwPerms !== undefined &&
       (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH' || req.method === 'DELETE') &&
-      (SESSION_SCOPED_RE.test(proxyPath) || /^\/api\/agentPreset[.\/]select$/.test(proxyPath));
+      (SESSION_SCOPED_RE.test(proxyPath) || AGENT_PRESET_SELECT_RE.test(proxyPath));
     // ── 第三方插件纵深防御：dsh-ssh 创建/修改/测试主机时，host 为私网/回环地址
     // 一律拒绝（SSRF 封堵——插件源码不在我们控制内，网关拦一层；
     // 所有登录用户含主用户都拦，管理员同样可能被诱导连接内网）
@@ -3487,8 +3822,15 @@ export function createGatewayServer(
       reqAs.dshpwPerms.allowed_agent_presets !== null &&
       (req.method === 'POST' || req.method === 'PUT') &&
       (/^\/api\/session[.\/](create|fork|prompt)$/.test(proxyPath) ||
-        /^\/api\/agentPreset[.\/]select$/.test(proxyPath));
-    const agentPresetMutation = /^\/api\/agentPreset[.\/](copy|openDocument|remove|read)$/.test(proxyPath);
+        AGENT_PRESET_SELECT_RE.test(proxyPath));
+    // alpha.3 图片附件随 ClientConnection RPC JSON 内嵌，不经过第三方上传路由。
+    // 关闭上传时必须在解封装请求体后拒绝，普通文本 prompt/command 保持可用。
+    const needsImageAttachmentCheck =
+      reqAs.dshpwPerms !== undefined &&
+      !reqAs.dshpwPerms.allow_upload &&
+      req.method === 'POST' &&
+      /^\/api\/(?:session[.\/]prompt|commands[.\/]execute|subagents[.\/]prompt)$/.test(proxyPath);
+    const agentPresetMutation = AGENT_PRESET_MUTATION_RE.test(proxyPath);
     if (reqAs.dshpwPerms !== undefined && reqAs.dshpwPerms.allowed_agent_presets !== null && agentPresetMutation) {
       res.status(403).type('html').send(forbiddenPage(langOf(req), t(langOf(req), 'gw.folderDenied')));
       return;
@@ -3498,7 +3840,7 @@ export function createGatewayServer(
       (req.method === 'POST' || req.method === 'PATCH' || req.method === 'PUT') &&
       /^\/api\/dsh-ssh[.\/](hosts|test)([.\/]|$)/.test(proxyPath);
 
-    if (needsFolderCheck || needsSandboxCheck || needsCommandCheck || needsApprovalCheck || needsOwnershipCheck || needsAgentPresetCheck || needsSshHostCheck) {
+    if (needsFolderCheck || needsSandboxCheck || needsCommandCheck || needsApprovalCheck || needsOwnershipCheck || needsAgentPresetCheck || needsImageAttachmentCheck || needsSshHostCheck) {
       const chunks: Buffer[] = [];
       let size = 0;
       let settled = false;
@@ -3549,11 +3891,17 @@ export function createGatewayServer(
         // 转发体默认原样；SSRF 校验或审批改写时会整体重建（重建必须同步更新 content-length）
         let forwardBody = Buffer.concat(chunks);
 
+        if (needsImageAttachmentCheck && hasImageAttachment(bodyObj)) {
+          upstreamReq.destroy();
+          res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.noUpload')));
+          return;
+        }
+
         if (needsAgentPresetCheck) {
           const allowedPresets = new Set(reqAs.dshpwPerms!.allowed_agent_presets ?? []);
-          const requestedPreset = findStringField(bodyObj, 'agentPreset');
+          const requestedPreset = agentPresetFromRequest(bodyObj);
           const sessionIds = collectSessionIds(bodyObj);
-          const requiresExplicitPreset = /^\/api\/agentPreset[./]select$/.test(proxyPath);
+          const requiresExplicitPreset = AGENT_PRESET_SELECT_RE.test(proxyPath);
           const sessionAgentPresets = sessionAgentPresetMapFor(reqAs.dshpwUser!);
           const inheritedPreset = /^\/api\/session[.\/]fork$/.test(proxyPath)
             ? [...sessionIds].map((id) => sessionAgentPresets.get(id)).find((id): id is string => id !== undefined)
@@ -3575,10 +3923,10 @@ export function createGatewayServer(
             res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
             return;
           }
-          if ((/^\/api\/session[.\/](create|fork)$/.test(proxyPath) || /^\/api\/agentPreset[.\/]select$/.test(proxyPath)) && selectedPreset !== undefined) {
+          if ((/^\/api\/session[.\/](create|fork)$/.test(proxyPath) || AGENT_PRESET_SELECT_RE.test(proxyPath)) && selectedPreset !== undefined) {
             reqAs.dshpwAgentPreset = selectedPreset;
           }
-          if (/^\/api\/agentPreset[.\/]select$/.test(proxyPath)) {
+          if (AGENT_PRESET_SELECT_RE.test(proxyPath)) {
             reqAs.dshpwSelectedSessionId = [...sessionIds][0];
           }
         }
@@ -3620,10 +3968,15 @@ export function createGatewayServer(
             targetPath = extractPathFromBody(bodyObj);
             if (targetPath === null) {
               const wid = extractWorkspaceId(bodyObj);
-              if (wid !== null) targetPath = workspacePathById.get(wid) ?? null;
-              // 走到这里仍为 null = 既无路径字段、也无 workspaceId 缓存命中（含空 body /
-              // 缓存 miss）→ 一律 fail-closed：不能跳过白名单校验后透传，否则可创建到
-              // 白名单外的工作区
+              if (wid !== null) {
+                // A subuser may only resolve IDs published by that user's filtered
+                // workspace baseline. The global cache is administrator/legacy-only.
+                targetPath = reqAs.dshpwUser === undefined
+                  ? workspacePathById.get(wid) ?? null
+                  : userWorkspacePaths.get(reqAs.dshpwUser)?.get(wid) ?? null;
+              }
+              // 走到这里仍为 null = 既无路径字段、也无经过已过滤 workspace baseline
+              // 建立的 workspaceId 映射 → 一律 fail-closed，不能放行默认目录。
               if (targetPath === null) {
                 upstreamReq.destroy();
                 res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
@@ -3634,24 +3987,30 @@ export function createGatewayServer(
           // session.create 即使用户的目录白名单为空（不限目录），仍不可借共享父目录
           // 或 workspaceId 缓存向其他用户拥有的工作区创建会话。
           if (targetPath !== null && WORKSPACE_ENDPOINT_RE.test(proxyPath) && !reqAs.dshpwIsAdmin) {
-            const normalizedTarget = normalizePath(targetPath);
-            const owners = db.listWorkspaceOwners();
-            if (owners.some((owner) => normalizePath(owner.path) === normalizedTarget && owner.userId !== reqAs.dshpwUser)) {
+            if (workspaceOwnedByAnotherSubuser(reqAs.dshpwUser!, targetPath)) {
               upstreamReq.destroy();
               res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.workspaceDenied')));
               return;
             }
           }
-          // 新建工作区由专门权限控制：成功后会自动加入创建者白名单，因此不能被
-          // 新用户的初始 __deny__ 白名单反向锁死。已有工作区的删除/重命名仍须在白名单内。
-          if (targetPath !== null && !isWorkspaceCreate(proxyPath) && !folderAllowed(targetPath, reqAs.dshpwPerms!.allowed_folders)) {
+          // 新建工作区本身由专门权限控制；目录选择器创建仍必须先限制父目录，
+          // 不能因允许“登记工作区”而获得任意宿主路径写入能力。
+          if (targetPath !== null && !isWorkspaceCreate(proxyPath) && !isWorkspaceDirectoryCreate(proxyPath) && !folderAllowed(targetPath, reqAs.dshpwPerms!.allowed_folders)) {
+            upstreamReq.destroy();
+            res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+            return;
+          }
+          if (targetPath !== null && isWorkspaceDirectoryCreate(proxyPath) && !folderAllowed(targetPath, reqAs.dshpwPerms!.allowed_folders)) {
             upstreamReq.destroy();
             res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
             return;
           }
           if (targetPath !== null && (isWorkspaceCreate(proxyPath) || isWorkspaceDeleteOrRename(proxyPath))) {
             const renamePaths = isWorkspaceDeleteOrRename(proxyPath) ? extractWorkspaceRenamePaths(bodyObj) : null;
-            if (isWorkspaceDeleteOrRename(proxyPath) && renamePaths === null && /(?:rename|update)(?:[./]|$)/.test(proxyPath)) {
+            // alpha workspace/rename changes only the title and therefore carries
+            // workspaceId + title rather than a path pair. Legacy workspace/update
+            // remains a path mutation and must retain the explicit old/new check.
+            if (renamePaths === null && /(?:update)(?:[./]|$)/.test(proxyPath)) {
               upstreamReq.destroy();
               res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
               return;
@@ -3659,8 +4018,16 @@ export function createGatewayServer(
             const oldPath = normalizePath(renamePaths?.oldPath ?? targetPath);
             const newPath = renamePaths === null ? null : normalizePath(renamePaths.newPath);
             const pathsToAuthorize = newPath === null ? [oldPath] : [oldPath, newPath];
-            const owners = db.listWorkspaceOwners();
-            if (!reqAs.dshpwIsAdmin && owners.some((owner) => pathsToAuthorize.includes(normalizePath(owner.path)) && owner.userId !== reqAs.dshpwUser)) {
+            if (!reqAs.dshpwIsAdmin && pathsToAuthorize.some((path) => workspaceOwnedByAnotherSubuser(reqAs.dshpwUser!, path))) {
+              upstreamReq.destroy();
+              res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.workspaceDenied')));
+              return;
+            }
+            // A shared administrator workspace is selectable and can host an
+            // explicitly granted session, but its global registry entry remains
+            // administrator-owned. Subusers may only rename or remove entries
+            // created under their own account.
+            if (!reqAs.dshpwIsAdmin && isWorkspaceDeleteOrRename(proxyPath) && !workspaceOwnedByUser(reqAs.dshpwUser!, oldPath)) {
               upstreamReq.destroy();
               res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.workspaceDenied')));
               return;
@@ -3759,6 +4126,27 @@ export function createGatewayServer(
         }
       });
     } else {
+      // 对无 Content-Length 的 chunked 请求也执行同一平台硬上限；否则大文件上传
+      // 可以通过改用 Transfer-Encoding 绕过 64/300 MiB 分档。
+      let receivedBodyBytes = 0;
+      let bodyLimitExceeded = false;
+      const onRequestData = (chunk: Buffer): void => {
+        if (bodyLimitExceeded) return;
+        receivedBodyBytes += chunk.length;
+        if (receivedBodyBytes <= requestBodyLimit) return;
+        bodyLimitExceeded = true;
+        requestBodyRejected = true;
+        req.unpipe(upstreamReq);
+        upstreamReq.destroy();
+        req.pause();
+        res.status(413).type('html').send(forbiddenPage(langOf(req), t(langOf(req), 'gw.bodyTooLarge')));
+        // 排空客户端剩余请求体，避免连接复用时把尾部数据解析成下一请求。
+        req.resume();
+      };
+      req.on('data', onRequestData);
+      req.on('end', () => {
+        req.off('data', onRequestData);
+      });
       req.pipe(upstreamReq);
     }
   });
@@ -3935,33 +4323,106 @@ export function createGatewayServer(
         let upstreamOpen = false;
         const pending: string[] = [];
         let pendingBytes = 0;
+        // session/control/follow may arrive before workspace/follow. A grant
+        // alone has no trustworthy cwd, so defer either session stream until
+        // the workspace baseline has established the per-user ownership snapshot.
+        const pendingSessionStreams = new Map<string, { text: string; sessionId: string | null }>();
+        const registeredClients = isSubuser
+          ? (remoteMuxClientsByUser.get(authUserId!) ?? new Set<any>())
+          : undefined;
+        if (registeredClients !== undefined) {
+          registeredClients.add(client);
+          remoteMuxClientsByUser.set(authUserId!, registeredClients);
+        }
+        const unregisterClient = (): void => {
+          if (registeredClients === undefined) return;
+          registeredClients.delete(client);
+          if (registeredClients.size === 0 && remoteMuxClientsByUser.get(authUserId!) === registeredClients) {
+            remoteMuxClientsByUser.delete(authUserId!);
+          }
+        };
         const closeBoth = (code?: number, reason?: string): void => {
           try { if (client.readyState === WebSocket.OPEN) client.close(code, reason); } catch {}
           try { upstreamWs.close(); } catch {}
+        };
+        const queueUpstreamFrame = (text: string): boolean => {
+          const textBytes = Buffer.byteLength(text);
+          if (!upstreamOpen || upstreamWs.readyState !== WebSocket.OPEN) {
+            if (pendingBytes + textBytes > REMOTE_MUX_MAX_PENDING_BYTES) {
+              closeBoth(1009, 'Remote stream queue too large');
+              return false;
+            }
+            pending.push(text);
+            pendingBytes += textBytes;
+            return true;
+          }
+          upstreamWs.send(text);
+          return true;
+        };
+        const flushPendingSessionStreams = (): void => {
+          if (isSubuser && userSessionAccess.get(authUserId!) === undefined) return;
+          for (const [streamId, pendingStream] of pendingSessionStreams) {
+            if (isSubuser && pendingStream.sessionId !== null) {
+              const perms = effectivePermissions(authUserId!);
+              const access = userSessionAccess.get(authUserId!);
+              const sessionPath = access?.get(pendingStream.sessionId);
+              if (
+                access === undefined ||
+                sessionPath === undefined ||
+                perms.disabled_sessions.includes(pendingStream.sessionId) ||
+                !db.hasUserSessionGrant(authUserId!, pendingStream.sessionId) ||
+                !folderAllowed(sessionPath, perms.allowed_folders) ||
+                workspaceOwnedByAnotherSubuser(authUserId!, sessionPath)
+              ) {
+                closeBoth(1008, 'Remote session not available for this user');
+                return;
+              }
+            }
+            pendingSessionStreams.delete(streamId);
+            if (active.has(streamId) && !queueUpstreamFrame(pendingStream.text)) return;
+          }
         };
         client.on('message', (data: Buffer, isBinary: boolean) => {
           if (isBinary) { closeBoth(1003, 'text messages required'); return; }
           const frame = parseRemoteMuxClientFrame(Buffer.from(data));
           if (frame === null) { closeBoth(1008, 'invalid Remote stream request'); return; }
+          let deferUntilWorkspaceBaseline = false;
           if (frame.type === 'open') {
             if (active.has(frame.streamId)) { closeBoth(1008, 'duplicate stream id'); return; }
             if (active.size >= REMOTE_MUX_MAX_STREAMS) { closeBoth(1008, 'too many Remote streams'); return; }
             if (isSubuser) {
-              if (frame.endpoint !== 'workspace/follow' && frame.endpoint !== 'session/control') {
-                closeBoth(1008, 'Remote endpoint not available for subusers');
-                return;
-              }
-              if (!remoteMuxEmptyArgs(frame.payload)) {
+              if (frame.endpoint === 'session/follow') {
+                const sessionId = remoteMuxFollowSessionId(frame.payload);
+                const perms = effectivePermissions(authUserId!);
+                const access = userSessionAccess.get(authUserId!);
+                const sessionPath = sessionId === null || access === undefined ? undefined : access.get(sessionId);
+                const sessionDeniedAfterBaseline =
+                  access !== undefined &&
+                  (sessionPath === undefined ||
+                    !folderAllowed(sessionPath, perms.allowed_folders) ||
+                    workspaceOwnedByAnotherSubuser(authUserId!, sessionPath));
+                if (
+                  sessionId === null ||
+                  perms.disabled_sessions.includes(sessionId) ||
+                  !db.hasUserSessionGrant(authUserId!, sessionId) ||
+                  sessionDeniedAfterBaseline
+                ) {
+                  closeBoth(1008, 'Remote session not available for this user');
+                  return;
+                }
+              } else if (!remoteMuxEmptyArgs(frame.payload)) {
                 closeBoth(1008, 'invalid Remote stream payload');
                 return;
               }
-              if (frame.endpoint === 'session/control' && userSessionAccess.get(authUserId!) === undefined) {
-                // alpha 的 session/control 与 workspace/follow 可能并发建立；先用
-                // 持久化显式 grant 建立仅含 session ID 的临时快照，workspace/follow
-                // 到达后再补全 cwd。未知 session 仍 fail-closed。
-                userSessionAccess.set(authUserId!, new Map(db.listUserSessionGrants(authUserId!).map((id) => [id, ''])));
-              }
-              active.set(frame.streamId, { endpoint: frame.endpoint, visibleWorkspaces: new Map() });
+              // $events is the alpha.3 Remote connection bootstrap. Blocking it
+              // prevents every client stream from becoming ready and makes the
+              // sidebar reconnect forever. workspace/control remain filtered
+              // below; session/follow is constrained to an explicit grant.
+              if (
+                (frame.endpoint === 'session/control' || frame.endpoint === 'session/follow') &&
+                userSessionAccess.get(authUserId!) === undefined
+              ) deferUntilWorkspaceBaseline = true;
+              active.set(frame.streamId, { endpoint: frame.endpoint as RemoteMuxUserStreamState['endpoint'], visibleWorkspaces: new Map() });
             } else {
               active.set(frame.streamId, null);
             }
@@ -3969,20 +4430,24 @@ export function createGatewayServer(
             return;
           }
           const text = JSON.stringify(frame);
-          const textBytes = Buffer.byteLength(text);
-          if (!upstreamOpen || upstreamWs.readyState !== WebSocket.OPEN) {
-            if (pendingBytes + textBytes > REMOTE_MUX_MAX_PENDING_BYTES) {
-              closeBoth(1009, 'Remote stream queue too large');
-              return;
-            }
-            pending.push(text);
-            pendingBytes += textBytes;
-          } else {
-            upstreamWs.send(text);
+          if (frame.type === 'cancel' && pendingSessionStreams.delete(frame.streamId)) {
+            active.delete(frame.streamId);
+            return;
           }
+          if (deferUntilWorkspaceBaseline && frame.type === 'open') {
+            pendingSessionStreams.set(frame.streamId, {
+              text,
+              sessionId: frame.endpoint === 'session/follow' ? remoteMuxFollowSessionId(frame.payload) : null,
+            });
+            return;
+          }
+          if (!queueUpstreamFrame(text)) return;
           if (frame.type === 'cancel') active.delete(frame.streamId);
         });
-        client.on('close', () => { try { upstreamWs.close(); } catch {} });
+        client.on('close', () => {
+          unregisterClient();
+          try { upstreamWs.close(); } catch {}
+        });
         upstreamWs.on('open', () => {
           upstreamOpen = true;
           while (pending.length > 0 && upstreamWs.readyState === WebSocket.OPEN) {
@@ -4001,6 +4466,13 @@ export function createGatewayServer(
             const filtered = filterRemoteMuxUserItem(authUserId!, effectivePermissions(authUserId!), state, frame.value);
             if (filtered === null) return;
             client.send(JSON.stringify({ type: 'item', streamId: frame.streamId, value: filtered }));
+            if (
+              state.endpoint === 'workspace/follow' &&
+              typeof filtered === 'object' &&
+              (filtered as { type?: unknown }).type === 'baseline'
+            ) {
+              flushPendingSessionStreams();
+            }
           } else {
             client.send(JSON.stringify(frame));
           }
@@ -4016,8 +4488,11 @@ export function createGatewayServer(
       const wsServer = new WebSocket.WebSocketServer({ noServer: true });
       wsServer.handleUpgrade(req, socket, head, (client: any) => {
         const upstreamWs = new WebSocket.WebSocket(`${upstream.protocol === 'https:' ? 'wss' : 'ws'}://${upstreamAuthority}${fwdPath}`, upstreamWsOptions());
+        const unregisterClient = registerUserWebSocketClient(authUserId!, {
+          close: () => { if (client.readyState === WebSocket.OPEN) client.close(1012, 'Permissions changed'); },
+        });
         client.on('message', () => client.close(1008, 'downlink only'));
-        client.on('close', () => { try { upstreamWs.close(); } catch {} });
+        client.on('close', () => { unregisterClient(); try { upstreamWs.close(); } catch {} });
         upstreamWs.on('open', () => {});
         upstreamWs.on('message', (data: Buffer) => {
           const filtered = authUserId === null
@@ -4053,6 +4528,10 @@ export function createGatewayServer(
       return;
     }
 
+    // 受限子用户的获授权第三方 WS 也必须在封禁/权限变更时主动撤销。
+    const unregisterRawUserWebSocket = userRole === 'user' && authUserId !== null
+      ? registerUserWebSocketClient(authUserId, { close: () => socket.destroy() })
+      : undefined;
     // 转发升级请求（Host/Origin 改写，同 HTTP 路径；路径已规范化）
     const upstreamSocket = upstreamIsHttps
       ? tlsConnect({ host: upstreamHost, port: upstreamPort, servername: upstreamHost, rejectUnauthorized: process.env.MCP_GATEWAY_UPSTREAM_TLS_VERIFY !== '0' }, () => {
@@ -4099,7 +4578,7 @@ export function createGatewayServer(
     });
     upstreamSocket.on('error', () => socket.destroy());
     socket.on('error', () => upstreamSocket.destroy());
-    socket.on('close', () => upstreamSocket.destroy());
+    socket.on('close', () => { unregisterRawUserWebSocket?.(); upstreamSocket.destroy(); });
     upstreamSocket.on('close', () => socket.destroy());
   });
 

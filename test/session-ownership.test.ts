@@ -16,7 +16,7 @@ import {
 } from '../src/permissions.js';
 
 test('F-25：SESSION_SCOPED_RE 命中会读取/写入会话的 RPC，但不命中 create/list', () => {
-  for (const m of ['history', 'prompt', 'respond', 'archive', 'delete', 'rename', 'retitle', 'title', 'resume', 'fork', 'truncate', 'export']) {
+  for (const m of ['history', 'prompt', 'respond', 'archive', 'delete', 'rename', 'retitle', 'title', 'resume', 'fork', 'truncate', 'export', 'attachment', 'updateQueue', 'cancel', 'page', 'openWorkspacePath']) {
     assert.equal(SESSION_SCOPED_RE.test(`/api/session.${m}`), true, `session.${m} 应归属校验`);
     assert.equal(SESSION_SCOPED_RE.test(`/api/session/${m}`), true, `session/${m} 应归属校验`);
   }
@@ -25,6 +25,9 @@ test('F-25：SESSION_SCOPED_RE 命中会读取/写入会话的 RPC，但不命�
   assert.equal(SESSION_SCOPED_RE.test('/api/session.create'), false, 'create 无源会话');
   assert.equal(SESSION_SCOPED_RE.test('/api/session.list'), false, 'list 单独过滤');
   assert.equal(SESSION_SCOPED_RE.test('/api/workspace.create'), false, '创建工作区不属于会话作用域');
+  for (const endpoint of ['commands/execute', 'commands/list', 'subagents/list', 'subagents/prompt', 'subagents/interruptByParent']) {
+    assert.equal(SESSION_SCOPED_RE.test(`/api/${endpoint}`), true, `${endpoint} 应归属校验`);
+  }
 });
 
 test('F-25：extractSessionId 提取顶层与嵌套 sessionId', () => {
@@ -36,9 +39,11 @@ test('F-25：extractSessionId 提取顶层与嵌套 sessionId', () => {
 test('Issue #16：collectSessionIds 不忽略空或超长 sessionId', () => {
   const ids = collectSessionIds({
     sessionId: 's-valid',
+    agentId: 'agent-valid',
     nested: [{ sessionId: '' }, { sessionId: 'x'.repeat(201) }],
   });
   assert.equal(ids.has('s-valid'), true);
+  assert.equal(ids.has('agent-valid'), true, 'alpha.3 commands 使用 agentId');
   assert.equal(ids.has(''), true, '空 sessionId 也必须触发 fail-closed 校验');
   assert.equal(ids.has('x'.repeat(201)), true, '超长 sessionId 也必须触发 fail-closed 校验');
 });

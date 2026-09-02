@@ -866,7 +866,7 @@ export class Database {
       allowedWebSocketPaths?: string[];
       allowedAgentPresets?: string[] | null;
       banned: boolean;
-      sandboxMode: string | null;
+      sandboxMode?: string | null;
       disabledSessions?: string[];
       allowedSessionIds?: string[];
     },
@@ -874,8 +874,12 @@ export class Database {
     // 防御性清洗：空串/当前目录/根目录条目在 folderAllowed 里语义=全盘允许
     // （fail-open 陷阱）——网关端点已拒绝，数据层再兑底一次。
     const allowedFolders = sanitizeAllowedFolders(perms.allowedFolders);
-    const disabledSessions = [...new Set((perms.disabledSessions ?? []).filter((id) => typeof id === 'string' && id.length > 0 && id.length <= 200))].slice(0, 2000);
     const current = this.getPermissions(userId);
+    const disabledSessions = [...new Set(
+      (perms.disabledSessions ?? current?.disabled_sessions ?? [])
+        .filter((id) => typeof id === 'string' && id.length > 0 && id.length <= 200),
+    )].slice(0, 2000);
+    const sandboxMode = perms.sandboxMode === undefined ? current?.sandbox_mode ?? null : perms.sandboxMode;
     const allowedWebSocketPaths = [...new Set(
       (perms.allowedWebSocketPaths ?? current?.allowed_websocket_paths ?? [])
         .filter((path) => typeof path === 'string' && path.length > 0 && path.length <= 256),
@@ -917,7 +921,7 @@ export class Database {
       JSON.stringify(allowedWebSocketPaths),
       allowedAgentPresets === null ? null : JSON.stringify(allowedAgentPresets),
       perms.banned ? 1 : 0,
-      perms.sandboxMode,
+      sandboxMode,
       JSON.stringify(disabledSessions),
       );
       if (perms.allowedSessionIds !== undefined) {

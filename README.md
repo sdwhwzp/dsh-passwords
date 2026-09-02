@@ -76,7 +76,7 @@ dsh 自带的网页界面没有登录与权限控制，公网部署后任何拿�
 
 ### 前置条件
 
-宿主机安装需要 Node.js 22.19+ 或 24+、可正常运行的 dsh 和 git。请让本插件与 dsh 宿主使用同一 Node 主线版本；DSH `0.1.2-alpha.3` 的官方运行要求也是 22.19+ 或 24+。Docker 安装只需要 Docker Engine 或 Docker Desktop 和一个 DeepSeek API key。
+宿主机安装需要 Node.js 22.19+ 或 24+、可正常运行的 dsh 和 git。请让本插件与 dsh 宿主使用同一 Node 主线版本；DSH `0.1.2-alpha.5` 的官方运行要求也是 22.19+ 或 24+。Docker 安装只需要 Docker Engine 或 Docker Desktop 和一个 DeepSeek API key。
 
 ### 安装
 
@@ -319,7 +319,7 @@ curl -so /dev/null -w "TLS:%{time_appconnect}s\n" https://地址/gateway/login
 
 ### 手动安装
 
-> v2.6.7 的兼容层覆盖 DSH `0.1.2-alpha.1` 至 `alpha.3` 的源码运行时；alpha.1 未发布 npm 包，npm/Docker 可安装基线为 `alpha.2+`，当前锁定并验收 `alpha.3`。安装器会严格检查 Node.js `22.19+` 或 `24+`，并在安装完成后注册插件、探测 dsh 安装目录并应用兼容补丁。自动更新与设置页“重载补丁”会沿用同一补丁链路。
+> v2.6.8 的兼容层覆盖 DSH `0.1.2-alpha.1` 至 `alpha.5` 的源码运行时；alpha.1 未发布 npm 包，npm/Docker 可安装基线为 `alpha.2+`，当前锁定并验收 `alpha.5`。安装器会严格检查 Node.js `22.19+` 或 `24+`，并在安装完成后注册插件、探测 dsh 安装目录并应用兼容补丁。自动更新与设置页“重载补丁”会沿用同一补丁链路。
 
 1. `git clone https://github.com/slywalker2006/dsh-passwords && cd dsh-passwords`
 2. `npm install && npm run build`
@@ -346,7 +346,7 @@ curl -so /dev/null -w "TLS:%{time_appconnect}s\n" https://地址/gateway/login
 
 ## 版本兼容
 
-当前版本 2.6.7。已验证 DSH `0.1.2-alpha.3` 源码部署；兼容层同时保留 `alpha.1` 与 `alpha.2` 的已知结构适配。npm 包包含预构建 dist、TypeScript 源码与全部脚本；Docker 镜像与 npm 包出自同一份源码，bundled Docker 默认使用 `0.1.2-alpha.3`。
+当前版本 2.6.8。已验证 DSH `0.1.2-alpha.5` 部署；兼容层覆盖 DSH `alpha.1` 至 `alpha.5` 的已知结构适配。npm 包包含预构建 dist、TypeScript 源码与全部脚本；bundled Docker 镜像与 npm 包出自同一份源码，并内置 DSH `0.1.2-alpha.5`。
 
 ## 参与贡献
 

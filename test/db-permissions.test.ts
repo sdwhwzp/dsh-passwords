@@ -149,6 +149,39 @@ test('旧 user_permissions 表会迁移 WebSocket 授权列，并保留现有权
       disabledSessions: [],
     });
     assert.equal(db.getPermissions(7)?.allowed_agent_presets, null, 'NULL 必须保留不限制的兼容语义');
+
+    db.setPermissions(7, {
+      allowedFolders: ['/srv/project'],
+      hourlyTokenLimit: 10,
+      dailyMinutesLimit: 20,
+      allowUpload: true,
+      allowGitDownload: true,
+      allowWorkspaceCreate: false,
+      banned: false,
+    });
+    assert.equal(db.getPermissions(7)?.sandbox_mode, 'workspace-write', '省略 sandboxMode 不得清除既有策略');
+    assert.deepEqual(db.getPermissions(7)?.disabled_sessions, [], '省略 disabledSessions 应保留当前集合');
+
+    db.setPermissions(7, {
+      allowedFolders: ['/srv/project'],
+      hourlyTokenLimit: 10,
+      dailyMinutesLimit: 20,
+      allowUpload: true,
+      allowGitDownload: true,
+      allowWorkspaceCreate: false,
+      banned: false,
+      disabledSessions: ['disabled-session'],
+    });
+    db.setPermissions(7, {
+      allowedFolders: ['/srv/project'],
+      hourlyTokenLimit: 10,
+      dailyMinutesLimit: 20,
+      allowUpload: true,
+      allowGitDownload: true,
+      allowWorkspaceCreate: false,
+      banned: false,
+    });
+    assert.deepEqual(db.getPermissions(7)?.disabled_sessions, ['disabled-session'], '省略 disabledSessions 不得恢复被禁用会话');
   } finally {
     db.close();
     rmSync(tempDir, { recursive: true, force: true });

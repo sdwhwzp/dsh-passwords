@@ -479,6 +479,13 @@ export function collectSessionCwdFromWorkspaces(value: unknown, out: Map<string,
  */
 export function extractWorkspaceId(value: unknown, depth = 0): string | null {
   if (depth > 6 || value === null || typeof value !== 'object') return null;
+  const args = depth === 0 ? clientConnectionArgs(value) : null;
+  if (args !== null) {
+    const request = args.request;
+    if (request !== null && typeof request === 'object' && !Array.isArray(request)) {
+      return extractWorkspaceId(request, depth + 1);
+    }
+  }
   const obj = value as Record<string, unknown>;
   if (typeof obj.workspaceId === 'string' && obj.workspaceId.length > 0) return obj.workspaceId;
   for (const key of Object.keys(obj)) {
@@ -758,12 +765,11 @@ export function isWorkspaceCreate(pathname: string): boolean {
 }
 
 /**
- * dsh 0.1.1-rc.2 的新建工作区流程会先通过目录选择器创建磁盘目录，
- * 再调用 workspace.create 登记工作区。目录创建不是 workspace RPC，必须单独拦截，
- * 否则关闭创建权限的子用户仍可在主机上留下任意文件夹。
+ * 目录选择器创建实际目录后，才由 workspace.create 登记工作区。alpha.3 使用
+ * directoryPicker/createDirectory；保留 host.createDirectory 是为旧 dsh 兼容。
  */
 export function isWorkspaceDirectoryCreate(pathname: string): boolean {
-  return /^\/api\/host[.\/]createDirectory(?:[.\/]|$)/.test(pathname);
+  return /^(?:\/api\/host|\/api\/directoryPicker)[.\/]createDirectory(?:[.\/]|$)/.test(pathname);
 }
 
 /** 当前 dsh 已提供的删除/重命名端点；移动、导入暂不纳入子用户权限。 */
@@ -793,7 +799,7 @@ export const WORKSPACE_ENDPOINT_RE = /^\/api\/session[.\/](create)([.\/]|$)/;
  * create 无源会话、list 单独做工作区/会话过滤，均不在此列。
  */
 export const SESSION_SCOPED_RE =
-  /^\/api\/(?:session[.\/](?:history|prompt|respond|archive|delete|rename|retitle|title|resume|fork|truncate|export)|workspace[.\/]archiveSession)([.\/]|$)/;
+  /^\/api\/(?:session[.\/](?:history|prompt|respond|archive|delete|rename|retitle|title|resume|fork|truncate|export|attachment|updateQueue|cancel|page|openWorkspacePath)|workspace[.\/]archiveSession|commands[.\/](?:list|execute)|subagents[.\/](?:list|prompt|interruptByParent))([.\/]|$)/;
 
 /** 递归查找请求体里的 sessionId（typert wire 字段）；找不到返回 null */
 export function extractSessionId(value: unknown, depth = 0): string | null {
@@ -807,17 +813,46 @@ export function extractSessionId(value: unknown, depth = 0): string | null {
   return null;
 }
 
-/** 收集请求体中的全部 sessionId，避免只校验第一个字段而让第二个目标绕过授权。
+/**
+ * alpha.3 的 ClientConnection envelope 把实际参数放在 payload.args；部分 Session
+ * endpoint 再把业务请求放进 args.request。只有严格识别的 envelope 才进入 args，
+ * 避免旧协议里未被 dsh 消费的伪 args 字段成为授权依据。
+ */
+export function clientConnectionArgs(value: unknown): Record<string, unknown> | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const outer = value as Record<string, unknown>;
+  // alpha.3 ClientConnection endpoint 是 namespace/method。旧 rc.2 的点号
+  // method 不得因此获得 args 解释权，防止伪 args 绕过路径授权。
+  if (outer.type !== 'client-request' || typeof outer.method !== 'string' || !outer.method.includes('/')) return null;
+  const payload = outer.payload;
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  const args = (payload as Record<string, unknown>).args;
+  return args !== null && typeof args === 'object' && !Array.isArray(args)
+    ? args as Record<string, unknown>
+    : null;
+}
+
+/** 收集请求体中的全部会话地址，避免只校验第一个字段而让第二个目标绕过授权。
+ * 覆盖 alpha.3 commands 的 agentId、subagent 的 parent/childSessionId 以及旧 sessionId。
  * 无论值是否符合格式都收集；调用方会让空值/超长值自然无法命中授权快照，fail-closed。 */
 export function collectSessionIds(value: unknown, out: Set<string> = new Set(), depth = 0): Set<string> {
   if (depth > 6 || value === null || typeof value !== 'object') return out;
+  const args = depth === 0 ? clientConnectionArgs(value) : null;
+  if (args !== null) {
+    collectSessionIds(args, out, depth + 1);
+    return out;
+  }
   if (Array.isArray(value)) {
     for (const item of value) collectSessionIds(item, out, depth + 1);
     return out;
   }
   const obj = value as Record<string, unknown>;
-  if (typeof obj.sessionId === 'string') out.add(obj.sessionId);
-  for (const child of Object.values(obj)) collectSessionIds(child, out, depth + 1);
+  for (const field of ['sessionId', 'agentId', 'parentSessionId', 'childSessionId']) {
+    if (typeof obj[field] === 'string') out.add(obj[field] as string);
+  }
+  for (const [key, child] of Object.entries(obj)) {
+    if (key !== 'args') collectSessionIds(child, out, depth + 1);
+  }
   return out;
 }
 
@@ -1065,13 +1100,25 @@ const PATH_FIELDS = [
  */
 export function extractPathFromBody(value: unknown, depth = 0): string | null {
   if (depth > 6 || value === null || typeof value !== 'object') return null;
+  const args = depth === 0 ? clientConnectionArgs(value) : null;
+  if (args !== null) {
+    const request = args.request;
+    if (request !== null && typeof request === 'object' && !Array.isArray(request)) {
+      return extractPathFromBody(request, depth + 1);
+    }
+    // directoryPicker/createDirectory 的真实 alpha.3 参数直接位于 args.path。
+    for (const field of PATH_FIELDS) {
+      const candidate = args[field];
+      if (typeof candidate === 'string' && candidate.length > 0) return candidate;
+    }
+  }
   const obj = value as Record<string, unknown>;
   for (const field of PATH_FIELDS) {
     const v = obj[field];
     if (typeof v === 'string' && v.length > 0) return v;
   }
   for (const key of Object.keys(obj)) {
-    if (key === 'args') continue; // 跳过 dsh 不消费的 args 伪包裹
+    if (key === 'args') continue; // 旧协议中 args 不被 dsh 消费
     const nested = extractPathFromBody(obj[key], depth + 1);
     if (nested !== null) return nested;
   }

@@ -26,7 +26,7 @@ function makeAlpha3Root(root: string, settings: string | null, connection: strin
   const connectionPath = path.join(dshRoot, 'node_modules', '@deepseek-ai', 'dsh-client-connection', 'lib', 'index.js');
   mkdirSync(path.dirname(settingsPath), { recursive: true });
   mkdirSync(path.dirname(connectionPath), { recursive: true });
-  writeFileSync(path.join(dshRoot, 'package.json'), JSON.stringify({ version: '0.1.2-alpha.3' }) + '\n');
+  writeFileSync(path.join(dshRoot, 'package.json'), JSON.stringify({ version: '0.1.2-alpha.5' }) + '\n');
   if (settings === null) mkdirSync(settingsPath);
   else writeFileSync(settingsPath, settings);
   writeFileSync(connectionPath, connection);
