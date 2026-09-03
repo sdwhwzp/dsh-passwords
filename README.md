@@ -17,7 +17,7 @@
   &nbsp;
   <a href="https://github.com/slywalker2006/dsh-passwords/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/slywalker2006/dsh-passwords/ci.yml?style=flat-square&label=CI" alt="CI"></a>
   &nbsp;
-  <a href="https://github.com/zhu1090093659/dsh-web"><img src="https://img.shields.io/badge/DSH-0.1.1--rc.2-4c6ef5?style=flat-square&labelColor=454a54" alt="DSH"></a>
+  <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/DSH-0.1.2--alpha.5-4c6ef5?style=flat-square&labelColor=454a54" alt="DSH"></a>
   &nbsp;
   <img src="https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square" alt="License">
   &nbsp;
@@ -319,7 +319,7 @@ curl -so /dev/null -w "TLS:%{time_appconnect}s\n" https://地址/gateway/login
 
 ### 手动安装
 
-> v2.6.8 的兼容层覆盖 DSH `0.1.2-alpha.1` 至 `alpha.5` 的源码运行时；alpha.1 未发布 npm 包，npm/Docker 可安装基线为 `alpha.2+`，当前锁定并验收 `alpha.5`。安装器会严格检查 Node.js `22.19+` 或 `24+`，并在安装完成后注册插件、探测 dsh 安装目录并应用兼容补丁。自动更新与设置页“重载补丁”会沿用同一补丁链路。
+> v2.6.9 的兼容层覆盖 DSH `0.1.2-alpha.1` 至 `alpha.5` 的源码运行时；alpha.1 未发布 npm 包，npm/Docker 可安装基线为 `alpha.2+`，当前锁定并验收 `alpha.5`。安装器会严格检查 Node.js `22.19+` 或 `24+`，并在安装完成后注册插件、探测 dsh 安装目录并应用兼容补丁。自动更新与设置页“重载补丁”会沿用同一补丁链路。
 
 1. `git clone https://github.com/slywalker2006/dsh-passwords && cd dsh-passwords`
 2. `npm install && npm run build`
@@ -346,7 +346,7 @@ curl -so /dev/null -w "TLS:%{time_appconnect}s\n" https://地址/gateway/login
 
 ## 版本兼容
 
-当前版本 2.6.8。已验证 DSH `0.1.2-alpha.5` 部署；兼容层覆盖 DSH `alpha.1` 至 `alpha.5` 的已知结构适配。npm 包包含预构建 dist、TypeScript 源码与全部脚本；bundled Docker 镜像与 npm 包出自同一份源码，并内置 DSH `0.1.2-alpha.5`。
+当前版本 2.6.9。已验证 DSH `0.1.2-alpha.5` 部署；兼容层覆盖 DSH `alpha.1` 至 `alpha.5` 的已知结构适配。npm 包包含预构建 dist、TypeScript 源码与全部脚本；bundled Docker 镜像与 npm 包出自同一份源码，并内置 DSH `0.1.2-alpha.5`。
 
 ## 参与贡献
 

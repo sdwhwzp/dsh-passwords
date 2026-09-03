@@ -17,7 +17,7 @@
   &nbsp;
   <a href="https://github.com/slywalker2006/dsh-passwords/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/slywalker2006/dsh-passwords/ci.yml?style=flat-square&label=CI" alt="CI"></a>
   &nbsp;
-  <a href="https://github.com/zhu1090093659/dsh-web"><img src="https://img.shields.io/badge/DSH-0.1.1--rc.2-4c6ef5?style=flat-square&labelColor=454a54" alt="DSH"></a>
+  <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/DSH-0.1.2--alpha.5-4c6ef5?style=flat-square&labelColor=454a54" alt="DSH"></a>
   &nbsp;
   <img src="https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square" alt="License">
   &nbsp;
@@ -319,7 +319,7 @@ The bottleneck is usually the network path to the server.
 
 ## Manual install
 
-> The v2.6.8 compatibility layer covers the DSH `0.1.2-alpha.1` through `alpha.5` source runtime. Alpha.1 was never published as an npm package, so the npm/Docker install baseline is `alpha.2+`; this worktree is locked and validated against `alpha.5`. The installers strictly require Node.js `22.19+` or `24+`, register the plugin, detect the dsh installation and apply the compatibility patch. Automatic updates and settings-page patch reload use the same patch path.
+> The v2.6.9 compatibility layer covers the DSH `0.1.2-alpha.1` through `alpha.5` source runtime. Alpha.1 was never published as an npm package, so the npm/Docker install baseline is `alpha.2+`; this worktree is locked and validated against `alpha.5`. The installers strictly require Node.js `22.19+` or `24+`, register the plugin, detect the dsh installation and apply the compatibility patch. Automatic updates and settings-page patch reload use the same patch path.
 
 1. `git clone https://github.com/slywalker2006/dsh-passwords && cd dsh-passwords`
 2. `npm install && npm run build`
@@ -346,7 +346,7 @@ The UI is bilingual zh/en and follows the dsh language setting. The login page h
 
 ## Version compatibility
 
-Current version: 2.6.8. The DSH `0.1.2-alpha.5` deployment is verified; the compatibility layer covers the known DSH `alpha.1` through `alpha.5` layouts. The npm package ships prebuilt dist, TypeScript sources and all scripts; the bundled Docker image is built from the same source and includes DSH `0.1.2-alpha.5`.
+Current version: 2.6.9. The DSH `0.1.2-alpha.5` deployment is verified; the compatibility layer covers the known DSH `alpha.1` through `alpha.5` layouts. The npm package ships prebuilt dist, TypeScript sources and all scripts; the bundled Docker image is built from the same source and includes DSH `0.1.2-alpha.5`.
 
 ## Contributing
 

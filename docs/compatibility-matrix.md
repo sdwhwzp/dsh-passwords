@@ -7,7 +7,7 @@
 | Node.js | 22.19+ or 24+ | Matches the DSH alpha.5 engine contract |
 | DSH source runtime | 0.1.2-alpha.1 through alpha.5 | Alpha.5 source service and patch structure are verified; earlier alpha layouts remain covered by compatibility adapters |
 | DSH npm runtime | 0.1.2-alpha.2 through alpha.5 | Alpha.5 packed settings and connection artifacts are patch-tested; alpha.1 was never published to npm |
-| dsh-passwords | 2.6.8 | Local build and regression suite; deployed against DSH alpha.5 |
+| dsh-passwords | 2.6.9 | Local build and regression suite; deployed against DSH alpha.5 |
 
 Development dependencies use the top-level alpha.5 DSH package so TypeScript resolves the current public plugin APIs. The package does not impose a runtime DSH dependency: DSH owns the profile and loads this package through its plugin link. Alpha.1 support is therefore a source-runtime compatibility target, not an npm version range.
 
