@@ -78,6 +78,11 @@ function startMockUpstream(): Promise<http.Server> {
         res.end(gzipBomb);
         return;
       }
+      if ((req.url ?? '').startsWith('/api/dsh-passwords/internal/assignable-resources')) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, folders: ['/workspaces/a'], sessions: [] }));
+        return;
+      }
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ ok: true, method: req.method, url: req.url }));
     });

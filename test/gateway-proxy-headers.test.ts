@@ -73,6 +73,18 @@ let lastUpstreamUrl = '';
 let sandboxStatusCode = 200;
 let sandboxSessionSequence = 0;
 let workspaceCreateMakesNewWorkspace = false;
+let delaySessionCreateResponse = false;
+let dropDelayedWorkspaceUpsert = false;
+let releaseSessionCreateResponse: (() => void) | null = null;
+let createdSessionIdForMock = 'created-session';
+let wireCreatedSessionId = '';
+let delayedWorkspaceClient: any = null;
+let delayedWorkspaceStreamId = '';
+let assignableResources = {
+  folders: ['/workspaces/visible'],
+  sessions: ['session-visible', 'session-hidden', 'session-newly-shared'],
+};
+let assignableResourcesUnavailable = false;
 let remoteMuxOpenEndpoints: string[] = [];
 
 /** mock 上游：刻意不设 content-length（write 分段写），Node 会以 chunked 分帧——
@@ -110,6 +122,12 @@ function startMockUpstream(): Promise<http.Server> {
               },
             },
           }));
+          // The Host publishes the durable attach once the delayed create
+          // request is received, while its unary response is still pending.
+          if (delaySessionCreateResponse) {
+            delayedWorkspaceClient = client;
+            delayedWorkspaceStreamId = frame.streamId;
+          }
           return;
         }
         if (frame.endpoint === '$events') {
@@ -130,6 +148,30 @@ function startMockUpstream(): Promise<http.Server> {
             type: 'item',
             streamId: frame.streamId,
             value: { type: 'emit', event: 'api-session/status', args: ['session-hidden', true] },
+          }));
+          client.send(JSON.stringify({
+            type: 'item',
+            streamId: frame.streamId,
+            value: {
+              type: 'waterfall', event: 'user-questions/request', eventId: 'question-visible', agentId: 'session-visible',
+              request: { questions: [{ id: 'language', question: 'Choose language', options: [{ label: 'Chinese' }, { label: 'English' }] }] },
+            },
+          }));
+          client.send(JSON.stringify({
+            type: 'item',
+            streamId: frame.streamId,
+            value: {
+              type: 'waterfall', event: 'user-questions/request', eventId: 'question-hidden', agentId: 'session-hidden',
+              request: { questions: [{ id: 'secret', question: 'Hidden question', options: [{ label: 'No' }] }] },
+            },
+          }));
+          client.send(JSON.stringify({
+            type: 'item',
+            streamId: frame.streamId,
+            value: {
+              type: 'waterfall', event: 'approval/request', eventId: 'approval-visible', agentId: 'session-visible',
+              request: { approvalId: 'approval-1', toolName: 'shell' },
+            },
           }));
           return;
         }
@@ -175,9 +217,45 @@ function startMockUpstream(): Promise<http.Server> {
           workspace: { workspaceId: workspaceCreateMakesNewWorkspace ? 'workspace-owned' : 'workspace-visible', path: workspacePath, title: 'Visible workspace', sessionIds: [] },
           created: workspaceCreateMakesNewWorkspace,
         } } }));
+      } else if ((req.url ?? '').startsWith('/api/dsh-passwords/internal/assignable-resources')) {
+        res.writeHead(assignableResourcesUnavailable ? 503 : 200, { 'content-type': 'application/json' });
+        res.end(assignableResourcesUnavailable ? JSON.stringify({ ok: false }) : JSON.stringify({ ok: true, ...assignableResources }));
       } else if ((req.url ?? '').startsWith('/api/session.create')) {
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ result: { value: { sessionId: `sandbox-session-${++sandboxSessionSequence}`, cwd: '/workspaces/visible' } } }));
+        const requestChunks: Buffer[] = [];
+        req.on('data', (chunk: Buffer) => requestChunks.push(chunk));
+        req.on('end', () => {
+          try {
+            const request = JSON.parse(Buffer.concat(requestChunks).toString('utf8')) as Record<string, unknown>;
+            createdSessionIdForMock = extractSessionIdForTest(request) ?? 'created-session';
+            wireCreatedSessionId = createdSessionIdForMock;
+          } catch {
+            createdSessionIdForMock = 'created-session';
+          }
+          const respond = () => {
+            res.writeHead(200, { 'content-type': 'application/json' });
+            res.end(JSON.stringify({ result: { value: { sessionId: createdSessionIdForMock, cwd: '/workspaces/visible' } } }));
+          };
+          if (delaySessionCreateResponse) {
+            if (!dropDelayedWorkspaceUpsert) {
+              delayedWorkspaceClient?.send(JSON.stringify({
+                type: 'item',
+                streamId: delayedWorkspaceStreamId,
+                value: {
+                  type: 'upsert',
+                  workspace: {
+                    workspaceId: 'workspace-visible',
+                    path: '/workspaces/visible',
+                    title: 'Visible workspace',
+                    sessionIds: ['session-visible', createdSessionIdForMock],
+                  },
+                },
+              }));
+            }
+            releaseSessionCreateResponse = respond;
+          } else {
+            respond();
+          }
+        });
       } else if ((req.url ?? '').startsWith('/api/session.list')) {
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({
@@ -219,6 +297,24 @@ function startMockUpstream(): Promise<http.Server> {
     server.on('close', () => remoteMux.close());
     server.listen(0, '127.0.0.1', () => resolve(server));
   });
+}
+
+function extractSessionIdForTest(value: unknown, depth = 0): string | null {
+  if (depth > 8 || value === null || typeof value !== 'object') return null;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = extractSessionIdForTest(item, depth + 1);
+      if (found !== null) return found;
+    }
+    return null;
+  }
+  const object = value as Record<string, unknown>;
+  if (typeof object.sessionId === 'string' && object.sessionId.length > 0) return object.sessionId;
+  for (const child of Object.values(object)) {
+    const found = extractSessionIdForTest(child, depth + 1);
+    if (found !== null) return found;
+  }
+  return null;
 }
 
 function rawNames(rawHeaders: string[]): string[] {
@@ -609,6 +705,181 @@ test('Issue #25：alpha.3 Remote workspace 基线可解析 workspaceId 创建会
   }
 });
 
+test('Issue #25：弱网络下 workspace upsert 先于 session.create 响应仍保留会话分组', async () => {
+  const subUser = db.createUser('issue-25-create-race', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false, allowedWebSocketPaths: [],
+    allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: ['session-visible'],
+  });
+  db.markSessionGrantsSeeded(subUser.id);
+  const subCookie = `dsh_gateway_token=${jwt.sign({ sub: String(subUser.id), username: subUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' })}`;
+  const originalCookie = cookie;
+  cookie = subCookie;
+  delaySessionCreateResponse = true;
+  releaseSessionCreateResponse = null;
+  try {
+    const connection = await openRemoteMux({ cookie: subCookie, origin: 'http://127.0.0.1', host: '127.0.0.1' });
+    try {
+      connection.client.send(JSON.stringify({
+        type: 'open', streamId: 'issue-25-create-race-workspace', endpoint: 'workspace/follow', payload: { args: {} },
+      }));
+      const baseline = await connection.nextFrame();
+      assert.equal(baseline.streamId, 'issue-25-create-race-workspace');
+
+      const create = gatewayReq(
+        'POST',
+        '/api/session.create',
+        { 'content-type': 'application/json' },
+        JSON.stringify({
+          type: 'client-request', rpcId: 'issue-25-create-race', method: 'session/create',
+          payload: { args: { request: { workspaceId: 'workspace-visible' } } },
+        }),
+      );
+      for (let attempt = 0; attempt < 20 && releaseSessionCreateResponse === null; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 2));
+      }
+      const release = releaseSessionCreateResponse as (() => void) | null;
+      if (release === null) throw new Error('mock DSH must receive the delayed create request');
+      assert.match(wireCreatedSessionId, /^session-[0-9a-f-]{36}$/i, '网关必须向 DSH 发出预分配 sessionId');
+
+      const upsert = await connection.nextFrame();
+      const upsertValue = upsert.value as { type?: string; workspace?: { sessionIds?: string[] } };
+      assert.equal(upsertValue.type, 'upsert');
+      assert.deepEqual(upsertValue.workspace?.sessionIds, ['session-visible', createdSessionIdForMock]);
+      assert.equal(db.listUserSessionGrants(subUser.id).includes(createdSessionIdForMock), false, 'upsert 到达时仍未提前写入 grant');
+
+      release();
+      releaseSessionCreateResponse = null;
+      const response = await create;
+      assert.equal(response.status, 200, response.body);
+      assert.deepEqual(db.listUserSessionGrants(subUser.id), [wireCreatedSessionId, 'session-visible'].sort(), '创建响应确认后才写入 grant');
+    } finally {
+      connection.client.close();
+    }
+  } finally {
+    delaySessionCreateResponse = false;
+    dropDelayedWorkspaceUpsert = false;
+    const pendingRelease = releaseSessionCreateResponse as (() => void) | null;
+    releaseSessionCreateResponse = null;
+    if (pendingRelease !== null) pendingRelease();
+    cookie = originalCookie;
+  }
+});
+
+test('Issue #25：原始 workspace upsert 丢失时，创建响应后补发最终会话分组', async () => {
+  const subUser = db.createUser('issue-25-create-compensation', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false, allowedWebSocketPaths: [],
+    allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: ['session-visible'],
+  });
+  db.markSessionGrantsSeeded(subUser.id);
+  const subCookie = `dsh_gateway_token=${jwt.sign({ sub: String(subUser.id), username: subUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' })}`;
+  const originalCookie = cookie;
+  cookie = subCookie;
+  delaySessionCreateResponse = true;
+  dropDelayedWorkspaceUpsert = true;
+  releaseSessionCreateResponse = null;
+  try {
+    const connection = await openRemoteMux({ cookie: subCookie, origin: 'http://127.0.0.1', host: '127.0.0.1' });
+    try {
+      connection.client.send(JSON.stringify({
+        type: 'open', streamId: 'issue-25-create-compensation-workspace', endpoint: 'workspace/follow', payload: { args: {} },
+      }));
+      const baseline = await connection.nextFrame();
+      assert.equal(baseline.streamId, 'issue-25-create-compensation-workspace');
+
+      const create = gatewayReq(
+        'POST',
+        '/api/session.create',
+        { 'content-type': 'application/json' },
+        JSON.stringify({
+          type: 'client-request', rpcId: 'issue-25-create-compensation', method: 'session/create',
+          payload: { args: { request: { workspaceId: 'workspace-visible' } } },
+        }),
+      );
+      for (let attempt = 0; attempt < 20 && releaseSessionCreateResponse === null; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 2));
+      }
+      const release = releaseSessionCreateResponse as (() => void) | null;
+      if (release === null) throw new Error('mock DSH must receive the delayed create request');
+      release();
+      releaseSessionCreateResponse = null;
+      const response = await create;
+      assert.equal(response.status, 200, response.body);
+
+      const compensation = await connection.nextFrame();
+      const value = compensation.value as { type?: string; workspace?: { sessionIds?: string[] } };
+      assert.equal(compensation.streamId, 'issue-25-create-compensation-workspace');
+      assert.equal(value.type, 'upsert');
+      assert.deepEqual(value.workspace?.sessionIds, ['session-visible', wireCreatedSessionId]);
+    } finally {
+      connection.client.close();
+    }
+  } finally {
+    delaySessionCreateResponse = false;
+    dropDelayedWorkspaceUpsert = false;
+    const pendingRelease = releaseSessionCreateResponse as (() => void) | null;
+    releaseSessionCreateResponse = null;
+    if (pendingRelease !== null) pendingRelease();
+    cookie = originalCookie;
+  }
+});
+
+test('Issue #25：权限保存拒绝当前资源快照中不存在的会话', async () => {
+  const subUser = db.createUser('issue-25-stale-assignment', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false, allowedWebSocketPaths: [],
+    allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: [],
+  });
+  const originalCookie = cookie;
+  const originalResources = assignableResources;
+  cookie = originalCookie;
+  assignableResources = { folders: ['/workspaces/visible'], sessions: ['session-visible'] };
+  const payload = JSON.stringify({
+    userId: subUser.id,
+    allowedFolders: ['/workspaces/visible'],
+    allowedSessionIds: ['deleted-session'],
+  });
+  try {
+    const response = await gatewayReq('POST', '/gateway/api/permissions', { 'content-type': 'application/json' }, payload);
+    assert.equal(response.status, 400, response.body);
+    assert.equal(db.listUserSessionGrants(subUser.id).includes('deleted-session'), false);
+  } finally {
+    assignableResources = originalResources;
+    cookie = originalCookie;
+  }
+});
+
+test('Issue #25：资源核验不可用时权限保存 fail-closed', async () => {
+  const subUser = db.createUser('issue-25-resource-outage', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false, allowedWebSocketPaths: [],
+    allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: [],
+  });
+  const originalCookie = cookie;
+  const originalResources = assignableResources;
+  const originalResourcesUnavailable = assignableResourcesUnavailable;
+  cookie = originalCookie;
+  assignableResourcesUnavailable = true;
+  try {
+    const response = await gatewayReq('POST', '/gateway/api/permissions', { 'content-type': 'application/json' }, JSON.stringify({
+      userId: subUser.id,
+      allowedFolders: ['/workspaces/visible'],
+      allowedSessionIds: ['session-visible'],
+    }));
+    assert.equal(response.status, 502, response.body);
+    assert.deepEqual(db.listUserSessionGrants(subUser.id), []);
+  } finally {
+    assignableResources = originalResources;
+    assignableResourcesUnavailable = originalResourcesUnavailable;
+    cookie = originalCookie;
+  }
+});
+
 test('Issue #25：alpha.3 session.list 先到时等待 Remote 基线并只返回显式授权会话', async () => {
   const subUser = db.createUser('issue-25-session-list-race', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
@@ -683,6 +954,99 @@ test('Issue #25：alpha.3 子用户能建立 $events 并且只收到当前工作
     await new Promise((resolve) => setTimeout(resolve, 25));
     assert.deepEqual(remoteMuxOpenEndpoints, ['workspace/follow', '$events']);
   } finally {
+    connection.client.close();
+  }
+});
+
+test('Issue #26：子用户收到自己会话的提问与审批 waterfall，且结果只能由同一 Remote generation 回传', async () => {
+  const subUser = db.createUser('issue-26-events-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false, allowedWebSocketPaths: [],
+    allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: ['session-visible'],
+  });
+  db.markSessionGrantsSeeded(subUser.id);
+  const subCookie = `dsh_gateway_token=${jwt.sign({ sub: String(subUser.id), username: subUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' })}`;
+  const connection = await openRemoteMux({ cookie: subCookie, origin: 'http://127.0.0.1', host: '127.0.0.1' });
+  const originalCookie = cookie;
+  cookie = subCookie;
+  try {
+    connection.client.send(JSON.stringify({
+      type: 'open', streamId: 'issue-26-workspace', endpoint: 'workspace/follow', payload: { args: {} },
+    }));
+    assert.equal((await connection.nextFrame()).streamId, 'issue-26-workspace');
+    connection.client.send(JSON.stringify({
+      type: 'open', streamId: 'issue-26-events', endpoint: '$events', payload: { args: {} },
+    }));
+    const ready = await connection.nextFrame();
+    const added = await connection.nextFrame();
+    const question = await connection.nextFrame();
+    const approval = await connection.nextFrame();
+    assert.deepEqual(ready, {
+      type: 'item', streamId: 'issue-26-events', value: { type: 'ready', clientId: 'remote-client', host: { home: '/root' } },
+    });
+    assert.equal((added.value as { type?: string }).type, 'emit');
+    assert.deepEqual(question, {
+      type: 'item', streamId: 'issue-26-events', value: {
+        type: 'waterfall', event: 'user-questions/request', eventId: 'question-visible', agentId: 'session-visible',
+        request: { questions: [{ id: 'language', question: 'Choose language', options: [{ label: 'Chinese' }, { label: 'English' }] }] },
+      },
+    });
+    assert.deepEqual(approval, {
+      type: 'item', streamId: 'issue-26-events', value: {
+        type: 'waterfall', event: 'approval/request', eventId: 'approval-visible', agentId: 'session-visible',
+        request: { approvalId: 'approval-1', toolName: 'shell' },
+      },
+    });
+
+    const result = (eventId: string, clientId = 'remote-client') => JSON.stringify({
+      type: 'client-request', rpcId: `issue-26-${eventId}`, method: '$events/result',
+      payload: { args: { clientId, eventId, outcome: { kind: 'result', value: { answers: [] } } } },
+    });
+    const forgedClient = await gatewayReq('POST', '/api/$events/result', { 'content-type': 'application/json' }, result('question-visible', 'wrong-client'));
+    assert.equal(forgedClient.status, 403, forgedClient.body);
+    const hidden = await gatewayReq('POST', '/api/$events/result', { 'content-type': 'application/json' }, result('question-hidden'));
+    assert.equal(hidden.status, 403, hidden.body);
+    const allowed = await gatewayReq('POST', '/api/$events/result', { 'content-type': 'application/json' }, result('question-visible'));
+    assert.equal(allowed.status, 200, allowed.body);
+    const replay = await gatewayReq('POST', '/api/$events/result', { 'content-type': 'application/json' }, result('question-visible'));
+    assert.equal(replay.status, 403, replay.body);
+    const approvalResult = await gatewayReq('POST', '/api/$events/result', { 'content-type': 'application/json' }, result('approval-visible'));
+    assert.equal(approvalResult.status, 200, approvalResult.body);
+
+    // A shared session may receive the same Host waterfall on two independent
+    // Remote generations. The first subuser's answer must not overwrite the
+    // other recipient's authorization record.
+    const sharedUser = db.createUser('issue-26-shared-events-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+    db.setPermissions(sharedUser.id, {
+      allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+      allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false, allowedWebSocketPaths: [],
+      allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: ['session-visible'],
+    });
+    db.markSessionGrantsSeeded(sharedUser.id);
+    const sharedCookie = `dsh_gateway_token=${jwt.sign({ sub: String(sharedUser.id), username: sharedUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' })}`;
+    const sharedConnection = await openRemoteMux({ cookie: sharedCookie, origin: 'http://127.0.0.1', host: '127.0.0.1' });
+    try {
+      sharedConnection.client.send(JSON.stringify({ type: 'open', streamId: 'issue-26-shared-workspace', endpoint: 'workspace/follow', payload: { args: {} } }));
+      await sharedConnection.nextFrame();
+      sharedConnection.client.send(JSON.stringify({ type: 'open', streamId: 'issue-26-shared-events', endpoint: '$events', payload: { args: {} } }));
+      await sharedConnection.nextFrame();
+      await sharedConnection.nextFrame();
+      const sharedQuestion = await sharedConnection.nextFrame();
+      assert.equal((sharedQuestion.value as { eventId?: string }).eventId, 'question-visible');
+      const originalResultCookie = cookie;
+      cookie = sharedCookie;
+      try {
+        const sharedResult = await gatewayReq('POST', '/api/$events/result', { 'content-type': 'application/json' }, result('question-visible'));
+        assert.equal(sharedResult.status, 200, sharedResult.body);
+      } finally {
+        cookie = originalResultCookie;
+      }
+    } finally {
+      sharedConnection.client.close();
+    }
+  } finally {
+    cookie = originalCookie;
     connection.client.close();
   }
 });

@@ -805,6 +805,85 @@ export function apply(ctx: Context): void {
     });
   };
 
+  const internalRequestAuthorized = (req: IncomingMessage): boolean => {
+    const peer = req.socket.remoteAddress ?? '';
+    if (peer !== '127.0.0.1' && peer !== '::1' && peer !== '::ffff:127.0.0.1') return false;
+    const supplied = typeof req.headers['x-internal-secret'] === 'string' ? req.headers['x-internal-secret'] : '';
+    const expected = cfg.internalSecret;
+    const a = Buffer.from(supplied);
+    const b = Buffer.from(expected);
+    return a.length === b.length && timingSafeEqual(a, b);
+  };
+
+  type AssignableWorkspace = {
+    path: string;
+    title: string;
+    sessions: Array<{ id: string; title: string }>;
+  };
+
+  const isDefiniteMissingSession = (error: unknown): boolean => {
+    if (error === null || typeof error !== 'object') return false;
+    const code = (error as { code?: unknown }).code;
+    const message = (error as { message?: unknown }).message;
+    return code === 'SESSION_QUERY_SESSION_NOT_FOUND' || code === 'SESSION_QUERY_EVENT_NOT_FOUND' ||
+      (typeof message === 'string' && /session.*not found/i.test(message));
+  };
+
+  /**
+   * DSH-owned assignment inventory. This is deliberately evaluated on every
+   * request: workspace deletion/archive and session persistence changes must
+   * not remain assignable through a stale gateway cache.
+   */
+  const listAssignableWorkspaces = async (): Promise<AssignableWorkspace[]> => {
+    const reg = ctx.get('workspaceRegistry') as unknown as
+      | {
+          list(): Array<{ path: string; title: string; sessionIds: readonly string[]; status(): Promise<'ok' | 'missing-dir'> }>;
+          archivedSessionIds: readonly string[];
+        }
+      | undefined;
+    if (reg === undefined) throw new Error('workspace registry unavailable');
+    const sessions = ctx.get('sessions') as unknown as
+      | { get(id: string): unknown }
+      | undefined;
+    const sessionTitle = ctx.get('sessionTitle') as unknown as
+      | { get(session: unknown): { title?: string } | undefined }
+      | undefined;
+    const sessionQuery = ctx.get('sessionQuery') as unknown as
+      | {
+          readSurface(id: string): Promise<{ events: readonly unknown[] }>;
+          readTitle?(id: string): Promise<{ title?: string } | undefined>;
+        }
+      | undefined;
+    const archived = new Set(reg.archivedSessionIds.map((id) => String(id)));
+    const output: AssignableWorkspace[] = [];
+    for (const workspace of reg.list()) {
+      if (await workspace.status() !== 'ok') continue;
+      const entries: Array<{ id: string; title: string }> = [];
+      for (const rawId of workspace.sessionIds) {
+        const id = String(rawId);
+        if (archived.has(id)) continue;
+        const live = sessions?.get(id);
+        if (live !== undefined) {
+          if (!isDisplayableDshSession(live)) continue;
+          entries.push({ id, title: sessionTitle?.get(live)?.title || id });
+          continue;
+        }
+        if (sessionQuery === undefined) throw new Error('session query unavailable');
+        try {
+          const surface = await sessionQuery.readSurface(id);
+          if (!isDisplayableDshSurface(surface.events)) continue;
+          const title = await sessionQuery.readTitle?.(id);
+          entries.push({ id, title: title?.title || id });
+        } catch (error) {
+          if (isDefiniteMissingSession(error)) continue;
+          throw error;
+        }
+      }
+      output.push({ path: workspace.path, title: workspace.title, sessions: entries });
+    }
+    return output;
+  };
+
   // ── /api/dsh-passwords/* 路由（exact 路由先于连接插件的 /api 前缀命中） ──
   const routes: WebRoute[] = [
     {
@@ -1106,77 +1185,42 @@ export function apply(ctx: Context): void {
         const caller = guard(req, res);
         if (!caller) return;
         if (!requireMethod(req, res, 'GET')) return;
-        // F-20：工作区路径清单仅主用户可读（供其配置子用户白名单下拉选择）；
-        // 子用户不应看到全部工作区目录清单（信息泄露面）
         if (caller.role !== 'admin') {
           writeJson(res, 403, { ok: false, code: 'FORBIDDEN', error: '仅主用户可操作' });
           return;
         }
-        // 读取 dsh 已注册的工作区目录（供主用户配置子用户可访问文件夹时下拉选择）
         try {
-          const reg = ctx.get('workspaceRegistry') as unknown as
-            | {
-                list(): Array<{ path: string; title: string; sessionIds: readonly string[] }>;
-                archivedSessionIds: readonly string[];
-              }
-            | undefined;
-          const sessions = ctx.get('sessions') as unknown as
-            | { get(id: string): unknown }
-            | undefined;
-          const sessionTitle = ctx.get('sessionTitle') as unknown as
-            | { get(session: unknown): { title?: string } | undefined }
-            | undefined;
-          const sessionQuery = ctx.get('sessionQuery') as unknown as
-            | {
-                readSurface(id: string): Promise<{ events: readonly unknown[] }>;
-                readTitle?(id: string): Promise<{ title?: string } | undefined>;
-              }
-            | undefined;
-          // Workspace.sessionIds 保留用于恢复排序的空白槽位。设置页只展示真实会话，
-          // 否则无标题空白会话会回退显示为 session-* UUID，误导管理员配置一个不存在的会话。
-          const archived = new Set((reg?.archivedSessionIds ?? []).map((id) => String(id)));
-          const workspaces = await Promise.all(
-            (reg?.list() ?? []).map(async (workspace) => {
-              const sessionEntries = await Promise.all(
-                workspace.sessionIds
-                  .map((sessionId) => String(sessionId))
-                  .filter((sessionId) => !archived.has(sessionId))
-                  .map(async (id) => {
-                    const liveSession = sessions?.get(id);
-                    if (liveSession !== undefined) {
-                      if (!isDisplayableDshSession(liveSession)) return null;
-                      const title = sessionTitle?.get(liveSession)?.title;
-                      return { id, title: title || id };
-                    }
-                    // sessions.get() 只覆盖 live session；sessionQuery 会补上持久化会话，
-                    // 否则旧的空白持久化槽位会被错误地按 UUID 展示。
-                    if (sessionQuery === undefined) return { id, title: id };
-                    try {
-                      const surface = await sessionQuery.readSurface(id);
-                      if (!isDisplayableDshSurface(surface.events)) return null;
-                      const title = await sessionQuery.readTitle?.(id);
-                      return { id, title: title?.title || id };
-                    } catch {
-                      // 存储短暂不可用时保留配置项，不能把正常会话静默隐藏。
-                      return { id, title: id };
-                    }
-                  }),
-              );
-              return {
-                path: workspace.path,
-                title: workspace.title,
-                sessions: sessionEntries.filter((session): session is { id: string; title: string } => session !== null),
-              };
-            }),
-          );
-          writeJson(res, 200, { ok: true, workspaces });
+          writeJson(res, 200, { ok: true, workspaces: await listAssignableWorkspaces() });
         } catch (error) {
-          // 工作区清单是权限编辑的可信来源；查询失败不能伪装成空清单，
-          // 否则前端会把所有工作区误显示为已关闭并覆盖用户草稿。
           writeJson(res, 502, {
             ok: false,
             code: 'WORKSPACES_UNAVAILABLE',
             error: error instanceof Error ? error.message : '工作区暂不可用',
+          });
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/api/dsh-passwords/internal/assignable-resources',
+      handler: async (req, res) => {
+        if (!internalRequestAuthorized(req)) {
+          writeJson(res, 403, { ok: false, code: 'FORBIDDEN', error: 'forbidden' });
+          return;
+        }
+        if (!requireMethod(req, res, 'GET')) return;
+        try {
+          const workspaces = await listAssignableWorkspaces();
+          writeJson(res, 200, {
+            ok: true,
+            folders: workspaces.map((workspace) => workspace.path),
+            sessions: workspaces.flatMap((workspace) => workspace.sessions.map((session) => session.id)),
+          });
+        } catch (error) {
+          writeJson(res, 502, {
+            ok: false,
+            code: 'RESOURCES_UNAVAILABLE',
+            error: error instanceof Error ? error.message : '可分配资源暂不可用',
           });
         }
       },
