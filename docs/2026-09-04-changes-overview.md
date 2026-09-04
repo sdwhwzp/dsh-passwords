@@ -132,14 +132,19 @@
 | launchd 作业 | 仅 `cn.sdwhwzp.dsh-nas`（网关为其子进程） |
 | 启动后新错误 | 0 |
 
-## 11. 待办与遗留
+## 11. 升级后的实测验证
 
-- **Office 预览未做端到端验证**。`dsh-better-sidebar` 从 `0.15.2` 升到 `0.18.0`（跨越 `ctx.betterSidebar` 注册表服务化重构），而 `@huanlin/dsh-plugin-better-sidebar-plugin-office@0.1.2` 声明的 peer 是 `dsh-better-sidebar: ^0.6.0`，npm 上无更新版本。静态核对通过：office bundle 完整（22.4 MB，含 xlsx/docx/pptx 处理），经 `ctx.betterSidebar.registerFileViewer` 注册，而 0.18.0 仍提供 `betterSidebar` 服务且 `registerFileViewer`/`registerTab` 均在。**需登录后打开一个 `.xlsx` 确认**；若失效，把 profile 钉回 `0.15.2`。
+- **Office 预览正常**。`dsh-better-sidebar` 从 `0.15.2` 升到 `0.18.0` 跨越了 `ctx.betterSidebar` 注册表服务化重构，而 `@huanlin/dsh-plugin-better-sidebar-plugin-office@0.1.2` 声明的 peer 仍是 `dsh-better-sidebar: ^0.6.0`（npm 上无更新版本），存在兼容风险。静态核对通过（office bundle 22.4 MB，含 xlsx/docx/pptx 处理，经 `ctx.betterSidebar.registerFileViewer` 注册；0.18.0 仍提供 `betterSidebar` 服务且 `registerFileViewer`/`registerTab` 均在），随后**经登录实测确认预览显示正常**。该升级可以保留。
+- **右侧 File 面板上传曾出现一次 `HTTP 502`，随后恢复正常**，未再复现。Host 错误日志中**没有任何 502 或超限记录**，因此无法归因。发生时段正值网关被反复重启、尚未稳定，最可能是那个窗口的瞬时故障；可以确定**不是 better-sidebar 0.18.0 升级引入的**，否则现在同样会失败。
+  - 排查时发现一条**未经证实**的线索备查：网关的 `MAX_BUFFER_BYTES` 为 16 MB（`src/gateway.ts`），而 better-sidebar 0.18 的 `uploadLimit` 常量含 128 MB 与 20 MB。两者不匹配。若将来上传大文件再现 502，优先用一个 15 MB 和一个 20 MB 的文件对比验证这条路径。「文件夹管理」上传走 dsh-passwords 自己的托管文件路径、不经这段代理缓冲，因此不受该上限影响。
+
+## 12. 待办与遗留
+
 - **dsh-weknora 未合并 Tencent 上游**。相对 `upstream/main` 落后 2913 个提交，那是整个 WeKnora 产品而本仓库只是插件包装器；历史做法是子树合并。本轮按决定跳过。
 - **28 服务器部署（Phase 2）未开始**。本机验证已完成，可按运维手册的原子发布 + PM2 + 回滚流程另行安排。上线前需确认：插件依赖解析指向 fork 构建（见第 5 节）、profile 的三处版本变更、以及 launchd/systemd 侧的网关托管方式改动。
 - **本机代理端口 7897 无监听**。LaunchAgent 设有 `HTTP_PROXY=http://127.0.0.1:7897` 与 `NODE_USE_ENV_PROXY=1`。经确认与本次故障无关，但会影响需要联网的功能。
 
-## 12. 回退材料
+## 13. 回退材料
 
 - Profile：`~/.dsh/profile-backups/20260904-160639-remove-3-plugins/`、`~/.dsh/profile-backups/20260904-163418-upgrade-sidebar-genui/`（后者含两个 plist 备份、`.env` 及 SHA-256）。
 - deepseek-harness：分支 `backup/tzwl-before-rc1-merge`（`b80f7752a3`）。
