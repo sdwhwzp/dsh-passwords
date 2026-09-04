@@ -13,8 +13,6 @@
         "../dsh-web/packages/dsh-web-all"
       ],
       "localWorkspacePackages": [
-        "../dsh-web/packages/dsh-chat-recovery",
-        "../dsh-web/packages/dsh-aionui-panel",
         "../dsh-web/packages/dsh-community-plugins",
         "../dsh-web/packages/dsh-git-graph",
         "../dsh-web/packages/dsh-market",
@@ -23,7 +21,6 @@
         "../dsh-web/packages/skins/skin-center",
         "../dsh-web/packages/dsh-task-board",
         "../dsh-web/packages/dsh-web-settings",
-        "../dsh-web/packages/dsh-desktop-launcher",
         "../dsh-web/packages/dsh-doctor",
         "../dsh-web/packages/dsh-liangshen",
         "../dsh-web/packages/dsh-pet",
