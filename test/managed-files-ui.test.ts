@@ -45,8 +45,9 @@ test('sidebar folder management opens the private file panel as a page dialog', 
   const indexSource = readFileSync(path.join(root, 'src/client/index.tsx'), 'utf8');
 
   assert.match(source, /export function ManagedFilesLauncher/);
-  assert.match(source, /fetch\('\/api\/dsh-passwords\/state'/);
-  assert.match(source, /value\.me\?\.role === 'user'/);
+  assert.match(source, /fetch\('\/gateway\/api\/managed-files\/status'/);
+  assert.match(source, /setTimeout\(probe, 3_000\)/);
+  assert.match(source, /window\.addEventListener\('focus', probe\)/);
   assert.match(source, /h\(\s*Modal,/);
   assert.match(source, /h\(ManagedFilesPanel,/);
   assert.match(source, /t\('managedFilesManage'\)/);

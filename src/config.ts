@@ -10,6 +10,7 @@ import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import type { MysqlConnectionOptions } from './mysql-sync.js';
+import { parseWebSocketAllowlist } from './permissions.js';
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 // dsh 进程里没有本项目的 .env（通过 DSH_PASSWORDS_ENV_FILE 显式指定网关 .env 路径）
@@ -21,6 +22,12 @@ loadEnv({ path: path.join(moduleDir, '..', '.env'), quiet: true });
 
 function readEnv(name: string, fallback: string): string {
   return (process.env[name] ?? '').trim() || fallback;
+}
+
+/** Resolve a configured path against its deployment directory. */
+export function resolveConfigPath(value: string, configRoot: string, fallbackName: string): string {
+  const configured = value.trim() || fallbackName;
+  return path.isAbsolute(configured) ? path.normalize(configured) : path.resolve(configRoot, configured);
 }
 
 export interface PlatformConfig {
@@ -60,6 +67,8 @@ export interface PlatformConfig {
     port: number;
     /** 对浏览器展示的完整 ws(s) 地址；留空时按当前访问主机与端口生成。 */
     publicUrl: string;
+    /** Stable host directory used for companion workspace registrations. */
+    placeholderRoot: string;
   };
   /** 宿主机上为子用户自动创建的专属工作区根目录。 */
   managedWorkspaceRoot: string;
@@ -69,6 +78,11 @@ export interface PlatformConfig {
     dshRoot: string;
     /** 补丁应用后要重启的 dsh systemd 服务名；留空则不自动重启 */
     restartService: string;
+  };
+  /** Optional third-party WebSocket routes; built-in alpha transports stay explicit in the gateway. */
+  webSocket?: {
+    adminAllowlist: string[];
+    userAllowlist: string[];
   };
 }
 
@@ -135,7 +149,10 @@ export function loadConfig(): PlatformConfig {
   const autoTls = !userCerts && !autoOff && (autoOn || autoTlsRaw === '');
   const acmeDir = path.join(path.dirname(dbPath), 'acme');
 
-  const gatewayPortRaw = readEnv('MCP_GATEWAY_PORT', '8080').trim();
+  // 自动 HTTPS 的 CLI 默认监听 443；插件、网关 Broker 和健康轮询必须在
+  // 同一配置阶段看到这个端口，不能等 cli.ts 启动后再局部改写，否则插件会
+  // 把 Cookie 同步到 8080，而公网网关实际在 443。
+  const gatewayPortRaw = readEnv('MCP_GATEWAY_PORT', autoTls ? '443' : '8080').trim();
   const gatewayPortNum = Number(gatewayPortRaw);
   // 端口非法（非数字/越界）回退默认 8080，避免 listen(NaN) 的泛化报错
   const gatewayPort =
@@ -148,6 +165,16 @@ export function loadConfig(): PlatformConfig {
     Number.isInteger(localWorkspacePortNum) && localWorkspacePortNum > 0 && localWorkspacePortNum <= 65535
       ? localWorkspacePortNum
       : Math.min(gatewayPort + 1, 65535);
+  const managedWorkspaceRoot = resolveEnvRelativePath(
+    readEnv('MCP_MANAGED_WORKSPACE_ROOT', ''),
+    envFilePath(),
+    path.join(homedir(), 'dsh-user-workspaces'),
+  );
+  const localWorkspacePlaceholderRoot = resolveEnvRelativePath(
+    readEnv('MCP_LOCAL_WORKSPACE_PLACEHOLDER_ROOT', ''),
+    envFilePath(),
+    path.join(path.dirname(managedWorkspaceRoot), 'dsh-local-workspaces'),
+  );
 
   return {
     setupKey,
@@ -186,15 +213,22 @@ export function loadConfig(): PlatformConfig {
       host: readEnv('MCP_LOCAL_WORKSPACE_HOST', '0.0.0.0'),
       port: localWorkspacePort,
       publicUrl: readEnv('MCP_LOCAL_WORKSPACE_PUBLIC_URL', ''),
+      placeholderRoot: localWorkspacePlaceholderRoot,
     },
-    managedWorkspaceRoot: resolveEnvRelativePath(
-      readEnv('MCP_MANAGED_WORKSPACE_ROOT', ''),
-      envFilePath(),
-      path.join(homedir(), 'dsh-user-workspaces'),
-    ),
+    managedWorkspaceRoot,
     patch: {
       dshRoot: readEnv('MCP_DSH_ROOT', ''),
       restartService,
+    },
+    webSocket: {
+      adminAllowlist: parseWebSocketAllowlist(
+        process.env.MCP_GATEWAY_WS_ADMIN_ALLOWLIST,
+        'MCP_GATEWAY_WS_ADMIN_ALLOWLIST',
+      ),
+      userAllowlist: parseWebSocketAllowlist(
+        process.env.MCP_GATEWAY_WS_USER_ALLOWLIST,
+        'MCP_GATEWAY_WS_USER_ALLOWLIST',
+      ),
     },
   };
 }

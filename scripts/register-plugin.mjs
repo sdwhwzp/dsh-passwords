@@ -42,7 +42,6 @@ const WORKSPACE = `packages:
   - .
 
 nodeLinker: hoisted
-autoInstallPeers: false
 `;
 
 mkdirSync(profileDir, { recursive: true });
@@ -126,5 +125,25 @@ const result = spawnSync('pnpm', ['install'], {
 if (result.error !== undefined) {
   console.error(`[dsh-passwords] 运行 pnpm 失败：${String(result.error)}（请先 npm install -g pnpm）`);
   process.exit(127);
+}
+
+// pnpm records local tarball build approvals only after the first resolution,
+// using exact source keys such as `package@file:...`. Resolve those generated
+// placeholders from the manifest allowlist and install once more so the
+// approved package prepare scripts actually run.
+const workspaceAfterInstall = readFileSync(workspacePath, 'utf8');
+const approvedWorkspace = mergeAllowBuilds(workspaceAfterInstall, recorded.allowBuilds);
+if (approvedWorkspace !== workspaceAfterInstall) {
+  writeFileSync(workspacePath, approvedWorkspace);
+  const approvedResult = spawnSync('pnpm', ['install'], {
+    cwd: profileDir,
+    stdio: 'inherit',
+    shell: process.platform === 'win32',
+  });
+  if (approvedResult.error !== undefined) {
+    console.error(`[dsh-passwords] 运行 pnpm 失败：${String(approvedResult.error)}（请先 npm install -g pnpm）`);
+    process.exit(127);
+  }
+  process.exit(approvedResult.status ?? 1);
 }
 process.exit(result.status ?? 1);

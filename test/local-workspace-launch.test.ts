@@ -137,6 +137,9 @@ test('launch 建库期间断线会回滚，随后同 workspaceId 可用新票据
     async resolveByPath(): Promise<undefined> {
       return undefined;
     },
+    list(): [] {
+      return [];
+    },
     async delete(): Promise<void> {},
   };
   const harness = await startHub({}, registry);
@@ -206,7 +209,7 @@ async function startHub(options: LocalWorkspaceHubOptions, registry?: object): P
     },
     jwtSecret: 'test-jwt',
     internalSecret: 'test-internal',
-    localWorkspace: { host: '127.0.0.1', port: 0, publicUrl: '' },
+    localWorkspace: { host: '127.0.0.1', port: 0, publicUrl: '', placeholderRoot: path.join(temp, 'local-workspaces') },
     patch: { dshRoot: '', restartService: '' },
   };
   const hub = new LocalWorkspaceHub(ctx, db, config, options);

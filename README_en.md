@@ -35,12 +35,13 @@ Listed in [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek
 
 The owner can configure, per subuser, from the settings page:
 
-- **Workspace and session permissions**: the owner enables workspaces per subuser with switches; enabled workspaces expose active sessions by default, with per-session checkboxes to turn individual sessions off. Archived sessions are excluded from the settings list
-- **Session and message isolation**: subusers only see enabled workspaces and enabled sessions; messages are limited to broadcasts, messages addressed to them, and messages they sent
+- **Workspace and session permissions**: the owner enables workspaces per subuser with switches; enabled workspaces expose active sessions by default, with per-session checkboxes to turn individual sessions off. A subuser may remove registrations backed by that account's managed directory or paired local computer, but not a shared grant or another account's private directory. Removal moves that user's sessions to Ungrouped without deleting directories, files, pairing records, or Session logs; the Sessions remain readable while their directory stays authorized. Archived sessions are excluded from the settings list
+- **Session and message isolation**: subusers only see sessions in enabled workspaces plus their own Ungrouped sessions. Their archived sessions remain readable because archive state affects organization, not account ownership. Messages are limited to broadcasts, messages addressed to them, and messages they sent
 - **DM-by-default messages**: subuser messages go to the owner by default; broadcasting is owner-only and must be explicitly chosen
 - **Hourly token limit** and **daily usage-time limit**: requests are rejected once the cap is hit
 - **Monthly model-spend allowance**: stored as integer CNY micros with ¥0.01 admin precision; shows used, remaining and an 80% warning, and rejects the next model step at 100%
 - **Customer model scope**: under the ChatGPT (Codex) provider, subuser selectors show only GPT-5.6-Sol, GPT-5.6-Terra, and GPT-5.6-Luna; models from other providers remain available, while the server rejects other Codex models for subusers and leaves the owner unrestricted
+- **Session model persistence**: each session keeps its model selection independently, including a selection made before the first prompt and followed by a dsh restart; selecting a model never changes the shared deployment default, which the owner changes explicitly in the `agent-default-model` Settings section
 - **Sandbox level**: read-only / workspace-write / full access; when a subuser's AI tries to escalate beyond its level, the gateway forces the approval to "reject"
 - **Upload toggle** (including private-folder uploads), **git-download toggle**, and **ban subusers**
 
@@ -57,9 +58,9 @@ The owner can configure, per subuser, from the settings page:
 
 ## Identity and spend synchronization
 
-Owners and subusers always sign in with local accounts and bcrypt passwords stored in this project's database. SQLite is the default and MySQL 8 is also supported. The gateway removes browser-supplied identity headers and creates a 30-second HMAC assertion for upstream requests; Harness verifies it and durably attaches the principal to each message, model step and tool execution.
+Owners and subusers always sign in with local accounts and bcrypt passwords stored in this project's database. SQLite is the default and MySQL 8 is also supported. The gateway removes browser-supplied identity headers and creates a 30-second HMAC assertion for upstream requests; Harness verifies it and durably attaches the principal to each message, model step and tool execution. With newer Harness builds that require browser authentication, the Host plugin and gateway child exchange and periodically renew the Host Cookie only through internal IPC. The process-scoped URL is never placed in arguments, environment variables, logs, or files, and the Host Cookie is never returned to customer browsers. The dsh plugin must launch the gateway in this mode and standalone startup fails explicitly; older Hosts without browser authentication may still use standalone startup.
 
-Workspace and session lists used by both initial sign-in and later refreshes are filtered on the server for the current subuser. WebSocket workspace, session, and archive events pass through the same ownership filter, so the browser never receives owner data while waiting for client-side hiding.
+Workspace and session lists used by both initial sign-in and later refreshes are filtered on the server for the current subuser. WebSocket workspace, session, and archive events pass through the same ownership filter, so the browser never receives owner data while waiting for client-side hiding. The gateway strictly validates both newer Harness `workspace/follow`, `session/list`, and `session/page` Remote/slash RPCs and legacy dot-style RPCs according to their respective protocols. Session ownership does not depend on current workspace registration or archive state: a legacy session from a trusted Host list is adopted only from the `dsh-passwords` identity durably attached to the first human prompt in a complete oldest-page walk at one fixed log cut. That read does not activate a cold Session. Directory location is never identity evidence; blank, incomplete, or unverifiable sessions conservatively remain with the owner account.
 
 Changing the database driver selects a different repository and does not copy rows from the other driver. Back up `.env` and the database and migrate existing accounts separately in production; a first deployment with an empty database can switch directly.
 
@@ -86,8 +87,8 @@ External file services and their accounts, passwords and databases are managed b
 
 ### 0. Prerequisites (three things)
 
-1. **Node.js 22.5+**: check with `node -v` (Linux: `curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs`; Windows: download from nodejs.org)
-2. **dsh installed**: `npm install -g @deepseek-ai/dsh`, with your model connection working (dsh's own model config is enough; this plugin needs no extra configuration)
+1. **Node.js 22.19+ or 24+**: check with `node -v` (Linux: `curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs`; Windows: download from nodejs.org)
+2. **dsh installed**: `npm install -g @deepseek-ai/dsh@0.1.2-alpha.4`, with your model connection working (dsh's own model config is enough; this plugin needs no extra configuration)
 3. **git**: Linux: `apt-get install -y git`; Windows: download from git-scm.com (pnpm is auto-installed by the script when missing)
 
 ### 1. Install (by platform)
@@ -111,7 +112,7 @@ npm install -g dsh-passwords
 dsh-passwords install     # generates SETUP_KEY, restores the plugin stack, and applies the patch
 ```
 
-(`dsh-passwords --version` prints the version; `dsh-passwords serve-gateway` runs the gateway manually.)
+(`dsh-passwords --version` prints the version; only a running and reachable older dsh build without Host browser authentication supports manual `dsh-passwords serve-gateway` startup.)
 
 The installer checks for prebuilt files, installing dependencies and building only when they are missing. It then generates `SETUP_KEY`, restores the recorded web-profile plugin stack, and applies the remote-settings patch.
 
@@ -119,11 +120,15 @@ The installer checks for prebuilt files, installing dependencies and building on
 
 `scripts/profile-plugins.json` is the versioned cross-machine deployment manifest. `dsh-passwords install` idempotently merges its NPM/Git sources, bundle order, Git build permissions, and required profile patches into `~/.dsh/profiles/web`, then runs one `pnpm install`. Existing local `link:` development sources and custom plugins outside the manifest are preserved; retired aggregate packages explicitly named by the manifest are migrated automatically.
 
-The default stack installs `dshmarket@1.16.2`, `@linxin666/dsh-web-all` from the `dev` branch of your `sdwhwzp/dsh-web` repository, the `dev` branches of `dsh-spend` and `dsh-plugin-subscriptions`, and the current `dsh-passwords`. The installer removes the retired `@linxin666/dsh-web-ui-all` dependency and bundle. When `dsh-web` and `dsh-passwords` share a parent directory, it links and builds the local aggregate together with every workspace package so DSH can resolve each loader from the profile root and local development remains direct. The subscriptions entry enforces `github:sdwhwzp/dsh-plugin-subscriptions#dev`, preventing a fresh host from silently selecting the NPM stable release.
+The default stack installs `dshmarket@1.16.2`, the `packages/dsh-web-all` subdirectory from the `master` branch of your `sdwhwzp/dsh-web` repository, the recorded branches of `dsh-spend`, `dsh-plugin-subscriptions`, `dsh-at-file`, and `dsh-weknora`, the better-sidebar Office viewer, and the current `dsh-passwords`. Targeting the aggregate subdirectory is required: installing the dsh-web repository root would resolve its published npm dependency instead of unpublished workspace changes. The installer removes the retired `@linxin666/dsh-web-ui-all` dependency and bundle. When adjacent source checkouts exist, it links and prepares those local packages so DSH can resolve each loader from the profile root and local development remains direct. Enforced Git entries prevent a fresh host from silently selecting an older npm release.
 
 `dsh-shandong-tizhi-brand` and `dsh-nas-webdav` are also recorded, but currently only have local source trees and no remotely fetchable branch. Before deploying them on another host, set `DSH_PLUGIN_BRAND_SPEC` and `DSH_PLUGIN_NAS_SPEC` to accessible NPM, Git, or `link:` sources. Without those variables the installer reports and skips those optional plugins while restoring the rest of the stack.
 
 At the end it prints the `SETUP_KEY` for first-time setup and writes it to `setup-key.txt` in the install directory. The file is deleted after setup succeeds; the active keys are kept as independent values in `.env`.
+
+## Uninstall
+
+Run `node dist/cli.js uninstall` from the dsh-passwords installation directory; a global npm installation can run `dsh-passwords uninstall`. The command removes only this plugin from the DSH Web Profile and reverses compatibility changes managed by it. Other plugins, the installation directory, `.env`, database, and certificates remain intact. A failed profile reconciliation restores the pre-uninstall state.
 
 ### 2. Finish setup in three steps
 
@@ -169,7 +174,7 @@ dsh starts → plugin loads → plugin spawns the password gate (logs appear in 
 dsh exits  → the gate stops with it (no orphan process holding ports)
 ```
 
-- Advanced: to run the gateway standalone, use `node dist/cli.js serve-gateway` or set up your own systemd unit.
+- Running older dsh builds without Host browser authentication may use `node dist/cli.js serve-gateway` or a systemd unit. Newer builds must let the plugin launch the gateway over internal IPC; standalone startup fails explicitly when the Host is unreachable or requires authentication.
 - Temporarily disable the auto-start (debugging): start dsh with `DSH_PASSWORDS_NO_AUTOSTART=1`.
 
 ## Automatic HTTPS
@@ -219,7 +224,7 @@ After logging in to dsh, open **Settings → Plugins** to find the "dsh-password
 
 | Feature | Who can use it | Notes |
 |---|---|---|
-| **Remote settings + reload patch** | All signed-in users | Remote settings are applied (always on); after a dsh upgrade, click "Reload patch" to fix the settings page in one click (restarts the web service and refreshes the page — no SSH) |
+| **Shared settings + reload patch** | Owner only | The Web Profile settings are shared by every account, so subusers cannot read or write them; the owner can reload the patch after an upgrade |
 | **Change password** | Yourself; the owner can change anyone's | Old sessions are invalidated immediately |
 | **Change username** | Yourself; the owner can change anyone's | Sign in with the new username afterwards |
 | **Subuser management** | Owner only | Create/delete subusers (subusers can sign in but have no admin rights) |
@@ -267,7 +272,7 @@ After logging in to dsh, open **Settings → Plugins** to find the "dsh-password
 node dist/cli.js audit --limit 20             # last 20 audit-log entries (auto-decrypted)
 node dist/cli.js patch status                 # remote-settings patch status
 node dist/cli.js patch                        # reload the patch (re-applies + restarts dsh-web)
-node dist/cli.js serve-gateway --port 9000    # run the gateway manually on another port
+node dist/cli.js serve-gateway --port 9000    # older dsh only: run the gateway manually on another port
 node scripts/start-http.mjs 8080              # plaintext HTTP mode (dangerous, y/N confirmation)
 dsh-local-workspace                           # reconnect with the saved local device token
 ```
@@ -283,7 +288,7 @@ dsh-local-workspace                           # reconnect with the saved local d
 - **The local workspace is online but has no composer?** Return to the new-conversation screen, expand **Choose a local folder** beside the mode selector above the input, and click **Open conversation** beside the online folder. `¥0` disables model calls; after submitting a question, the customer sees an explicit exhausted-allowance notice in the conversation.
 - **Nothing opens after clicking “Choose a local folder”?** Expand **Companion did not open?**, download the EXE, and double-click it once to register the protocol, then retry on the original page. Do not move or delete the registered EXE; if you move it, double-click it again at the new location. The web flow never opens `about:blank`, so the current conversation remains intact.
 - **dsh fails to start with `duplicate loader entry id`?** You used `dsh plugin add` in the profile. It reconciles ALL dependencies declaring `dsh.bundle` into the bundles layer, which crashes dsh when they overlap with already-installed plugins. Use `node scripts/register-plugin.mjs` to sync `scripts/profile-plugins.json` precisely; it appends only the bundles named by the manifest and preserves all other configuration.
-- **npm fails installing dsh (allow-scripts / node-pty)?** Newer npm blocks install scripts. Allow them first, then reinstall: `npm config set allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user` followed by `npm install -g @deepseek-ai/dsh` again (this project itself has no such issue — it's dsh's dependencies that run native builds).
+- **npm fails installing dsh (allow-scripts / node-pty)?** Newer npm blocks install scripts. Allow them first, then reinstall: `npm config set allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user` followed by `npm install -g @deepseek-ai/dsh@0.1.2-alpha.4` again (this project itself has no such issue — it's dsh's dependencies that run native builds).
 - **`dsh-passwords install` reports TS5058 after an npm `--prefix` install?** Upgrade to `dsh-passwords@2.5.4`. It correctly detects runtime dependencies hoisted to `<prefix>/node_modules` and no longer falls back to a source build.
 - **dsh reports `crypto.randomUUID is not a function`?** An older gateway build lacks the HTML injection compat layer — update the code and **hard-refresh the browser** (Ctrl+Shift+R).
 - **Is it a problem if the database file is stolen?** No. Sensitive fields are encrypted or hashed; without the keys in `.env` they can't be read, and passwords only exist as bcrypt hashes anyway.
@@ -310,7 +315,8 @@ Passwords are stored as bcrypt hashes only. Usernames, IPs, and audit records ar
 - **Brute-force protection**: failed logins lock the account, and the lock duration backs off per round (1 → 5 → 15 → 60 minutes, capped). Owner accounts can't be globally locked out by IP-rotation (per-IP locking still applies) — prevents account-level DoS.
 - **Password-spray protection (per-IP throttle)**: 50 failed logins from the same IP within 15 minutes → that IP is globally throttled for 15 minutes (accumulated across usernames — aimed at the "one IP rotating many usernames" spraying technique; bcrypt is not consumed while throttled, and a successful login lifts the throttle). If a large NAT/shared egress trips it by accident, it auto-recovers after 15 minutes with no manual action.
 - **Session revocation**: logging out revokes the token server-side immediately; changing the password/username invalidates all old sessions.
-- **Subuser isolation (third-party plugin surface)**: ops endpoints such as dsh-ssh (SSH hosts/tunnels), skin-center, modlens, and the dsh-uploads list/delete are owner-only; upload/download stay gated by `allow_upload` / `allowGitDownload`, and **new subusers default to git download off** (including dsh-uploads download and other exfiltration channels) — the owner enables it per-user, so subusers can't enumerate or exfiltrate files from the shared upload storage.
+- **Subuser isolation (third-party plugin surface)**: ops endpoints such as dsh-ssh (SSH hosts/tunnels), skin-center, modlens, and the dsh-uploads list/delete are owner-only; upload/download stay gated by `allow_upload` / `allowGitDownload`, and **new subusers default to git download off** (including dsh-uploads download and other exfiltration channels). Ordinary better-sidebar previews and downloads are separately bound to a Session owned by the current account and its authorized workspace; forged `sessionId`, `cwd`, or file paths receive 403. The gateway authorizes and reads each subuser file through the same open descriptor, so a concurrent path replacement cannot redirect the read to another account's file.
+- **New Remote isolation**: commands, goals, subagents, feedback, model selection, and native path opening all recheck the addressed Session for subusers; opened paths must also stay inside that Session workspace. Plugin inventory, dynamic Cordis, shared settings, credentials, and Agent Preset administration entries are omitted from the subuser boot graph, and crafted direct requests receive 403 as well.
 - **Slow-connection protection**: explicit request timeouts (half-open headers cut off at 20s) plus a concurrent-connection cap (512 gateway / 256 redirect) to resist slowloris-style resource exhaustion.
 - **Path normalization**: the gate resolves the prefix from the raw URL with iterative decoding (blocks double-encoding), slash collapsing and WHATWG normalization — `%2f..%2f` / `%252f..` SPA-shell bypass variants are all rejected.
 - **Hardening tips**:
@@ -327,6 +333,45 @@ The UI is bilingual (Chinese/English) and follows dsh's language setting:
 - **CLI**: follows the `LANG` / `LC_ALL` environment variables (`en` prefix = English).
 
 ## Release notes
+
+### v2.6.17 (2026-09-02)
+
+- Adds formal compatibility with DeepSeek Harness `0.1.2-alpha.4`: runtime peers and compiler dependencies remain pinned to the same exact release, installation guidance and Docker defaults advance together, and the optional principal-access authorization API also requires Alpha.4.
+
+### v2.6.16 (2026-09-02)
+
+- Syncs the upstream v2.6.7 Node 22.19/24 requirement, deterministic `npm-shrinkwrap.json`, Docker initialization, and recoverable uninstall flow while retaining MySQL, tenant workspaces, budgets, WebDAV, session ownership, and Alpha.3 Host identity isolation.
+
+### v2.6.15 (2026-09-01)
+
+- Allows a subuser to remove its own managed or paired-local Workspace registration through the newer `/api/workspace/delete` endpoint. Shared grants and another account's private directories remain denied; physical directories, files, local pairing records, and Sessions stay intact. Owner deletion semantics are unchanged.
+
+### v2.6.14 (2026-09-01)
+
+- Updates the runtime, browser, and compiler dependency set to DeepSeek Harness `0.1.2-alpha.3`. Account directories, Sessions, and Workspaces remain tenant-isolated through Host-verified caller identities and principal-access authorization.
+
+### v2.6.13 (2026-09-01)
+
+- On Linux, locates the actual running dsh CLI from the process command line even when the plugin loader rewrites JavaScript arguments; each candidate accepts only its owning dsh package, preventing selection of stale dependencies in a plugin directory's ancestors.
+
+### v2.6.12 (2026-09-01)
+
+- Unwraps Remote call results before rendering the current identity and account list; remote failures retain their error codes and details instead of appearing as an empty account state.
+- When the configured directory has no direct dsh installation, resolves the package owned by the active CLI so split Profile and immutable-runtime deployments do not incorrectly report partial functionality.
+
+### v2.6.11 (2026-09-01)
+
+- Resolves the `dshPasswords` client only through its exact Cordis v4 nested dependency after mounting the Remote namespace, so the password-gate settings card no longer renders empty; unloading the plugin also disposes the mounted namespace.
+- Idempotently migrates active local-workspace placeholders to `MCP_LOCAL_WORKSPACE_PLACEHOLDER_ROOT` at startup. It confirms the stable Host registration first, atomically updates the SQLite/MySQL row, and then removes only Host registrations whose release path, owner, and workspace-id digest all match. Old directories, files, and session logs remain untouched, and an interrupted cleanup can continue on the next restore.
+
+### v2.6.10 (2026-09-01)
+
+- Fixes the missing Cordis dependency declaration for the Alpha.1 client `remote` service, which prevented `dsh-passwords` from loading in the browser.
+
+### v2.6.9 (2026-08-30)
+
+- Supports newer Harness slash RPCs, the `workspace/follow` Remote workspace snapshot, and cold-safe legacy ownership recovery through `session/page`; stream frames, methods, immutable page cuts, and readiness probes are validated strictly and fail closed.
+- Applies subuser isolation to commands, goals, subagents, feedback, model selection, native path opening, shared settings, plugin inventory, and dynamic Cordis administration, while omitting the corresponding owner-only client entries.
 
 ### v2.5.4 (2026-08-20)
 

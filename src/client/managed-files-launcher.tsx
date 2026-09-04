@@ -22,19 +22,34 @@ export function ManagedFilesLauncher({ t, wide }: Props) {
 
   useEffect(() => {
     let disposed = false;
-    void fetch('/api/dsh-passwords/state', {
-      cache: 'no-store',
-      credentials: 'same-origin',
-      headers: { accept: 'application/json' },
-    })
-      .then(async (response) => {
-        if (!response.ok) return false;
-        const value = await response.json().catch(() => ({})) as { me?: { role?: unknown } };
-        return value.me?.role === 'user';
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    const probe = () => {
+      if (disposed) return;
+      if (retryTimer !== undefined) clearTimeout(retryTimer);
+      retryTimer = undefined;
+      void fetch('/gateway/api/managed-files/status', {
+        cache: 'no-store',
+        credentials: 'same-origin',
+        headers: { accept: 'application/json' },
       })
-      .then((next) => { if (!disposed) setAvailable(next); })
-      .catch(() => undefined);
-    return () => { disposed = true; };
+        .then(async (response) => {
+          if (!response.ok) throw new Error(`managed files status failed: ${response.status}`);
+          const value = await response.json().catch(() => ({})) as { available?: unknown };
+          if (!disposed) setAvailable(value.available === true);
+        })
+        .catch(() => {
+          if (!disposed) retryTimer = setTimeout(probe, 3_000);
+        });
+    };
+    probe();
+    window.addEventListener('focus', probe);
+    window.addEventListener('online', probe);
+    return () => {
+      disposed = true;
+      if (retryTimer !== undefined) clearTimeout(retryTimer);
+      window.removeEventListener('focus', probe);
+      window.removeEventListener('online', probe);
+    };
   }, []);
 
   if (!available) return null;

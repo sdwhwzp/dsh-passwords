@@ -65,7 +65,7 @@ async function harness() {
     },
     jwtSecret: 'jwt',
     internalSecret: 'internal',
-    localWorkspace: { host: '127.0.0.1', port: 8081, publicUrl: '' },
+    localWorkspace: { host: '127.0.0.1', port: 8081, publicUrl: '', placeholderRoot: path.join(directory, 'local') },
     managedWorkspaceRoot: path.join(directory, 'users'),
     patch: { dshRoot: '', restartService: '' },
   };
@@ -171,6 +171,38 @@ test('startup backfills existing subusers and preserves their explicit quotas an
     const restartedRegistry = new FakeWorkspaceRegistry();
     await provisioner.restore(restartedRegistry as unknown as WorkspaceRegistry);
     assert.equal(restartedRegistry.workspaces[0].path, managed.path);
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test('startup converts a legacy unrestricted folder list to the private managed workspace', async () => {
+  const env = await harness();
+  try {
+    const created = env.db.createUser('legacy-open', await bcrypt.hash('UserPassword1!', 4), 'user');
+    env.db.setPermissions(created.id, {
+      allowedFolders: [], hourlyTokenLimit: 321, dailyMinutesLimit: 12, monthlyBudgetMicros: 4_000_000,
+      allowUpload: true, allowGitDownload: true, banned: false, sandboxMode: null, disabledSessions: [],
+    });
+    const registry = new FakeWorkspaceRegistry();
+    const provisioner = new ManagedWorkspaceProvisioner(env.db, env.config);
+
+    await provisioner.restore(registry as unknown as WorkspaceRegistry);
+
+    const managed = env.db.getManagedWorkspace(created.id)!;
+    const permissions = env.db.getPermissions(created.id)!;
+    assert.deepEqual(permissions.allowed_folders, [managed.path]);
+    assert.equal(permissions.hourly_token_limit, 321);
+    assert.equal(permissions.daily_minutes_limit, 12);
+    assert.equal(permissions.monthly_budget_micros, 4_000_000);
+    assert.equal(permissions.allow_git_download, true);
+
+    env.db.setPermissions(created.id, {
+      allowedFolders: [], hourlyTokenLimit: 321, dailyMinutesLimit: 12, monthlyBudgetMicros: 4_000_000,
+      allowUpload: true, allowGitDownload: true, banned: false, sandboxMode: null, disabledSessions: [],
+    });
+    await provisioner.restore(new FakeWorkspaceRegistry() as unknown as WorkspaceRegistry);
+    assert.deepEqual(env.db.getPermissions(created.id)!.allowed_folders, [managed.path]);
   } finally {
     await env.cleanup();
   }

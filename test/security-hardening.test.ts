@@ -92,7 +92,7 @@ function startMockUpstream(): Promise<http.Server> {
                 title: 'active',
                 sessionIds: ['s-active'],
               }],
-              archivedSessionIds: [],
+              archivedSessionIds: ['s-archived'],
             },
           },
         }));
@@ -109,10 +109,66 @@ function startMockUpstream(): Promise<http.Server> {
               items: [
                 { sessionId: 's-active', cwd: '/workspaces/a' },
                 { sessionId: 's-removed', cwd: '/workspaces/a' },
+                { sessionId: 's-private-legacy', cwd: '/managed/u2/deleted-workspace' },
+                { sessionId: 's-private-admin-legacy', cwd: '/managed/u2/support' },
+                { sessionId: 's-private-blank-legacy', cwd: '/managed/u2/blank' },
+                { sessionId: 's-ambiguous-legacy', cwd: '/workspaces/a' },
+                { sessionId: 's-admin-owned', cwd: '/workspaces/a' },
+                { sessionId: 's-disabled', cwd: '/workspaces/a' },
+                { sessionId: 's-archived', cwd: '/workspaces/a' },
               ],
             },
           },
         }));
+        return;
+      }
+      if ((req.url ?? '').startsWith('/api/session.history')) {
+        const chunks: Buffer[] = [];
+        req.on('data', (chunk: Buffer) => chunks.push(chunk));
+        req.on('end', () => {
+          const input = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as unknown;
+          const sessionId = (() => {
+            const visit = (value: unknown, depth = 0): string | null => {
+              if (depth > 8 || value === null || typeof value !== 'object') return null;
+              const row = value as Record<string, unknown>;
+              if (typeof row.sessionId === 'string') return row.sessionId;
+              for (const child of Object.values(row)) {
+                const found = visit(child, depth + 1);
+                if (found !== null) return found;
+              }
+              return null;
+            };
+            return visit(input);
+          })();
+          const principal = sessionId === 's-private-legacy'
+            ? { source: 'dsh-passwords', id: String(subuserId), username: 'subuser', role: 'user' }
+            : sessionId === 's-private-admin-legacy'
+              ? { source: 'dsh-passwords', id: String(adminId), username: 'admin', role: 'admin' }
+              : null;
+          const events = principal === null
+            ? []
+            : [{
+                event: {
+                  type: 'user/message',
+                  seq: 9,
+                  time: 1,
+                  data: {
+                    id: 'legacy-message',
+                    role: 'user',
+                    content: [{ type: 'text', text: 'legacy' }],
+                    source: { kind: 'user', rpcId: 'legacy-rpc' },
+                    principal,
+                  },
+                  surfaceOp: 'append',
+                },
+              }];
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({
+            type: 'server-response',
+            rpcId: 'session-history',
+            result: { ok: true, value: { events, hasMore: false } },
+          }));
+        });
         return;
       }
       res.writeHead(200, { 'content-type': 'application/json' });
@@ -165,6 +221,12 @@ before(async () => {
   adminId = adminUser.id;
   const sub = db.createUser('subuser', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   subuserId = sub.id;
+  db.setManagedWorkspace(subuserId, '/managed/u2');
+  db.claimSessionOwner('s-active', subuserId);
+  db.claimSessionOwner('s-removed', subuserId);
+  db.claimSessionOwner('s-disabled', subuserId);
+  db.claimSessionOwner('s-archived', subuserId);
+  db.claimSessionOwner('s-admin-owned', adminId);
   const third = db.createUser('third', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   thirdId = third.id;
   // 登录限速回归：真实 bcrypt 凭据（登录流程需要比对）
@@ -274,7 +336,11 @@ test('子账号登录首屏的 GET 工作区与会话列表默认拒绝管理员
   const sessionBody = JSON.parse(sessions.body) as {
     result: { value: { items: Array<{ sessionId: string }> } };
   };
-  assert.deepEqual(sessionBody.result.value.items, []);
+  assert.deepEqual(
+    sessionBody.result.value.items.map((item) => item.sessionId),
+    ['s-private-legacy'],
+    '默认关闭共享工作区，但账号自己的托管目录仍可用',
+  );
 });
 
 test('H-1：受限子用户 session.list 响应超 16MiB → 502（不透传未过滤内容）', async () => {
@@ -299,9 +365,9 @@ test('H-1b：gzip 高压缩比炸弹（解压后 70MiB）→ 502（maxOutputLeng
   assert.equal(r.status, 502);
 });
 
-test('子账号只看到活动工作区成员，已移除同目录会话无法列表或直读', async () => {
+test('子账号可读取自己的未分组会话，但不能认领共享路径或管理员会话', async () => {
   db.setPermissions(subuserId, {
-    allowedFolders: ['/workspaces/a'],
+    allowedFolders: ['/workspaces/a', '/managed/u2'],
     hourlyTokenLimit: null,
     dailyMinutesLimit: null,
     monthlyBudgetMicros: 0,
@@ -309,13 +375,22 @@ test('子账号只看到活动工作区成员，已移除同目录会话无法�
     allowGitDownload: false,
     banned: false,
     sandboxMode: null,
-    disabledSessions: [],
+    disabledSessions: ['s-disabled'],
   });
 
   const listed = await gatewayReq('POST', '/api/session.list', {}, subuserCookie, '{}');
   assert.equal(listed.status, 200);
   const body = JSON.parse(listed.body) as { result: { value: { items: Array<{ sessionId: string }> } } };
-  assert.deepEqual(body.result.value.items.map((item) => item.sessionId), ['s-active']);
+  assert.deepEqual(body.result.value.items.map((item) => item.sessionId), [
+    's-active',
+    's-removed',
+    's-private-legacy',
+    's-archived',
+  ]);
+  assert.equal(db.getSessionOwner('s-private-legacy'), subuserId, '专属目录旧会话应安全补登记');
+  assert.equal(db.getSessionOwner('s-private-admin-legacy'), adminId, '管理员在子目录内的旧会话不得泄露');
+  assert.equal(db.getSessionOwner('s-private-blank-legacy'), adminId, '无身份空白会话不得按目录认领');
+  assert.equal(db.getSessionOwner('s-ambiguous-legacy'), adminId, '共享路径旧会话不得按目录认领');
 
   upstreamUrls.length = 0;
   const removed = await gatewayReq(
@@ -325,8 +400,44 @@ test('子账号只看到活动工作区成员，已移除同目录会话无法�
     subuserCookie,
     JSON.stringify({ sessionId: 's-removed' }),
   );
-  assert.equal(removed.status, 403);
-  assert.ok(!upstreamUrls.includes('/api/session.history'), '已移除会话请求不得转发上游');
+  assert.equal(removed.status, 200, '删除 Workspace 后的自有会话应继续作为未分组项读取');
+
+  const privateLegacy = await gatewayReq(
+    'POST',
+    '/api/session.history',
+    {},
+    subuserCookie,
+    JSON.stringify({ sessionId: 's-private-legacy' }),
+  );
+  assert.equal(privateLegacy.status, 200, '专属目录内的旧会话应恢复读取');
+
+  const archived = await gatewayReq(
+    'POST',
+    '/api/session.history',
+    {},
+    subuserCookie,
+    JSON.stringify({ sessionId: 's-archived' }),
+  );
+  assert.equal(archived.status, 200, '自有归档会话仍应读取；归档不是账号授权边界');
+
+  upstreamUrls.length = 0;
+  for (const sessionId of [
+    's-private-admin-legacy',
+    's-private-blank-legacy',
+    's-ambiguous-legacy',
+    's-admin-owned',
+    's-disabled',
+  ]) {
+    const denied = await gatewayReq(
+      'POST',
+      '/api/session.history',
+      {},
+      subuserCookie,
+      JSON.stringify({ sessionId }),
+    );
+    assert.equal(denied.status, 403, `${sessionId} 不得读取`);
+  }
+  assert.ok(!upstreamUrls.includes('/api/session.history'), '拒绝的会话请求不得转发上游');
 
   const active = await gatewayReq(
     'POST',
@@ -636,7 +747,7 @@ test('M-13：allowedFolders 精确禁止全部工作区 → 200', async () => {
     JSON.stringify({ userId: subuserId, allowedFolders: ['__deny__'] }),
   );
   assert.equal(r.status, 200);
-  assert.deepEqual(db.getPermissions(subuserId)?.allowed_folders, ['__deny__']);
+  assert.deepEqual(db.getPermissions(subuserId)?.allowed_folders, ['/managed/u2']);
 });
 
 test('M-13：禁止全部工作区哨兵不能与路径混用', async () => {

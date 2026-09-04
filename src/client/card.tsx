@@ -9,11 +9,12 @@
 // dsh 设置里的语言（Settings → General → Language）。t seat 由注册时的
 // `locale: 'dshpw'` 声明注入。
 import { createElement as h, useEffect, useRef, useState } from 'react';
-import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots';
+import type { PropsLocale, Translate } from '@deepseek-ai/dsh-client-ui-slots';
 import { publishChatEntryChanged } from './events';
 import { submitLogoutNavigation } from './account-logout';
 import { LocalWorkspacePanel } from './local-workspace';
 import { ManagedFilesPanel } from './managed-files';
+import { api } from './api';
 
 export interface UserInfo {
   id: number;
@@ -75,6 +76,19 @@ interface PermDraft {
   disabledSessions: string[];
 }
 
+/** Validate the patch status response before presenting a healthy state. */
+export function readPatchState(response: unknown): PatchState | null {
+  if (typeof response !== 'object' || response === null || !('status' in response)) return null;
+  const status = response.status;
+  if (
+    typeof status !== 'object' || status === null ||
+    !('settingsHostMode' in status) || typeof status.settingsHostMode !== 'boolean' ||
+    !('whitelist' in status) || typeof status.whitelist !== 'boolean' ||
+    !('workspaceSearch' in status) || typeof status.workspaceSearch !== 'boolean'
+  ) return null;
+  return status as PatchState;
+}
+
 interface BudgetStatus {
   userId: number;
   month: string;
@@ -120,25 +134,6 @@ function fmtTime(iso: string): string {
 
 
 
-type ApiError = { error?: string; code?: string };
-
-function api<T>(path: string, body?: unknown): Promise<T> {
-  return fetch(path, {
-    method: body === undefined ? 'GET' : 'POST',
-    headers: body === undefined ? undefined : { 'content-type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  }).then(async (res) => {
-    const data = (await res.json().catch(() => ({}))) as ApiError & T;
-    if (!res.ok) {
-      const err = new Error(data.error || `HTTP ${res.status}`);
-      // 携带服务端稳定错误码：errText 优先按码本地化（跟随 dsh 语言）
-      (err as Error & { code?: string }).code = data.code;
-      throw err;
-    }
-    return data as T;
-  });
-}
-
 /** 错误文案：有 code 走本地词典，未知 code / 无 code 回退服务端文案。
  *  词典项含占位符（{minutes}/{count} 等）时客户端无参数可填，回退服务端已插值文案。 */
 function errText(error: unknown, tr: (key: string, params?: Record<string, string | number>) => string): string {
@@ -154,11 +149,15 @@ function errText(error: unknown, tr: (key: string, params?: Record<string, strin
   return tr('opFailed');
 }
 
-export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
+interface DshPasswordsCardProps extends PropsLocale<'dshpw'> {
+  loadState(): Promise<StateData>;
+}
+
+export function DshPasswordsCard(props: DshPasswordsCardProps) {
   const t = props.t;
   // errText 需要接收动态 key（err.<code>），而 dshpw 词典 t 的 key 是受限联合类型：
   // 这里包一层宽松签名适配器（运行时行为不变）
-  const trErr = (key: string, params?: Record<string, string | number>) => t(key as never, params);
+  const trErr: Translate = (key, params) => t(key as never, params);
 
   const [data, setData] = useState<StateData | null>(null);
   const [patchState, setPatchState] = useState<PatchState | null>(null);
@@ -199,7 +198,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
     refreshingRef.current = true;
     // in-flight 守卫覆盖整个 state→overview→workspaces 链（而非只覆盖 patch/status）：
     // 否则慢网络下 overview 未返回时守卫已被 patch/status 提前释放，30s 定时又会叠一轮。
-    api<StateData>('/api/dsh-passwords/state')
+    props.loadState()
       .then((d) => {
         setData(d);
         setError('');
@@ -258,8 +257,8 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
         }
       });
     // patch 状态独立于主链（轻量 + 失败只影响状态展示）
-    api<{ status: PatchState | null }>('/api/dsh-passwords/patch/status')
-      .then((r) => setPatchState(r.status))
+    api<unknown>('/api/dsh-passwords/patch/status')
+      .then((r) => setPatchState(readPatchState(r)))
       .catch(() => setPatchState(null));
   };
 

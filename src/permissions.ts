@@ -27,6 +27,62 @@ export function normalizePath(p: string): string {
   return n;
 }
 
+export type WebSocketAccess = 'deny' | 'authenticated';
+
+/** Parse exact or trailing-wildcard WebSocket path grants. */
+export function parseWebSocketAllowlist(raw: string | undefined, envName: string): string[] {
+  if (raw === undefined || raw.trim() === '') return [];
+  const rules = new Set<string>();
+  for (const item of raw.split(',')) {
+    const rule = item.trim();
+    if (rule === '') continue;
+    if (rule.length > 256) throw new Error(`${envName}: rule is longer than 256 characters`);
+    if (!rule.startsWith('/')) throw new Error(`${envName}: rule must start with /: ${rule}`);
+    if (/[? #%\\\u0000-\u001f\u007f]/.test(rule)) {
+      throw new Error(`${envName}: rule contains query, encoding, backslash, or control characters: ${rule}`);
+    }
+    const wildcard = rule.endsWith('/*');
+    if (rule.includes('*') && !wildcard) {
+      throw new Error(`${envName}: only a trailing /* wildcard is supported: ${rule}`);
+    }
+    const pathPart = wildcard ? rule.slice(0, -2) : rule;
+    if (pathPart === '' || pathPart === '/') throw new Error(`${envName}: root and /* are not allowed`);
+    if (pathPart === '/gateway' || pathPart.startsWith('/gateway/')) {
+      throw new Error(`${envName}: gateway paths cannot be allowlisted: ${rule}`);
+    }
+    if (pathPart === '/api/dsh-passwords/internal' || pathPart.startsWith('/api/dsh-passwords/internal/')) {
+      throw new Error(`${envName}: internal gateway paths cannot be allowlisted: ${rule}`);
+    }
+    const segments = pathPart.split('/').slice(1);
+    if (segments.some((segment) => segment === '.' || segment === '..' || segment === '')) {
+      throw new Error(`${envName}: rule contains an empty or dot path segment: ${rule}`);
+    }
+    rules.add(rule);
+    if (rules.size > 64) throw new Error(`${envName}: at most 64 rules are supported`);
+  }
+  return [...rules];
+}
+
+/** Match one WebSocket pathname against an exact or trailing-wildcard rule. */
+export function matchesWebSocketRule(pathname: string, rule: string): boolean {
+  return rule.endsWith('/*') ? pathname.startsWith(`${rule.slice(0, -2)}/`) : pathname === rule;
+}
+
+/** Resolve an authenticated account's access to one WebSocket route. */
+export function webSocketAccessForPath(
+  pathname: string,
+  configuredRules: readonly string[],
+  grantedRules: readonly string[],
+  userRole: 'admin' | 'user',
+  builtin: boolean,
+): WebSocketAccess {
+  if (builtin) return 'authenticated';
+  if (!configuredRules.some((rule) => matchesWebSocketRule(pathname, rule))) return 'deny';
+  return userRole === 'admin' || grantedRules.some((rule) => matchesWebSocketRule(pathname, rule))
+    ? 'authenticated'
+    : 'deny';
+}
+
 /**
  * 工作区白名单的"禁止所有"哨兵值：主用户选择"禁止工作区"时存入白名单，
  * 与空数组（=全部允许）区分开（空数组还是"未限制"语义，兼容默认子用户）。
@@ -400,7 +456,8 @@ export function collectSessionCwdFromWorkspaces(value: unknown, out: Map<string,
 
 /**
  * 递归查找请求体里的 workspaceId（session.create 可能带 workspaceId 而非 cwd）。
- *  ⚠ 递归时跳过 args 子对象（同 extractPathFromBody：args 是 dsh 不消费的伪字段）。
+ * Legacy dot-style envelopes skip an `args` child. Alpha slash-style envelopes are
+ * unwrapped by the gateway before this helper receives their real parameter object.
  */
 export function extractWorkspaceId(value: unknown, depth = 0): string | null {
   if (depth > 6 || value === null || typeof value !== 'object') return null;
@@ -412,6 +469,30 @@ export function extractWorkspaceId(value: unknown, depth = 0): string | null {
     if (nested !== null) return nested;
   }
   return null;
+}
+
+/** Extract both explicit paths from a workspace rename request. */
+export function extractWorkspaceRenamePaths(value: unknown): { oldPath: string; newPath: string } | null {
+  const oldKeys = new Set(['oldPath', 'previousPath', 'sourcePath', 'fromPath']);
+  const newKeys = new Set(['newPath', 'targetPath', 'destinationPath', 'toPath']);
+  let oldPath: string | null = null;
+  let newPath: string | null = null;
+  const visit = (current: unknown, depth: number): void => {
+    if (depth > 6 || current === null || typeof current !== 'object' || (oldPath !== null && newPath !== null)) return;
+    if (Array.isArray(current)) {
+      for (const item of current) visit(item, depth + 1);
+      return;
+    }
+    for (const [key, item] of Object.entries(current as Record<string, unknown>)) {
+      if (typeof item === 'string' && item.trim() !== '') {
+        if (oldKeys.has(key) && oldPath === null) oldPath = item;
+        if (newKeys.has(key) && newPath === null) newPath = item;
+      }
+      visit(item, depth + 1);
+    }
+  };
+  visit(value, 0);
+  return oldPath !== null && newPath !== null ? { oldPath, newPath } : null;
 }
 
 /** 沙盒权限级别（dsh SANDBOX_MODES）+ 严重度排序（越靠后越宽松） */
@@ -480,6 +561,10 @@ export function forceRejectApproval(value: unknown, depth = 0): boolean {
   let changed = false;
   if (typeof obj.approvalId === 'string' && typeof obj.outcome === 'string' && obj.outcome !== 'rejected') {
     obj.outcome = 'rejected';
+    changed = true;
+  }
+  if (obj.kind === 'result' && obj.value === 'allowed-once') {
+    obj.value = 'rejected';
     changed = true;
   }
   for (const key of Object.keys(obj)) {
@@ -556,7 +641,9 @@ export function isUploadRequest(method: string, pathname: string): boolean {
     pathname === '/api/dsh-uploads' ||
     pathname.startsWith('/api/dsh-uploads/') ||
     pathname === '/api/filePathBridge/importFile' ||
-    pathname === '/api/dsh-ssh/upload'
+    pathname === '/api/dsh-ssh/upload' ||
+    pathname === '/sidebar/upload' ||
+    pathname === '/describe-image/attach'
   );
 }
 
@@ -576,12 +663,30 @@ export function isGitRequest(pathname: string): boolean {
   );
 }
 
+/** Shared Host settings mutations change the Web Profile for every account. */
+export function isSharedSettingsWrite(pathname: string): boolean {
+  return /^\/api\/settings[.\/](openDocument|update|replace|mutate)$/.test(pathname);
+}
+
+/** Whether a request value contains one canonical cross-session reference token. */
+export function containsSessionReference(value: unknown, depth = 0): boolean {
+  if (depth > 12) return false;
+  if (typeof value === 'string') return /dsh-session:[A-Za-z0-9_-]+/u.test(value);
+  if (Array.isArray(value)) return value.some((entry) => containsSessionReference(entry, depth + 1));
+  if (value === null || typeof value !== 'object') return false;
+  return Object.values(value as Record<string, unknown>)
+    .some((entry) => containsSessionReference(entry, depth + 1));
+}
+
 /**
  * 第三方插件“运维面”端点（仅主用户可访问）：
  *   - dsh-ssh —— SSH 主机清单/隧道/远程文件：含服务器连接信息（host/port/user/auth/keyReady），
  *     泄露即扩大 SSH 凭据面；
  *   - skin-center —— 皮肤中心（未纳入网关权限模型）；
  *   - modlens —— 模型透镜（未纳入网关权限模型）；
+ *   - dsh-usage —— 提供商余额、订阅计划和用量总览仅管理员可见；
+ *   - dsh-at-file 设置写入 —— 修改共享 Web Profile 的全局设置与工作区过滤规则；
+ *   - Host settings 写入 —— 修改所有账号共用的 Web Profile 设置文件；
  *   - dsh-uploads —— 共享上传存储的【列表/删除】（F-12）：枚举全部用户上传文件清单
  *     与删除他人文件均仅主用户；上传（POST）仍由 allow_upload 门控、下载
  *     （GET /download）仍由 allowGitDownload 门控，保持原权限语义。
@@ -589,16 +694,39 @@ export function isGitRequest(pathname: string): boolean {
  */
 export function isAdminOnlyPluginEndpoint(method: string, pathname: string): boolean {
   return (
+    /^\/api\/settings[.\/](?:describe|openSettingsDocument|openAgentPresetDirectory|canOpenAgentPresetDirectory)$/.test(pathname) ||
+    isSharedSettingsWrite(pathname) ||
+    pathname === '/api/dsh-web-ui-settings/describe' ||
+    pathname === '/api/dsh-web-ui-settings/mutate' ||
+    pathname === '/describe-image/native-images' ||
+    pathname === '/sidebar/api/settings.update' ||
+    /^\/api\/credentials[.\/](describe|set|unset)$/.test(pathname) ||
+    /^\/api\/host[.\/](pickDirectory|openPath)$/.test(pathname) ||
+    /^\/api\/agentPresets?[.\/](read|copy|openDocument|remove|deletePreset)$/.test(pathname) ||
+    pathname === '/api/llm/discoverModels' ||
+    pathname === '/api/pluginInventory/list' ||
+    pathname === '/api/dynamicCordisRunner' ||
+    pathname.startsWith('/api/dynamicCordisRunner/') ||
+    pathname === '/api/sessionReferenceResolver/candidates' ||
     pathname === '/api/dsh-ssh' ||
     pathname.startsWith('/api/dsh-ssh/') ||
     pathname === '/api/skin-center' ||
     pathname.startsWith('/api/skin-center/') ||
     pathname === '/modlens' ||
     pathname.startsWith('/modlens/') ||
+    pathname === '/api/dsh-usage' ||
+    pathname.startsWith('/api/dsh-usage/') ||
+    pathname === '/plugins/events' ||
+    (pathname === '/api/atFile/updateSettings' && method === 'POST') ||
     // F-12：仅精确匹配 /api/dsh-uploads（不含 /download 子路径），且只看
     // GET（列表）/DELETE（删除）；POST 上传由 isUploadRequest 按 allow_upload 判定
     (pathname === '/api/dsh-uploads' && (method === 'GET' || method === 'DELETE'))
   );
+}
+
+/** better-sidebar host file, Git, preview, upload, and terminal surface. */
+export function isAdminOnlySidebarEndpoint(pathname: string): boolean {
+  return pathname === '/sidebar' || pathname.startsWith('/sidebar/');
 }
 
 /** aionui-panel 文件树：读取/下载文件内容的端点（raw 为 GET 流式传输，read 为 POST JSON） */
@@ -649,9 +777,26 @@ export function aionuiRootFrom(
   return null;
 }
 
+/** Workspace registration endpoints covered by the create permission. */
+export function isWorkspaceCreate(pathname: string): boolean {
+  return /^\/api\/workspace[.\/](add|create)([.\/]|$)/.test(pathname);
+}
+
+/** Directory creation used by the Host workspace picker before registration. */
+export function isWorkspaceDirectoryCreate(pathname: string): boolean {
+  return /^\/api\/(?:host[.\/]createDirectory|directoryPicker[.\/]createDirectory)(?:[.\/]|$)/.test(pathname);
+}
+
+/** Workspace removal and rename endpoints supported by the current Host. */
+export function isWorkspaceDeleteOrRename(pathname: string): boolean {
+  return /^\/api\/workspace[.\/](remove|delete|rename|update)([.\/]|$)/.test(pathname);
+}
+
 /** 工作区创建/删除/重命名/归档/移动等写操作，由网关按操作与目标目录授权。 */
 export function isWorkspaceWrite(pathname: string): boolean {
-  return /^\/api\/workspace[.\/](add|create|import|remove|delete|rename|update|move|archiveSession|insertBefore|insertSessionBefore|materialize|adopt)/.test(pathname);
+  return isWorkspaceCreate(pathname) ||
+    isWorkspaceDeleteOrRename(pathname) ||
+    /^\/api\/workspace[.\/](import|move|archiveSession|insertBefore|insertSessionBefore|materialize|adopt)([.\/]|$)/.test(pathname);
 }
 
 // ── 工作区/会话文件夹限制：需要读 JSON 请求体 ──────────────────────────
@@ -666,7 +811,22 @@ export const WORKSPACE_ENDPOINT_RE = /^\/api\/session[.\/](create)([.\/]|$)/;
  * 子用户必须启用其所在工作区，且该会话未被管理员单独关闭。
  * create 无源会话、list 单独做工作区/会话过滤，均不在此列。
  */
-export const SESSION_SCOPED_RE = /^\/api\/session[.\/](history|prompt|respond|archive|delete|rename|retitle|title|resume|fork|truncate|export)([.\/]|$)/;
+export const SESSION_SCOPED_RE = /^\/api\/session[.\/](history|page|models|selectModel|openWorkspacePath|prompt|respond|attachment|updateQueue|cancel|archive|delete|rename|retitle|title|resume|fork|truncate|export)([.\/]|$)/;
+
+/** Subagent RPCs are authorized by their direct parent session. */
+export const SUBAGENT_SCOPED_RE = /^\/api\/subagents?[.\/](list|history|prompt|interrupt|interruptByParent)([.\/]|$)/;
+
+/** Agent-scoped command RPCs use the addressed Session as their authorization subject. */
+export const COMMANDS_SCOPED_RE = /^\/api\/commands[.\/](list|execute)$/;
+
+/** Goal mutations operate on one Agent and therefore inherit its Session ownership. */
+export const GOALS_SCOPED_RE = /^\/api\/goals?[.\/](create|edit|pause|resume|complete|clear)$/;
+
+/** Session-owned feedback rows exposed by the alpha.1 message feedback service. */
+export const MESSAGE_FEEDBACK_SCOPED_RE = /^\/api\/messageFeedback[.\/](list|put|delete)$/;
+
+/** dsh-at-file workspace search: `agentId` addresses one live session. */
+export const AT_FILE_SEARCH_RE = /^\/api\/atFile[.\/]search$/;
 
 /** 递归查找请求体里的 sessionId（typert wire 字段）；找不到返回 null */
 export function extractSessionId(value: unknown, depth = 0): string | null {
@@ -675,6 +835,18 @@ export function extractSessionId(value: unknown, depth = 0): string | null {
   if (typeof obj.sessionId === 'string' && obj.sessionId.length > 0) return obj.sessionId;
   for (const key of Object.keys(obj)) {
     const nested = extractSessionId(obj[key], depth + 1);
+    if (nested !== null) return nested;
+  }
+  return null;
+}
+
+/** Recursively find dsh-at-file's agent lookup id in one Typert request. */
+export function extractAgentId(value: unknown, depth = 0): string | null {
+  if (depth > 6 || value === null || typeof value !== 'object') return null;
+  const obj = value as Record<string, unknown>;
+  if (typeof obj.agentId === 'string' && obj.agentId.length > 0) return obj.agentId;
+  for (const key of Object.keys(obj)) {
+    const nested = extractAgentId(obj[key], depth + 1);
     if (nested !== null) return nested;
   }
   return null;
@@ -720,25 +892,37 @@ export function collectArchivedSessionIds(value: unknown, out: Set<string> = new
   return out;
 }
 
-/**
- * 递归清空 archivedSessionIds 数组（F-25 枚举源：workspace.list 把他人会话 ID
- * 直接漏给受限子用户）。返回是否有改动。
- */
-export function stripArchivedSessionIds(value: unknown, depth = 0): boolean {
+/** Filter archived session ids in-place, retaining only entries accepted by the caller. */
+export function filterArchivedSessionIds(
+  value: unknown,
+  keep: (id: string) => boolean,
+  depth = 0,
+): boolean {
   if (depth > 8 || value === null || typeof value !== 'object') return false;
   const obj = value as Record<string, unknown>;
   let changed = false;
-  if (Array.isArray(obj.archivedSessionIds) && obj.archivedSessionIds.length > 0) {
-    obj.archivedSessionIds = [];
-    changed = true;
+  if (Array.isArray(obj.archivedSessionIds)) {
+    const original = obj.archivedSessionIds;
+    const filtered = original.filter(
+      (id): id is string => typeof id === 'string' && keep(id),
+    );
+    if (filtered.length !== original.length || filtered.some((id, index) => id !== original[index])) {
+      obj.archivedSessionIds = filtered;
+      changed = true;
+    }
   }
   for (const key of Object.keys(obj)) {
-    const v = obj[key];
-    if (v !== null && typeof v === 'object') {
-      if (stripArchivedSessionIds(v, depth + 1)) changed = true;
+    const nested = obj[key];
+    if (nested !== null && typeof nested === 'object') {
+      if (filterArchivedSessionIds(nested, keep, depth + 1)) changed = true;
     }
   }
   return changed;
+}
+
+/** Clear archived session ids where a caller must suppress the entire enumeration source. */
+export function stripArchivedSessionIds(value: unknown, depth = 0): boolean {
+  return filterArchivedSessionIds(value, () => false, depth);
 }
 
 /**
@@ -857,10 +1041,9 @@ const PATH_FIELDS = [
 ];
 
 /**
- * 递归查找请求体里第一个字符串路径字段（兼容 typert 信封 {type,rpcId,method,payload}）。
- * ⚠ 递归时跳过 args 子对象——实测 {payload:{args:{cwd:'/root/11'}}} 会被 dsh 忽略 args、
- *  用默认工作区（/opt），而网关若把 args.cwd 当白名单依据会误放行（fail-open 越权）。
- *  真实 wire 路径是 payload.cwd（payload 层），args 是 dsh 不消费的伪字段。
+ * Recursively find the first string path field in one already-selected RPC parameter object.
+ * Legacy dot-style envelopes skip an `args` child because those Hosts do not consume it.
+ * Alpha slash-style envelopes are method-checked and unwrapped by the gateway first.
  */
 export function extractPathFromBody(value: unknown, depth = 0): string | null {
   if (depth > 6 || value === null || typeof value !== 'object') return null;
@@ -905,7 +1088,7 @@ export function isStaticAsset(pathname: string): boolean {
 export function isUsageAnchorRequest(pathname: string): boolean {
   return (
     /^\/api\/session[.\/]prompt$/.test(pathname) ||
-    /^\/api\/subagent[.\/]prompt$/.test(pathname) ||
+    /^\/api\/subagents?[.\/]prompt$/.test(pathname) ||
     /^\/api\/agent[.\/]prompt$/.test(pathname)
   );
 }

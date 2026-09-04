@@ -3,9 +3,15 @@
 //   - 远程设置补丁状态 + "重载补丁"按钮（任何登录用户可触发；补丁强制启用）
 //   - 用户管理（改密/改名/子用户） → fetch /api/dsh-passwords/*（网关
 //     JWT cookie 鉴权）
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client';
-import type {} from '@deepseek-ai/dsh-client-ui-slots/client';
+import type { Context as ClientContext } from '@deepseek-ai/cordis';
+import type {} from '@deepseek-ai/dsh-api-gateway/client';
+import type {} from '@deepseek-ai/dsh-api-session-controller/client';
+import type {} from '@deepseek-ai/dsh-api-workspace-controller/client';
+import type {} from '@deepseek-ai/dsh-client-ui-conversation/client';
+import type {} from '@deepseek-ai/dsh-client-ui-layout/client';
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client';
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client';
+import type {} from '@deepseek-ai/dsh-client-ui-workspace/client';
 import type {} from '@deepseek-ai/dsh-client-locale/client';
 import { DshPasswordsCard } from './card';
 import { DshPasswordsSection } from './section';
@@ -15,13 +21,16 @@ import { LocalWorkspaceLauncher } from './local-workspace-launcher';
 import { ManagedFilesLauncher } from './managed-files-launcher';
 import { zh, en } from './locales';
 import { AccountLogoutRow, installDesktopLauncherSuppression } from './account-logout';
+import { DSH_PASSWORDS_REMOTE, type DshPasswordsRemoteClient } from './remote';
+import { loadDshPasswordsState, resolveDshPasswordsClient } from './dsh-passwords-client';
+
+export { inject } from './inject';
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface SlotMap {
-    'sidebar.workspaces.action': {
+    'dsh-passwords.plugin.item': {
       kind: 'list';
       scope: 'root';
-      owner: { wide: boolean };
     };
   }
 }
@@ -149,9 +158,10 @@ button.dshpw-managed-files-name:hover{color:var(--dsw-alias-brand-primary)}
 @media(max-width:640px){.dshpw-local-download,.dshpw-local-launcher-main,.dshpw-general-row{align-items:stretch;flex-direction:column}.dshpw-general-row-copy{padding-right:0}.dshpw-general-logout{justify-content:center}.dshpw-local-workspace{grid-template-columns:minmax(0,1fr) auto}.dshpw-local-workspace>.dshpw-switch-copy{grid-column:1/-1}.dshpw-managed-files-row{grid-template-columns:minmax(0,1fr) auto}.dshpw-managed-files-row>.dshpw-hint{display:none}.dshpw-local-launcher-seat>.dshpw-local-launcher{width:calc(100vw - 28px)}.dshpw-local-guide-backdrop{padding:12px}.dshpw-local-guide-dialog{max-height:calc(100vh - 24px);padding:18px}.dshpw-local-guide-actions{align-items:stretch;flex-direction:column}.dshpw-local-guide-actions>*{justify-content:center;width:100%;box-sizing:border-box;text-align:center}}
 `;
 
-export const inject = ['slots', 'locale', 'sessions', 'workspaces'] as const;
-
-export function apply(ctx: ClientContext): void {
+export async function apply(ctx: ClientContext): Promise<() => void | Promise<void>> {
+  const remote = ctx.remote as unknown as DshPasswordsRemoteClient;
+  const disposeRemote = await remote.$mount(DSH_PASSWORDS_REMOTE);
+  const dshPasswords = await resolveDshPasswordsClient(ctx);
   let gatewayDetected: boolean | null = null;
   const isBehindGateway = async (): Promise<boolean> => {
     if (gatewayDetected !== null) return gatewayDetected;
@@ -197,10 +207,8 @@ export function apply(ctx: ClientContext): void {
       {
         name: 'settings.general.item',
         id: 'dsh-passwords-account-logout',
-        key: 'dsh-passwords-account-logout',
         order: 1000,
         locale: 'dshpw',
-        inject: () => ({}),
       },
       AccountLogoutRow,
     ),
@@ -214,7 +222,6 @@ export function apply(ctx: ClientContext): void {
       {
         name: 'settings.section',
         id: 'dsh-passwords',
-        key: 'dsh-passwords',
         order: 105,
         label: () => ctx.locale.bind('dshpw')('sectionTitle'),
         locale: 'dshpw',
@@ -230,10 +237,9 @@ export function apply(ctx: ClientContext): void {
       {
         name: 'dsh-passwords.plugin.item',
         id: 'dsh-passwords-card',
-        key: 'dsh-passwords-card',
         order: 55,
         locale: 'dshpw',
-        inject: () => ({}),
+        inject: () => ({ loadState: () => loadDshPasswordsState(dshPasswords) }),
       },
       DshPasswordsCard,
     ),
@@ -245,10 +251,8 @@ export function apply(ctx: ClientContext): void {
       {
         name: 'shell.overlay',
         id: 'dsh-passwords-chat',
-        key: 'dsh-passwords-chat',
         order: 100,
         locale: 'dshpw',
-        inject: () => ({}),
       },
       ChatLauncher,
     ),
@@ -258,7 +262,7 @@ export function apply(ctx: ClientContext): void {
   // 读取 dsh 的 tokenUsage 投影并把增量上报给密码门，用于子用户每小时 token 配额。
   ctx.slots.inject('conversation.composer.dock', () =>
     ctx.slots.register(
-      { name: 'conversation.composer.dock', id: 'dsh-passwords-token', key: 'dsh-passwords-token', order: 90 },
+      { name: 'conversation.composer.dock', id: 'dsh-passwords-token', order: 90 },
       TokenReporter,
     ),
   );
@@ -269,7 +273,6 @@ export function apply(ctx: ClientContext): void {
       {
         name: 'conversation.input.bootstrap',
         id: 'dsh-passwords-local-workspace-launcher',
-        key: 'dsh-passwords-local-workspace-launcher',
         order: 30,
         locale: 'dshpw',
         inject: () => ({
@@ -299,7 +302,10 @@ export function apply(ctx: ClientContext): void {
                 else listener();
               });
             }
-            const sessionId = await ctx.workspaces.connectWorkspace(workspace.workspaceId);
+            if (workspace === undefined) {
+              throw new Error(ctx.locale.bind('dshpw')('localOpenConversationFailed'));
+            }
+            const sessionId = await ctx.uiWorkspace.connectWorkspace(workspace.workspaceId);
             ctx.sessions.open(sessionId);
           },
         }),
@@ -314,10 +320,8 @@ export function apply(ctx: ClientContext): void {
       {
         name: 'sidebar.workspaces.action',
         id: 'dsh-passwords-managed-files',
-        key: 'dsh-passwords-managed-files',
         order: 10,
         locale: 'dshpw',
-        inject: () => ({}),
       },
       ManagedFilesLauncher,
     ),
@@ -355,4 +359,5 @@ export function apply(ctx: ClientContext): void {
   // 双语词典（zh/en）：卡片文字跟随 dsh 设置里的语言
   // （设置 → 通用 → 语言 / Settings → General → Language），切换即时生效
   ctx.effect(() => ctx.locale.register('dshpw', { zh, en }), 'dsh-passwords: dicts');
+  return disposeRemote;
 }

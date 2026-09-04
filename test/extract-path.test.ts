@@ -15,9 +15,43 @@ import {
   extractWorkspaceId,
   extractPathFromBody,
   WORKSPACE_ENDPOINT_RE,
+  isWorkspaceCreate,
+  isWorkspaceDirectoryCreate,
+  isWorkspaceDeleteOrRename,
+  extractWorkspaceRenamePaths,
+  normalizePath,
+  parseWebSocketAllowlist,
+  webSocketAccessForPath,
+  isAdminOnlySidebarEndpoint,
 } from '../src/permissions.js';
 
 // ── 1) args 伪包裹跳过 ─────────────────────────────────────────────
+
+test('WebSocket 白名单只支持精确路径和显式子路径', () => {
+  assert.deepEqual(parseWebSocketAllowlist('/sidebar/ws/terminal, /sidebar/ws/terminal, /plugin/ws/*', 'TEST'), [
+    '/sidebar/ws/terminal',
+    '/plugin/ws/*',
+  ]);
+  assert.equal(webSocketAccessForPath('/plugin/ws/run', ['/plugin/ws/*'], [], 'admin', false), 'authenticated');
+  assert.equal(webSocketAccessForPath('/plugin/ws', ['/plugin/ws/*'], [], 'admin', false), 'deny');
+  assert.equal(webSocketAccessForPath('/plugin/ws/run', ['/plugin/ws/*'], [], 'user', false), 'deny');
+  assert.equal(webSocketAccessForPath('/plugin/ws/run', ['/plugin/ws/*'], ['/plugin/ws/*'], 'user', false), 'authenticated');
+  assert.equal(webSocketAccessForPath('/plugin/ws/run', ['/plugin/ws/*'], [], 'admin', false), 'authenticated');
+  assert.equal(webSocketAccessForPath('/api/events.mux', [], [], 'user', true), 'authenticated');
+  assert.equal(webSocketAccessForPath('/unknown', [], 'admin', false), 'deny');
+  for (const value of ['/gateway/x', '/api/dsh-passwords/internal/x', '/*', '/x/../y', '/x%2fy', '/x?y=1']) {
+    assert.throws(() => parseWebSocketAllowlist(value, 'TEST'), value);
+  }
+});
+
+test('better-sidebar 宿主侧路由只允许主用户', () => {
+  assert.equal(isAdminOnlySidebarEndpoint('/sidebar/api/fs.tree'), true);
+  assert.equal(isAdminOnlySidebarEndpoint('/sidebar/upload'), true);
+  assert.equal(isAdminOnlySidebarEndpoint('/sidebar/ws/terminal'), true);
+  assert.equal(isAdminOnlySidebarEndpoint('/sidebar'), true);
+  assert.equal(isAdminOnlySidebarEndpoint('/api/events.mux'), false);
+  assert.equal(isAdminOnlySidebarEndpoint('/api/dsh-passwords/state'), false);
+});
 
 test('R-A：extractPathFromBody 跳过 args 伪包裹（防 fail-open 越权）', () => {
   // dsh 信封：payload 顶层 cwd 是真参数；args 下的 cwd 是 dsh 不消费的伪字段
@@ -55,6 +89,30 @@ test('R-A：WORKSPACE_ENDPOINT_RE 只匹配 create 不匹配 fork', () => {
   assert.equal(WORKSPACE_ENDPOINT_RE.test('/api/session/create2'), false, 'create2 不是 create');
   assert.equal(WORKSPACE_ENDPOINT_RE.test('/api/session.list'), false, 'list 不在此列');
   assert.equal(WORKSPACE_ENDPOINT_RE.test('/api/session.history'), false, 'history 不在此列');
+});
+
+test('工作区路径归一化和重命名字段提取保持一致', () => {
+  assert.equal(normalizePath('/srv/a/../project'), '/srv/project');
+  assert.deepEqual(extractWorkspaceRenamePaths({ payload: { oldPath: '/srv/a/../project', newPath: '/srv/project-renamed' } }), {
+    oldPath: '/srv/a/../project',
+    newPath: '/srv/project-renamed',
+  });
+  assert.equal(extractWorkspaceRenamePaths({ payload: { path: '/srv/project' } }), null);
+});
+
+test('工作区管理权限只开放创建、删除和重命名', () => {
+  assert.equal(isWorkspaceCreate('/api/workspace.create'), true);
+  assert.equal(isWorkspaceCreate('/api/workspace.add'), true);
+  assert.equal(isWorkspaceCreate('/api/workspace.delete'), false);
+  assert.equal(isWorkspaceDirectoryCreate('/api/host.createDirectory'), true);
+  assert.equal(isWorkspaceDirectoryCreate('/api/host/createDirectory'), true);
+  assert.equal(isWorkspaceDirectoryCreate('/api/directoryPicker/createDirectory'), true);
+  assert.equal(isWorkspaceDirectoryCreate('/api/host.listDirectory'), false);
+  assert.equal(isWorkspaceDirectoryCreate('/api/workspace.create'), false);
+  assert.equal(isWorkspaceDeleteOrRename('/api/workspace.delete'), true);
+  assert.equal(isWorkspaceDeleteOrRename('/api/workspace.rename'), true);
+  assert.equal(isWorkspaceDeleteOrRename('/api/workspace.move'), false);
+  assert.equal(isWorkspaceDeleteOrRename('/api/workspace.import'), false);
 });
 
 // ── 3) collectIdPathPairs 收集 workspaceId 与 id ───────────────────

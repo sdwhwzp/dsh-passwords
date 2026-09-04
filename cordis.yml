@@ -9,28 +9,9 @@
 #   dsh web --patch ./cordis.yml
 # 或把本文件内容合并进 ~/.dsh/profiles/web/cordis.patch.yml
 
-# Connection 在请求处理期间读取 requestPrincipal；显式注入可让它访问由
-# dsh-passwords 发布到 Host 根作用域的身份验证服务。
-- id: connection
-  inject: [webRuntime, requestPrincipal]
-
-# ── 目录选择固定为「应用内浏览对话框」 ──────────────────────────
-# dsh 默认挂 -auto 选择器：loopback 绑定 + 有显示会话时判定为 native
-# （浏览器原生目录选择器）——远程经网关访问时 pickDirectory 会失败。
-# 官方支持直接 pin -browse：弹应用内目录浏览对话框（Miller 列 +
-# 面包屑路径编辑，可直接输入服务器绝对路径如 D:\ 或 /opt/app）。
-# 参考: deepseek-harness/.agents/notes/implemented/feature/
-#       2026-07-29-directory-picker-adaptive-default.md
-- id: directory-picker
-  disabled: true
+# DSH 0.1.2-alpha.1+ 已原生加载目录选择器。这里不能重复插入官方
+# directory-picker-browse/ui-directory-picker-browse，否则 profile 组合后会出现
+# duplicate loader entry id。只注册 dsh-passwords 自身的主机侧插件。
 - insert:
-    # 后端：宿主文件系统浏览（list/create）
-    - id: directory-picker-browse
-      name: '@deepseek-ai/dsh-host-directory-picker-browse'
-    # 前端：应用内选择工作区目录对话框
-    - id: ui-directory-picker-browse
-      name: '@deepseek-ai/dsh-client-ui-directory-picker-browse'
-    # dsh-passwords 主机侧插件：设置命名空间 + 用户管理路由
-    # （需把本项目加入 dsh profile 依赖：pnpm add /opt/dsh-passwords）
     - id: dsh-passwords
       name: 'dsh-passwords'

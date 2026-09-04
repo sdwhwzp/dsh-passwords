@@ -1,6 +1,7 @@
 /** Browser file transfer panel for the signed-in subuser's host-managed directory. */
 
 import { createElement as h, useEffect, useRef, useState } from 'react';
+import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots';
 
 interface ManagedFileEntry {
   name: string;
@@ -18,7 +19,7 @@ interface ManagedFileListing {
 }
 
 interface Props {
-  t: (key: string, params?: Record<string, string | number>) => string;
+  t: TranslateNS<'dshpw'>;
   busy: boolean;
   setBusy(value: boolean): void;
   setError(value: string): void;

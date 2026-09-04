@@ -70,9 +70,48 @@
     {
       "name": "dsh-plugin-subscriptions",
       "defaultSpecifier": "github:sdwhwzp/dsh-plugin-subscriptions#dev",
+      "localCandidates": [
+        "../dsh-plugin-subscriptions"
+      ],
       "activation": "bundle",
       "allowBuild": true,
       "enforceDefault": true
+    },
+    {
+      "name": "dsh-at-file",
+      "defaultSpecifier": "github:sdwhwzp/dsh-at-file#dev",
+      "localCandidates": [
+        "../dsh-at-file"
+      ],
+      "localPrepare": {
+        "cwd": "../dsh-at-file",
+        "command": [
+          "node",
+          "scripts/link-runtime-peers.mjs"
+        ]
+      },
+      "allowBuildPackages": [
+        "protobufjs"
+      ],
+      "enforceDefault": true,
+      "activation": "bundle"
+    },
+    {
+      "name": "@wxg-prc-cpg/dsh-weknora",
+      "defaultSpecifier": "github:sdwhwzp/dsh-weknora#main",
+      "localCandidates": [
+        "../dsh-weknora"
+      ],
+      "localPrepare": {
+        "cwd": "../dsh-weknora",
+        "command": [
+          "npm",
+          "run",
+          "build"
+        ]
+      },
+      "activation": "bundle",
+      "allowBuild": true
     },
     {
       "name": "dsh-passwords",

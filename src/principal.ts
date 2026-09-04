@@ -1,4 +1,8 @@
 import type { Context } from '@deepseek-ai/cordis';
+import type {
+  ConnectionPrincipalRequest,
+  RequestPrincipalProvider as RequestPrincipalProviderContract,
+} from '@deepseek-ai/dsh-client-connection';
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { PlatformConfig } from './config.js';
 
@@ -65,6 +69,19 @@ interface PrincipalEnvelope extends AuthenticatedPrincipal {
 const PRINCIPAL_HEADER = 'x-dsh-principal';
 const SIGNATURE_HEADER = 'x-dsh-principal-signature';
 
+type PrincipalHeaderSource =
+  | Pick<Headers, 'get'>
+  | Readonly<Record<string, string | readonly string[] | undefined>>;
+
+function principalHeader(headers: PrincipalHeaderSource, name: string): string | null {
+  const webHeaders = headers as Pick<Headers, 'get'>;
+  if (typeof webHeaders.get === 'function') return webHeaders.get(name);
+  const record = headers as Readonly<Record<string, string | readonly string[] | undefined>>;
+  const value = record[name] ?? record[name.toLowerCase()];
+  if (Array.isArray(value)) return value.join(', ');
+  return typeof value === 'string' ? value : null;
+}
+
 function signature(value: string, secret: string): Buffer {
   return createHmac('sha256', secret).update(value, 'utf8').digest();
 }
@@ -116,12 +133,12 @@ function parseEnvelope(encoded: string): PrincipalEnvelope {
 
 /** Verify one signed gateway assertion. Browser-submitted body fields are ignored. */
 export function verifyPrincipalHeaders(
-  headers: Pick<Headers, 'get'>,
+  headers: PrincipalHeaderSource,
   secret: string,
   now = Date.now(),
 ): AuthenticatedPrincipal | undefined {
-  const encoded = headers.get(PRINCIPAL_HEADER);
-  const suppliedRaw = headers.get(SIGNATURE_HEADER);
+  const encoded = principalHeader(headers, PRINCIPAL_HEADER);
+  const suppliedRaw = principalHeader(headers, SIGNATURE_HEADER);
   if (encoded === null && suppliedRaw === null) return undefined;
   if (encoded === null || suppliedRaw === null) throw new Error('incomplete identity assertion');
   let supplied: Buffer;
@@ -147,17 +164,11 @@ export function verifyPrincipalHeaders(
   });
 }
 
-declare module '@deepseek-ai/cordis' {
-  interface Context {
-    requestPrincipal: RequestPrincipalProvider;
-  }
-}
-
 /** Trusted Host authentication adapter consumed by client-connection. */
-export class RequestPrincipalProvider {
+export class RequestPrincipalProvider implements RequestPrincipalProviderContract {
   constructor(private readonly config: PlatformConfig) {}
 
-  authenticate(request: Request): AuthenticatedPrincipal | undefined {
+  authenticate(request: ConnectionPrincipalRequest): AuthenticatedPrincipal | undefined {
     return verifyPrincipalHeaders(request.headers, this.config.internalSecret);
   }
 }

@@ -168,6 +168,9 @@ test('审批期间设备断线会清连接并回滚未交付 token 的 provision
     async resolveByPath(): Promise<undefined> {
       return undefined;
     },
+    list(): [] {
+      return [];
+    },
     async delete(): Promise<void> {},
   };
   const harness = await startHub({ deviceCode: () => '987654' }, registry);
@@ -223,7 +226,7 @@ async function startHub(
     },
     jwtSecret: 'test-jwt',
     internalSecret: 'test-internal',
-    localWorkspace: { host: '127.0.0.1', port: 0, publicUrl: '' },
+    localWorkspace: { host: '127.0.0.1', port: 0, publicUrl: '', placeholderRoot: path.join(temp, 'local-workspaces') },
     patch: { dshRoot: '', restartService: '' },
   };
   const hub = new LocalWorkspaceHub(ctx, db, config, options);
