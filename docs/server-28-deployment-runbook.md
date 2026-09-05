@@ -1030,9 +1030,11 @@ Profile 的 `pnpm-workspace.yaml` 还有独立的 `overrides`：`dsh-better-side
 
 日志中的「旧会话归属证据读取失败，保持不可见」在 alpha.3 与 rc.1 下**都会出现**，是长期噪音，不能作为本类故障的判据；实际缺归属记录的只有 2 个会话（含 1 个探针会话），`session_owners` 41 条对应磁盘 42 个会话。
 
-### 待办
+### 功能验收
 
-按 `## 10` 完成其余功能验收：子账号权限与额度、WebDAV 挂载、Office 预览、Spend 计量。
+按 `## 10` 逐项实测通过：工作区选择、历史记录、右侧栏文件下载、子账号权限与额度、WebDAV 挂载、Office 预览、Spend 计量。
+
+Office 预览这一项跨越了 `dsh-better-sidebar` 的 `ctx.betterSidebar` 注册表服务化重构（`0.18.0-alpha.0` → `0.18.1-alpha.0`），而 `@huanlin/dsh-plugin-better-sidebar-plugin-office@0.1.3` 声明的 peer 仍是旧范围；实测确认注册接口未受影响。
 
 ### 回滚
 
