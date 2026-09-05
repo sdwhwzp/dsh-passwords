@@ -151,10 +151,10 @@ function setup(root: string, autoEnabled: boolean, nowRef: { value: number }, re
   return { engine, db, ops, calls, restarts: () => restarts, setRestartAllowed: (allowed: boolean) => { restartAllowed = allowed; } };
 }
 
-test('test package flow targets 2.6.17 from a 2.6.16 baseline', () => {
+test('test package flow targets 2.6.18 from a 2.6.17 baseline', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
-  assert.equal(pkg.version, '2.6.17');
-  assert.equal(compareVersions(pkg.version, '2.6.16'), 1);
+  assert.equal(pkg.version, '2.6.18');
+  assert.equal(compareVersions(pkg.version, '2.6.17'), 1);
 });
 
 test('Harness peer and compiler dependencies stay pinned to rc.1', () => {

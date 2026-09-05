@@ -1043,6 +1043,18 @@ export function createGatewayServer(
   const userGrantableWebSocketPaths = [...new Set(config.webSocket?.userAllowlist ?? [])];
   // 不泄露框架信息
   app.disable('x-powered-by');
+
+  // dsh-remote-web-ui 的浏览器补丁在非回环来源下会把 `/api/...` 重写成
+  // `/remote/api/...`，并靠 `/api/pair/status` 的策略回包撤销该重写。该探测
+  // 本身也被重写，网关若不认这个前缀就永远回不出策略，重写便无法撤销，全部
+  // API 随之 404/405。此处在任何路由之前剥掉前缀：网关已经完成账号认证，
+  // 远程通道的设备配对不叠加在它之上。
+  app.use((req, _res, next) => {
+    if (req.url === '/remote' || req.url.startsWith('/remote/') || req.url.startsWith('/remote?')) {
+      req.url = req.url.slice('/remote'.length) || '/';
+    }
+    next();
+  });
   // 仅解析 /gateway 表单请求；代理请求的 body 必须原样透传给上游
   // （全局 express.json/urlencoded 会消费掉请求流，导致上游收到空 body）
   app.use('/gateway', express.urlencoded({ extended: false }));
