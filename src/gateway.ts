@@ -1050,8 +1050,16 @@ export function createGatewayServer(
   // API 随之 404/405。此处在任何路由之前剥掉前缀：网关已经完成账号认证，
   // 远程通道的设备配对不叠加在它之上。
   app.use((req, _res, next) => {
+    const strip = (value: string): string => value.slice('/remote'.length) || '/';
     if (req.url === '/remote' || req.url.startsWith('/remote/') || req.url.startsWith('/remote?')) {
-      req.url = req.url.slice('/remote'.length) || '/';
+      req.url = strip(req.url);
+    }
+    // The reverse proxy rebuilds the upstream target from originalUrl, which
+    // Express never rewrites with req.url, so strip it too or the upstream
+    // still receives the gated prefix and answers 404/405.
+    const original = req.originalUrl;
+    if (original === '/remote' || original.startsWith('/remote/') || original.startsWith('/remote?')) {
+      req.originalUrl = strip(original);
     }
     next();
   });
