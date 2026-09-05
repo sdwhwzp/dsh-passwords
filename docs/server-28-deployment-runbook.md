@@ -54,13 +54,13 @@ DeepSeek Harness Web + Web Profile + 插件
 | pnpm | `11.24.0` |
 | PM2 | `6.0.13` |
 | Tailscale | `1.102.3` |
-| dsh | `0.1.2-alpha.3`，线上构建标识 `0.1.2-alpha.3-b66a316` |
-| dsh-passwords | `2.6.15`，提交 `d67159a` |
-| dsh-spend | `0.6.4`，提交 `a0d1648` |
+| dsh | `0.1.2-rc.1`，发布 `20260904-204003-bf8d4921d9-rc1`，源提交 `bf8d4921d9` |
+| dsh-passwords | `2.6.17` |
+| dsh-spend | `0.6.5` |
 | dsh-nas-webdav | `0.2.5`，提交 `ef3b9eb` |
 | dsh-plugin-subscriptions | `0.6.2`，提交 `d3f549f` |
 | Office 侧栏预览 | `@huanlin/dsh-plugin-better-sidebar-plugin-office@0.1.3` |
-| dsh-web 插件族 | `@linxin666/dsh-web-all@0.3.10`，提交 `0f9116c` |
+| dsh-web 插件族 | `@linxin666/dsh-web-all@0.3.10`，发布 `20260902-170500-f43c9bf-alpha4`；本机已到 `0.3.14`，线上未跟进 |
 | 数据库 | MySQL，`192.168.10.95:3306/dsh_passwords_platform` |
 
 ### 3.1 端口
@@ -363,6 +363,39 @@ mkdir -p "$release"
 ln -sfn "$release" "$runtime_root/current"
 ```
 
+#### 运行时发布目录怎么产生
+
+运行时发布是一个名为 `dsh-runtime-deploy` 的私有包：`npm/` 存放构建机产出的全部 tarball，`package.json` 的每个依赖写成 `file:./npm/<tarball>`，在该目录执行 `pnpm install` 得到 pnpm 布局的 `node_modules`。`pnpm deploy --legacy` 不适用，它解析不全这套依赖树。
+
+构建机产出 tarball：
+
+```bash
+cd /path/to/deepseek-harness
+export DSH_BUILD_CLIENT_PROFILE=official
+export DSH_CLIENT_COMMIT_HASH=$(git rev-parse HEAD)
+export DSH_CLIENT_VERSION=$(node -p "require('./package.json').version")
+pnpm run build
+pnpm exec tsx scripts/release/pack.ts --family dsh --out /tmp/dsh-pack
+```
+
+官方制品画像有两个硬性前提，否则 `pack` 直接失败：
+
+- **工作树必须完全干净**。判定使用 `git status --porcelain=v1 --untracked-files=normal`，**未跟踪文件同样算 dirty**。临时把本地产物移开再移回。
+- **必须先用该环境重新构建**。校验读的是产物记录的构建环境，不是打包时的环境；沿用旧构建会一直报 `client build environment differs from the required artifact profile`。
+
+`--family dsh` 只产出 dsh 成员，`cordis`/`cosmokit`/`schemastery` 等 vendor 包属于 `--family vendor`。它们版本固定，跨版本升级时直接从旧发布的 `npm/` 复用即可。
+
+#### 跨版本升级时清单必须逐项对账
+
+新发布的清单不能照抄旧发布，以下四处都要改，漏一处安装就会失败：
+
+1. **`pnpm-workspace.yaml` 同样含一整份 tarball 路径清单**（`overrides` 与 `allowBuilds` 两处），必须与 `package.json` 同步改写。只改 `package.json` 会让 pnpm 仍按 workspace 覆盖去找旧版本文件而报 `ENOENT`。
+2. **上游已移除的包**要从清单和 `npm/` 中一并剔除。`0.1.2-rc.1` 移除了 `@deepseek-ai/dsh-code-runtime-python` 与 `@deepseek-ai/dsh-tool-subagent-report`。
+3. **上游新增的包**要补进清单。`0.1.2-rc.1` 新增 `@deepseek-ai/dsh-http-proxy`；清单缺它时 pnpm 会转向 npm registry 并以 404 失败（fork 包不在公共 registry）。
+4. **对账方法**：提取 `package.json` 与 `pnpm-workspace.yaml` 中全部 `file:./npm/<file>` 引用，与 `npm/` 实际文件求差集，直到依赖数与 tarball 数一致。从旧发布复用制品时注意别把已移除包的旧 tarball 一并带进来。
+
+fork 独有包容易掉队。`@deepseek-ai/dsh-principal-access` 曾停留在 `0.1.2-alpha.4`，而 `release:pack` 要求同一 family 版本一致，会拒绝打包。发现版本掉队时正式对齐并提交，不要临时改完再还原——否则每次发布都会重复踩到。
+
 dsh-web 是 pnpm workspace，不能只把新发布目录的根 `node_modules` 软链接到旧发布。每个 `packages/*` 依赖的是本发布目录内由 pnpm 生成的包级 `node_modules` 链接；缺失时 Cordis 会在加载插件时以 `ERR_MODULE_NOT_FOUND` 退出，PM2 随即进入重启循环。新发布必须在自身目录完成 `pnpm install --offline --frozen-lockfile`（或完整复制一套已经验证的 pnpm 布局），切换 `current` 前至少直接导入本次修改插件的 `lib/index.js`，并观察 PM2 的 PID 与重启次数在一个验收窗口内保持不变。
 
 业务插件也使用同一模式：
@@ -378,6 +411,17 @@ dsh-web 是 pnpm workspace，不能只把新发布目录的根 `node_modules` �
 ```
 
 部署新的 dsh-passwords 包时，从旧发布复制 `.env`、必要的本地 `data/` 和依赖，不得覆盖或丢失密钥。先在新目录验证 `dist/client.js`、`dist/gateway.js` 和 `package.json`，再切换软链接。
+
+新发布目录只放 `artifacts/` 是不够的：`dsh-passwords` 需要解包成目录，`.env` 也要单独恢复，否则切换后网关拿不到配置。
+
+```bash
+new=/home/tzwl3/apps/dsh-plugins/releases/<RELEASE_ID>
+mkdir -p "$new/dsh-passwords"
+tar xzf "$new/artifacts/dsh-passwords-<版本>.tgz" -C "$new/dsh-passwords" --strip-components=1
+cp -p <备份>/dsh-passwords.env "$new/dsh-passwords/.env"
+chmod 600 "$new/dsh-passwords/.env"
+sha256sum <备份>/dsh-passwords.env "$new/dsh-passwords/.env"   # 两行摘要必须相同
+```
 
 ### 7.6 安装 Web Profile 插件
 
@@ -714,6 +758,18 @@ cat /home/tzwl3/.local/state/kmMac-model-monitor/status
 
 “删除工作区”只删除 Host 的 Workspace 登记，不删除目录、文件、会话或本机助手配对记录。若本机助手仍保持配对，后续重连或服务重启可以重新注册该目录；要永久停止自动恢复，应在“本机工作区”中撤销对应设备或目录授权。
 
+### 11.15 线上缺少开发机已有的界面功能
+
+先分清功能属于哪个发布单元。runtime、dsh-web 和业务插件是三条独立的发布线，`current` 各自指向不同发布，升级其中一条不会带动另外两条。
+
+例：右侧栏的文件下载入口来自 `@linxin666/dsh-web-all`（dsh-web 发布线），不在 better-sidebar 里。2026-09-04 升级 runtime 到 rc.1 时未动 dsh-web，线上仍是 `0.3.10` 而开发机为 `0.3.14`，功能因此缺失。
+
+对照两侧同一包的版本，比只对照 runtime 版本可靠：
+
+```bash
+node -p "require('/home/tzwl3/.dsh/profiles/web/node_modules/@linxin666/dsh-web-all/package.json').version"
+for d in dsh-runtime dsh-web dsh-plugins; do echo "$d=$(readlink -f /home/tzwl3/apps/$d/current)"; done
+```
 ## 12. 上传 Git 前检查
 
 1. 确认 dsh-passwords、dsh-spend、dsh-nas-webdav、dsh-plugin-subscriptions、dsh-at-file、dsh-genui、dsh-weknora、品牌插件和 dsh-web 的包版本与提交号一致，避免同一版本号对应不同内容。
@@ -733,25 +789,24 @@ rg -n '(PASSWORD|SECRET|TOKEN|AUTH_KEY|API_KEY)=.+|BEGIN .*PRIVATE KEY' \
 
 | 组件 | 当前目标 |
 |---|---|
-| runtime | `/home/tzwl3/apps/dsh-runtime/releases/20260901-162100-b66a316-alpha3` |
-| plugins | `/home/tzwl3/apps/dsh-plugins/releases/20260901-170745-d67159a-alpha3` |
-| dsh-web | `/home/tzwl3/apps/dsh-web/releases/20260901-140500-0f9116c3-alpha3` |
-| runtime 源提交 | `b66a31652d47db8683916c3284521f1029b7f232` |
-| dsh-web 源提交 | `0f9116c33ce6ab2a5bb5d8162e53e4fea3cb7467` |
-| dsh-passwords 安装包 | SHA-256 `ed3083151e1374927044538a151964c6f7d3d3a30e96b447419b35c5426547b7` |
-| dsh-plugin-subscriptions 安装包 | SHA-256 `c0ad6a0fb025c96aace7cf8049a995c275e27cdccbb999dbdc1e6c1b14998553` |
-| dsh-spend 安装包 | SHA-256 `dbcc1b89db6277a3caaf54a88854d7f945f37049f6b93b92f981ca9a7db7bde1` |
-| dsh-nas-webdav 安装包 | SHA-256 `c849bb27ab623e887385646b8b37f130e20551464e592adbf2ec5172ed1eb31b` |
-| dsh-at-file 安装包 | SHA-256 `39871f3d5377ae02fa83dc26a1b0e204298fb5176aa0a34fb47491c7cbfcdb48` |
-| dsh-genui 安装包 | SHA-256 `f0c447f0b64d63e78c4ac9de1836101389d9d03e0094f20523b367bc404ad98b` |
-| dsh-weknora 安装包 | SHA-256 `ebfd99d18df709b03f0dc2d97cab662c42132eb1bf326cae1b8810bc614adca0` |
+| runtime | `/home/tzwl3/apps/dsh-runtime/releases/20260904-204003-bf8d4921d9-rc1` |
+| plugins | `/home/tzwl3/apps/dsh-plugins/releases/20260904-204003-bf8d4921d9-rc1` |
+| dsh-web | `/home/tzwl3/apps/dsh-web/releases/20260902-170500-f43c9bf-alpha4` |
+| runtime 源提交 | `bf8d4921d940dad89863be28494a8c3fb3685126`（`sdwhwzp/deepseek-harness` `tzwl`） |
+| runtime 版本 | `0.1.2-rc.1` |
+| dsh-genui 安装包 | SHA-256 `5f119f312014aeb00ff9c4587f340c8981cb4e0255138f465adb58b5c82fc55e` |
+| dsh-at-file 安装包 | SHA-256 `c97936a034d916c2292f8a098de0b8a44541a9407cf73b6ad789a0227eba7a23` |
+| better-sidebar 安装包 | SHA-256 `a6124113e28680c9fb0b3ec71e6c49fb35e5ae0a62f272fba0919afb4f3f51af` |
+| dsh-nas-webdav 安装包 | SHA-256 `df105ae6be6949c348bed6c49255ba9f9e80e4757f5c93b1e627a7aa97829787` |
+| dsh-passwords 安装包 | SHA-256 `01386b937e9716b72da412bf57f00a4cc818211c85ccd3241c2570e0d415992c` |
+| dsh-plugin-subscriptions 安装包 | SHA-256 `2322427e5c2a888a5658272c3d791f63caf7988263887273ec83d2c2149af61e` |
 | 品牌插件安装包 | SHA-256 `15d3d51ca465ca76574995d3b0fae6a953aa507d2acda043815d895bbe150a11` |
+| dsh-spend 安装包 | SHA-256 `be9b8a760eea440ecd5bc911136bd0fc597bdf3ad25fccea17f88620e1efe1d8` |
 | Office 预览安装包 | SHA-256 `0f85a98a2470eef6d372c1c31ad2dc6a88ed642b2a1e2100910b8fcb4c779230` |
-| better-sidebar 安装包 | SHA-256 `f464ce910b591245a667a5c48c637170f3eeb25b7b2712a3fcdd92580c9b7932` |
-| Alpha.3 整体回滚备份 | `/home/tzwl3/apps/dsh-backups/20260901-162732-alpha3` |
-| dsh-passwords 2.6.15 回滚备份 | `/home/tzwl3/apps/dsh-backups/20260901-171539-dsh-passwords-2.6.15` |
-
-这些标识用于确认 2026-09-01 的 Alpha.3 服务器快照。任何后续构建都应创建新的发布标识和内容哈希，不应复用目录名或把新内容覆盖到旧发布中。插件发布目录内的 `DEPLOYMENT.json` 是完整包版本、源码提交和 SHA-256 的权威清单。
+| dsh-weknora 安装包 | SHA-256 `fcb63bbd94070a8796c5f44a76fb62e7bb42e3c5dff35b6c9dc211fc9c5083db` |
+| rc.1 升级前整体备份 | `/home/tzwl3/apps/deploy-backups/pre-rc1-20260904-202228` |
+| 上一个可用 runtime | `/home/tzwl3/apps/dsh-runtime/releases/20260901-162100-b66a316-alpha3` |
+| 上一个可用 plugins | `/home/tzwl3/apps/dsh-plugins/releases/20260902-173500-434f632-alpha4` |
 
 ## 14. 2026-08-27 principal、Spend 与 Excel 预览部署记录
 
@@ -906,3 +961,57 @@ dsh-passwords 的普通文件下载和 HTML 预览现在都绑定到当前账号
 ### 长期修复
 
 正式修复方向是部署合并 upstream 后的 `0.1.2-alpha.5` runtime（`sdwhwzp/deepseek-harness` 分支 `tzwl` → `b80f7752a3`，含 upstream 的 session/ownership 修复）。上线前需在构建机用离线安装流程生成 runtime release（`pnpm deploy --legacy` 对该 workspace 会缺少部分传递依赖，不能直接等效还原服务器现有 release 目录），需提供该离线安装命令后再升级。
+
+## 26. 2026-09-04 Harness 0.1.2-rc.1 升级部署记录
+
+把 28 的运行时从 `0.1.2-alpha.3` 升到 `0.1.2-rc.1`，插件制品同批重新打包发布。发布 ID `20260904-204003-bf8d4921d9-rc1`（runtime 与 plugins 同 ID），构建自 `sdwhwzp/deepseek-harness` `tzwl` 分支 `bf8d4921d9`。
+
+### 背景
+
+`0.1.2-alpha.3` 是 09-03 事故（`## 25`）回滚后的版本，而 `DEPLOYMENT.json` 的 `harnessCohort` 记的是 `alpha.4`，两者错位。本次把运行时推进到 rc.1 并让记录与实际一致。
+
+升级前先在 macOS 开发机完成同等升级并验证，六个业务插件的 `@deepseek-ai/*` 声明已从 alpha.3/alpha.4 升到 `0.1.2-rc.1`、`@deepseek-ai/cordis` 升到 `^4.0.2`。
+
+### 与开发机的差异
+
+28 的 Web Profile 与开发机差别很大，本机的 profile 改动大多不适用：bundles 只有 12 个（开发机 27 个）；`dsh-chat-recovery`、`dsh-client-ui-aionui-panel`、`dsh-desktop-launcher` 在 28 上本就不存在，无需移除；`dshmarket` 不在 profile 依赖里（在运行时 overrides 中，`1.38.1`）；`dsh-better-sidebar` 与 Office 预览用的是自建 tgz（`0.18.1-alpha.0`、`0.1.3`），后者 npm 上没有。跨机器套用 profile 变更前必须先对照实际状态。
+
+网关托管方式无需改动：28 早已是 Host 派生网关子进程的形态，PM2 环境中没有 `DSH_PASSWORDS_NO_AUTOSTART`。
+
+### 执行步骤
+
+1. 停服完整备份到 `/home/tzwl3/apps/deploy-backups/pre-rc1-20260904-202228`：`~/.dsh/` 共 22G、MySQL dump（13 张表，以 `Dump completed` 结束）、`.env`、`pm2 dump`、三个 `current` 的原始指向。28 上原本没有 `mysqldump`，先 `apt-get install default-mysql-client`。
+2. 构建机产出 244 个 rc.1 tarball 与 8 个插件 tgz，rsync 到新发布目录；`dsh-better-sidebar` 与 Office 预览两个制品从旧发布复用。
+3. 生成运行时清单并逐项对账（详见 `## 7.5`），最终 254 依赖对应 254 个 tarball。
+4. 新发布目录 `pnpm install` 成功，253 个 `@deepseek-ai` 包，`dsh` 报 `0.1.2-rc.1`。
+5. 切换前验证：用新运行时执行 `--profile web --dump-config`，成功解析 682 行，确认全部插件在 rc.1 下可加载。
+6. 原子切换 runtime 与 plugins 的 `current`，解包 `dsh-passwords` 并恢复 `.env`（SHA-256 与备份一致），`pm2 restart dsh-web --update-env`。
+
+### 验收结果
+
+3080 返回 `401`、3081 返回 `302`、3082 监听；登录页正常返回 `登录 · DeepSeek Harness`；PM2 `online` 且重启次数不增长；本次启动后的错误日志为 0。
+
+`3080` 返回 `401` 而非 `## 10.1` 写的 `200`：rc.1 对根路径启用了浏览器认证，开发机升级后表现相同，属预期变化。客户经 3081 访问不受影响。
+
+`## 10.2` 中检查 `~/.dsh/profiles/web/node_modules/@deepseek-ai/dsh-client-ui-conversation/lib/client.js` 的那条命令在当前布局下已不适用——该包不在 Profile 的 `node_modules`，由运行时提供；应改查 `/home/tzwl3/apps/dsh-runtime/current/node_modules/` 下的同一文件，本次验证含 `conversation.input.bootstrap`。
+
+09-03 事故的特征日志「旧会话归属证据读取失败，保持不可见」在重启后**未再出现**（当天 15:41–17:04 的 4 条来自升级前的 alpha.3 运行期）。数据库 `session_owners` 有 41 条记录、磁盘 42 个会话，绝大多数历史会话有持久归属记录，不依赖该推断路径。
+
+### 本次未包含 dsh-web
+
+只切换了 runtime 与 plugins，`dsh-web/current` 仍指向 `20260902-170500-f43c9bf-alpha4`，其中 `@linxin666/dsh-web-all` 为 `0.3.10`。开发机已到 `0.3.14`，两者相差 dsh-web 提交 `501d5869 fix(web-ui-all): add universal file downloads` 等内容，表现为**线上右侧栏没有文件下载入口而开发机有**。
+
+补齐需要单独为 dsh-web 做一次发布。届时会连带引入开发机那次 dsh-web 合并的全部内容，包括移除 `dsh-aionui-panel`、`dsh-chat-recovery`、`dsh-desktop-launcher`——这三个在 28 上本就不存在，不影响本机部署。
+
+### 待办
+
+- 登录后的功能验收（历史会话可见性、子账号权限与额度、WebDAV 挂载、Office 预览）尚未执行。
+- dsh-web 发布未跟进（见上）。
+
+### 回滚
+
+```bash
+ln -sfn /home/tzwl3/apps/dsh-runtime/releases/20260901-162100-b66a316-alpha3 /home/tzwl3/apps/dsh-runtime/current
+ln -sfn /home/tzwl3/apps/dsh-plugins/releases/20260902-173500-434f632-alpha4 /home/tzwl3/apps/dsh-plugins/current
+pm2 restart dsh-web --update-env
+```

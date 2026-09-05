@@ -138,13 +138,43 @@
 - **右侧 File 面板上传曾出现一次 `HTTP 502`，随后恢复正常**，未再复现。Host 错误日志中**没有任何 502 或超限记录**，因此无法归因。发生时段正值网关被反复重启、尚未稳定，最可能是那个窗口的瞬时故障；可以确定**不是 better-sidebar 0.18.0 升级引入的**，否则现在同样会失败。
   - 排查时发现一条**未经证实**的线索备查：网关的 `MAX_BUFFER_BYTES` 为 16 MB（`src/gateway.ts`），而 better-sidebar 0.18 的 `uploadLimit` 常量含 128 MB 与 20 MB。两者不匹配。若将来上传大文件再现 502，优先用一个 15 MB 和一个 20 MB 的文件对比验证这条路径。「文件夹管理」上传走 dsh-passwords 自己的托管文件路径、不经这段代理缓冲，因此不受该上限影响。
 
-## 12. 待办与遗留
+## 12. 28 服务器部署(Harness 0.1.2-rc.1)
+
+发布 ID `20260904-204003-bf8d4921d9-rc1`，runtime 与 plugins 同 ID，构建自 `tzwl` 分支 `bf8d4921d9`。运行时从 `0.1.2-alpha.3` 升到 `0.1.2-rc.1`。完整记录见运维手册 `## 26`。
+
+### 与开发机的差异必须先对照
+
+28 的 Web Profile 与开发机差别很大，本机的 profile 改动大多不适用:bundles 只有 12 个(开发机 27);待移除的三个插件在 28 上本就不存在;`dshmarket` 不在 profile 依赖里;better-sidebar 与 Office 预览用的是自建 tgz(`0.18.1-alpha.0`、`0.1.3`，后者 npm 上没有)。网关也早已是 Host 托管形态，本机那项架构修正在 28 上不需要做。
+
+### 发布产出方式(解答 09-03 的未决问题)
+
+运行时发布是 `dsh-runtime-deploy` 私有包:`npm/` 放全部 tarball,`package.json` 每个依赖写成 `file:./npm/<tarball>`，在该目录 `pnpm install` 得到 pnpm 布局。`pnpm deploy --legacy` 解析不全这套依赖树，09-03 走不通是正常的。
+
+`release:pack` 有两个硬性前提：工作树完全干净(未跟踪文件也算 dirty)，且必须先用 `DSH_BUILD_CLIENT_PROFILE=official` + `DSH_CLIENT_COMMIT_HASH` + `DSH_CLIENT_VERSION` 重新构建——校验读的是产物记录的构建环境。
+
+### 跨版本升级的清单对账
+
+新发布清单不能照抄旧发布，四处都要改:`pnpm-workspace.yaml` 的 `overrides` 与 `allowBuilds` 也含整份 tarball 路径清单;上游已移除的包(`dsh-code-runtime-python`、`dsh-tool-subagent-report`)要连同旧制品一并剔除;上游新增的包(`dsh-http-proxy`)要补进清单，否则 pnpm 转向 npm registry 而 404;最后按 `file:./npm/` 引用与实际文件求差集直到数量一致(本次 254 对 254)。
+
+排查中我一度被"复用旧制品"步骤留下的 alpha.3 文件误导，对那两个已移除的包判断反复了一次。
+
+### 执行与验收
+
+停服完整备份(`pre-rc1-20260904-202228`:`~/.dsh/` 22G、MySQL dump 13 表、`.env`、pm2 dump、原 `current` 指向;28 上原无 `mysqldump`，先装 `default-mysql-client`)。切换前用新运行时 `--dump-config` 成功解析 682 行，确认插件全部可加载。切换后解包 `dsh-passwords` 并恢复 `.env`(SHA-256 与备份一致)。
+
+验收:3080=401、3081=302、3082 监听，登录页正常，PM2 online 无崩溃循环，本次启动后错误 0。09-03 事故的「保持不可见」特征日志在重启后未再出现(当天 15:41–17:04 的 4 条来自升级前的 alpha.3 运行期);`session_owners` 41 条记录对应磁盘 42 个会话。
+
+`3080` 返回 `401` 而非手册写的 `200`，是 rc.1 对根路径启用浏览器认证所致，开发机同样表现。手册 `## 10.2` 中检查 Profile 内 conversation bundle 的路径已不适用——该包由运行时提供，应改查运行时目录。
+
+**登录后的功能验收尚未执行。**
+
+## 13. 待办与遗留
 
 - **dsh-weknora 未合并 Tencent 上游**。相对 `upstream/main` 落后 2913 个提交，那是整个 WeKnora 产品而本仓库只是插件包装器；历史做法是子树合并。本轮按决定跳过。
-- **28 服务器部署（Phase 2）未开始**。本机验证已完成，可按运维手册的原子发布 + PM2 + 回滚流程另行安排。上线前需确认：插件依赖解析指向 fork 构建（见第 5 节）、profile 的三处版本变更、以及 launchd/systemd 侧的网关托管方式改动。
+- **dsh-web 发布线未跟进 28**。本次只把 runtime 升到 rc.1，线上 `@linxin666/dsh-web-all` 仍是 `0.3.10`（开发机 `0.3.14`），表现为线上右侧栏缺少文件下载入口。补齐需单独为 dsh-web 做一次发布。
 - **本机代理端口 7897 无监听**。LaunchAgent 设有 `HTTP_PROXY=http://127.0.0.1:7897` 与 `NODE_USE_ENV_PROXY=1`。经确认与本次故障无关，但会影响需要联网的功能。
 
-## 13. 回退材料
+## 14. 回退材料
 
 - Profile：`~/.dsh/profile-backups/20260904-160639-remove-3-plugins/`、`~/.dsh/profile-backups/20260904-163418-upgrade-sidebar-genui/`（后者含两个 plist 备份、`.env` 及 SHA-256）。
 - deepseek-harness：分支 `backup/tzwl-before-rc1-merge`（`b80f7752a3`）。
@@ -152,3 +182,4 @@
 - dsh-passwords：分支 `backup/feature-before-sync-20260904`（`dc5ac61`）。
 - dsh-at-file：分支 `backup/dev-before-sync-20260904`（`06b57ca`）。
 - dsh-plugin-subscriptions、dsh-weknora：各自 `stash@{0}`。
+- 28 服务器：备份 `/home/tzwl3/apps/deploy-backups/pre-rc1-20260904-202228`；回滚把 `dsh-runtime/current` 切回 `20260901-162100-b66a316-alpha3`、`dsh-plugins/current` 切回 `20260902-173500-434f632-alpha4`，再 `pm2 restart dsh-web --update-env`。
