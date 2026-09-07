@@ -35,6 +35,7 @@ import { ManagedWorkspaceProvisioner, registerManagedUserWorkspace } from './man
 import { AgentTurnPrincipalTracker, registerRequestPrincipal } from './principal.js';
 import type { AuthenticatedPrincipal } from './principal.js';
 import { registerPrincipalAccess } from './principal-access.js';
+import { registerBotBridge } from './bot-bridge.js';
 import { DshPasswordsRemote } from './remote.js';
 import { backupSqliteBeforeMigration } from './db-backup.js';
 import { createMonthlyBudgetResolver } from './spend-budget.js';
@@ -408,6 +409,7 @@ export function apply(ctx: Context): void {
   if (db !== null) {
     registerManagedUserWorkspace(ctx, db, cfg);
     registerPrincipalAccess(ctx, db);
+    if (auth !== null) registerBotBridge(ctx, db, auth);
     const remoteDb = db;
     ctx.inject(['typertGateway'], (scope) => {
       new DshPasswordsRemote(scope, remoteDb);
