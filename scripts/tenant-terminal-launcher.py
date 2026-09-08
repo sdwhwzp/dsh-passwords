@@ -13,8 +13,37 @@ ACCOUNT = 'tzwl3'
 # nftables table dsh_sandbox filters by this group, so the group must exist and
 # must be the process group of every sandboxed shell.
 SANDBOX_GROUP = 'dsh-sandbox'
+# Per-account home, shared with the editor sandbox and addressed by account id
+# rather than tenant directory name so both reach the same one. Kept out of the
+# workspace: a version manager's downloads belong beside neither the code nor
+# the account's git history.
+HOME_ROOT = pathlib.Path('/var/lib/dsh-sandbox-home')
 # Resolver, CA bundle and account lookups the network needs; /etc is otherwise empty.
 NETWORK_FILES = ['/etc/resolv.conf', '/etc/hosts', '/etc/nsswitch.conf', '/etc/passwd', '/etc/group']
+
+
+def sandbox_home(owner, account):
+    """Create this account's sandbox home under a root-owned parent and return it."""
+    if HOME_ROOT.exists():
+        if HOME_ROOT.resolve(strict=True) != HOME_ROOT:
+            raise ValueError('noncanonical home root')
+        info = HOME_ROOT.stat()
+        if info.st_uid != 0 or info.st_mode & 0o022:
+            raise ValueError('untrusted home root')
+    else:
+        HOME_ROOT.mkdir(mode=0o711)
+        os.chown(HOME_ROOT, 0, 0)
+    home = HOME_ROOT / ('u' + owner)
+    if not home.exists():
+        home.mkdir(mode=0o700)
+        os.chown(home, account.pw_uid, account.pw_gid)
+    if home.resolve(strict=True) != home:
+        raise ValueError('noncanonical account home')
+    # `~/workspace` keeps the habit of reaching the workspace from the home.
+    link = home / 'workspace'
+    if not link.exists(follow_symlinks=False):
+        link.symlink_to('/workspace')
+    return home
 
 
 def main():
@@ -29,6 +58,7 @@ def main():
         raise ValueError('workspace directory required')
     account = pwd.getpwnam(ACCOUNT)
     sandbox = grp.getgrnam(SANDBOX_GROUP)
+    home = sandbox_home(sys.argv[1], account)
     network = []
     for path in NETWORK_FILES:
         if pathlib.Path(path).exists():
@@ -38,9 +68,13 @@ def main():
             '--symlink', 'usr/sbin', '/sbin', '--symlink', 'usr/lib', '/lib',
             '--symlink', 'usr/lib64', '/lib64', '--proc', '/proc', '--dev', '/dev',
             '--perms', '1777', '--tmpfs', '/tmp', '--dir', '/etc',
+            # bwrap creates a missing bind parent as 0700 root, which the
+            # dropped uid cannot traverse; the home mount needs it walkable.
+            '--perms', '0755', '--dir', '/home',
             '--ro-bind', '/etc/ssl', '/etc/ssl', *network,
-            '--bind', str(tenant), '/workspace', '--chdir', str(pathlib.Path('/workspace') / relative),
-            '--setenv', 'HOME', '/workspace', '--setenv', 'PATH', '/usr/bin:/bin',
+            '--bind', str(tenant), '/workspace', '--bind', str(home), '/home/dsh',
+            '--chdir', str(pathlib.Path('/workspace') / relative),
+            '--setenv', 'HOME', '/home/dsh', '--setenv', 'PATH', '/usr/bin:/bin',
             '--setenv', 'TERM', 'xterm-256color', '--setenv', 'LANG', 'C.UTF-8',
             '--setenv', 'TMPDIR', '/tmp', '--setenv', 'PS1', r'sandbox:\w\$ ',
             '--', '/usr/bin/setpriv', '--reuid', str(account.pw_uid), '--regid', str(sandbox.gr_gid), '--clear-groups', '--no-new-privs', '--bounding-set=-all', '/bin/bash', '--noprofile', '--norc', '-i']
