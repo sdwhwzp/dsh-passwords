@@ -18,7 +18,8 @@ import {
   closeSync,
   constants as fsConstants,
 } from 'node:fs';
-import { link, lstat, mkdir, realpath, rm, unlink } from 'node:fs/promises';
+import { cp, link, lstat, mkdir, realpath, rename, rm, unlink } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -30,6 +31,17 @@ import { URL } from 'node:url';
 import dns from 'node:dns';
 import express, { type Request, type Response } from 'express';
 import WebSocket, { type RawData, WebSocketServer } from 'ws';
+import {
+  MANAGED_GIT_OUTPUT_MAX_BYTES,
+  MANAGED_GIT_TIMEOUT_MS,
+  managedGitBranch,
+  managedGitCloneArgs,
+  managedGitDirectoryName,
+  managedGitEnv,
+  managedGitPullArgs,
+  parseManagedGitUrl,
+  redactManagedGitOutput,
+} from './managed-git.js';
 import type { PlatformConfig } from './config.js';
 import { hardenSecretsAfterSetup } from './config.js';
 import { AuthService, AuthError, type RequestMeta } from './auth.js';
@@ -320,6 +332,36 @@ function pathWithin(root: string, candidate: string): boolean {
     !relative.startsWith('..' + path.sep) &&
     !path.isAbsolute(relative)
   );
+}
+
+/** One resolved path inside a subuser's managed root. */
+interface ManagedPath {
+  /** Canonical managed root of the account. */
+  root: string;
+  /** Canonical absolute path of the entry. */
+  target: string;
+  /** Path relative to {@link ManagedPath.root}, using forward slashes. */
+  relative: string;
+}
+
+/** Why one managed path cannot be used, mapped to a response by `managedPathError`. */
+interface ManagedPathFailure {
+  ok: false;
+  code: 'FORBIDDEN' | 'NOT_FOUND' | 'INVALID' | 'EXISTS';
+}
+
+/** An existing managed file or directory accepted as the source of a move or copy. */
+interface ManagedSource {
+  ok: true;
+  resolved: ManagedPath;
+  kind: 'file' | 'directory';
+}
+
+/** A managed path that does not exist yet and whose parent directory does. */
+interface ManagedDestination {
+  ok: true;
+  resolved: ManagedPath;
+  name: string;
 }
 
 /** Parse a browser relative path into portable, non-traversing path segments. */
@@ -2732,6 +2774,20 @@ export function createGatewayServer(
         return left.name.localeCompare(right.name);
       });
     const segments = resolved.relative === '' ? [] : resolved.relative.split('/');
+    let repository = false;
+    let branch: string | null = null;
+    try {
+      repository = statSync(path.join(resolved.target, '.git')).isDirectory();
+    } catch {
+      // 普通目录没有 .git：git 区块只显示“克隆仓库”。
+    }
+    if (repository) {
+      try {
+        branch = managedGitBranch(readFileSync(path.join(resolved.target, '.git', 'HEAD'), 'utf8'));
+      } catch {
+        // 仓库刚初始化或 HEAD 不可读：分支名留空，拉取按钮照常可用。
+      }
+    }
     res.setHeader('Cache-Control', 'no-store');
     res.json({
       ok: true,
@@ -2739,6 +2795,7 @@ export function createGatewayServer(
       parent: segments.length === 0 ? null : segments.slice(0, -1).join('/'),
       entries,
       truncated: rows.length > MANAGED_FILE_LIST_MAX_ENTRIES,
+      git: { repository, branch },
     });
   });
 
@@ -2929,6 +2986,311 @@ export function createGatewayServer(
     } finally {
       await unlink(temporary).catch(() => undefined);
     }
+  });
+
+
+  // ── 专属文件夹：新建 / 移动 / 复制 ─────────────────────────
+  // 浏览器只提交相对路径；来源必须已存在且不是符号链接，目标必须落在同一个
+  // 专属根目录内且尚不存在，因此这些操作无法覆盖文件或写出账号目录之外。
+
+  /** Resolve one managed source that exists as a plain file or directory. */
+  const managedSourceFor = async (
+    userId: number,
+    relativePath: string,
+  ): Promise<ManagedSource | ManagedPathFailure> => {
+    const resolved = managedFilePathFor(userId, relativePath);
+    if (resolved === null || resolved.relative === '') return { ok: false, code: 'FORBIDDEN' };
+    let info;
+    try {
+      info = await lstat(resolved.target);
+    } catch {
+      return { ok: false, code: 'NOT_FOUND' };
+    }
+    if (info.isSymbolicLink()) return { ok: false, code: 'FORBIDDEN' };
+    if (!info.isFile() && !info.isDirectory()) return { ok: false, code: 'INVALID' };
+    return { ok: true, resolved, kind: info.isDirectory() ? 'directory' : 'file' };
+  };
+
+  /** Resolve one managed destination whose parent directory exists and whose name is free. */
+  const managedDestinationFor = async (
+    userId: number,
+    directoryRelative: string,
+    name: string,
+  ): Promise<ManagedDestination | ManagedPathFailure> => {
+    const nameSegments = managedFileSegments(name);
+    if (nameSegments === null || nameSegments.length !== 1) return { ok: false, code: 'INVALID' };
+    const directory = managedFilePathFor(userId, directoryRelative);
+    if (directory === null) return { ok: false, code: 'FORBIDDEN' };
+    try {
+      if (!(await lstat(directory.target)).isDirectory()) return { ok: false, code: 'INVALID' };
+    } catch {
+      return { ok: false, code: 'NOT_FOUND' };
+    }
+    const targetRelative = [directory.relative, nameSegments[0]].filter((part) => part !== '').join('/');
+    const target = managedFilePathFor(userId, targetRelative);
+    if (target === null || path.dirname(target.target) !== directory.target) {
+      return { ok: false, code: 'FORBIDDEN' };
+    }
+    try {
+      await lstat(target.target);
+      return { ok: false, code: 'EXISTS' };
+    } catch {
+      return { ok: true, resolved: target, name: nameSegments[0] };
+    }
+  };
+
+  /** Map one managed path failure to its response. */
+  const managedPathError = (res: Response, code: ManagedPathFailure['code']): void => {
+    if (code === 'FORBIDDEN') res.status(403).json({ ok: false, code, error: '路径越出专属文件夹' });
+    else if (code === 'NOT_FOUND') res.status(404).json({ ok: false, code, error: '文件或文件夹不存在' });
+    else if (code === 'EXISTS') res.status(409).json({ ok: false, code: 'FILE_EXISTS', error: '同名文件或文件夹已存在' });
+    else res.status(400).json({ ok: false, code, error: '名称或目标无效' });
+  };
+
+  app.post('/gateway/api/managed-files/directory', jsonBody, async (req, res) => {
+    const access = managedFilesAuth(req, res, true);
+    if (access === null) return;
+    const body = req.body as { path?: unknown; name?: unknown };
+    const destination = await managedDestinationFor(
+      access.me.userId,
+      typeof body.path === 'string' ? body.path : '',
+      typeof body.name === 'string' ? body.name.trim() : '',
+    );
+    if (!destination.ok) {
+      managedPathError(res, destination.code);
+      return;
+    }
+    try {
+      await mkdir(destination.resolved.target, { mode: 0o700 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        managedPathError(res, 'EXISTS');
+      } else {
+        res.status(500).json({ ok: false, code: 'INTERNAL', error: '创建文件夹失败' });
+      }
+      return;
+    }
+    db.audit('managed_directory_created', {
+      username: access.me.username,
+      detail: JSON.stringify({ path: destination.resolved.relative }),
+    });
+    res.status(201).json({
+      ok: true,
+      directory: { name: destination.name, path: destination.resolved.relative },
+    });
+  });
+
+  for (const operation of ['move', 'copy'] as const) {
+    app.post(`/gateway/api/managed-files/${operation}`, jsonBody, async (req, res) => {
+      const access = managedFilesAuth(req, res, true);
+      if (access === null) return;
+      const body = req.body as { from?: unknown; toDirectory?: unknown; name?: unknown };
+      const source = await managedSourceFor(access.me.userId, typeof body.from === 'string' ? body.from : '');
+      if (!source.ok) {
+        managedPathError(res, source.code);
+        return;
+      }
+      const requestedName = typeof body.name === 'string' && body.name.trim() !== ''
+        ? body.name.trim()
+        : path.basename(source.resolved.target);
+      const destination = await managedDestinationFor(
+        access.me.userId,
+        typeof body.toDirectory === 'string' ? body.toDirectory : '',
+        requestedName,
+      );
+      if (!destination.ok) {
+        managedPathError(res, destination.code);
+        return;
+      }
+      if (pathWithin(source.resolved.target, destination.resolved.target)) {
+        res.status(400).json({ ok: false, code: 'INVALID', error: '不能移动或复制到自身或其子目录' });
+        return;
+      }
+      try {
+        if (operation === 'move') {
+          await rename(source.resolved.target, destination.resolved.target);
+        } else {
+          await cp(source.resolved.target, destination.resolved.target, {
+            recursive: true,
+            errorOnExist: true,
+            force: false,
+            dereference: false,
+            verbatimSymlinks: true,
+            preserveTimestamps: true,
+          });
+        }
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'EEXIST') managedPathError(res, 'EXISTS');
+        else if (code === 'ENOENT') managedPathError(res, 'NOT_FOUND');
+        else if (code === 'ENOSPC') res.status(507).json({ ok: false, code: 'NO_SPACE', error: '磁盘空间不足' });
+        else res.status(500).json({ ok: false, code: 'INTERNAL', error: operation === 'move' ? '移动失败' : '复制失败' });
+        return;
+      }
+      db.audit(operation === 'move' ? 'managed_file_moved' : 'managed_file_copied', {
+        username: access.me.username,
+        detail: JSON.stringify({
+          from: source.resolved.relative,
+          to: destination.resolved.relative,
+          kind: source.kind,
+        }),
+      });
+      res.json({
+        ok: true,
+        entry: { name: destination.name, path: destination.resolved.relative, kind: source.kind },
+      });
+    });
+  }
+
+  // ── 专属文件夹：git 拉取代码 ────────────────────────────────
+  // git 以网关进程身份运行，因此每次调用都用固定的加固参数与最小环境：
+  // 只允许 http(s)、禁用凭据助手与交互提示、不读取宿主账号的 git 配置，
+  // 并且把符号链接写成普通文件，使仓库内容无法指向专属文件夹之外。
+
+  /** One in-flight git run per account; a second request must not fork another clone. */
+  const managedGitRunning = new Set<number>();
+
+  /** Run one hardened git command inside the caller's managed folder. */
+  const runManagedGit = (
+    args: readonly string[],
+    cwd: string,
+    home: string,
+  ): Promise<{ code: number | null; signal: NodeJS.Signals | null; output: string }> =>
+    new Promise((resolve) => {
+      const child = spawn('git', [...args], {
+        cwd,
+        env: managedGitEnv(process.env, home),
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: MANAGED_GIT_TIMEOUT_MS,
+        killSignal: 'SIGKILL',
+        windowsHide: true,
+      });
+      const chunks: string[] = [];
+      let bytes = 0;
+      const collect = (chunk: Buffer) => {
+        if (bytes >= MANAGED_GIT_OUTPUT_MAX_BYTES) return;
+        const text = chunk.toString('utf8');
+        bytes += chunk.length;
+        chunks.push(text);
+      };
+      child.stdout.on('data', collect);
+      child.stderr.on('data', collect);
+      child.on('error', (error: NodeJS.ErrnoException) => {
+        resolve({
+          code: null,
+          signal: null,
+          output: error.code === 'ENOENT' ? '服务器未安装 git' : error.message,
+        });
+      });
+      child.on('close', (code, signal) => {
+        resolve({ code, signal, output: chunks.join('').slice(0, MANAGED_GIT_OUTPUT_MAX_BYTES) });
+      });
+    });
+
+  app.post('/gateway/api/managed-files/git/clone', jsonBody, async (req, res) => {
+    const access = managedFilesAuth(req, res, true);
+    if (access === null) return;
+    if (!effectivePermissions(access.me.userId).allow_git_download) {
+      res.status(403).json({ ok: false, code: 'NO_GIT', error: '当前账号没有 git 权限' });
+      return;
+    }
+    const body = req.body as { path?: unknown; url?: unknown; directory?: unknown };
+    const url = parseManagedGitUrl(typeof body.url === 'string' ? body.url : '');
+    if (url === null) {
+      res.status(400).json({ ok: false, code: 'INVALID_GIT_URL', error: '仓库地址无效：只支持 http/https' });
+      return;
+    }
+    const directoryName = managedGitDirectoryName(url, typeof body.directory === 'string' ? body.directory : '');
+    if (directoryName === null) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: '目标文件夹名无效' });
+      return;
+    }
+    const destination = await managedDestinationFor(
+      access.me.userId,
+      typeof body.path === 'string' ? body.path : '',
+      directoryName,
+    );
+    if (!destination.ok) {
+      managedPathError(res, destination.code);
+      return;
+    }
+    if (managedGitRunning.has(access.me.userId)) {
+      res.status(409).json({ ok: false, code: 'GIT_BUSY', error: '已有 git 任务在执行，请等待完成' });
+      return;
+    }
+    managedGitRunning.add(access.me.userId);
+    let result;
+    try {
+      result = await runManagedGit(
+        managedGitCloneArgs(url, destination.name),
+        path.dirname(destination.resolved.target),
+        destination.resolved.root,
+      );
+    } finally {
+      managedGitRunning.delete(access.me.userId);
+    }
+    const output = redactManagedGitOutput(result.output, url);
+    if (result.code !== 0) {
+      // git 失败时可能已经建出半个仓库目录：克隆前该路径确认不存在，删除它是安全的。
+      await rm(destination.resolved.target, { recursive: true, force: true }).catch(() => undefined);
+      db.audit('managed_git_clone_failed', {
+        username: access.me.username,
+        detail: JSON.stringify({ url: url.display, path: destination.resolved.relative }),
+      });
+      res.status(502).json({ ok: false, code: 'GIT_FAILED', error: '克隆失败', output });
+      return;
+    }
+    db.audit('managed_git_cloned', {
+      username: access.me.username,
+      detail: JSON.stringify({ url: url.display, path: destination.resolved.relative }),
+    });
+    res.status(201).json({
+      ok: true,
+      directory: { name: destination.name, path: destination.resolved.relative },
+      output,
+    });
+  });
+
+  app.post('/gateway/api/managed-files/git/pull', jsonBody, async (req, res) => {
+    const access = managedFilesAuth(req, res, true);
+    if (access === null) return;
+    if (!effectivePermissions(access.me.userId).allow_git_download) {
+      res.status(403).json({ ok: false, code: 'NO_GIT', error: '当前账号没有 git 权限' });
+      return;
+    }
+    const body = req.body as { path?: unknown };
+    const directory = managedFilePathFor(access.me.userId, typeof body.path === 'string' ? body.path : '');
+    if (directory === null) {
+      managedPathError(res, 'FORBIDDEN');
+      return;
+    }
+    try {
+      if (!statSync(path.join(directory.target, '.git')).isDirectory()) throw new Error('not a repository');
+    } catch {
+      res.status(400).json({ ok: false, code: 'NOT_REPOSITORY', error: '当前目录不是 git 仓库' });
+      return;
+    }
+    if (managedGitRunning.has(access.me.userId)) {
+      res.status(409).json({ ok: false, code: 'GIT_BUSY', error: '已有 git 任务在执行，请等待完成' });
+      return;
+    }
+    managedGitRunning.add(access.me.userId);
+    let result;
+    try {
+      result = await runManagedGit(managedGitPullArgs(), directory.target, directory.root);
+    } finally {
+      managedGitRunning.delete(access.me.userId);
+    }
+    const output = result.output.replace(/\/\/[^/@\s]*@/g, '//***@');
+    if (result.code !== 0) {
+      res.status(502).json({ ok: false, code: 'GIT_FAILED', error: '拉取失败', output });
+      return;
+    }
+    db.audit('managed_git_pulled', {
+      username: access.me.username,
+      detail: JSON.stringify({ path: directory.relative }),
+    });
+    res.json({ ok: true, output });
   });
 
   // ── 远程文件下载（Issue #4）──────────────────────────────────

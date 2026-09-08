@@ -8,7 +8,7 @@
 // 语言：卡片词典注册在 locale 命名空间 'dshpw'（见 locales.ts），文字跟随
 // dsh 设置里的语言（Settings → General → Language）。t seat 由注册时的
 // `locale: 'dshpw'` 声明注入。
-import { createElement as h, useEffect, useRef, useState } from 'react';
+import { createElement as h, useEffect, useRef, useState, type ReactNode } from 'react';
 import type { PropsLocale, Translate } from '@deepseek-ai/dsh-client-ui-slots';
 import { publishChatEntryChanged } from './events';
 import { submitLogoutNavigation } from './account-logout';
@@ -124,6 +124,29 @@ export function parseLimit(raw: string): number | null {
   return Number.isSafeInteger(n) ? n : Number.NaN;
 }
 
+/** 圆形头像里的首字母；空用户名（数据未到）回退为 '?'。 */
+function initial(name: string): string {
+  return (name.trim().charAt(0) || '?').toUpperCase();
+}
+
+/**
+ * 表单字段：标签在输入框上方，完整校验规则作为字段下方的提示行。
+ * @param label 字段名（短标签）
+ * @param control 输入控件
+ * @param hint 字段下方的规则提示；省略则不渲染提示行
+ * @param wide 是否占满整行（默认按网格自动分栏）
+ * @returns 包裹标签、控件与提示行的 label 元素
+ */
+function field(label: string, control: ReactNode, hint?: string, wide?: boolean): ReactNode {
+  return h(
+    'label',
+    { className: wide === true ? 'dshpw-field wide' : 'dshpw-field' },
+    h('span', { className: 'dshpw-field-label' }, label),
+    control,
+    hint === undefined ? null : h('span', { className: 'dshpw-field-hint' }, hint),
+  );
+}
+
 /** 本地时间格式化（ISO → 可读的 YYYY-MM-DD HH:mm） */
 function fmtTime(iso: string): string {
   const d = new Date(iso);
@@ -185,6 +208,8 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
   const [workspaces, setWorkspaces] = useState<WorkspaceInfo[]>([]);
   // 正在编辑中的子用户草稿：dirty 时 30s 自动刷新不覆盖本地未保存的修改
   const dirtyUsersRef = useRef<Set<number>>(new Set());
+  // dirty 集合的可渲染副本：权限卡片据此显示“未保存”标记（ref 变化不触发重绘）
+  const [dirtyUsers, setDirtyUsers] = useState<readonly number[]>([]);
   // 刷新 in-flight 守卫：慢网络下 30s 定时 + 操作后手动 refresh 不重叠。
   // 若刷新期间又有请求，排队在当前响应结束后补跑，避免旧快照覆盖乐观分配结果。
   const refreshingRef = useRef(false);
@@ -400,6 +425,7 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
   // 权限草稿更新 + 保存（仅主用户）
   const setDraft = (userId: number, patch: Partial<PermDraft>) => {
     dirtyUsersRef.current.add(userId);
+    setDirtyUsers([...dirtyUsersRef.current]);
     setPermDrafts((prev) => ({ ...prev, [userId]: { ...prev[userId], ...patch } }));
   };
 
@@ -471,6 +497,7 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
         }).then(() => {
           // 保存成功：草稿与服务端一致，解除 dirty（后续 30s 刷新可覆盖）
           dirtyUsersRef.current.delete(userId);
+          setDirtyUsers([...dirtyUsersRef.current]);
         }),
       t('permsSaved'),
     );
@@ -507,16 +534,28 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
   const body = h(
     'div',
     { className: 'dshpw-body' },
-    // ── 当前身份（原折叠头里的账号信息，独立分区后直接展示） ──
+    // ── 当前身份（头像 + 账号 + 角色徽章；主用户另附账号总数） ──
     h(
       'div',
-      { className: 'dshpw-row' },
-      h('span', null, t('identity')),
-      h('strong', null, me || '—'),
-      isAdmin
-        ? h('span', { className: 'dshpw-badge admin' }, t('owner'))
-        : h('span', { className: 'dshpw-badge' }, t('subuser')),
+      { className: 'dshpw-identity' },
+      h('span', { className: 'dshpw-avatar', 'aria-hidden': 'true' }, initial(me)),
+      h(
+        'span',
+        { className: 'dshpw-identity-copy' },
+        h('span', { className: 'dshpw-identity-cap' }, t('identity')),
+        h(
+          'span',
+          { className: 'dshpw-identity-name' },
+          me || '—',
+          isAdmin
+            ? h('span', { className: 'dshpw-badge admin' }, t('owner'))
+            : h('span', { className: 'dshpw-badge' }, t('subuser')),
+        ),
+      ),
     ),
+    // 操作结果紧跟身份区展示，长表单下方的按钮点击后无需回到页尾查看
+    error !== '' && h('div', { className: 'dshpw-banner err', role: 'alert' }, error),
+    notice !== '' && h('div', { className: 'dshpw-banner ok', role: 'status' }, notice),
     // ── 聊天入口：按当前账号跨设备同步的显示偏好 ──
     h(
       'div',
@@ -584,40 +623,51 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
     h(
       'div',
       { className: 'dshpw-section' },
-      h('span', { className: 'dshpw-label' }, t('chgPw')),
-      isAdmin && h('span', { className: 'dshpw-hint' }, t('targetUser')),
-      targetSelect(pwTarget, setPwTarget),
-      // F-06：改自己需先验证当前密码（管理员改他人无需）
-      (pwTarget === '' || pwTarget === me) &&
-        h('input', {
-          className: 'dshpw-input',
-          type: 'password',
-          // 使用标准 current-password 语义，让密码管理器能正确识别当前密码；
-          // 侧栏搜索框的防自动填充由 dsh 补丁单独处理，不再牺牲这里的兼容性。
-          autoComplete: 'current-password',
-          name: 'current-password',
-          placeholder: t('currentPwPh'),
-          value: pwCurrent,
-          onChange: (e: { target: { value: string } }) => setPwCurrent(e.target.value),
-        }),
-      h('input', {
-        className: 'dshpw-input',
-        type: 'password',
-        autoComplete: 'new-password',
-        name: 'new-password',
-        placeholder: t('newPwPh'),
-        value: pwNew,
-        onChange: (e: { target: { value: string } }) => setPwNew(e.target.value),
-      }),
-      h('input', {
-        className: 'dshpw-input',
-        type: 'password',
-        autoComplete: 'new-password',
-        name: 'confirm-password',
-        placeholder: t('confirmPwPh'),
-        value: pwConfirm,
-        onChange: (e: { target: { value: string } }) => setPwConfirm(e.target.value),
-      }),
+      h('div', { className: 'dshpw-section-head' }, h('span', { className: 'dshpw-label' }, t('chgPw'))),
+      h(
+        'div',
+        { className: 'dshpw-fields' },
+        isAdmin ? field(t('targetUser'), targetSelect(pwTarget, setPwTarget)) : null,
+        // F-06：改自己需先验证当前密码（管理员改他人无需）
+        (pwTarget === '' || pwTarget === me)
+          ? field(
+              t('fieldCurrentPw'),
+              h('input', {
+                className: 'dshpw-input',
+                type: 'password',
+                // 使用标准 current-password 语义，让密码管理器能正确识别当前密码；
+                // 侧栏搜索框的防自动填充由 dsh 补丁单独处理，不再牺牲这里的兼容性。
+                autoComplete: 'current-password',
+                name: 'current-password',
+                value: pwCurrent,
+                onChange: (e: { target: { value: string } }) => setPwCurrent(e.target.value),
+              }),
+            )
+          : null,
+        field(
+          t('fieldNewPw'),
+          h('input', {
+            className: 'dshpw-input',
+            type: 'password',
+            autoComplete: 'new-password',
+            name: 'new-password',
+            value: pwNew,
+            onChange: (e: { target: { value: string } }) => setPwNew(e.target.value),
+          }),
+          t('pwPolicy'),
+        ),
+        field(
+          t('fieldConfirmPw'),
+          h('input', {
+            className: 'dshpw-input',
+            type: 'password',
+            autoComplete: 'new-password',
+            name: 'confirm-password',
+            value: pwConfirm,
+            onChange: (e: { target: { value: string } }) => setPwConfirm(e.target.value),
+          }),
+        ),
+      ),
       h(
         'div',
         { className: 'dshpw-action-row dshpw-form-actions' },
@@ -629,23 +679,29 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
     h(
       'div',
       { className: 'dshpw-section' },
-      h('span', { className: 'dshpw-label' }, t('chgName')),
-      isAdmin && h('span', { className: 'dshpw-hint' }, t('targetUser')),
-      targetSelect(nameTarget, setNameTarget),
-      h('input', {
-        className: 'dshpw-input',
-        autoComplete: 'off',
-        name: 'dshpw-newname',
-        placeholder: t('newNamePh'),
-        value: nameNew,
-        onChange: (e: { target: { value: string } }) => setNameNew(e.target.value),
-      }),
+      h('div', { className: 'dshpw-section-head' }, h('span', { className: 'dshpw-label' }, t('chgName'))),
+      h(
+        'div',
+        { className: 'dshpw-fields' },
+        isAdmin ? field(t('targetUser'), targetSelect(nameTarget, setNameTarget)) : null,
+        field(
+          t('fieldNewName'),
+          h('input', {
+            className: 'dshpw-input',
+            autoComplete: 'off',
+            name: 'dshpw-newname',
+            value: nameNew,
+            onChange: (e: { target: { value: string } }) => setNameNew(e.target.value),
+          }),
+          t('namePolicy'),
+        ),
+      ),
       h(
         'div',
         { className: 'dshpw-action-row dshpw-form-actions' },
+        h('span', { className: 'dshpw-hint dshpw-action-copy' }, t('nameHint')),
         h('button', { className: 'dshpw-btn', disabled: busy, onClick: rename }, t('saveName')),
       ),
-      h('div', { className: 'dshpw-hint' }, t('nameHint')),
     ),
 
     // ── 子用户管理（仅主用户） ──
@@ -653,46 +709,87 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
       h(
         'div',
         { className: 'dshpw-section' },
-        h('span', { className: 'dshpw-label' }, t('subusers')),
-        ...(data?.users ?? []).map((u) =>
-          h(
-            'div',
-            { className: 'dshpw-user', key: u.id },
-            h(
-              'span',
-              null,
-              u.username,
-              u.role === 'admin'
-                ? h('span', { className: 'dshpw-badge admin' }, t('owner'))
-                : h('span', { className: 'dshpw-badge' }, t('subuser')),
-              u.last_login_at ? h('span', { className: 'dshpw-hint' }, t('lastLogin', { time: fmtTime(u.last_login_at) })) : null,
-            ),
-            u.username !== me &&
-              h('button', { className: 'dshpw-btn danger', disabled: busy, onClick: () => removeUser(u.username) }, t('remove')),
-          ),
-        ),
-        h('input', {
-          className: 'dshpw-input',
-          autoComplete: 'off',
-          name: 'dshpw-subname',
-          placeholder: t('subNamePh'),
-          value: addName,
-          onChange: (e: { target: { value: string } }) => setAddName(e.target.value),
-        }),
-        h('input', {
-          className: 'dshpw-input',
-          type: 'password',
-          autoComplete: 'new-password',
-          placeholder: t('subPwPh'),
-          value: addPw,
-          onChange: (e: { target: { value: string } }) => setAddPw(e.target.value),
-        }),
         h(
           'div',
-          { className: 'dshpw-action-row dshpw-form-actions' },
-          h('button', { className: 'dshpw-btn', disabled: busy, onClick: addSubUser }, t('addSub')),
+          { className: 'dshpw-section-head' },
+          h('span', { className: 'dshpw-label' }, t('subusers')),
+          h('span', { className: 'dshpw-hint' }, t('usersCount', { count: data?.users.length ?? 0 })),
         ),
-        h('div', { className: 'dshpw-hint' }, t('subHint')),
+        h(
+          'div',
+          { className: 'dshpw-users' },
+          ...(data?.users ?? []).map((u) =>
+            h(
+              'div',
+              { className: 'dshpw-user', key: u.id },
+              h('span', { className: 'dshpw-avatar sm', 'aria-hidden': 'true' }, initial(u.username)),
+              h(
+                'span',
+                { className: 'dshpw-user-copy' },
+                h(
+                  'span',
+                  { className: 'dshpw-user-name' },
+                  u.username,
+                  u.role === 'admin'
+                    ? h('span', { className: 'dshpw-badge admin' }, t('owner'))
+                    : h('span', { className: 'dshpw-badge' }, t('subuser')),
+                  u.username === me ? h('span', { className: 'dshpw-chip' }, t('selfTag')) : null,
+                ),
+                h(
+                  'span',
+                  { className: 'dshpw-user-meta' },
+                  u.last_login_at ? t('lastLogin', { time: fmtTime(u.last_login_at) }) : t('neverLoggedIn'),
+                ),
+              ),
+              u.username !== me &&
+                h(
+                  'button',
+                  { className: 'dshpw-btn danger sm', disabled: busy, onClick: () => removeUser(u.username) },
+                  t('remove'),
+                ),
+            ),
+          ),
+        ),
+        (data?.users ?? []).every((u) => u.role !== 'user')
+          ? h('div', { className: 'dshpw-empty' }, t('noSubusers'))
+          : null,
+        h(
+          'div',
+          { className: 'dshpw-subpanel' },
+          h('span', { className: 'dshpw-subpanel-title' }, t('addSubTitle')),
+          h(
+            'div',
+            { className: 'dshpw-fields' },
+            field(
+              t('fieldSubName'),
+              h('input', {
+                className: 'dshpw-input',
+                autoComplete: 'off',
+                name: 'dshpw-subname',
+                value: addName,
+                onChange: (e: { target: { value: string } }) => setAddName(e.target.value),
+              }),
+              t('namePolicy'),
+            ),
+            field(
+              t('fieldSubPw'),
+              h('input', {
+                className: 'dshpw-input',
+                type: 'password',
+                autoComplete: 'new-password',
+                value: addPw,
+                onChange: (e: { target: { value: string } }) => setAddPw(e.target.value),
+              }),
+              t('pwPolicy'),
+            ),
+          ),
+          h(
+            'div',
+            { className: 'dshpw-action-row dshpw-form-actions' },
+            h('span', { className: 'dshpw-hint dshpw-action-copy' }, t('subHint')),
+            h('button', { className: 'dshpw-btn', disabled: busy, onClick: addSubUser }, t('addSub')),
+          ),
+        ),
       ),
 
     // ── 子用户权限（仅主用户） ──
@@ -715,29 +812,70 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
               h(
                 'div',
                 { className: 'dshpw-perm-head' },
+                h('span', { className: 'dshpw-avatar sm', 'aria-hidden': 'true' }, initial(u.username)),
                 h('strong', null, u.username),
-                u.usage
-                  ? h(
-                      'span',
-                      { className: 'dshpw-hint' },
-                      `${t('usageTime')} ${Math.round(u.usage.activeSeconds / 60)}m · ${t('usageTokens')} ${u.usage.hourlyTokens}`,
-                    )
-                  : null,
-                budget !== undefined
-                  ? h(
-                      'span',
-                      { className: budget.exhausted || budget.warning ? 'dshpw-badge' : 'dshpw-hint' },
-                      `${t('budgetUsed')} ¥${(budget.usedMicros / 1_000_000).toFixed(2)} · ${t('budgetRemaining')} ¥${((budget.remainingMicros ?? 0) / 1_000_000).toFixed(2)}${budget.warning ? ` · ${t('budgetWarning')}` : ''}`,
-                    )
-                  : null,
-                u.permissions.banned ? h('span', { className: 'dshpw-badge' }, t('banned')) : null,
+                h(
+                  'span',
+                  { className: 'dshpw-perm-chips' },
+                  u.usage
+                    ? h(
+                        'span',
+                        { className: 'dshpw-chip' },
+                        `${t('usageTime')} ${Math.round(u.usage.activeSeconds / 60)}m · ${t('usageTokens')} ${u.usage.hourlyTokens}`,
+                      )
+                    : null,
+                  u.permissions.banned ? h('span', { className: 'dshpw-chip danger' }, t('banned')) : null,
+                ),
               ),
-              h('div', { className: 'dshpw-label' }, t('permsFolders')),
+              h(
+                'div',
+                { className: 'dshpw-perm-body' },
+              budget !== undefined
+                ? h(
+                    'div',
+                    { className: 'dshpw-budget' },
+                    budget.budgetMicros === null
+                      ? null
+                      : h(
+                          'div',
+                          {
+                            className: `dshpw-budget-bar${budget.exhausted ? ' over' : budget.warning ? ' warn' : ''}`,
+                          },
+                          h('span', {
+                            style: { width: `${Math.min(100, Math.max(0, Math.round(budget.ratio * 100)))}%` },
+                          }),
+                        ),
+                    h(
+                      'span',
+                      { className: budget.exhausted ? 'dshpw-error' : budget.warning ? 'dshpw-warn' : 'dshpw-hint' },
+                      `${t('budgetUsed')} ¥${(budget.usedMicros / 1_000_000).toFixed(2)} · ${t('budgetRemaining')} ¥${((budget.remainingMicros ?? 0) / 1_000_000).toFixed(2)}${budget.warning ? ` · ${t('budgetWarning')}` : ''}`,
+                    ),
+                  )
+                : null,
+              // 工作区默认全开的部署不需要逐条勾选：折叠起来，摘要行给出开启数
+              h(
+                'details',
+                { className: 'dshpw-fold' },
+                h(
+                  'summary',
+                  { className: 'dshpw-fold-summary' },
+                  h('span', { className: 'dshpw-label' }, t('permsFolders')),
+                  h(
+                    'span',
+                    { className: 'dshpw-hint' },
+                    workspaces.length === 0
+                      ? t('permsNoWorkspaces')
+                      : t('permsFoldersSummary', {
+                          enabled: workspaces.filter((workspace) => enabledFolderSet(d).has(workspace.path)).length,
+                          total: workspaces.length,
+                        }),
+                  ),
+                ),
               workspaces.length === 0
-                ? h('div', { className: 'dshpw-hint' }, t('permsNoWorkspaces'))
+                ? null
                 : h(
                     'div',
-                    { className: 'dshpw-workspaces' },
+                    { className: 'dshpw-fold-body dshpw-workspaces' },
                     ...workspaces.map((workspace) => {
                       const enabled = enabledFolderSet(d).has(workspace.path);
                       return h(
@@ -793,59 +931,71 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
                       );
                     }),
                   ),
-              h(
-                'select',
-                {
-                  className: 'dshpw-input',
-                  value: d.sandbox,
-                  'aria-label': t('permsSandbox'),
-                  onChange: (e: { target: { value: string } }) => setDraft(u.id, { sandbox: e.target.value }),
-                },
-                h('option', { value: '' }, t('sandboxNone')),
-                h('option', { value: 'read-only' }, t('sandboxReadOnly')),
-                h('option', { value: 'workspace-write' }, t('sandboxWorkspace')),
-                h('option', { value: 'danger-full-access' }, t('sandboxFull')),
               ),
               h(
                 'div',
-                { className: 'dshpw-row' },
-                h('input', {
-                  className: 'dshpw-input',
-                  type: 'text',
-                  inputMode: 'numeric',
-                  pattern: '[0-9]*',
-                  autoComplete: 'off',
-                  name: 'dshpw-tokenlimit',
-                  placeholder: t('permsToken'),
-                  value: d.token,
-                  onChange: (e: { target: { value: string } }) => setDraft(u.id, { token: e.target.value }),
-                }),
-                h('input', {
-                  className: 'dshpw-input',
-                  type: 'text',
-                  inputMode: 'numeric',
-                  pattern: '[0-9]*',
-                  autoComplete: 'off',
-                  name: 'dshpw-minlimit',
-                  placeholder: t('permsMinutes'),
-                  value: d.minutes,
-                  onChange: (e: { target: { value: string } }) => setDraft(u.id, { minutes: e.target.value }),
-                }),
-                h('input', {
-                  className: 'dshpw-input',
-                  type: 'text',
-                  inputMode: 'decimal',
-                  pattern: '[0-9]+([.][0-9]{1,2})?',
-                  autoComplete: 'off',
-                  name: 'dshpw-monthly-budget',
-                  placeholder: t('permsMonthlyBudget'),
-                  value: d.monthlyBudget,
-                  onChange: (e: { target: { value: string } }) => setDraft(u.id, { monthlyBudget: e.target.value }),
-                }),
+                { className: 'dshpw-fields' },
+                field(
+                  t('permsSandbox'),
+                  h(
+                    'select',
+                    {
+                      className: 'dshpw-input',
+                      value: d.sandbox,
+                      onChange: (e: { target: { value: string } }) => setDraft(u.id, { sandbox: e.target.value }),
+                    },
+                    h('option', { value: '' }, t('sandboxNone')),
+                    h('option', { value: 'read-only' }, t('sandboxReadOnly')),
+                    h('option', { value: 'workspace-write' }, t('sandboxWorkspace')),
+                    h('option', { value: 'danger-full-access' }, t('sandboxFull')),
+                  ),
+                ),
+                field(
+                  t('fieldTokenLimit'),
+                  h('input', {
+                    className: 'dshpw-input',
+                    type: 'text',
+                    inputMode: 'numeric',
+                    pattern: '[0-9]*',
+                    autoComplete: 'off',
+                    name: 'dshpw-tokenlimit',
+                    value: d.token,
+                    onChange: (e: { target: { value: string } }) => setDraft(u.id, { token: e.target.value }),
+                  }),
+                  t('fieldUnlimited'),
+                ),
+                field(
+                  t('fieldMinutesLimit'),
+                  h('input', {
+                    className: 'dshpw-input',
+                    type: 'text',
+                    inputMode: 'numeric',
+                    pattern: '[0-9]*',
+                    autoComplete: 'off',
+                    name: 'dshpw-minlimit',
+                    value: d.minutes,
+                    onChange: (e: { target: { value: string } }) => setDraft(u.id, { minutes: e.target.value }),
+                  }),
+                  t('fieldUnlimited'),
+                ),
+                field(
+                  t('fieldMonthlyBudget'),
+                  h('input', {
+                    className: 'dshpw-input',
+                    type: 'text',
+                    inputMode: 'decimal',
+                    pattern: '[0-9]+([.][0-9]{1,2})?',
+                    autoComplete: 'off',
+                    name: 'dshpw-monthly-budget',
+                    value: d.monthlyBudget,
+                    onChange: (e: { target: { value: string } }) => setDraft(u.id, { monthlyBudget: e.target.value }),
+                  }),
+                  t('fieldBudgetHint'),
+                ),
               ),
               h(
                 'div',
-                { className: 'dshpw-row' },
+                { className: 'dshpw-checks' },
                 h(
                   'label',
                   { className: 'dshpw-check' },
@@ -868,7 +1018,7 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
                 ),
                 h(
                   'label',
-                  { className: 'dshpw-check' },
+                  { className: 'dshpw-check danger' },
                   h('input', {
                     type: 'checkbox',
                     checked: d.banned,
@@ -877,9 +1027,11 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
                   t('permsBanned'),
                 ),
               ),
+              ),
               h(
                 'div',
-                { className: 'dshpw-action-row dshpw-form-actions' },
+                { className: 'dshpw-perm-foot' },
+                dirtyUsers.includes(u.id) ? h('span', { className: 'dshpw-chip warn' }, t('unsaved')) : null,
                 h(
                   'button',
                   { className: 'dshpw-btn', disabled: busy, onClick: () => savePermissions(u.id) },
@@ -891,8 +1043,6 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
       ),
 
 
-    error && h('div', { className: 'dshpw-error' }, error),
-    notice && h('div', { className: 'dshpw-ok' }, notice),
   );
 
   return h('div', { className: 'dshpw-card' }, body);
