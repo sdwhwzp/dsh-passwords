@@ -31,6 +31,8 @@ export function resolveConfigPath(value: string, configRoot: string, fallbackNam
 }
 
 export interface PlatformConfig {
+  /** Enable the authenticated browser editor routes supplied by dsh-vsceditor. */
+  tenantEditor?: { enabled: boolean };
   /** Optional Linux sandbox launcher. Empty disables restricted-account terminals. */
   tenantTerminal?: { launcher: string; maxPerUser: number; reconnectGraceMs: number };
   /** Isolated replacement for the global task-board Host; enable only with the global Host disabled. */
@@ -226,6 +228,7 @@ export function loadConfig(): PlatformConfig {
       placeholderRoot: localWorkspacePlaceholderRoot,
     },
     managedWorkspaceRoot,
+    tenantEditor: { enabled: readEnv('MCP_TENANT_EDITOR', 'false') === 'true' },
     tenantTaskBoard: {
       enabled: readEnv('MCP_TENANT_TASK_BOARD', 'false') === 'true',
       directory: resolveEnvRelativePath(readEnv('MCP_TENANT_TASK_BOARD_DIR', ''), envFilePath(), path.join(homedir(), '.dsh', 'tenant-task-boards')),

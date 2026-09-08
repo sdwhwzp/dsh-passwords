@@ -1214,3 +1214,46 @@ Linux 原生 PTY、交互 Shell、UID 1000、零 capabilities、工作区文件�
 初次切换前备份为 `/home/tzwl3/apps/deploy-backups/pre-20260908-terminal-board`（原 2.6.20 Profile、环境与 PM2 快照）；2.6.23 切换前备份为 `/home/tzwl3/apps/deploy-backups/pre-20260908-terminal-board-v23`。恢复前先保存后续新增配置与个人任务账本，停止服务后恢复目标 Profile 和对应密码门环境，再验收并保存 PM2；不能重跑已经完成的切换脚本。root 启动器与 sudoers 独立于 Profile，回滚时需核对匹配的摘要；旧提示符启动器保留在 `/usr/local/libexec/dsh-tenant-terminal.20260908-v1`。不得删除用户工作区、会话日志或个人任务账本来回滚插件。
 
 普通账号终端的宿主机网络与外网均未开放；管理员终端不使用该隔离启动器。既有旧子代理日志兼容问题及浏览器启动时两条 `Cannot read properties of undefined (reading 'phase')` 仍记录为未解决项，不影响本次看板页面验收，不宣称整站无错误。源码与文档已提交到密码门 `dev` 分支；各插件的归档记录见 [变更概览第 14 节](2026-09-08-changes-overview.md#14-2026-09-08-dev-分支归档)。
+
+## 32. 2026-09-08 网页 VS Code 编辑器集成
+
+在会话「编辑器」中直接浏览、修改和保存本人托管工作区文件，无需安装桌面 VS Code。生产使用 `dsh-vsceditor@0.5.1-dsh.20260908.4`、`dsh-passwords@2.6.24` 和服务器端 code-server `4.133.0`；Harness 保持 `0.1.3-alpha.1-593ee89`。新增编辑器后共 16 个 bundle，原 Context、Routing Suite、终端、任务看板及 Router 预设保留。网页入口为 `http://wh.gr-iot.cn:3081`；本轮使用用户提供的 SSH `wh.gr-iot.cn:3022`，以原 `192.168.10.28` 主机密钥校验连接。
+
+### 接入与账号隔离
+
+新 Host 与客户端入口分别为 `lib/tenant-host.cjs`、`lib/tenant-client.js`，通过当前会话视图和 locale 服务注册「编辑器」。同源 `/dsh-vsceditor/open` 与 `/dsh-vsceditor/ide/<sessionId>/` 的 HTTP、资源请求及 WebSocket 每次校验身份、会话读取权限、持久化 cwd 和托管根目录的真实路径。其他账号会话、越界目录与符号链接逃逸拒绝访问。密码门新增 `MCP_TENANT_EDITOR=true`，普通账号还必须具有文件写入权限；跨源请求拒绝，认证凭据不会转交 code-server。
+
+每账号复用一个编辑器实例，独立 Unix socket、状态和工作区。root 所有的 `/usr/local/libexec/dsh-tenant-editor` 仅接受固定账号参数；sudoers 绑定该文件摘要。启动器经 bubblewrap 隔离挂载、PID、IPC、UTS 与网络，清理环境并降为 UID/GID 1000；只挂载本账号根目录到 `/workspace`，宿主机 home、其他账号与服务密钥不挂载。配置位于 root 所有的 `/etc/dsh-vsceditor.json`，运行状态位于 `/var/lib/dsh-vsceditor`，固定运行时位于 `/opt/dsh-vsceditor/code-server-4.133.0-linux-amd64`。
+
+Host 默认最多 4 个账号实例，启动超时 30 秒，无连接且空闲 15 分钟后回收，Host 退出时也回收进程。`codeServerCommit` 与已安装 VS Code 提交 `d2f7a122522456b351e9b3ddd39e4f3fb9fd5318` 匹配，以代理其带版本的 WebSocket 路径。编辑器打开时禁用 DSH 对话文本宽度拖动柄，避免透明区域截获编辑器点击。
+
+### 候选问题与恢复
+
+候选阶段修正了 Linux 沙盒隐式父目录权限和 code-server 带版本的 WebSocket 路径。首次线上切换因缺少 Cordis Standard Schema 配置接口而未通过健康检查，已自动恢复原 Profile 和环境；修复 `Config['~standard'].validate` 后，使用真实 `dsh` Profile 装配验证，再次切换成功。v3 浏览器验收发现对话宽度拖动柄遮挡，最终 v4 加入视图范围内的 CSS 修复。失败候选、日志和自动回滚状态保留，不将失败轮次计为成功验收。
+
+有效的原 2.6.23 备份为 `/home/tzwl3/apps/deploy-backups/pre-20260908-vsceditor-v3`；最终界面修复前的 v3 备份为 `/home/tzwl3/apps/deploy-backups/pre-20260908-vsceditor-v4`。二者含 Profile、对应密码门环境和 PM2 快照。恢复前须先保存后续配置及编辑器状态，停止服务后恢复目标 Profile 与匹配环境，再验收并保存 PM2。启动器、sudoers 和 code-server 独立于 Profile，须核对所选版本；不得删除工作区、会话日志或任务账本，也不得重跑已完成的切换脚本。
+
+### 包摘要与证据
+
+| 文件 | SHA256 |
+|---|---|
+| `dsh-passwords-2.6.24.tgz` | `f36b92cde3ff47b2f3c01b832d8f180b09707f8344c2ba165c6ca59df8d84fae` |
+| `dsh-vsceditor-0.5.1-dsh.20260908.4.tgz` | `596475e0a32c7f3cfebeb0815c9652107ac6b84fb61d83add9c7d9fc8c4b493b` |
+| `code-server-4.133.0-linux-amd64.tar.gz` | `a4e0f8f8c76e7de8e7424289f74e507af4c97bfe104c3e8ee272b8cc7b46c6f1` |
+| `dsh-tenant-editor` | `82bcc6c0dcfe966122c1d05758c2b8834e27433e3bbeaab73b1020d619d57185` |
+
+最终插件包分别位于服务器 `apps/dsh-plugins/addons/20260908-vsceditor-v2/` 和 `20260908-vsceditor-v4/`。本机证据根为 `/Users/wangzhipeng/macproject/deploy-artifacts/20260908-vsceditor`，服务器 staging 为 `/home/tzwl3/apps/deploy-staging/20260908-vsceditor`。`accepted.json`、`acceptance.json`、`regression.json`、`prepared-v4.json` 与 `cutover-state-v4.json` 记录最终结果；私有环境、临时令牌、PM2 私有快照和用户截图不加入 Git。
+
+### 验收结果
+
+20:37（Asia/Shanghai）完成 PM2 保存，Host PID `1434872`、restartCount `37`，配置与 Profile 冻结输入一致，数据库及网关健康。编辑器新增 4 项单元测试和 3 个入口语法检查通过；密码门构建、客户端类型检查及 12 项配置、终端网关和工作区看板回归通过，补充版本路径后对应网关测试通过。候选冻结安装及真实 `dsh` Profile 装配通过。
+
+生产浏览器中打开验收文件、修改保存、服务器磁盘核对和重新打开文件通过。最初自动化焦点误入内置 Chat 的尝试未计为成功；最终精确定位代码输入区域后验收。账号 2 的编辑器 HTTP 200、WebSocket 101；账号 3 访问该会话均为 403；跨源 403、未登录 302 登录。实际编辑器命名空间内确认 UID 1000、本账号工作区可见、宿主机 home 和其他账号不可见、宿主机网络不可达。
+
+原普通账号终端返回 101，UID 1000、目录 `/workspace/测试`；看板状态返回 200。管理员与普通账号的指定主会话均返回 14 条历史记录，模型目录各返回 14 项。3 个临时令牌已注销，专用验收文件已删除，私有证据保留；没有修改用户代码文件。
+
+### 已知限制
+
+系统运行目录只读但可进入，编辑器不承诺禁止导航到 `/bin`；写入权限限于本账号工作区、编辑器私有状态及沙盒临时目录。编辑器进程不能访问宿主机网络或互联网，因此在线扩展安装、远程 Git 和依赖下载不可用。公网 HTTP 下部分剪贴板和 WebView 功能受限，需要 HTTPS 才能完整使用。
+
+上游全局跟随 diff、编辑锁定、桌面后端和共享设置未接入租户入口；不保证模型与用户同时修改文件时自动协调。code-server 自带 Chat 不是 DSH 模型接口，本次未配置。既有旧子代理历史兼容问题和两条前端 `phase` 异常仍存在；本次没有执行付费模型调用、整机重启或完整灾备恢复演练。

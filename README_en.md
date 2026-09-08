@@ -396,3 +396,7 @@ Restricted sidebar terminals mount only the authenticated account's managed work
 On Linux, install `scripts/tenant-terminal-launcher.py` as the root-owned, non-user-writable `/usr/local/libexec/dsh-tenant-terminal`. Its account and managed root must match the deployment. Grant sudo access only to that fixed launcher, never arbitrary `sudo bwrap`. Enable it with `MCP_TENANT_TERMINAL_LAUNCHER`; `MCP_TENANT_TERMINAL_LIMIT` and `MCP_TENANT_TERMINAL_GRACE_MS` default to 8 terminals per account and 30000 milliseconds.
 
 Enable `MCP_TENANT_TASK_BOARD=true` only with the aggregate's global `web-ui-task-board` Host disabled and its client retained. Separate ledgers live under `MCP_TENANT_TASK_BOARD_DIR` and restore schedules after reload. All execution and history RPCs use the local `MCP_TENANT_TASK_BOARD_GATEWAY`, preserving current workspace, model, sandbox and quota checks. Deleted, banned or mismatched owners cannot execute tasks. Legacy global ledgers are retained and are not automatically imported into personal boards.
+
+### Browser code editor
+
+Enable `MCP_TENANT_EDITOR=true` only with the tenant edition of `dsh-vsceditor` and its isolated server launcher installed. Restricted accounts require file-write permission. The Host validates session ownership and the managed root; same-origin WebSockets participate in logout, ban and credential-change revocation. Routes remain disabled otherwise.

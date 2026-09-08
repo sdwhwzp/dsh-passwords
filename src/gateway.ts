@@ -3498,6 +3498,15 @@ export function createGatewayServer(
       // 解码为真实敏感路由（C-1）。query 仍由 URL 只读解析。
       const parsed = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const requestPath = gatePath;
+      const editorPath = requestPath === '/dsh-vsceditor' || requestPath.startsWith('/dsh-vsceditor/');
+      if (editorPath && (
+        !config.tenantEditor?.enabled ||
+        req.headers['sec-fetch-site'] === 'cross-site' ||
+        (typeof req.headers.origin === 'string' && !originHostMatches(req))
+      )) {
+        denyRequest(req, res, langOf(req), '403 Forbidden');
+        return;
+      }
       // 自身插件的写操作必须同源：Sec-Fetch-Site 可被缺省/伪造，且 text/plain
       // 可避免 CORS 预检；浏览器提供 Origin 时严格与请求 Host 一致。跨源攻击的
       // 本质是跨主机（攻击者无法在受害者主机名上托管内容），因此只比主机:端口、
@@ -3527,6 +3536,12 @@ export function createGatewayServer(
         const lang = langOf(req);
         if (perms.banned) {
           denyRequest(req, res, lang, t(lang, 'gw.banned'));
+          return;
+        }
+        // The editor's file writes use its WebSocket protocol, so require write
+        // permission for the entire editor instead of filtering HTTP methods.
+        if (editorPath && !perms.allow_upload) {
+          denyRequest(req, res, lang, t(lang, 'gw.noUpload'));
           return;
         }
         // F-09/F-12：第三方插件“运维面”端点（dsh-ssh 主机清单/隧道、skin-center、modlens、
@@ -6856,12 +6871,19 @@ export function createGatewayServer(
     // WebSocket 仅是 dsh 的服务器→客户端事件下行通道；客户端消息是协议违规。
     // 不允许把任意 HTTP 路径升级为 WS，否则会绕过 HTTP 侧完整的权限模型。
     const terminalPath = gatePath === '/sidebar/ws/terminal';
+    const editorPath = /^\/dsh-vsceditor\/ide\/session-[a-zA-Z0-9-]{1,100}\/(?:stable-[a-f0-9]{40})?$/.test(gatePath);
+    if (editorPath && (
+      !config.tenantEditor?.enabled ||
+      req.headers['sec-fetch-site'] === 'cross-site' || !originHostMatches(req as Request) ||
+      (userRole !== 'admin' && (authedUserId === null || !effectivePermissions(authedUserId).allow_upload))
+    )) { rejectUpgrade(socket, 403); return; }
     if (terminalPath && (req.headers['sec-fetch-site'] === 'cross-site' || !originHostMatches(req as Request))) { rejectUpgrade(socket, 403); return; }
     if (terminalPath && userRole !== 'admin') {
       if (!config.tenantTerminal?.launcher) { rejectUpgrade(socket, 403); return; }
       fwdPath = '/api/dsh-passwords/tenant-terminal' + fwdPath.slice(gatePath.length);
     }
     const builtinWsPath =
+      editorPath ||
       terminalPath ||
       gatePath === '/api/remote.mux' ||
       gatePath === '/api/events.mux' ||

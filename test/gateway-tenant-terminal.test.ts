@@ -29,6 +29,7 @@ test('sidebar terminals route users to the isolated provider and reject cross-or
     gateway: { host: '127.0.0.1', port: 0, upstream: `http://127.0.0.1:${(upstream.address() as { port: number }).port}`, tls: null, redirectPort: null, publicHost: '', domain: '', autoTls: false, acmeEmail: '', acmeStaging: false },
     jwtSecret: 'jwt', internalSecret: 'internal', localWorkspace: { host: '127.0.0.1', port: 0, publicUrl: '', placeholderRoot: path.join(dir, 'local') },
     managedWorkspaceRoot: path.join(dir, 'managed'), patch: { dshRoot: '', restartService: '' },
+    tenantEditor: { enabled: true },
     tenantTerminal: { launcher: '/usr/local/libexec/test-launcher', maxPerUser: 8, reconnectGraceMs: 30000 },
   };
   const gateway = createGatewayServer(config, new AuthService(config, db), db, { upstreamBrowserCookie: 'dsh-auth-test=trusted' });
@@ -46,6 +47,19 @@ test('sidebar terminals route users to the isolated provider and reject cross-or
     assert.equal(typeof privileged === 'number' ? privileged : privileged.path, '/sidebar/ws/terminal?sessionId=admin&tab=x');
     assert.equal(await open(user, '/sidebar/ws/terminal?sessionId=mine&tab=x', 'https://evil.invalid'), 403);
     assert.equal(await open(user, '/sidebar/ws/agent-terminals'), 404);
+    const editor = '/dsh-vsceditor/ide/session-owned/';
+    assert.equal(typeof await open(user, editor), 'object');
+    assert.equal(typeof await open(user, editor + 'stable-' + 'a'.repeat(40)), 'object');
+    assert.equal(await open(user, editor + 'stable-invalid'), 404);
+    assert.equal(await open(user, editor, 'https://evil.invalid'), 403);
+    assert.equal(await open(user, '/dsh-vsceditor/arbitrary/'), 404);
+    config.tenantEditor!.enabled = false;
+    assert.equal(await open(user, editor), 403);
+    config.tenantEditor!.enabled = true;
+    db.setPermissions(user.id, { allowedFolders: [], hourlyTokenLimit: null, dailyMinutesLimit: null, monthlyBudgetMicros: 0, allowUpload: false, allowGitDownload: false, banned: false, sandboxMode: 'workspace-write', disabledSessions: [] });
+    assert.equal(await open(user, editor), 403);
+    const token = jwt.sign({ sub: String(user.id), username: user.username, cv: 0 }, 'jwt', { expiresIn: 60 });
+    assert.equal((await fetch(origin + '/dsh-vsceditor/open?sessionId=session-owned', { method: 'POST', headers: { origin, cookie: 'dsh_gateway_token=' + token } })).status, 403);
     assert.equal(await open(user, '/api/dsh-passwords/tenant-terminal?sessionId=mine&tab=x'), 404);
   } finally {
     for (const socket of wss.clients) socket.terminate(); wss.close(); gateway.closeAllConnections(); upstream.closeAllConnections();
