@@ -1,5 +1,7 @@
 # 2026-09-08 本次改动清单（Harness 0.1.3-alpha.1 已部署）
 
+最新交接摘要见[插件集成与部署总结](2026-09-08-plugin-integration-handoff.md)，包含已完成功能、`dev` 上传记录、网页编辑器待办及已知限制。下文按阶段保留验收记录，后续章节补充较早阶段的状态。
+
 > 记录本轮“检查全部源仓库更新 → 升级 Harness 到 0.1.3-alpha.1 → 各插件适配 → 本机验证 → 28 部署”任务中已产生的改动。上一轮记录见 `docs/2026-09-04-changes-overview.md`。
 >
 > **状态：28 已完成本次私有 alpha.1 cohort 部署，2026-09-08 12:58:29（Asia/Shanghai）记录为 accepted，PM2 startup 已保存。** 三条 current 均为 `20260908-104825-593ee89-alpha1`；最终 Host PID `1348895`、restartCount `23`、kill_timeout `30000`。remote 配置修复及修复后生产、Doctor、运行验收通过；生产报告为 passed-with-warnings，保留 `LEGACY_SESSION_OWNER_BOOTSTRAP_PARTIAL` 和 browserUiVerified=false。未发布公共 npm，原完整测试/公共锁缺口及历史失败继续保留。
