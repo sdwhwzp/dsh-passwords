@@ -2,6 +2,21 @@
 
 Context、Routing Suite、普通账号终端、任务看板和网页 VS Code 编辑器均已部署。刷新 DSH，在本人的托管工作区会话中点击「编辑器」，即可浏览、修改和保存代码，无需安装桌面 VS Code。源码及配套记录使用各自 fork 的 `dev` 分支。
 
+## 文档入口
+
+- 本文：功能总览、网页编辑器使用步骤、源码提交、验收与限制。
+- [变更概览第 15 节](2026-09-08-changes-overview.md#15-2026-09-08-网页编辑器打包与部署)：本次集成摘要与此前改动索引。
+- [部署手册第 32 节](server-28-deployment-runbook.md#32-2026-09-08-网页-vs-code-编辑器集成)：服务器路径、包摘要、配置、失败恢复及回滚资料。
+
+## 网页编辑器使用
+
+1. 登录 DSH 网页并刷新页面，打开自己托管工作区内的会话。
+2. 点击会话顶部的「编辑器」。首次打开需要启动该账号的服务器端 code-server，后续会话复用同账号实例。
+3. 在编辑器左侧文件树中打开文件，在代码区域修改，通过编辑器的 File → Save 保存。保存会写入服务器上的本人工作区文件。
+4. 保存后可重新打开文件确认内容。需要独立页面时点击「新窗口打开」；「重新加载」用于重载编辑器页面，不能代替保存。
+
+普通账号需要文件写入权限。编辑器顶部的 `/workspace/...` 是本人工作区在沙盒中的路径；管理员也只能通过该入口打开自己的托管目录。编辑器自带 Chat 未连接 DSH 模型，需要与 DSH 助手交流时使用原「对话」页签。
+
 ## 用户要求
 
 - 在 DSH 网页内直接浏览、编辑和保存服务器工作区代码，浏览器用户不需要安装桌面 VS Code。
@@ -26,14 +41,14 @@ Context、Routing Suite、普通账号终端、任务看板和网页 VS Code 编
 
 ## dev 分支上传记录
 
-下表保留前两项插件检查点，并记录本次编辑器与密码门适配。
+下表记录已上传的功能提交；后续文档提交会继续推进 `dev`，不会改变本次部署包版本。编辑器与密码门的功能提交已在推送后核对远程 `dev` SHA。
 
 | 仓库 | 分支与提交 | 内容 |
 |---|---|---|
 | [dsh-context](https://github.com/sdwhwzp/dsh-context/tree/dev) | 新建 `dev`，`e0988f8` | alpha 兼容、计时、会话详情权限、依赖及回归测试 |
 | [dsh-routing-suite](https://github.com/sdwhwzp/dsh-routing-suite/tree/dev) | 新建 `dev`，`bd20369` | `fa550d0` 保存插件适配，`bd20369` 修复 npm 打包测试夹具 |
-| [dsh-passwords](https://github.com/sdwhwzp/dsh-passwords/tree/dev) | 保留原 `dev` 历史，版本 `2.6.24` | 此前终端、看板隔离与部署记录保留；新增编辑器认证、写入权限与 WebSocket 路由及本次文档 |
-| [dsh-vsceditor](https://github.com/sdwhwzp/dsh-vsceditor/tree/dev) | 已有 `dev`，`9b078fa` | 基于 `a683b58` 新增多账号网页编辑器、固定启动器和测试，保留上游实现及说明 |
+| [dsh-passwords](https://github.com/sdwhwzp/dsh-passwords/tree/dev) | 保留原 `dev`，[`f1221c0`](https://github.com/sdwhwzp/dsh-passwords/commit/f1221c06a97742a156464667e01f7b474d1be51c) | 此前终端、看板隔离与部署记录保留；新增编辑器认证、写入权限与 WebSocket 路由及本次文档 |
+| [dsh-vsceditor](https://github.com/sdwhwzp/dsh-vsceditor/tree/dev) | 已有 `dev`，[`9b078fa`](https://github.com/sdwhwzp/dsh-vsceditor/commit/9b078face736985d142d693344ca66c7ac673817) | 基于 `a683b58` 新增多账号网页编辑器、固定启动器和测试，保留上游实现及说明 |
 
 四个本地仓库均位于 `/Users/wangzhipeng/macproject/`，已切换至 `dev`。没有改写远程历史，没有提交服务器凭据、私有环境文件、令牌、备份或用户截图，也没有公共 npm 发布。Harness 主仓库中的 principal 迁移修复不包含在这四个仓库的上传中，文件清单见[改动清单第 11.1 节](2026-09-08-changes-overview.md#111-尚未提交的-harness-修改)。
 
@@ -62,4 +77,4 @@ Context、Routing Suite、普通账号终端、任务看板和网页 VS Code 编
 
 一条旧子代理历史因 descriptor 位于继承区仍无法打开；浏览器曾记录 `Cannot read properties of undefined (reading 'phase')`，来源尚未定位。此前插件页面验收通过不代表整站没有这些异常。
 
-部署详情、包 SHA256、备份与回滚方法见[服务器部署手册第 27–32 节](server-28-deployment-runbook.md#27-2026-09-08-harness-013-alpha1-部署记录)。本机私有证据分别位于 `deploy-artifacts/20260908-013-deploy/`、`deploy-artifacts/20260908-context-routing/` 、`deploy-artifacts/20260908-terminal-board/` 和 `deploy-artifacts/20260908-vsceditor/`。恢复前先保存后续新增数据和配置，不得删除会话日志、工作区、个人任务账本或已提交的数据后继，不得直接重跑已完成的切换脚本。
+部署详情、包 SHA256、备份与回滚方法见[服务器部署手册第 27–32 节](server-28-deployment-runbook.md#27-2026-09-08-harness-013-alpha1-部署记录)。本机私有证据分别位于 `deploy-artifacts/20260908-013-deploy/`、`deploy-artifacts/20260908-context-routing/`、`deploy-artifacts/20260908-terminal-board/` 和 `deploy-artifacts/20260908-vsceditor/`。恢复前先保存后续新增数据和配置，不得删除会话日志、工作区、个人任务账本或已提交的数据后继，不得直接重跑已完成的切换脚本。

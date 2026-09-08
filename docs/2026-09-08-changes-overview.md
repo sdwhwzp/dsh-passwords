@@ -475,4 +475,4 @@ finalization job 退出 0，没有再次重启服务，先私有保留原 startu
 
 新增身份和会话校验、同源 HTTP/WebSocket 代理、root 固定启动器、文件与网络隔离，并修复 code-server 版本路径、Cordis 配置装配和编辑器点击遮挡。首次启动失败的自动回滚、最终包摘要、验收与备份位置见[部署记录第 32 节](server-28-deployment-runbook.md#32-2026-09-08-网页-vs-code-编辑器集成)。源码与配套文档使用各自 `dev` 分支，Context 和 Routing Suite 保留第 14 节已上传版本。
 
-编辑器网络隔离，在线扩展市场和远程 Git 不可用；HTTP 下部分剪贴板和 WebView 受限。上游全局 diff 跟随与编辑锁未接入，不保证模型与人工同时修改的协调。完整交接见[插件集成总结](2026-09-08-plugin-integration-handoff.md)。
+编辑器网络隔离，在线扩展市场和远程 Git 不可用；HTTP 下部分剪贴板和 WebView 受限。上游全局 diff 跟随与编辑锁未接入，不保证模型与人工同时修改的协调。使用步骤、已上传的功能提交及完整交接见[插件集成总结](2026-09-08-plugin-integration-handoff.md)。

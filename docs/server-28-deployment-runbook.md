@@ -1242,7 +1242,7 @@ Host 默认最多 4 个账号实例，启动超时 30 秒，无连接且空闲 1
 | `code-server-4.133.0-linux-amd64.tar.gz` | `a4e0f8f8c76e7de8e7424289f74e507af4c97bfe104c3e8ee272b8cc7b46c6f1` |
 | `dsh-tenant-editor` | `82bcc6c0dcfe966122c1d05758c2b8834e27433e3bbeaab73b1020d619d57185` |
 
-最终插件包分别位于服务器 `apps/dsh-plugins/addons/20260908-vsceditor-v2/` 和 `20260908-vsceditor-v4/`。本机证据根为 `/Users/wangzhipeng/macproject/deploy-artifacts/20260908-vsceditor`，服务器 staging 为 `/home/tzwl3/apps/deploy-staging/20260908-vsceditor`。`accepted.json`、`acceptance.json`、`regression.json`、`prepared-v4.json` 与 `cutover-state-v4.json` 记录最终结果；私有环境、临时令牌、PM2 私有快照和用户截图不加入 Git。
+最终插件包分别位于服务器 `apps/dsh-plugins/addons/20260908-vsceditor-v2/` 和 `20260908-vsceditor-v4/`。本机证据根为 `/Users/wangzhipeng/macproject/deploy-artifacts/20260908-vsceditor`，服务器 staging 为 `/home/tzwl3/apps/deploy-staging/20260908-vsceditor`。`accepted.json` 记录最终验收、PM2 保存、文件重新打开及临时数据清理结果，`acceptance.json` 与 `regression.json` 记录接口验收，`prepared-v4.json` 记录冻结输入；`cutover-state-v4.json` 仅记录切换结束时等待验收的阶段状态，最终完成状态以 `accepted.json` 为准；私有环境、临时令牌、PM2 私有快照和用户截图不加入 Git。
 
 ### 验收结果
 
