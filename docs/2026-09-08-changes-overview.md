@@ -434,7 +434,7 @@ finalization job 退出 0，没有再次重启服务，先私有保留原 startu
 | `packages/session/session-format-v0-to-v1/README.{md,zh.md,i18n.yaml}` | 更新迁移支持范围及双语配对 |
 | `.agents/notes/implemented/architecture/2026-09-05-principal-authorization-across-013-upstream.{md,zh.md,i18n.yaml}` | 记录已发布历史数据中的身份保留要求 |
 
-本仓库的本轮文档更新为 `docs/2026-09-08-changes-overview.md` 与 `docs/server-28-deployment-runbook.md`，当前也尚未提交或推送。前文源码状态表记录的是已部署阶段，不表示这些后续修改已经发布。
+本仓库的本轮文档更新为 `docs/2026-09-08-changes-overview.md` 与 `docs/server-28-deployment-runbook.md`，已随本次账号隔离修改提交到 `dev`；Harness principal 迁移修改的状态独立于本仓库。
 
 ### 11.2 证据与后续事项
 
@@ -448,10 +448,21 @@ finalization job 退出 0，没有再次重启服务，先私有保留原 startu
 
 刷新网页后，已有对话中打开「上下文」；新会话选择 Router 预设；输入 `/graded <任务>` 使用分级规划；管理员在「设置 → 插件管理」注入服务器上的插件目录。生产历史、模型目录、两类账号的 Context 页面及预设列表均已验证。
 
-本机源码修改尚未提交或推送；私有包和完整证据位于 `deploy-artifacts/20260908-context-routing/`。既有旧子代理历史限制仍保留，另记录了未影响本次插件页面渲染的前端 `phase` 异常，详见部署记录。
+插件适配源码已提交到各自的 `dev` 分支，提交记录见下节；私有包和完整证据位于 `deploy-artifacts/20260908-context-routing/`。既有旧子代理历史限制仍保留，另记录了未影响本次插件页面渲染的前端 `phase` 异常，详见部署记录。
 
 ## 13. 2026-09-08 终端与任务看板账号隔离
 
 28 服务器已部署 `dsh-passwords@2.6.23`，修复普通账号终端 1006 和任务看板 `not found`/`forbidden`。终端按本人会话校验，只挂载自己的托管工作区；任务看板按账号保存，执行继续经过网关权限及额度检查。公网终端、双账号隔离、浏览器看板、原会话历史和模型列表均已验收，PM2 已保存。实现、测试、包摘要与回滚位置见 [部署记录 §31](server-28-deployment-runbook.md#31-2026-09-08-普通账号终端与任务看板修复)。
 
 终端中的 `/bin` 是沙盒内只读工具目录，允许 `cd` 进入，不能修改；这不等同于访问宿主机或其他账号目录。提示符已改为 `sandbox:`，当前没有实现禁止 `cd` 离开 `/workspace`。终端网络隔离、临时目录及既有前端异常的限制已明确记录，不能把提示符更名视为目录访问控制。
+
+## 14. 2026-09-08 dev 分支归档
+
+按用户要求，Context、Routing Suite、VS Code 网页编辑器及密码门的配套集成使用各自 fork 的 `dev` 分支。Context 与 Routing Suite 的 `dev` 为本次新建；密码门保留原 `dev` 历史，以合并提交纳入已部署的 alpha 适配、终端与任务看板修改。没有改写远程历史，也未将私有环境文件、令牌、服务器备份或用户截图加入 Git。
+
+- `dsh-context`: `e0988f8`，包含嵌入流计时、会话详情权限、依赖声明及回归测试；lint、类型检查、构建通过，1183 项测试通过、21 项跳过，覆盖率 100%。
+- `dsh-routing-suite`: `fa550d0` 保存插件兼容与账号权限适配，`bd20369` 修复 npm 打包测试夹具；115 项测试、Graded 构建、Injector 构建及类型检查通过。
+- `dsh-passwords`: `fc375b8` 保存终端与看板账号隔离，`e0f04f4` 保存故障修复与部署记录；构建与 35 项聚焦回归通过。
+- `dsh-vsceditor`: 远程已有 `dev`，本机已切换并跟踪；当前基线 `a683b58`。网页编辑器的多账号适配及上线仍在进行，不属于前述已验收部署。
+
+本节记录源码归档，不代表重新部署；线上版本仍以第 13 节的验收状态为准。

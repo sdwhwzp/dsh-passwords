@@ -1213,4 +1213,4 @@ Linux 原生 PTY、交互 Shell、UID 1000、零 capabilities、工作区文件�
 
 初次切换前备份为 `/home/tzwl3/apps/deploy-backups/pre-20260908-terminal-board`（原 2.6.20 Profile、环境与 PM2 快照）；2.6.23 切换前备份为 `/home/tzwl3/apps/deploy-backups/pre-20260908-terminal-board-v23`。恢复前先保存后续新增配置与个人任务账本，停止服务后恢复目标 Profile 和对应密码门环境，再验收并保存 PM2；不能重跑已经完成的切换脚本。root 启动器与 sudoers 独立于 Profile，回滚时需核对匹配的摘要；旧提示符启动器保留在 `/usr/local/libexec/dsh-tenant-terminal.20260908-v1`。不得删除用户工作区、会话日志或个人任务账本来回滚插件。
 
-普通账号终端的宿主机网络与外网均未开放；管理员终端不使用该隔离启动器。既有旧子代理日志兼容问题及浏览器启动时两条 `Cannot read properties of undefined (reading 'phase')` 仍记录为未解决项，不影响本次看板页面验收，不宣称整站无错误。源码、文档修改尚未提交或推送。
+普通账号终端的宿主机网络与外网均未开放；管理员终端不使用该隔离启动器。既有旧子代理日志兼容问题及浏览器启动时两条 `Cannot read properties of undefined (reading 'phase')` 仍记录为未解决项，不影响本次看板页面验收，不宣称整站无错误。源码与文档已提交到密码门 `dev` 分支；各插件的归档记录见 [变更概览第 14 节](2026-09-08-changes-overview.md#14-2026-09-08-dev-分支归档)。
