@@ -8,8 +8,8 @@
 
 | 仓库 | 分支 | 状态 | 说明 |
 |---|---|---|---|
-| deepseek-harness | `tzwl` | 合并已解完、**未提交** | 44 冲突全解，typecheck 通过；测试见 §2.3（1 项真实失败已修，其余为本机资源竞争） |
-| macproject/dsh-web | `master` | 已提交 `0a01f09c`、**未推送** | 上游 v0.3.17 共 51 提交，全部门禁通过 |
+| deepseek-harness | `tzwl` | 已提交 `593ee89aa6`、**未推送** | 版本 `0.1.3-alpha.1`；44 冲突全解，typecheck 与 pre-commit 六项钩子通过；测试见 §2.3 |
+| macproject/dsh-web | `master` | 已推送 `cec0cde4` | 含合并 `0a01f09c` 与文件末尾空行清理；本轮补跑脚本、文档检查通过（§10.5） |
 | macproject/dsh-passwords | `feature/principal-budget-webdav` | 已提交 `388f80b`、**未推送** | BotHub Bridge 已落盘；定向修复空白会话分配，测试与构建通过（§10.3） |
 | macproject/dsh-plugin-subscriptions | `dev` | 已提交 `a9a030b`、**未推送** | Codex 实时模型目录改造 + 0.1.3 适配，测试与构建通过（§10.2） |
 | macproject/dsh-at-file | `dev` | 无待合上游 | — |
@@ -18,7 +18,7 @@
 | dsh-shandong-tizhi-brand | `main` | 无待合上游 | — |
 | macproject/dsh-weknora | `main` | 按既往决定跳过 | 腾讯上游 2916 提交 |
 
-续跑时直接查询远端确认：`sdwhwzp/dsh-web` 的 `master` 已是 `5e65a315`，线上 task-board 修复已经推送。本地 `origin/master` 仍停在旧值，不能据此判断未推送数量；本地 `master` 相对真实远端领先 **52 个提交**（51 个上游提交及本次合并提交）。
+续跑时直接查询远端确认：`sdwhwzp/dsh-web` 的 `master` 当时已是 `5e65a315`，线上 task-board 修复已经推送；本地 `origin/master` 停在旧值。随后已将 51 个上游提交、合并提交和一项末尾空行清理提交推送，远端与本地 `master` 均为 `cec0cde4`。
 
 ## 2. deepseek-harness：合并 upstream 0.1.3-alpha.1
 
@@ -87,7 +87,9 @@ utimesSync(boundary, cutoffMs / 1000, cutoffMs / 1000)   // utimes 收秒
 
 这些都是跑真实子进程（oxlint 可执行文件、Python 解释器、构建产物导入）的重型用例，本机并发下互相争 CPU 即超时。实证：oxlint 与 code-runtime-python **单独各自全绿**，两者同跑则 oxlint 5 项全数超时失败。
 
-按 `AGENTS.md` 的分工，穷尽覆盖与平台矩阵归 CI；本机据此判定合并本身健康。
+修完 spill 后的第四轮全量为 10 个失败，`spill-local` 已不再出现，其余全部集中在同一批重型用例；本轮新出现的 `client-build-environment.client.spec.ts`（8/8）、`typert/generator/tests/tools-catalog.spec.ts`（1/1）、`code-runtime-python/tests/protocol.spec.ts`（25/25）单独复跑同样全绿。
+
+按 `AGENTS.md` 的分工，穷尽覆盖与平台矩阵归 CI；本机据此判定合并本身健康，已提交为 `593ee89aa6`。
 
 Agent Note 已写：`.agents/notes/implemented/architecture/2026-09-05-principal-authorization-across-013-upstream.md`（中英双语 + i18n 配对）。
 
@@ -190,7 +192,7 @@ function pickerModels(models) { return models.filter(m => CODEX_PICKER_MODEL_IDS
 
 ## 7. 待确认事项汇总
 
-空白会话定向修复已在本机完成；推送、Grok 扩展和额外磁盘清理仍未执行。
+空白会话定向修复与 dsh-web 补推已完成；Grok 扩展和额外磁盘清理未执行。
 
 ### 7.1 dsh-passwords 的空白会话过滤（§5）
 
@@ -198,7 +200,7 @@ function pickerModels(models) { return models.filter(m => CODEX_PICKER_MODEL_IDS
 
 ### 7.2 dsh-web 后续合并补推
 
-续跑时 `git ls-remote https://github.com/sdwhwzp/dsh-web.git refs/heads/master` 返回 `5e65a315441447044ae95d6bf7aa6abfc274ec74`；该修复已在远端。本次待推送的是从该提交到 `0a01f09c` 的 52 个提交，目标仍是自己的 fork（`sdwhwzp/dsh-web`）。
+已通过明确的个人 fork URL 推送 `master`，远端从 `5e65a315` 前进到 `cec0cde4`，未修改任何 remote URL。原“65 个未推送”的判断来自过期的本地 remote-tracking ref；本轮实际推送 53 个提交，包含末尾空行清理。见 §10.5。
 
 ### 7.3 Grok 是否同样改为实时目录
 
@@ -219,7 +221,7 @@ function pickerModels(models) { return models.filter(m => CODEX_PICKER_MODEL_IDS
 
 | 对象 | 回退点 |
 |---|---|
-| deepseek-harness | 分支 `backup/tzwl-before-013` = `bf8d4921d9`（合并前状态） |
+| deepseek-harness | 分支 `backup/tzwl-before-013` = `bf8d4921d9`（合并前状态）；合并提交为 `593ee89aa6` |
 | dsh-web | 合并提交 `0a01f09c` 的第一父提交 `5e65a315` |
 | dsh-passwords | `0a71ac8` 之前为 `2.6.19` 线上同源状态 |
 | dsh-plugin-subscriptions | `a9a030b` 的第一父提交；保留本次提交，可另行 revert |
@@ -244,3 +246,30 @@ Node `22.21.1` 下 `npm test` 为 378 项：372 通过、6 跳过、0 失败；`
 提交 `388f80b`（`fix(workspaces): allow assigning registered blank sessions`）。工作区清单保留 live 和可读取的持久化空白会话，过滤已归档、已删除及目录不存在的记录；只有明确的 `SESSION_QUERY_SESSION_NOT_FOUND` 才按会话已删除处理。服务缺失或存储失败返回 HTTP 502 / `WORKSPACE_UNAVAILABLE`，设置卡显示错误并支持刷新恢复，避免把失败伪装成空清单。管理员鉴权保持在清单读取之前。
 
 Node `22.21.1` 下 `npm test` 为 392 项：379 通过、13 项既有跳过、0 失败；`npm run build` 通过，包含 Host/Client 类型检查和客户端 bundle。日志为 `/tmp/dsh-013-passwords-test.log` 和 `/tmp/dsh-013-passwords-build.log`。提交尚未推送，28 服务器未改动。
+
+### 10.4 Harness 复核补修
+
+本次复核发现上轮 §2.2 中两个修复仍有遗漏，并补充了授权取消和版本一致性检查：
+
+- 模型重载时不仅保留 aria/title，也保留按钮上可见的推理等级文字。
+- 通用工具图片不能由 `read_image` 专属图库完全替代。新增 `tool.call.result-images` 插槽，复用附件插件的会话授权加载器，恢复根调用、嵌套调用及缺少完整卡片元数据的历史图片；有效 `read_image` 卡保持折叠展示且不重复渲染。
+- `subagent.prompt` 的父会话授权被取消时也返回 `gateway/cancelled`，并保留已映射的拒绝错误。
+- `@deepseek-ai/dsh-principal-access` 从遗漏的 `0.1.2-rc.1` 对齐到 `0.1.3-alpha.1`；静态检查全部 259 个非 vendor 的 dsh family manifest 后无版本不一致。内部引用使用 `workspace:` / `link:`，无需修改锁文件。
+
+Node `22.21.1` 下，`control.spec.ts` 23 项通过；模型按钮、工具图片、附件、会话投影及导出等 21 个测试文件的 381 项通过；`pnpm run build:lib:client` 通过；构建后的 `image-display.expected.e2e.ts` 4 项通过。日志分别为 `/tmp/dsh-013-control-test.log`、`/tmp/dsh-013-focused-test.log`、`/tmp/dsh-013-client-build.log`、`/tmp/dsh-013-image-display.log`。
+
+`pnpm run test:docs` 首次为 14 个检查通过、1 个配对检查失败。随后核对并修复了 5 对历史合并文档：补中文 principal-access 配置项、持久化 principal/调用引用字段和来源行号，纠正 subagent note 与源码不符的引用菜单描述；限定这 5 对的配对检查通过。
+
+完整 `doc-sync` 期间，Host 编译报 `TS6053`：`scripts/staged-lint-probe-6f516ca8-978e-4d52-ba5d-abe08544a4c2.ts` 被 `scripts/**/*.ts` 纳入程序后已不存在。进程检查确认另一项任务在同一仓库执行 `vitest.mjs run` 全量测试。为停止争用，本任务主动中断自己的 `doc-sync`（退出 130）；中断前 doc graphs 通过，其余检查不能宣称通过。日志为 `/tmp/dsh-013-doc-sync.log`。随后对本任务涉及的 20 个改动文件执行不加载 TypeScript project 的 staged lint 配置，退出 0，日志为 `/tmp/dsh-013-staged-lint.log`。
+
+以上 Harness 改动仍未提交。本任务未修改或暂存另一任务的 spill-local 测试，也未终止其进程。§2.3 是另一任务的测试记录，§10.1 和本节是本任务实际执行结果，两者不能混作同一次独占验证。
+
+### 10.5 dsh-web 补推完成
+
+本轮按既有合并门禁记录补跑 `pnpm test:scripts`（251 项全部通过）与 `pnpm docs:check`（通过）。`git diff --check` 发现上游四个文件带多余末尾空行；机械清理并同步对应双语 hash，提交 `cec0cde4`，未改变测试或产品行为。
+
+执行 `git push git@github.com:sdwhwzp/dsh-web.git master:master` 后，`git ls-remote` 与本地 `HEAD` 均为 `cec0cde4ca890c94e5d803690fbd4b747b5e2a43`，工作区干净。日志为 `/tmp/dsh-013-web-scripts.log` 和 `/tmp/dsh-013-web-docs.log`。本机没有 `gh` 命令，本轮未核对 GitHub Actions 状态；推送不代表部署，28 仍保持原发布。
+
+### 10.6 接续位置
+
+先确定由哪一项任务负责 Harness 收尾，避免继续同时改文件、编译和运行全量测试。保持 Node `22.21.1`，补完完整 `doc-sync`、所需 lint 和合并验证后再提交；不要把本任务的两次中断运行算作通过。另一任务的 spill-local 修改由其负责人确认。随后核对插件推送与 0.1.3 发布版本范围，按部署手册准备三条发布线。Grok 改造、大件磁盘清理和 28 部署均未执行。
