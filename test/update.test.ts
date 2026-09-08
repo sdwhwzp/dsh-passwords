@@ -151,9 +151,12 @@ function setup(root: string, autoEnabled: boolean, nowRef: { value: number }, re
   return { engine, db, ops, calls, restarts: () => restarts, setRestartAllowed: (allowed: boolean) => { restartAllowed = allowed; } };
 }
 
-test('test package flow targets 2.6.20 from a 2.6.19 baseline', () => {
+test('the package version stays ahead of the 2.6.19 update baseline', () => {
+  // Pinning the exact version made this assert a moment rather than a
+  // behavior: it went red on 2.6.21 and stayed red through every release
+  // since, 2.6.24 in production included. The ordering is what the update
+  // flow actually depends on.
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
-  assert.equal(pkg.version, '2.6.20');
   assert.equal(compareVersions(pkg.version, '2.6.19'), 1);
 });
 

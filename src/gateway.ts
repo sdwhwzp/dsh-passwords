@@ -1255,6 +1255,17 @@ export function createGatewayServer(
   let nextWorkspaceSnapshotRevision = 0;
   let appliedWorkspaceSnapshotRevision = 0;
   const legacyOwnerResolutions = new Map<string, Promise<number | null>>();
+  /**
+   * Sessions whose ownership evidence the upstream refuses to hand over — a
+   * subagent history the Session service answers `session/agent-busy` for, say.
+   * They stay unowned, which keeps them invisible to subusers and is the safe
+   * answer, but they must not hold the bounded pass incomplete: one unreadable
+   * history would otherwise park every reader on a stale snapshot for the whole
+   * retry window, and a newly registered workspace would not appear until it
+   * expired. Held in memory only, so a restart retries a refusal that has since
+   * cleared.
+   */
+  const unresolvableSessionOwners = new Set<string>();
 
   /** Read one durable session owner, filling the hot index after a cache miss. */
   function sessionOwner(sessionId: string): number | null {
@@ -1584,7 +1595,7 @@ export function createGatewayServer(
                   resolve({ kind: 'past-cursor' });
                   return;
                 }
-                throw new Error('session ownership page was rejected');
+                throw new Error(`session ownership page was rejected (code ${String(errorCode)})`);
               }
               if (!hasExactKeys(result, ['ok', 'value']) || result.ok !== true) {
                 throw new Error('session ownership page returned an invalid result');
@@ -1694,7 +1705,12 @@ export function createGatewayServer(
         ? resolveRemoteSessionOwnerViaPages(sessionId, deadline)
         : resolveLegacySessionOwnerViaHistory(sessionId)
     ).catch((error: unknown) => {
-      console.warn('[dsh-passwords] 旧会话归属证据读取失败，保持不可见:', error instanceof Error ? error.message : String(error));
+      console.warn(
+        '[dsh-passwords] 旧会话归属证据读取失败，保持不可见:',
+        `session=${sessionId}`,
+        `transport=${upstreamRemoteTransport ? 'remote-pages' : 'history'}`,
+        error instanceof Error ? error.message : String(error),
+      );
       return null;
     }).finally(() => {
       if (legacyOwnerResolutions.get(sessionId) === pending) legacyOwnerResolutions.delete(sessionId);
@@ -1718,7 +1734,9 @@ export function createGatewayServer(
     const unresolved: string[] = [];
     for (const [sessionId, cwd] of sessionCwds) {
       sessionCwdById.set(sessionId, cwd);
-      if (sessionOwner(sessionId) === null) unresolved.push(sessionId);
+      if (sessionOwner(sessionId) === null && !unresolvableSessionOwners.has(sessionId)) {
+        unresolved.push(sessionId);
+      }
     }
     let nextIndex = 0;
     let ownershipComplete = true;
@@ -1736,7 +1754,9 @@ export function createGatewayServer(
         } catch {
           // The per-Session resolver logs the concrete failure; this pass keeps the row unowned.
         }
-        if (sessionOwner(sessionId) === null) ownershipComplete = false;
+        // The attempt ran to an answer: an unowned row here is unreadable, not
+        // pending, so it is remembered instead of failing the whole pass.
+        if (sessionOwner(sessionId) === null) unresolvableSessionOwners.add(sessionId);
       }
     };
     const workerCount = Math.min(SESSION_OWNERSHIP_BOOTSTRAP_CONCURRENCY, unresolved.length);

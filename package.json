@@ -1,6 +1,6 @@
 {
   "name": "dsh-passwords",
-  "version": "2.6.24",
+  "version": "2.6.26",
   "description": "dsh-passwords: a server-grade gateway that turns DeepSeek Harness into a multi-tenant platform \u2014 remote access + automatic HTTPS, per-subuser permissions & quotas, sandbox enforcement, first-run setup, SQLite/MySQL auth with at-rest encryption, rate-limit and audit log (bilingual zh/en UI)",
   "type": "module",
   "main": "dist/index.js",
