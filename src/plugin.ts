@@ -26,7 +26,8 @@ import { Database, type UserListRow } from './db.js';
 import { createFieldCrypto } from './encrypt.js';
 import { AuthService, AuthError, assertNoSqlInjection, type AuthedUser, type RequestMeta } from './auth.js';
 import { findDshRoot, patchStatus } from './patch.js';
-import { isDisplayableDshSession, isDisplayableDshSurface, todayLocal } from './permissions.js';
+import { todayLocal } from './permissions.js';
+import { listAssignableWorkspaces } from './assignable-workspaces.js';
 import {
   DEVICE_APPROVAL_ERROR,
   LocalWorkspaceHub,
@@ -1089,66 +1090,21 @@ export function apply(ctx: Context): void {
           writeJson(res, 403, { ok: false, code: 'FORBIDDEN', error: '仅主用户可操作' });
           return;
         }
-        // 读取 dsh 已注册的工作区目录（供主用户配置子用户可访问文件夹时下拉选择）
         try {
-          const reg = ctx.get('workspaceRegistry') as unknown as
-            | {
-                list(): Array<{ path: string; title: string; sessionIds: readonly string[] }>;
-                archivedSessionIds: readonly string[];
-              }
-            | undefined;
-          const sessions = ctx.get('sessions') as unknown as
-            | { get(id: string): unknown }
-            | undefined;
-          const sessionTitle = ctx.get('sessionTitle') as unknown as
-            | { get(session: unknown): { title?: string } | undefined }
-            | undefined;
-          const sessionQuery = ctx.get('sessionQuery') as unknown as
-            | {
-                readSurface(id: string): Promise<{ events: readonly unknown[] }>;
-                readTitle?(id: string): Promise<{ title?: string } | undefined>;
-              }
-            | undefined;
-          // Workspace.sessionIds 保留用于恢复排序的空白槽位。设置页只展示真实会话，
-          // 否则无标题空白会话会回退显示为 session-* UUID，误导管理员配置一个不存在的会话。
-          const archived = new Set((reg?.archivedSessionIds ?? []).map((id) => String(id)));
-          const workspaces = await Promise.all(
-            (reg?.list() ?? []).map(async (workspace) => {
-              const sessionEntries = await Promise.all(
-                workspace.sessionIds
-                  .map((sessionId) => String(sessionId))
-                  .filter((sessionId) => !archived.has(sessionId))
-                  .map(async (id) => {
-                    const liveSession = sessions?.get(id);
-                    if (liveSession !== undefined) {
-                      if (!isDisplayableDshSession(liveSession)) return null;
-                      const title = sessionTitle?.get(liveSession)?.title;
-                      return { id, title: title || id };
-                    }
-                    // sessions.get() 只覆盖 live session；sessionQuery 会补上持久化会话，
-                    // 否则旧的空白持久化槽位会被错误地按 UUID 展示。
-                    if (sessionQuery === undefined) return { id, title: id };
-                    try {
-                      const surface = await sessionQuery.readSurface(id);
-                      if (!isDisplayableDshSurface(surface.events)) return null;
-                      const title = await sessionQuery.readTitle?.(id);
-                      return { id, title: title?.title || id };
-                    } catch {
-                      // 存储短暂不可用时保留配置项，不能把正常会话静默隐藏。
-                      return { id, title: id };
-                    }
-                  }),
-              );
-              return {
-                path: workspace.path,
-                title: workspace.title,
-                sessions: sessionEntries.filter((session): session is { id: string; title: string } => session !== null),
-              };
-            }),
+          const workspaces = await listAssignableWorkspaces(
+            ctx.get('workspaceRegistry'),
+            ctx.get('sessions'),
+            ctx.get('sessionTitle'),
+            ctx.get('sessionQuery'),
           );
           writeJson(res, 200, { ok: true, workspaces });
         } catch {
-          writeJson(res, 200, { ok: true, workspaces: [] });
+          // Registry or persistence failures must not look like a successful empty inventory.
+          writeJson(res, 502, {
+            ok: false,
+            code: 'WORKSPACE_UNAVAILABLE',
+            error: '工作区服务暂不可用，请稍后重试',
+          });
         }
       },
     },

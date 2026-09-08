@@ -242,8 +242,11 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
               .then((r) => {
                 if (!refreshQueuedRef.current) setWorkspaces(r.workspaces ?? []);
               })
-              .catch(() => {
-                if (!refreshQueuedRef.current) setWorkspaces([]);
+              .catch((e) => {
+                if (!refreshQueuedRef.current) {
+                  setWorkspaces([]);
+                  setError(errText(e, trErr));
+                }
               });
           })
           .catch(() => setOverview(null));

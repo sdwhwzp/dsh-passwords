@@ -101,6 +101,23 @@ test('settings card renders account and patch controls for a healthy response', 
   assert.doesNotMatch(card.text(), /card-crashed/);
 });
 
+test('settings card reports workspace inventory failures and recovers on refresh', async (t) => {
+  const responses: Record<string, () => Response> = {
+    '/api/dsh-passwords/workspaces': () => Response.json({
+      ok: false,
+      code: 'WORKSPACE_UNAVAILABLE',
+      error: 'The workspace service is temporarily unavailable; try again later',
+    }, { status: 502 }),
+  };
+  const card = await mountCard(t, responses);
+  assert.match(card.text(), /The workspace service is temporarily unavailable/);
+  assert.doesNotMatch(card.text(), /card-crashed/);
+
+  delete responses['/api/dsh-passwords/workspaces'];
+  await card.refresh();
+  assert.doesNotMatch(card.text(), /The workspace service is temporarily unavailable|card-crashed/);
+});
+
 test('settings card reports degraded remote settings when every patch flag is false', async (t) => {
   const card = await mountCard(t, {}, {
     '/api/dsh-passwords/patch/status': {
