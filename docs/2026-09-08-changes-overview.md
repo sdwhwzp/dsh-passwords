@@ -476,3 +476,27 @@ finalization job 退出 0，没有再次重启服务，先私有保留原 startu
 新增身份和会话校验、同源 HTTP/WebSocket 代理、root 固定启动器、文件与网络隔离，并修复 code-server 版本路径、Cordis 配置装配和编辑器点击遮挡。首次启动失败的自动回滚、最终包摘要、验收与备份位置见[部署记录第 32 节](server-28-deployment-runbook.md#32-2026-09-08-网页-vs-code-编辑器集成)。源码与配套文档使用各自 `dev` 分支，Context 和 Routing Suite 保留第 14 节已上传版本。
 
 编辑器网络隔离，在线扩展市场和远程 Git 不可用；HTTP 下部分剪贴板和 WebView 受限。上游全局 diff 跟随与编辑锁未接入，不保证模型与人工同时修改的协调。使用步骤、已上传的功能提交及完整交接见[插件集成总结](2026-09-08-plugin-integration-handoff.md)。
+
+## 16. 2026-09-08 编辑器界面融合
+
+`dsh-vsceditor@0.5.2-dsh.20260908.1` 已切换上线，只改插件客户端入口；Host 入口、root 启动器、code-server 与 Harness 版本不变，Profile 仍为 16 个 bundle。刷新网页即可看到：会话「编辑器」页签的工具栏改用 DSH 控件与设计 token，编辑器标题栏、活动栏、侧栏、文件树、标签栏和状态栏跟随 DSH 明暗主题实时切换，code-server 自带菜单栏与未接入模型的 Chat 入口已隐藏。
+
+代码区、面包屑、终端面板与快速打开保留 code-server 自身配色，语法与终端对比度不变；DSH 亮色主题配暗色编辑器主题时，外壳与代码区呈现两个明暗分区。活动栏与状态栏本身未隐藏，需要写入 code-server 用户设置才能移除，而该目录仅 root 启动器可写。包摘要、候选装配、切换与验收结果见[部署记录第 33 节](server-28-deployment-runbook.md#33-2026-09-08-编辑器界面融合部署)。
+
+浏览器视觉验收尚未执行，服务器 `accepted-v5.json` 记为 `healthy-pending-visual-acceptance`。本次没有签发临时令牌，也没有写入用户工作区文件。
+
+## 17. 2026-09-08 编辑器主题接管与账号 git
+
+`dsh-vsceditor@0.5.3-dsh.20260908.1` 已上线。编辑器配色改为由 DSH 写入该账号的 code-server 用户设置：明暗、代码区和语法高亮整体跟随 DSH 主题，切换主题时运行中的编辑器直接跟随；菜单栏、活动栏和状态栏由 VS Code 自己收起，不再是留下空条的 CSS 隐藏。上一版只覆盖外壳变量，DSH 切暗色时会出现外壳与代码区明暗不一致，本版修复。
+
+宿主机安装 git `2.45.2`。git 位于 `/usr`，两个沙盒都只读绑定 `/usr`，因此终端与编辑器内立即可用，未修改 root 启动器。编辑器首次打开会在该账号的编辑器 HOME 写入 `.gitconfig`，`user.name` 为账号名、`user.email` 为 `<账号名>@dsh.local`，已存在则不改写，各账号天然分开。终端的 git 身份由密码门负责，尚未实现。两个沙盒仍无网络，远程 git 操作不可用。
+
+设置、校验、包摘要与验收见[部署记录第 34 节](server-28-deployment-runbook.md#34-2026-09-08-编辑器主题接管chrome-精简与账号-git)。浏览器视觉验收尚未执行。
+
+## 18. 2026-09-08 沙盒联网与账号 git
+
+宿主机安装 git `2.45.2`，终端与编辑器沙盒现在可以访问内网 GitLab（`192.168.10.73:30000`）和公网 HTTPS，因此每个人可以在自己账号的终端里用自己的 git 账号拉取、修改和上传代码。沙盒改为共享宿主网络命名空间并以 `dsh-sandbox` 组运行，出站由一张按组过滤的 nftables 表约束：DSH 自身的 API 与登录网关、宿主 SSH、NAS、内网其余主机与 tailnet 全部不可达，实测逐条验证。
+
+编辑器首次打开会写入该账号的 `.gitconfig`（`user.name` 为账号名），各账号的 git 配置与凭据互相独立。**终端的 git 身份尚未自动写入**，首次提交前需自行 `git config --global user.name`/`user.email`。远程 git 走 HTTP + Personal Access Token，仅限内网路径；公网路径已被规则拦掉以免 PAT 明文穿越互联网。
+
+放行公网 443 的副作用是沙盒可访问任意 HTTPS 站点，`npm install`、`pip install` 与在线扩展市场随之可用——这是明确接受的取舍。设计权衡、规则集、启动器摘要与验收矩阵见[部署记录第 35 节](server-28-deployment-runbook.md#35-2026-09-08-沙盒联网账号-git-与出站策略)。

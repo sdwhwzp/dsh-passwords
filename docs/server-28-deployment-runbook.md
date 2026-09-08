@@ -1257,3 +1257,117 @@ Host 默认最多 4 个账号实例，启动超时 30 秒，无连接且空闲 1
 系统运行目录只读但可进入，编辑器不承诺禁止导航到 `/bin`；写入权限限于本账号工作区、编辑器私有状态及沙盒临时目录。编辑器进程不能访问宿主机网络或互联网，因此在线扩展安装、远程 Git 和依赖下载不可用。公网 HTTP 下部分剪贴板和 WebView 功能受限，需要 HTTPS 才能完整使用。
 
 上游全局跟随 diff、编辑锁定、桌面后端和共享设置未接入租户入口；不保证模型与用户同时修改文件时自动协调。code-server 自带 Chat 不是 DSH 模型接口，本次未配置。既有旧子代理历史兼容问题和两条前端 `phase` 异常仍存在；本次没有执行付费模型调用、整机重启或完整灾备恢复演练。
+
+## 33. 2026-09-08 编辑器界面融合部署
+
+`dsh-vsceditor` 从 `0.5.1-dsh.20260908.4` 升级到 `0.5.2-dsh.20260908.1`，只改插件客户端入口，Host 入口、root 启动器、sudoers、code-server 与 Harness `0.1.3-alpha.1-593ee89` 均未变动。Profile 仍为 16 个 bundle。切换后 Host PID `1457337`，restartCount `37`，`pm2 save` 已执行。
+
+### 改动范围
+
+会话「编辑器」页签的工具栏改用 `@deepseek-ai/dsh-client-ui-primitives` 的 `Button` 与 `--dsw-alias-*` 设计 token，路径、加载与错误提示随 DSH 主题渲染。编辑器代理与 DSH 同源，面板把当前 DSH token 写入 code-server 文档的 `--vscode-*` 主题值，覆盖标题栏、活动栏、侧栏、分区头、标签栏与状态栏；列表与滚动条变量声明在 `.part.sidebar` 上，不外溢到快速打开和编辑器浮层。切换 DSH 主题由 `data-ds-dark-theme` 的 MutationObserver 触发重绘，编辑器整页重载由 iframe `onLoad` 重新套用。code-server 自带菜单栏与 Chat 入口按 `aria-label`/`title` 匹配隐藏。代码区、面包屑、终端面板与快速打开保留 code-server 自身配色。
+
+`require('@deepseek-ai/dsh-client-ui-primitives')` 由 Web shell 的冻结 seed 表应答，已在部署运行时 `@deepseek-ai/dsh-client-web/lib/index.js` 中确认该键存在，插件包同时声明 `dsh.client.external`。
+
+### 部署过程
+
+本机 `npm pack` 产出 `dsh-vsceditor-0.5.2-dsh.20260908.1.tgz`，SHA256 `8279897337e35d83fb4256d0fa93404de73b8ef661158d656e969e66f0faeecf`，上传至 `apps/dsh-plugins/addons/20260908-vsceditor-v5/` 后服务器端摘要一致。候选 Profile `apps/deploy-staging/20260908-vsceditor/final-v5/profile` 由线上 Profile 改写 tarball 路径与 `sha512` 完整性生成，`pnpm install --frozen-lockfile` 后四份输入摘要未漂移。切换前以真实 `dsh --profile web` 在隔离 home 与 34087 端口装配候选，插件挂载且未授权会话返回 403。
+
+切换沿用 v4 脚本结构：`deploy-backups/pre-20260908-104825-593ee89-alpha1/deployment.lock` 排他锁、备份 Profile 与 PM2 快照到 `pre-20260908-vsceditor-v5`、停服、换入候选、`pnpm install --frozen-lockfile`、恢复密码门 `.env`、重启，并要求健康检查连续 30 秒通过；PM2 启动路径与环境比对一致。失败路径自动恢复 Profile、`.env` 与服务。
+
+### 验收结果
+
+Host 3080 返回 401、网关 `/gateway/readyz` 200 且数据库健康、登录 302、工作区 3082 可连接，连续 7 次采样稳定。线上 Profile 内 `dsh-vsceditor` 版本为 `0.5.2-dsh.20260908.1`，客户端入口 SHA256 `1ce0ed7ebcbd1a6d62323c1e0fd125ae1d125f40f29c99c9dc7f55dbdafcb8e5`，包含界面融合标记；`dsh --profile web --dump-config` 正常输出 `vsceditor` 条目。新进程启动后日志中没有 `dsh-vsceditor` 相关错误。
+
+启动后 8 秒出现两条 `[dsh-task-board] session/list failed; treating the host session roster as unknown TypeError: fetch failed`：任务看板在 Host HTTP 就绪前轮询，属既有启动竞态，与本次改动无关，插件自身按未知处理。
+
+浏览器视觉验收尚未执行，`accepted-v5.json` 记为 `healthy-pending-visual-acceptance`、`browserVisualVerified: false`。本次没有签发临时令牌、没有写入用户工作区文件、没有调用付费模型。
+
+### 回滚
+
+`apps/deploy-backups/pre-20260908-vsceditor-v5` 含切换前 Profile、密码门环境与 PM2 快照。恢复前先保存后续新增配置与编辑器状态，停服后恢复该 Profile 与匹配 `.env`，重启验收再 `pm2 save`。启动器、sudoers 与 code-server 本次未变，无需回滚。不得删除工作区、会话日志或任务账本，也不得重跑已完成的 v4/v5 切换脚本。
+
+### 已知限制
+
+活动栏与状态栏本身未隐藏：VS Code 工作台栅格按脚本计算的内联尺寸布局，纯 CSS 隐藏只留同色空条；真正移除需要把 `workbench.activityBar.location` 与 `workbench.statusBar.visible` 写入 code-server 用户设置目录，该目录仅 root 启动器可写，须重新部署启动器。语法高亮仍由 code-server 主题决定，DSH 亮色主题配暗色编辑器主题时外壳与代码区呈现两个明暗分区。第 32 节的其余限制保持不变。
+
+## 34. 2026-09-08 编辑器主题接管、chrome 精简与账号 git
+
+`dsh-vsceditor` 从 `0.5.2-dsh.20260908.1` 升级到 `0.5.3-dsh.20260908.1`，并在宿主机安装 git。Host PID `1463610`，restartCount `37`，`pm2 save` 已执行；Profile 仍为 16 个 bundle，Harness 仍 `0.1.3-alpha.1-593ee89`。root 启动器、sudoers 与 code-server 未变动。
+
+### 为什么改掉 0.5.2 的做法
+
+0.5.2 由浏览器把 DSH token 注入同源 iframe 覆盖 `--vscode-*`，只影响外壳；代码区与语法高亮仍由 code-server 自带主题决定，DSH 切暗色时出现外壳与代码区明暗不一致。核查发现 `/etc/dsh-vsceditor.json` 的 `account` 就是 DSH 运行账号 `tzwl3`，启动器创建的 `/var/lib/dsh-vsceditor/<租户>/data` 为 `tzwl3:tzwl3 0700`，Host 本就可读写，因此改用 code-server 用户设置，不需要修改 root 启动器。
+
+### 改动范围
+
+Host 在启动实例后写 `<stateRoot>/<租户>/data/user/User/settings.json`：按 DSH 明暗写 `workbench.colorTheme`（`Default Dark Modern` / `Default Light Modern`），把 DSH token 写进 `workbench.colorCustomizations`，并按 `hiddenChrome` 写 `window.menuBarVisibility`、`workbench.activityBar.location`、`workbench.statusBar.visible`。新增 `POST /dsh-vsceditor/theme`，与 `/open` 同一套身份、会话与托管根目录校验；客户端监听 body 全部属性变化，配色载荷变化时提交。
+
+DSH 只拥有上述五个键，每次写入前重读该账号设置文件并保留其余键，经临时文件重命名落盘；文件不是 JSON 时报错并原样保留。浏览器提交的配色经固定键名白名单与 `#rrggbb[aa]` 校验，载荷上限 16 KiB。`/open` 上的设置失败不阻断编辑器打开，响应回报 `settings` 状态。
+
+`gitIdentity` 开启时首次打开编辑器在 `<stateRoot>/<租户>/data/.gitconfig` 以 `wx` 写入账号 git 身份，已存在则不改写。账号名取自 gateway principal 的 `username`，不满足 `^[A-Za-z0-9._-]{1,64}$` 时回退为 `u<id>`。新增 Config 字段 `followTheme`、`hiddenChrome`、`gitIdentity`、`gitEmailDomain`，均在装载时校验。
+
+宿主机执行 `apt-get install -y --no-install-recommends git`，安装 git `2.45.2`（含 `git-man`、`liberror-perl`）。git 及其依赖全部位于 `/usr`，而两个沙盒都以只读方式绑定 `/usr`，因此终端与编辑器内立即可用，未修改启动器。编辑器与终端沙盒仍为 `--unshare-net`，远程 git 操作依旧不可用。
+
+### 部署过程
+
+本机 `npm pack` 产出 `dsh-vsceditor-0.5.3-dsh.20260908.1.tgz`，SHA256 `1335baf96974b5a90ae7fcc364ca2db36887e47a03d6fe4bc27f2b32e53016ac`，上传至 `addons/20260908-vsceditor-v6/` 后摘要一致。候选 Profile `final-v6/profile` 由线上 Profile 改写 tarball 路径与 `sha512` 生成，`pnpm install --frozen-lockfile` 后输入摘要未漂移。切换前以真实 `dsh --profile web` 在隔离 home 与 34088 端口装配候选，插件挂载且未授权会话返回 403。切换沿用 v4 脚本结构，健康检查连续 30 秒通过，PM2 启动路径与环境比对一致。
+
+### 验收结果
+
+Host 3080 返回 401、网关 `/gateway/readyz` 200 且数据库健康、登录 302、工作区 3082 可连接。线上 `dsh-vsceditor` 版本 `0.5.3-dsh.20260908.1`，客户端入口 SHA256 `b7af7a049be17f98977d366c00e53b75a51927b2d47ca24f7caddab723eddf34`，其中已无 `monaco-workbench` 字样，确认 CSS 注入路径移除。
+
+以线上安装的 `lib/tenant-settings.cjs` 对临时状态根执行一次真实写入：`editor.background` 因不在白名单被丢弃，`workbench.colorTheme` 为 `Default Dark Modern`，三个 chrome 键按配置写入，`.gitconfig` 正确落盘，临时目录已删除。插件自测 12 项通过。`git --version` 在宿主机返回 `2.45.2`。新进程日志中除既有的任务看板启动竞态（`session/list failed`，Host HTTP 就绪前轮询）外无错误。
+
+浏览器视觉验收仍未执行，`accepted-v6.json` 记为 `healthy-pending-visual-acceptance`。本次没有签发临时令牌，没有写入任何账号的真实编辑器设置或工作区文件。
+
+### 回滚
+
+`apps/deploy-backups/pre-20260908-vsceditor-v6` 含切换前 Profile、密码门环境与 PM2 快照。回滚插件不会卸载 git，也不会删除已写入账号的 `settings.json` 与 `.gitconfig`；需要还原编辑器外观时手工删除对应账号的这两个文件。不得删除工作区、会话日志或任务账本。
+
+### 已知限制
+
+账号把 `settings.json` 手工改成非 JSON 后主题不再跟随，直到该文件恢复为合法 JSON；DSH 报错但不覆盖。终端的 git 身份不在本插件范围内：终端 HOME 是账号的工作区根目录，需由密码门写入。git 身份是便利设置而非审计手段，git 允许从命令行或环境指定作者。远程 git 仍被网络命名空间阻断，开放需要修改 root 启动器。第 32、33 节的其余限制保持不变。
+
+## 35. 2026-09-08 沙盒联网、账号 git 与出站策略
+
+目标是让每个账号在自己的终端和编辑器里用自己的 git 账号 clone/pull/push。宿主机安装 git，两个租户沙盒改为共享宿主网络命名空间并以专用组运行，出站由一张按组过滤的 nftables 表约束。`dsh-vsceditor` 升级到 `0.5.4-dsh.20260908.1`，Host PID `1482230`，`pm2 save` 已执行，Profile 仍为 16 个 bundle，Harness 仍 `0.1.3-alpha.1-593ee89`。
+
+### 为什么不是独立网络命名空间
+
+初版设计是每沙盒一个 netns + veth + 网桥，默认全断按需开洞。核查发现两件事推翻了它：宿主 `ufw` 处于 active 且 FORWARD 默认 DROP（nftables 语义下任一表 DROP 即丢包，我们的放行救不回来），而 `net.ipv4.ip_forward` 为 `0`。要走通就得开全局转发并给网桥加一条笼统的 `ufw route allow`，为一个**本就发布在公网**的登录网关和一个**每台办公电脑本就可达**的局域网增加一层路由基础设施。改为共享网络命名空间 + 按组过滤：不动 `ip_forward`（仍为 `0`）、不动 ufw。
+
+pasta 方案也被否决：Ubuntu 24.10 的 2024-08 版 pasta 默认把宿主 loopback 映射进命名空间，`--no-map-gw` 实测无效，该版本没有关闭开关。
+
+### 宿主机改动
+
+安装 git `2.45.2`（`apt-get install -y --no-install-recommends git`，带 `git-man`、`liberror-perl`）。git 及其依赖全部位于 `/usr`，两个沙盒均以只读方式绑定 `/usr`，因此无需修改启动器即可使用。原型验证期间安装的 `passt` 已 `apt-get purge`。
+
+新增系统组 `dsh-sandbox`（gid `984`）。规则文件 `/etc/dsh-sandbox.nft` 由 `dsh-sandbox-nft.service`（oneshot、`RemainAfterExit`、`ExecStop` 删表）装载，已 enable。表 `inet dsh_sandbox` 的 output 链只在 `meta skgid 984` 时跳转到 sandbox 链，无 socket 的包不跳转，宿主自身流量不受影响。sandbox 链依次：放行回环 53；丢弃回环上 1024 以下端口与 3080/3081/3082；放行其余回环端口；`::1` 同规则后丢弃全部 IPv6；放行 `192.168.10.73:30000`；丢弃 `10/8`、`172.16/12`、`192.168/16`、`169.254/16`、`100.64/10`；丢弃本部署公网地址 `221.2.171.165`；放行 tcp 443；其余丢弃。
+
+### 启动器改动
+
+`dsh-tenant-editor` 与 `dsh-tenant-terminal` 均去掉 `--unshare-net`，`setpriv --regid` 由账号 gid 改为 `dsh-sandbox`，并只读绑定 `/etc/ssl` 与 `resolv.conf`、`hosts`、`nsswitch.conf`、`passwd`、`group`——沙盒的 `/etc` 原为空目录，缺根证书会让 HTTPS 直接失败。源码分别在 `dsh-vsceditor/scripts/tenant-editor-launcher.py` 与 `dsh-passwords/scripts/tenant-terminal-launcher.py`。
+
+摘要变化：编辑器 `82bcc6c0…` → `4952114cad3393468b48e772cdcfb35cd2e0e5957bcd8317d05d2bcb810d683f`，终端 `6bb4efc2…` → `ddb8b89b9a5e8493e68860f952287529e6144db1cf8e9cb38a7bcfc3f50f2428`。两条 sudoers 记录已按新摘要重新 pin，安装前经 `visudo -c` 校验。旧文件保留为 `/usr/local/libexec/*.20260908-v2`，旧 sudoers 保留为 `/root/sudoers-*.20260908-v2.bak`。
+
+`dsh-vsceditor` 升级到 `0.5.4` 的唯一目的是让包内 `scripts/tenant-editor-launcher.py` 与已安装的 root 启动器一致：包内该文件摘要与 `/usr/local/libexec/dsh-tenant-editor` 相同，`lib/` 内容与 `0.5.3` 相同（客户端 bundle SHA 未变）。
+
+### 验收结果
+
+以 `setpriv --regid 984` 直接跑的可达性矩阵：内网 GitLab `:30000` 通、`github.com:443` 通、DNS 通；DSH API、登录网关（回环 / LAN / 公网三条路径）、宿主 SSH、GitLab 那台的 22/80/443、NAS、内网网关、GitLab 公网路径、`github.com:22`、tailnet 全部断。同一矩阵以 gid 1000 运行时宿主自身不受影响。
+
+经真实终端启动器的端到端测试：`id` 返回 `gid=984(dsh-sandbox)`，`git version 2.45.2`，GitLab 可达，DNS 可用，登录网关与 NAS 被拦，CA 包存在。沙盒内 `git ls-remote https://github.com/git/git HEAD` 返回真实 SHA，证明 DNS、TLS、CA 与 git 全链路可用。
+
+`dsh-vsceditor` 自测 12 项通过；候选 Profile 经真实 `dsh --profile web` 在隔离 home 与 34089 端口装配通过；切换后健康检查连续 30 秒通过。浏览器视觉验收仍未执行，`accepted-v7.json` 记为 `healthy-pending-visual-acceptance`。
+
+### 已知限制
+
+出站策略是「默认通、按规则拦」，不是「默认断、按需放」；规则错漏即是缺口，规则集存档在 `deploy-artifacts/20260908-vsceditor/records/dsh-sandbox.nft`。放行公网 443 意味着沙盒可访问**任意 HTTPS 站点**，`npm install`、`pip install` 与 code-server 在线扩展市场随之可用，数据也可经 HTTPS 外发——这是部署方明确接受的取舍。沙盒之间不再有网络命名空间隔离，可互相访问对方在高位端口监听的本地服务。所有沙盒仍以同一 uid 1000 运行，隔离依靠挂载命名空间；联网后一次逃逸的价值上升。
+
+内网 GitLab 为 HTTP，git over HTTP 的 PAT 以明文传输，仅限局域网内；公网路径 `221.2.171.165:30000` 已被规则拦掉，避免 PAT 明文穿越互联网。GitLab 对 git over HTTP 通常不接受账号密码，需在 GitLab 建 Personal Access Token。
+
+**终端的 git 身份尚未自动写入**：编辑器 HOME 是每账号独立的 `/editor-data`，`dsh-vsceditor` 会在首次打开时 seed `.gitconfig`；终端 HOME 是账号的工作区根目录，由密码门负责，目前未实现。各账号首次在终端提交前需自行执行 `git config --global user.name`/`user.email`，凭据若用 `credential.helper store` 会落在工作区根目录。
+
+### 回滚
+
+装回 `/usr/local/libexec/*.20260908-v2` 并从 `/root/sudoers-*.20260908-v2.bak` 恢复两条 sudoers（`visudo -c` 校验后再替换），沙盒即恢复 `--unshare-net` 且以账号 gid 运行。`systemctl disable --now dsh-sandbox-nft.service` 删表；`groupdel dsh-sandbox` 可选。git 与 nftables 单元独立于 Profile，回滚 `dsh-vsceditor` 到 `pre-20260908-vsceditor-v7` 不会撤销它们。
