@@ -1,24 +1,24 @@
-# 2026-09-08 本次改动清单（Harness 0.1.3-alpha.1 升级，进行中）
+# 2026-09-08 本次改动清单（Harness 0.1.3-alpha.1 已部署）
 
-> 记录本轮“检查全部源仓库更新 → 升级 Harness 到 0.1.3-alpha.1 → 各插件适配 → 本机验证”任务中已产生的改动。上一轮记录见 `docs/2026-09-04-changes-overview.md`。
+> 记录本轮“检查全部源仓库更新 → 升级 Harness 到 0.1.3-alpha.1 → 各插件适配 → 本机验证 → 28 部署”任务中已产生的改动。上一轮记录见 `docs/2026-09-04-changes-overview.md`。
 >
-> **状态：本机候选安装核验完成，发布门禁尚未全部通过，未部署到 28 服务器。** 上次验收记录为 runtime `0.1.2-rc.1` + dsh-web-all `0.3.14` + dsh-passwords `2.6.19`；补充登录信息后已核实三条 current 路径与该基线一致，已取得安全发布清单及复用制品，尚未修改服务器。
+> **状态：28 已完成本次私有 alpha.1 cohort 部署，2026-09-08 12:58:29（Asia/Shanghai）记录为 accepted，PM2 startup 已保存。** 三条 current 均为 `20260908-104825-593ee89-alpha1`；最终 Host PID `1348895`、restartCount `23`、kill_timeout `30000`。remote 配置修复及修复后生产、Doctor、运行验收通过；生产报告为 passed-with-warnings，保留 `LEGACY_SESSION_OWNER_BOOTSTRAP_PARTIAL` 和 browserUiVerified=false。未发布公共 npm，原完整测试/公共锁缺口及历史失败继续保留。
 
-## 1. 各仓库当前状态
+## 1. 各仓库部署源码状态
 
 | 仓库 | 分支 | 状态 | 说明 |
 |---|---|---|---|
-| deepseek-harness | `tzwl` | 已提交 `593ee89aa6`、**未推送** | 文档 33 项与 lint 通过；最终全量 9 项失败，原预算聚焦 9 项通过（§10.6） |
-| macproject/dsh-web | `master` | 已推送 `cec0cde4` | 含合并 `0a01f09c`；另有未应用的 alpha.1 修复候选，隔离 typecheck/build 与 3634 项测试通过（§10.5） |
-| macproject/dsh-passwords | `feature/principal-budget-webdav` | 修复 `388f80b` 已提交、**未推送** | 空白会话修复已验证（§10.3）；另有未提交发布依赖候选（§10.7） |
-| macproject/dsh-plugin-subscriptions | `dev` | 修复 `a9a030b` 已提交、**未推送** | 实时目录和 0.1.3 API 适配已验证（§10.2）；另有未提交发布依赖候选（§10.7） |
-| macproject/dsh-at-file | `dev` | 无待合上游；有未提交发布依赖候选 | 见 §10.7 |
-| macproject/dsh-spend | `feature/principal-budget-webdav` | 无待合上游；有未提交发布依赖候选 | 见 §10.7 |
-| macproject/nas | `main` | 无待合上游；有未提交发布依赖候选 | 见 §10.7 |
+| macproject/dsh-plugin-subscriptions | `codex/internal-013-deploy-20260908` | 已推送 `048176fbb4` | 0.6.4，Codex 实时目录与 alpha.1 API 适配 |
+| macproject/dsh-passwords | `codex/internal-013-deploy-20260908` | 已推送 `fce5ceb386` | 2.6.20，空白会话修复和部署依赖对齐；公共锁保留缺口 |
+| macproject/dsh-at-file | `codex/internal-013-deploy-20260908` | 已推送 `0a9b67b2ff` | 0.7.3，176 项 check 及构建通过 |
+| macproject/dsh-spend | `codex/internal-013-deploy-20260908` | 已推送 `80d97981cf` | 0.6.6，公开一致性门禁 42/43，私有 Profile 部署 |
+| macproject/nas | `codex/internal-013-deploy-20260908` | 已推送 `36c9dd9508` | 0.2.6，构建和私有 Profile 安装验证通过 |
+| deepseek-harness | `tzwl` | 已推送 `593ee89aa6` | 全量 9 失败及原预算聚焦 9 通过保留；§10.6 |
+| macproject/dsh-web | `master` | 已推送 `56b9de30ee` | Pet/all 内部版本、alpha.1 迁移与源码检查完成；§10.11 |
 | dsh-shandong-tizhi-brand | `main` | 无待合上游 | — |
 | macproject/dsh-weknora | `main` | 按既往决定跳过 | 腾讯上游 2916 提交 |
 
-续跑时直接查询远端确认：`sdwhwzp/dsh-web` 的 `master` 当时已是 `5e65a315`，线上 task-board 修复已经推送；本地 `origin/master` 停在旧值。随后已将 51 个上游提交、合并提交和一项末尾空行清理提交推送，远端与本地 `master` 均为 `cec0cde4`。
+续跑时直接查询远端确认：`sdwhwzp/dsh-web` 的 `master` 当时已是 `5e65a315`，线上 task-board 修复已经推送；本地 `origin/master` 停在旧值。随后已将 51 个上游提交、合并提交和一项末尾空行清理提交推送，该阶段远端与本地 `master` 均为 `cec0cde4`；后续 alpha.1 迁移已推进至 §1 的 `56b9de30ee`。
 
 ## 2. deepseek-harness：合并 upstream 0.1.3-alpha.1
 
@@ -174,7 +174,7 @@ function pickerModels(models) { return models.filter(m => CODEX_PICKER_MODEL_IDS
 1. **apiproxy 白名单补丁**——上游删除（0.1.3 已无该包）。本 fork **已经清理过**，无需处理。
 2. **可分配工作区的空白会话过滤**——上游明确移除，其 JSDoc 写明“`session.create()` 之后会话本来就是空白的；能否分配只由注册表成员资格、归档状态与持久化存在决定”。本 fork 的 `src/plugin.ts:1124/1133` **仍在**用 `isDisplayableDshSession` / `isDisplayableDshSurface` 过滤，且外层 `catch` 会把异常吞成空列表——与此前“选择不了工作区”的故障同源。
 
-续跑已定向移植第 2 项并补回归测试（§10.3），未全量合并这 7 个提交。空白会话在管理员分配清单中可选，账号可见性仍受原有权限约束；改动尚未上线。
+续跑已定向移植第 2 项并补回归测试（§10.3），未全量合并这 7 个提交。空白会话在管理员分配清单中可选，账号可见性仍受原有权限约束；该阶段改动尚未上线，现已随 §10.11–10.16 部署。
 
 本轮已完成的是：把仓库里未提交的 **BotHub Bridge**（`src/bot-bridge.ts` + 测试 + `BOTHUB.md`，已接入 `plugin.ts`）落盘为 `0a71ac8`，避免合并时丢失。落盘前验证：`npm run build` 通过，`npm test` 385 项全过。
 
@@ -212,12 +212,9 @@ function pickerModels(models) { return models.filter(m => CODEX_PICKER_MODEL_IDS
 
 见 §6。当前已回收到 29Gi，短期不再紧迫；表中大件是否清理由使用者决定。
 
-## 8. 下一步
+## 8. 后续范围与保留事项
 
-1. Harness 合并已提交为 `593ee89aa6`；该提交的完整文档门禁和 lint 通过，最终全量测试结果另记 §10.6，不能以早期单独复跑结果代替。
-2. 完成 dsh-web 的 alpha.1 SDK 兼容修复与隔离验证（§10.5），再完成五个业务插件的发布声明、锁文件和安装入口对齐（§10.7）。
-3. 28 安全清单与固定第三方制品已取得（§10.8）；限定本机的完整 Profile 安装及冻结重装已通过（§10.10），下一步应完成 Linux 整套 Host 验收与部署备份，不可直接套用开发机注册脚本。
-4. 本机验证和安装布局核验完成后，再按部署手册切换 runtime、dsh-web、dsh-plugins 三条发布线及 Profile 绝对依赖路径。Grok 扩展和额外磁盘清理不在本轮升级必需项内。
+本次私有部署已 accepted，remote 修复后验收和 PM2 startup 保存完成。剩余事项是公开 npm/开发锁恢复、既有 Harness 全量失败诊断及未执行的浏览器、真实模型/NAS和数据恢复演练；它们不应记为本次已通过。Grok 扩展和额外磁盘清理未执行。
 
 ## 9. 回退依据
 
@@ -227,9 +224,11 @@ function pickerModels(models) { return models.filter(m => CODEX_PICKER_MODEL_IDS
 | dsh-web | 合并提交 `0a01f09c` 的第一父提交 `5e65a315` |
 | dsh-passwords | `0a71ac8` 之前为 `2.6.19` 线上同源状态 |
 | dsh-plugin-subscriptions | `a9a030b` 的第一父提交；保留本次提交，可另行 revert |
-| 28 服务器 | 本轮未改动；已核实 current 与上次 rc.1 基线一致，安全清单见候选目录 `server-28/` |
+| 28 服务器 | 已部署并 accepted；完整回退备份为 `/home/tzwl3/apps/deploy-backups/pre-20260908-104825-593ee89-alpha1`，包括五 data roots 与 MySQL。旧 runtime/plugins `20260904-204003-bf8d4921d9-rc1`、旧 Web `20260905-083633-5e65a315-rc1` 保留。Doctor 副作用、精确锁恢复、备份失败和配置修复均另记下文。 |
 
 ## 10. 续跑记录
+
+§10.1–10.10 保留各次验证当时的结果；当前部署结论见 §10.11–10.16。历史失败、跳过和当时未执行的范围不回写成通过。
 
 ### 10.1 独占验证尚未取得
 
@@ -241,13 +240,13 @@ function pickerModels(models) { return models.filter(m => CODEX_PICKER_MODEL_IDS
 
 提交 `a9a030b6ae06b9042c79533fe3681c5c10c1942a`（`fix(codex): discover subscription models from the live catalog`）。除原有目录改动，还补齐 `resolveOwnModel` 的输入模态传播，避免纯文本模型在实际选择后仍被宣称支持图片；补充目录、版本、配置和缓存回归，并更新 README 双语。
 
-Node `22.21.1` 下 `npm test` 为 378 项：372 通过、6 跳过、0 失败；`npm run build` 通过，包含 Host 和 Client 类型检查。既有登录测试会探测 macOS Keychain，本次因已有登录凭据而跳过 6 项文件存储测试；没有输出或修改凭据，也没有调用真实 token/API 接口。日志为 `/tmp/dsh-013-subscriptions-test.log` 和 `/tmp/dsh-013-subscriptions-build.log`。提交尚未推送。
+Node `22.21.1` 下 `npm test` 为 378 项：372 通过、6 跳过、0 失败；`npm run build` 通过，包含 Host 和 Client 类型检查。既有登录测试会探测 macOS Keychain，本次因已有登录凭据而跳过 6 项文件存储测试；没有输出或修改凭据，也没有调用真实 token/API 接口。日志为 `/tmp/dsh-013-subscriptions-test.log` 和 `/tmp/dsh-013-subscriptions-build.log`。该阶段提交尚未推送；现已随 §1 内部部署分支推送。
 
 ### 10.3 空白会话分配已验证并提交
 
 提交 `388f80b`（`fix(workspaces): allow assigning registered blank sessions`）。工作区清单保留 live 和可读取的持久化空白会话，过滤已归档、已删除及目录不存在的记录；只有明确的 `SESSION_QUERY_SESSION_NOT_FOUND` 才按会话已删除处理。服务缺失或存储失败返回 HTTP 502 / `WORKSPACE_UNAVAILABLE`，设置卡显示错误并支持刷新恢复，避免把失败伪装成空清单。管理员鉴权保持在清单读取之前。
 
-Node `22.21.1` 下 `npm test` 为 392 项：379 通过、13 项既有跳过、0 失败；`npm run build` 通过，包含 Host/Client 类型检查和客户端 bundle。日志为 `/tmp/dsh-013-passwords-test.log` 和 `/tmp/dsh-013-passwords-build.log`。提交尚未推送，28 服务器未改动。
+Node `22.21.1` 下 `npm test` 为 392 项：379 通过、13 项既有跳过、0 失败；`npm run build` 通过，包含 Host/Client 类型检查和客户端 bundle。日志为 `/tmp/dsh-013-passwords-test.log` 和 `/tmp/dsh-013-passwords-build.log`。该阶段提交尚未推送、服务器未改动；后续推送与服务器操作见 §10.11 起。
 
 ### 10.4 Harness 复核补修
 
@@ -278,7 +277,7 @@ Node `22.21.1` 下，`control.spec.ts` 23 项通过；模型按钮、工具图�
 
 隔离安装确认 259 个根依赖包与 2563 个 DSH/vendor 引用均匹配本批制品后，alpha.1 类型检查发现实际兼容性错误：`dsh-pet/src/event-projection.ts` 仍投影已移除的持久化 `assistant/chunk`，测试也构造旧事件。新 `assistant/live-chunk` 仅属于 Client 投影；Host 必须改订阅 `agent/assistant-stream` 并保留文本/推理增量的宠物状态。已在隔离副本迁移到 Host 流式事件，保留思考/书写增量；start/end 帧不发放奖励，奖励仍由持久化 turn/end 去重处理。监听随全局启停注册和释放，账号级视图保持 idle、无跨账号会话摘要。不能将已推送 `cec0cde4` 直接当作包含该修复的 alpha.1 Web 制品。
 
-隔离副本的 Pet 服务测试 47 项通过；全工作区 typecheck（20 个子项目）和 build 通过；随后 `pnpm -r --workspace-concurrency=2 test` 为 3634 通过、1 跳过、0 失败，其中 Pet 全包 478 项通过。使用原测试预算，未调用真实模型 API，也未运行 Electron 或线上 Host smoke。日志、SDK 来源审计和可应用源码补丁保存于候选目录 `dsh-web-validation/`；真实 dsh-web 仓库仍未应用该迁移。Pet 与聚合包最低 Harness 版本、直接 `dsh-agent` 开发依赖、README 双语和 Agent Note 已单独补成候选 patch；文档配对和 aggregate 检查通过。三个独立 patch（Pet 源码、task-board 测试、发布声明/文档）可共同应用到 `cec0cde4`。正式新版本、统一 SDK 发布锁和 CI/release 的 rc.1 smoke 固定项尚未完成，不能当作已发布修复。
+隔离副本的 Pet 服务测试 47 项通过；全工作区 typecheck（20 个子项目）和 build 通过；随后 `pnpm -r --workspace-concurrency=2 test` 为 3634 通过、1 跳过、0 失败，其中 Pet 全包 478 项通过。使用原测试预算，未调用真实模型 API，也未运行 Electron 或线上 Host smoke。日志、SDK 来源审计和可应用源码补丁保存于候选目录 `dsh-web-validation/`；该隔离验证阶段真实 dsh-web 尚未应用迁移；后续已按 §10.11 提交推送。Pet 与聚合包最低 Harness 版本、直接 `dsh-agent` 开发依赖、README 双语和 Agent Note 已单独补成候选 patch；文档配对和 aggregate 检查通过。三个独立 patch（Pet 源码、task-board 测试、发布声明/文档）可共同应用到 `cec0cde4`。当时正式新版本、统一 SDK 发布锁和 CI/release 的 rc.1 smoke 固定项未完成；后续内部部署版本已提交，公共开发锁及旧 CI 固定项缺口仍保留。
 
 全 Web 测试日志还暴露一个既有 task-board 测试问题：对旧 `modelId` 字段的断言位于生产 catch 内，抛出 AssertionError 仍被吞掉并显示用例通过。alpha.1 的选择请求字段是 `model`、响应字段是 `selected`，生产实现正确；已将测试断言移到调用完成后对捕获请求检查，单文件 15 项通过；单独保存测试修复补丁，防止后续生产 catch 掩盖断言失败。
 
@@ -293,7 +292,7 @@ Node `22.21.1` 下，`control.spec.ts` 23 项通过；模型按钮、工具图�
 | Python 日志/返回值峰值测试 | 预期 `output-limit`，实际为运行时 `timeout`（20 秒） |
 | Python 两项 600 万元素宽度测试 | 实际返回 `wall-clock ceiling reached (60000ms)`，不能归入 Vitest 默认 5 秒超时 |
 
-随后仅选择这六个文件中的九项失败用例，使用 `pnpm exec vitest run <六个文件> -t <九项用例名称>`，保留原配置、预算和断言：9 项全部通过，293 项因名称筛选未执行，耗时 58.80 秒。日志为 `/tmp/dsh-013-failed-cases.log`。没有扩大全局/用例超时、降低断言或修改这些测试；本轮聚焦通过说明失败在该次运行未复现，不能把完整 `pnpm run test` 改记为通过，也不能据此证明并发稳定性。Harness 合并尚未推送。
+随后仅选择这六个文件中的九项失败用例，使用 `pnpm exec vitest run <六个文件> -t <九项用例名称>`，保留原配置、预算和断言：9 项全部通过，293 项因名称筛选未执行，耗时 58.80 秒。日志为 `/tmp/dsh-013-failed-cases.log`。没有扩大全局/用例超时、降低断言或修改这些测试；本轮聚焦通过说明失败在该次运行未复现，不能把完整 `pnpm run test` 改记为通过，也不能据此证明并发稳定性。该阶段 Harness 合并尚未推送；现已推送，测试结果保持原值。
 
 追加只读审计已保存为候选目录 `validation-logs/harness-flake-review.md`。Inspector 两例的 5 秒外层预算小于所启动 Worker 的合法预算，且存在先申请空闲端口再关闭重绑、断言失败后缺少 finally 清理的问题；这些静态缺陷不等于已证明本次超时根因。Python 的大数据用于 Linux 地址空间限制下的内存回归，macOS 不提供同一限制；缩小数据必须先用 Linux 负对照证明仍会击中原缺陷，不能仅为消除超时减少样本。其余失败仍缺少具体阶段耗时证据。本次没有修改六个测试文件、扩大预算或新增 skip。
 
@@ -301,7 +300,7 @@ Node `22.21.1` 下，`control.spec.ts` 23 项通过；模型按钮、工具图�
 
 五个业务插件本机直接声明的 DSH 依赖均已软链到 Harness `0.1.3-alpha.1`，但发布 manifest 仍为 `0.1.2-rc.1`。本地 semver `7.8.5` 验证 `satisfies('0.1.3-alpha.1', '^0.1.2-rc.1')` 为 false，本机构建成功不能代替制品安装核验。
 
-按前次升级惯例整体切换目标线，保留各仓库已有的精确/caret 写法；候选版本为 subscriptions `0.6.4`、passwords `2.6.20`、at-file `0.7.3`、spend `0.6.6`、NAS `0.2.6`。同时更新 README、at-file 插件 manifest、passwords 安装器/Docker 默认版本和版本准入测试，共 20 个文件。品牌插件没有 DSH 依赖，无需改版。上述为未提交的候选 diff；隔离生成锁阶段未改真实锁或 node_modules，后续 at-file 构建的自动依赖同步另记下文。
+按前次升级惯例整体切换目标线，保留各仓库已有的精确/caret 写法；候选版本为 subscriptions `0.6.4`、passwords `2.6.20`、at-file `0.7.3`、spend `0.6.6`、NAS `0.2.6`。同时更新 README、at-file 插件 manifest、passwords 安装器/Docker 默认版本和版本准入测试，共 20 个文件。品牌插件没有 DSH 依赖，无需改版。上述当时为未提交候选；现已加入一个 at-file 版本预期测试，共 21 文件提交到 §1 内部部署分支。隔离生成锁阶段未改真实锁或 node_modules，后续 at-file 构建的自动依赖同步另记下文。
 
 在隔离临时目录使用 npm `--package-lock-only --ignore-scripts` 生成锁时，passwords 因官方 registry 缺少 `@deepseek-ai/dsh-api-session-controller@0.1.3-alpha.1` 返回 ETARGET。Spend 和 NAS 的 caret 范围分别解析出 44 和 25 个 `0.1.3-alpha.2` DSH 条目，均未回填，避免混入未经本轮验证的版本。没有使用 `--force`、`--legacy-peer-deps` 或伪造 resolution/integrity。仅确认了首个缺包，未声称其他 exact 依赖在 npm 可用。
 
@@ -309,9 +308,9 @@ Node `22.21.1` 下，`control.spec.ts` 23 项通过；模型按钮、工具图�
 
 候选 patch 已按仓库保存到 `/Users/wangzhipeng/macproject/deploy-artifacts/20260908-013-candidate/plugin-dependencies/`，并记录基线提交、涉及文件以及 patch/旧锁 SHA-256；排除了本改动总览。锁文件和插件制品安装核验仍未完成，不能直接将这些候选 diff 当作可发布版本。下一步需以同批 runtime tarball 和部署 Profile 的显式 overrides 核验实际安装布局。
 
-追加本机检查：subscriptions、passwords、at-file、NAS 的已有 build 均通过；passwords 两项版本/peer 固定测试通过。Spend 没有 build 或 typecheck 脚本，执行已有 `npm test` 为 42 通过、1 失败；唯一失败是候选 package `0.6.6` 与旧 lock `0.6.5` 未同步，依赖锁仍待生成，该检查记为未通过。记录与日志位于候选目录 `plugin-dependencies/light-validation/`。
+追加本机检查：subscriptions、passwords、at-file、NAS 的已有 build 均通过；passwords 两项版本/peer 固定测试通过。Spend 没有 build 或 typecheck 脚本，执行已有 `npm test` 为 42 通过、1 失败；首先失败的是测试对 package 版本的旧硬编码 `0.6.5`，实际为 `0.6.6`；后续锁根版本及 peer 预期也未同步。此项是公开发布一致性门禁失败，旧公共锁不伪改，私有 Profile 冻结安装另行验证。记录与日志位于候选目录 `plugin-dependencies/light-validation/`。
 
-at-file 的 `pnpm run build` 被 pnpm `11.24.0` 默认 `verify-deps-before-run=install` 自动触发依赖重整，虽未显式运行 install，node_modules 仍发生了变化。构建前后全部已跟踪文件、锁和 gitstatus 均相同；当前 14 个预期直接 DSH peer 均链接本机 Harness `0.1.3-alpha.1`。未逐项记录同步前的链接，不能声称链接前后完全相同；另有一个不在 manifest 中的悬空 `dsh-client-runtime` 链接，来源未确认，未擅自删除。其他候选锁仍与基线一致，依赖候选均未提交。
+at-file 的 `pnpm run build` 被 pnpm `11.24.0` 默认 `verify-deps-before-run=install` 自动触发依赖重整，虽未显式运行 install，node_modules 仍发生了变化。构建前后全部已跟踪文件、锁和 gitstatus 均相同；当前 14 个预期直接 DSH peer 均链接本机 Harness `0.1.3-alpha.1`。未逐项记录同步前的链接，不能声称链接前后完全相同；另有一个不在 manifest 中的悬空 `dsh-client-runtime` 链接，来源未确认，未擅自删除。其他候选锁仍与基线一致，该阶段依赖候选未提交；后续内部部署提交见 §10.11。
 
 ### 10.8 28 部署准备与缺失输入
 
@@ -348,3 +347,58 @@ at-file 的 `pnpm run build` 被 pnpm `11.24.0` 默认 `verify-deps-before-run=i
 该候选共 270 个直接依赖，269 个安装归档实例的 4382 个文件与制品一致，实际 DSH 版本只有 alpha.1；全部 11 个业务/Web Host 入口可用原生 ESM 导入，12 个 bundles 及顺序与 28 一致。另核对链接 Web 副本的 483 项依赖声明、280 个预期实例和 4368 个文件，均匹配已验证的源码副本及同批 runtime 制品。第一次 Office 检查误用 CJS 条件解析 import-only 导出，已改用原生 ESM；原验证 helper 的失败日志仍保留。
 
 最终记录见 `plugin-profile-validation/README.md`、`validation.json` 和 `commands.json`。以上是 macOS 的安装、依赖与入口导入验证，未启动 12 个 bundles 组成的完整 Host、未执行 Linux 原生功能，也未切换服务器。源码发布锁/版本、passwords 安装恢复路径、Web release smoke 和 §10.6 的全量测试失败仍分别保留，不因候选安装通过而自动消除。
+
+### 10.11 内部部署源码与 Linux 冻结安装
+
+七仓源码已按 §1 的远端 ref 推送并核对，正常 hooks、无强推。表内提交是本批制品的源码基线，后续文档提交不改变制品来源。五插件共 21 文件内部部署提交，包含 at-file 旧版本硬编码预期的机械同步；其 `pnpm run check` 首次失败后 176 项通过，typecheck/build 通过。五 tgz 共 389 文件与提交后的源码/编译输出一致，测试不在 tgz 内。源码提交和 tgz SHA 对照见部署记录 `plugin-source-commits.json`、`source-pushes.json`。
+
+Web 已应用 Pet Host 流式迁移、task-board 断言修复及最低版本/双语文档/Agent Note，源码 `56b9de30ee`；Pet/all 内部版本为 `0.3.18-dsh.20260908.1`，最低 Harness `>=0.1.3-alpha.1`，Pet 直接声明 dsh-agent 开发依赖。实际 alpha.1 SDK 的 20 个子项目 typecheck/build、全工作区 3634 通过/1 跳过已验证；其中 Pet 全包 478、服务 47，task-board 断言修复后单文件 15 项通过。公共 Web 开发锁及旧 rc.1 CI smoke 不因内部部署而完成。
+
+Linux Node `22.21.1` 下，runtime、Web、smoke Profile、production Profile 暂存副本四组 fresh frozen 安装均退出 0，package/workspace/lock 摘要不变。runtime 使用 pnpm `11.7.0`，其余 `11.24.0`；完整 Profile 保留 270 个直接依赖和原 12 bundles 顺序。Native 平台包保持官方 exact `0.1.1` registry resolution/integrity，没有 platform file overrides；没有复制 macOS node_modules、混入 alpha.2 或伪造锁。cutover 又在 live Profile 最终路径安装同锁并核对链接，不搬暂存 node_modules。runtime 的 market 仅保留安装，未启用。
+
+### 10.12 Linux smoke 失败历史与最终通过
+
+历史 smoke1 因随机密码缺符号而 setup 400；smoke2 因 DB 父目录包含 managed root 而拒绝子账号工作区；smoke3 因 session/list 错发 request 而非 descriptor 的 _request 被拒。均只修 fixture，保留原断言。smoke4 五项功能通过，但 guard 拒绝默认 Doctor socket；smoke5 功能通过且进程组清空，但 Doctor 救援初始化 npm 请求被 guard 拒绝。五轮整体均保留 failed，Host 子进程退出码 0 不能替代报告 status。
+
+smoke6 增加正式 Doctor home/XDG/local package/真实 dsh 覆盖后，六项检查和整体隔离验收通过：Linux native full，真实 Host/gateway 的 179 entries 清单，Doctor 0.3.17 与 dsh alpha.1 的真实 capsule verified/dump 配置可组合，mock SSE 会话/69 字节 PNG/三个 durable principal 事件，子账号 own session 与跨账号历史/图片拒绝，HMR 错误广播后 generation 2 同 PID 恢复。自有进程组清理为空。179 是装载清单总数，包含 smoke 禁用项，不宣称所有效果启用。
+
+### 10.13 Doctor 共享控制文件副作用与恢复
+
+早期 smoke 未隔离 Doctor home。网络 guard 阻止默认 socket 连接，但不隔离文件系统；Doctor 在 IPC 前写 policy，并可能创建 reconcile lock/更新 deployed，不能记成“生产目录未改”。实际默认目录的 policy mtime 更新，lock owner 是已退出 smoke4 PID `1330600`；token mtime/hash 保持原值。Root 备份后只隔离这个确认自有的死锁到 `pre-20260908-104825-593ee89-alpha1/doctor-control-before-owned-lock-recovery/reconcile.lock.from-smoke4`，没有批量删锁或手写 policy/deployed。旧 Doctor 随后自行恢复 socket 和 0.3.14 成功部署标记。
+
+旧版本受控 graceful restart 约 12 秒通过：PID `545700` 退出，新旧版 PID `1338243`，kill_timeout 持久化为 30 秒；旧重复 Doctor 进程全部退出，仅一个新 Host 子进程，token 未变。后续 smoke 和正式新版本 Doctor 均使用正式本地 source 参数；独立 smoke home 与生产 home 分开。该副作用与恢复历史不因最终成功而删除。
+
+### 10.14 最终备份的失败与成功
+
+历史 v2 在停服前读取受保护系统进程 environ 时 PermissionError 失败，服务未停。v3 对明确的系统进程作窄处理后，停服阶段发现 `.dsh/attachments` 是原有 ext4 bind mount（`/dev/sda1:/dsh-attachments`，13,258,752 allocated bytes），不在原 root 清单内，备份退出；脚本自动恢复旧 cohort ready，PID `1340994`，state failed-old-ready。恢复旧服务不是备份成功。
+
+v4 将附件独立列为第 5 个 root，父 `.dsh` excludes 保留 bind mount。实际停服一致备份约 76.9 秒、退出 0，state complete-service-stopped；包含 `.dsh`、用户工作区、本机工作区、Doctor 和附件五 root 的完整快照；前三者经 rsync/checksum 核验，Doctor 与附件另有完整 manifest 通过，MySQL 13 表 dump 43,402 字节，spend-ledger.sqlite quick_check 通过。Doctor live-copy 约 1 秒、MySQL live dump preflight 均成功，但两者只是非一致性预拷贝/预演，不能替代 v4。
+
+完整备份为 `/home/tzwl3/apps/deploy-backups/pre-20260908-104825-593ee89-alpha1`；旧三条 release 与全部失败证据保留。rollback28-v4 只做静态审核，没有执行数据恢复演练，且仅接受未 accepted/failed 状态。当前已经 accepted，未来回滚必须重新审查当前状态、保存之后产生的数据，不能直接运行旧脚本或宣称一键回滚已验证。
+
+### 10.15 remote 私有配置缺陷与实际修复
+
+cutover 首次退出 0，新 PID `1342917`、restartCount `22`，Doctor 和运行检查通过。生产验收 v1 的流失败是 fixture 使用过期路径；v2 改用实际路径后 workspace/session follow/page 通过，却发现两个身份的 `/api/pair/status` 404。根因是旧 patch 覆盖 aggregate shell 的整个 config，丢失 config.plugin：Host 没有挂载真实 remote 插件及 pair routes，浏览器 aggregate 仍包含 child。此问题不是 3082、Origin 或鉴权故障。
+
+正确的非敏感配置保留 shell selector，并把参数放入内层 config：
+
+```yaml
+- id: web-ui-remote-web-ui
+  config:
+    plugin: '@linxin666/dsh-remote-web-ui'
+    config:
+      autoTunnel: false
+      requirePairingForLan: false
+```
+
+受控 repair job 约 43.5 秒、退出 0；两次隔离 dump 的 174 合成条目比较只改变目标 config，!!js 未执行。原 patch SHA256 `8bcf783c9f655c4be633b4741a30df2c1d5e079dca4dca715d4c6e9cdacbd3f6` 改为 `1625f2b49da6d0109d5f4ecd50e9266a962f286e37edc4d32b08f5438d1415ad`；旧 patch、state、完整 PM2 环境、Doctor 报告和日志 offset 私有保存在 `/home/tzwl3/apps/deploy-staging/20260908-104825-593ee89-alpha1/remote-config-repair-private`。live patch 0600 原子替换，PM2 只重启一次，完整 env 与 launch 字段/30 秒 timeout 不变；新 PID `1348895`、restartCount `23`，健康稳定 30 秒。修复产生新 state 时间，后续验收全部重跑，没有覆盖旧失败记录。
+
+### 10.16 最终验收与 PM2 startup 保存
+
+修复后 production-acceptance-v3、doctor-acceptance-postrepair、operational-verification-postrepair 三个 job 均退出 0。生产所有 required 检查通过；管理员与子账号 pair/status 均 200、requirePairingForLan=false，root/remote HTML 没有旧 rewrite，HTTP/静态 bundle/身份/session list/workspace follow/session follow/page 通过。签发的两个临时 token 全撤销，expiryFallback=0。报告为 passed-with-warnings，唯一警告是既有 LEGACY_SESSION_OWNER_BOOTSTRAP_PARTIAL，browserUiVerified=false；未声称管理员汇总历史逐项所有权已证明。
+
+Doctor armed、fullProtection=true、capsule verified，版本 0.3.17/0.1.3-alpha.1 且实际配置可组合，token 未变。五 root identity 保持，两个既有 WebDAV mounts 恢复，增量日志无 fatal 命中；这不等于真实 NAS读写或模型 API 验收。最终 3080=401、3081 readyz=200/database ready、根路径登录 302、3082 listening；Mac 另实测 gateway/login HTTP 200。
+
+finalization job 退出 0，没有再次重启服务，先私有保留原 startup dump，再 pm2 save。新 dump/.bak 均 0600，exe/cwd/args/kill_timeout 与两项 Doctor env 和 live 匹配；PM2 PID `1348895`、restartCount `23` 保持。2026-09-08 12:58:29（Asia/Shanghai）state 写为 accepted、pm2Saved=true。现有用户 crontab 恰一条 @reboot pm2 resurrect 保留，未改启动机制；没有启用或新增 pm2-tzwl3 systemd 服务，也未执行整机重启演练。
+
+本机证据入口为 `deploy-artifacts/20260908-013-deploy/records/deployment-journal.md` 和 `.json`；服务器最终记录为本次 staging 的 cutover-state.json、finalization-report.json 及各 job 输出。完整测试仍为 Harness 18,196 通过/118 跳过/9 失败，聚焦九例通过不替代全量；Spend 公开一致性仍 42/43，公共 registry/五库锁/passwords npm ci/Web 开发锁及旧 CI smoke 缺口未消失。没有公共 npm publish、真实外部模型调用、浏览器视觉或完整数据恢复演练。

@@ -38,6 +38,8 @@ DeepSeek Harness Web + Web Profile + 插件
 
 ## 3. 当前基线
 
+本次 alpha.1 cohort 已完成私有部署及限定范围验收，2026-09-08 12:58:29 记录为 accepted，PM2 startup 已保存；保留 legacy bootstrap partial 警告及 browser UI 未验证。详情见 §27，旧 rc.1 基线保留于 §26。
+
 | 项目 | 当前值 |
 |---|---|
 | 主机名 | `tzwl3-ThinkCentre-E77` |
@@ -54,13 +56,13 @@ DeepSeek Harness Web + Web Profile + 插件
 | pnpm | `11.24.0` |
 | PM2 | `6.0.13` |
 | Tailscale | `1.102.3` |
-| dsh | `0.1.2-rc.1`，发布 `20260904-204003-bf8d4921d9-rc1`，源提交 `bf8d4921d9` |
-| dsh-passwords | `2.6.19` |
-| dsh-spend | `0.6.5` |
-| dsh-nas-webdav | `0.2.5`，提交 `ef3b9eb` |
-| dsh-plugin-subscriptions | `0.6.2`，提交 `d3f549f` |
+| dsh | `0.1.3-alpha.1`，发布 `20260908-104825-593ee89-alpha1`，源提交 `593ee89aa6` |
+| dsh-passwords | `2.6.20` |
+| dsh-spend | `0.6.6` |
+| dsh-nas-webdav | `0.2.6`，内部部署提交 `36c9dd9508` |
+| dsh-plugin-subscriptions | `0.6.4`，内部部署提交 `048176fbb4` |
 | Office 侧栏预览 | `@huanlin/dsh-plugin-better-sidebar-plugin-office@0.1.3` |
-| dsh-web 插件族 | `@linxin666/dsh-web-all@0.3.14`，发布 `20260905-083633-5e65a315-rc1` |
+| dsh-web 插件族 | Pet/聚合包 `0.3.18-dsh.20260908.1`，remote-web-ui 为 `0.4.0`，其余版本以本批冻结锁为准，发布 `20260908-104825-593ee89-alpha1` |
 | 数据库 | MySQL，`192.168.10.95:3306/dsh_passwords_platform` |
 
 ### 3.1 端口
@@ -473,6 +475,8 @@ pm2 start /home/tzwl3/apps/dsh-runtime/current/node_modules/@deepseek-ai/dsh/lib
   -- web --no-open --port 3080
 pm2 save
 chmod 600 /home/tzwl3/.pm2/dump.pm2
+# pm2 save 若已生成备份，同样保护其中的环境变量。
+if [ -f /home/tzwl3/.pm2/dump.pm2.bak ]; then chmod 600 /home/tzwl3/.pm2/dump.pm2.bak; fi
 ```
 
 当前机器通过用户 crontab 的 `@reboot ... pm2 resurrect` 恢复，不依赖 `pm2-tzwl3.service`。迁移时必须恢复该 crontab，并在重启后验证 PM2 真正在线。
@@ -522,7 +526,7 @@ grep -q 'dsh-passwords-local-workspace-launcher' \
   /home/tzwl3/apps/dsh-plugins/current/dsh-passwords/dist/client.js
 ```
 
-两项必须同时成功。当前正确的 conversation bundle 短 SHA-1 为 `2440832da50b`，dsh-passwords 客户端 bundle 短 SHA-1 为 `d40def448ef9`；未来代码变化会产生新哈希，因此验收应同时检查功能标记，不能永久写死哈希。
+两项必须同时成功。前次验收时的 conversation bundle 短 SHA-1 为 `2440832da50b`，dsh-passwords 客户端 bundle 短 SHA-1 为 `d40def448ef9`；未来代码变化会产生新哈希，因此验收应同时检查功能标记，不能永久写死哈希。
 
 若 Profile 仍旧，优先用同一版本 dsh CLI 重新安装 Web Profile 依赖。紧急恢复时应先备份 Profile 内旧文件，再从经过验证的运行时复制包含该插槽的 `client.js`，重启并检查首页启动清单中的 `rev` 已变化。
 
@@ -791,26 +795,30 @@ rg -n '(PASSWORD|SECRET|TOKEN|AUTH_KEY|API_KEY)=.+|BEGIN .*PRIVATE KEY' \
 
 ## 13. 当前发布标识
 
+下表为已 accepted 的本次 cohort，PM2 startup 已保存。验收范围、警告和旧基线见 §27。
+
 | 组件 | 当前目标 |
 |---|---|
-| runtime | `/home/tzwl3/apps/dsh-runtime/releases/20260904-204003-bf8d4921d9-rc1` |
-| plugins | `/home/tzwl3/apps/dsh-plugins/releases/20260904-204003-bf8d4921d9-rc1` |
-| dsh-web | `/home/tzwl3/apps/dsh-web/releases/20260905-083633-5e65a315-rc1` |
-| runtime 源提交 | `bf8d4921d940dad89863be28494a8c3fb3685126`（`sdwhwzp/deepseek-harness` `tzwl`） |
-| runtime 版本 | `0.1.2-rc.1` |
+| runtime | `/home/tzwl3/apps/dsh-runtime/releases/20260908-104825-593ee89-alpha1` |
+| plugins | `/home/tzwl3/apps/dsh-plugins/releases/20260908-104825-593ee89-alpha1` |
+| dsh-web | `/home/tzwl3/apps/dsh-web/releases/20260908-104825-593ee89-alpha1` |
+| runtime 源提交 | `593ee89aa6ec8496e26dd2f4d3fbaab76b41c65a`（`sdwhwzp/deepseek-harness` `tzwl`） |
+| runtime 版本 | `0.1.3-alpha.1` |
 | dsh-genui 安装包 | SHA-256 `5f119f312014aeb00ff9c4587f340c8981cb4e0255138f465adb58b5c82fc55e` |
-| dsh-at-file 安装包 | SHA-256 `c97936a034d916c2292f8a098de0b8a44541a9407cf73b6ad789a0227eba7a23` |
+| dsh-at-file 安装包 | SHA-256 `6c426ce4487129ab936ca8125ccb5099c3cf65a25e902790bb1f80580831dd4d` |
 | better-sidebar 安装包 | SHA-256 `a6124113e28680c9fb0b3ec71e6c49fb35e5ae0a62f272fba0919afb4f3f51af` |
-| dsh-nas-webdav 安装包 | SHA-256 `df105ae6be6949c348bed6c49255ba9f9e80e4757f5c93b1e627a7aa97829787` |
-| dsh-passwords | `2.6.19`（远程通道前缀修复，见 `## 26`） |
-| dsh-plugin-subscriptions 安装包 | SHA-256 `2322427e5c2a888a5658272c3d791f63caf7988263887273ec83d2c2149af61e` |
+| dsh-nas-webdav 安装包 | SHA-256 `b4ff63131a95c3db1577a8ce8264fc2e405af7d3887a03fab9d808eb5c862d7a` |
+| dsh-passwords | `2.6.20`，内部部署提交 `fce5ceb386` |
+| dsh-plugin-subscriptions 安装包 | SHA-256 `d834a448cbd0e36b8159f1b21a3cd37c844b98df492d21132ca4eb4f2e8f804b` |
 | 品牌插件安装包 | SHA-256 `15d3d51ca465ca76574995d3b0fae6a953aa507d2acda043815d895bbe150a11` |
-| dsh-spend 安装包 | SHA-256 `be9b8a760eea440ecd5bc911136bd0fc597bdf3ad25fccea17f88620e1efe1d8` |
+| dsh-spend 安装包 | SHA-256 `684a742391d99bcfa83919527bfd1bfb9e660d8fa5e3dde5407cd9b808a8776c` |
 | Office 预览安装包 | SHA-256 `0f85a98a2470eef6d372c1c31ad2dc6a88ed642b2a1e2100910b8fcb4c779230` |
 | dsh-weknora 安装包 | SHA-256 `fcb63bbd94070a8796c5f44a76fb62e7bb42e3c5dff35b6c9dc211fc9c5083db` |
 | rc.1 升级前整体备份 | `/home/tzwl3/apps/deploy-backups/pre-rc1-20260904-202228` |
-| 上一个可用 runtime | `/home/tzwl3/apps/dsh-runtime/releases/20260901-162100-b66a316-alpha3` |
-| 上一个可用 plugins | `/home/tzwl3/apps/dsh-plugins/releases/20260902-173500-434f632-alpha4` |
+| 上一个可用 runtime | `/home/tzwl3/apps/dsh-runtime/releases/20260904-204003-bf8d4921d9-rc1` |
+| 上一个可用 plugins | `/home/tzwl3/apps/dsh-plugins/releases/20260904-204003-bf8d4921d9-rc1` |
+| 本次完整回退备份 | `/home/tzwl3/apps/deploy-backups/pre-20260908-104825-593ee89-alpha1`，五 data roots 与 MySQL，v4 完成 |
+| 上一个可用 Web | `/home/tzwl3/apps/dsh-web/releases/20260905-083633-5e65a315-rc1` |
 
 ## 14. 2026-08-27 principal、Spend 与 Excel 预览部署记录
 
@@ -1051,3 +1059,56 @@ pm2 restart dsh-web --update-env
 ```
 
 三条 `current` 必须一起切回，Profile 也必须同批恢复，否则会落入上文的版本错配。
+
+## 27. 2026-09-08 Harness 0.1.3-alpha.1 部署记录
+
+**本次私有部署已完成，2026-09-08 12:58:29（Asia/Shanghai）state=accepted、pm2Saved=true。** release 为 `20260908-104825-593ee89-alpha1`，三条 current 均指向该 release；最终 Host PID `1348895`、restartCount `23`、kill_timeout `30000`。生产报告 passed-with-warnings，保留 LEGACY_SESSION_OWNER_BOOTSTRAP_PARTIAL 与 browserUiVerified=false。公共 npm 发布门禁不在此结论内。
+
+### 源码、制品与实际安装
+
+七仓源码经正常 hooks 推送并核对 live refs，准确提交见 [部署源码表](2026-09-08-changes-overview.md#1-各仓库部署源码状态)。Harness 为 `593ee89aa6`，Web 为 `56b9de30ee`；Pet/all 内部版本 `0.3.18-dsh.20260908.1`，其余本批 Web 版本保持。五插件版本为 passwords 2.6.20、subscriptions 0.6.4、at-file 0.7.3、Spend 0.6.6、NAS 0.2.6，21 文件内部部署提交与五 tgz 的 389 文件来源匹配。本次没有公共 npm publish。
+
+原不可变 tgz 与真实冻结锁用于私有部署，Web/Profile 引用三条新 release 的绝对路径；Profile 保留 270 个直接依赖、原 12 bundles 及固定第三方版本。market 仅保留安装，未启用。Linux 四组 fresh frozen 安装均通过，Node 22.21.1，runtime pnpm 11.7.0、Web/Profile 11.24.0，输入摘要不变。cutover 在 live Profile 最终路径重新安装同锁并检查链接，不移动 staging node_modules，不上传 macOS node_modules；native optional 平台包保持 exact 0.1.1 registry resolution/integrity。
+
+### 隔离 smoke 与 Doctor 副作用历史
+
+smoke1–3 依次修复密码、目录与 descriptor 参数 fixture；smoke4 拒绝默认 Doctor socket，smoke5 拒绝 Doctor rescue 初始化的 npm 请求，五轮整体失败记录保留。smoke6 六项及整体隔离通过：Linux native full、Host/gateway、真实 Doctor capsule、mock会话/图片/principal、子账号跨账号拒绝和同 PID HMR恢复，进程组清理为空。该 smoke 使用 mock 模型和 SQLite，不代替真实模型、NAS、MySQL生产数据或浏览器验收。
+
+早期未覆盖 Doctor home，guard 拒绝连接没有阻止控制文件写入。Root 备份并只隔离已退出的 smoke4 PID 1330600 所有 reconcile lock，token 未变、未手写 policy/deployed；旧 Doctor 自行恢复 socket 和 0.3.14 成功标记。旧版本 graceful restart 约 12 秒通过，PID `545700` → `1338243`、30 秒停止预算，旧重复 Doctor 进程退出。完整副作用及精确恢复证据见 [续跑记录](2026-09-08-changes-overview.md#1013-doctor-共享控制文件副作用与恢复)，不能写生产文件始终未改。
+
+### 完整备份与失败恢复历史
+
+v2 因受保护系统进程 environ 读取失败，在停服前退出。v3 停服后发现 `.dsh/attachments` 为原有本地 ext4 bind mount（/dev/sda1:/dsh-attachments，约 13 MB），因未独立纳入原root清单而退出，脚本自动恢复旧 cohort ready、PID `1340994`、state failed-old-ready。恢复旧服务不是备份成功。
+
+v4 将附件作为第 5 个独立root，父 `.dsh` excludes 保留挂载点；约 76.9 秒完成停服一致备份，state complete-service-stopped，含 `.dsh`、用户工作区、本机工作区、Doctor 与附件五 root 的完整快照；前三者用 rsync/checksum 核验，Doctor 与附件另有完整 manifest，MySQL 13 表 dump 43,402 字节，spend-ledger.sqlite quick_check通过。完整备份 `/home/tzwl3/apps/deploy-backups/pre-20260908-104825-593ee89-alpha1` 和旧release保留。Doctor live-copy、MySQL live dump preflight只是非一致性预拷贝/预演。
+
+rollback28-v4没有实际执行数据恢复演练，且只接受未accepted/failed状态。当前已accepted；未来回滚须重新审查当时状态、先保存之后新产生的数据，不能直接运行旧脚本。原备份不包含本次accepted之后的新增用户数据。
+
+### aggregate shell 的 remote 配置修复
+
+首轮生产流检查是过期路径fixture错误；第二轮流检查通过，却发现真实 `/api/pair/status` 404。旧private patch覆盖整个shell config，丢失config.plugin，导致Host未挂载remote及pair routes；浏览器仍载aggregate child。这不是3082、Origin或鉴权问题。正确非敏感配置为：
+
+```yaml
+- id: web-ui-remote-web-ui
+  config:
+    plugin: '@linxin666/dsh-remote-web-ui'
+    config:
+      autoTunnel: false
+      requirePairingForLan: false
+```
+
+原patch SHA256 `8bcf783c9f655c4be633b4741a30df2c1d5e079dca4dca715d4c6e9cdacbd3f6` → 新patch `1625f2b49da6d0109d5f4ecd50e9266a962f286e37edc4d32b08f5438d1415ad`。旧patch/state/完整PM2env/Doctor报告/日志offset私有保存在 `/home/tzwl3/apps/deploy-staging/20260908-104825-593ee89-alpha1/remote-config-repair-private`。repair job约 43.5 秒退出 0，两次隔离dump的174 条目只改目标config、!!js未执行；live patch0600原子替换，仅重启一次，完整env/launch不变，新PID `1348895` / restartCount `23`健康稳定30 秒。原失败记录未覆盖，修复后全部验收按新state时间重跑。
+
+### 修复后验收与启动保存
+
+production-acceptance-v3、doctor-acceptance-postrepair、operational-verification-postrepair均退出0。生产所有required检查通过，两身份pair/status200且requirePairingForLan=false，HTML无旧rewrite，HTTP/static/identity/session/workspace流与历史page通过；两个临时token全撤销。报告唯一warning是既有LEGACY_SESSION_OWNER_BOOTSTRAP_PARTIAL，browserUiVerified=false。管理员汇总列表的ownershipVerified=false保留，未宣称所有历史归属已完成核对。
+
+Doctor armed/fullProtectiontrue/capsuleVerified，版本0.3.17/dsh0.1.3-alpha.1、实际配置可组合、token未变。五root身份保持、两个既有WebDAV mounts恢复、增量日志无fatal；未额外验证NAS读写。3080=401、3081readyz=200且数据库ready、根路径302登录、3082监听；Mac实测gateway/login HTTP200。HTTP检查不能替代浏览器视觉交互验收。
+
+finalization退出0、pm2Savedtrue、serviceRestartedfalse，PID `1348895` / restartCount `23`保持。保存前私有备份原startup dump，新dump和.bak均0600，exe/cwd/args/30 秒kill_timeout及两项Doctor环境与live一致，最终state accepted。用户crontab恰有一条@reboot pm2 resurrect，旧机制未改；pm2-tzwl3 systemd不存在是预期，未新增服务，未执行整机重启演练。
+
+### 验证范围和保留门禁
+
+Harness完整测试仍18196通过/118跳过/9失败，原预算聚焦九项通过不替代全量；Spend公开一致性42/43保留。公共registry缺exact alpha.1、五插件旧公共锁、passwords npm ci和Web旧开发锁/CI smoke未恢复，私有Profile安装通过不能代替这些门禁。npm Arborist、Mac native file override和全部早期fixture失败保留。没有公共npm publish、真实外部模型、浏览器视觉或数据恢复演练。
+
+本机完整journal与JSON在 `deploy-artifacts/20260908-013-deploy/records/deployment-journal.*`，服务器state/report和jobs在本次staging。隔离Host必须分别设置DSH/Doctor/XDG根；网络guard不隔离文件。后续备份应保留五root及原bind mount，不能把旧staging依赖树移动为live或批量清理Doctor锁。
