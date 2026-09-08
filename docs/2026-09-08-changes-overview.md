@@ -4,6 +4,10 @@
 >
 > **状态：28 已完成本次私有 alpha.1 cohort 部署，2026-09-08 12:58:29（Asia/Shanghai）记录为 accepted，PM2 startup 已保存。** 三条 current 均为 `20260908-104825-593ee89-alpha1`；最终 Host PID `1348895`、restartCount `23`、kill_timeout `30000`。remote 配置修复及修复后生产、Doctor、运行验收通过；生产报告为 passed-with-warnings，保留 `LEGACY_SESSION_OWNER_BOOTSTRAP_PARTIAL` 和 browserUiVerified=false。未发布公共 npm，原完整测试/公共锁缺口及历史失败继续保留。
 
+> **14:36 空会话列表修复完成：** 重建 28 条历史空会话摘要，原日志及标题保留；服务未重启。管理员列表的非空标记由 41 条恢复为 13 条，子账号由 10 条恢复为 5 条；刷新页面后应用过滤。诊断与验证范围见 [部署记录 §28](server-28-deployment-runbook.md#28-2026-09-08-升级后空会话列表修复)。
+
+> **15:18 历史加载修复完成复核：** 13 条旧日志已生成并验证 v2 后继，原始文件保留；用户报告的会话及模型选择状态可正常读取。另有一条旧子代理历史的描述记录位于继承区，仍无法通过 API 打开。线上包和服务进程未变，迁移源码修复保留在 Harness 工作区，详见 [部署记录 §29](server-28-deployment-runbook.md#29-2026-09-08-principal-历史迁移修复)。
+
 ## 1. 各仓库部署源码状态
 
 | 仓库 | 分支 | 状态 | 说明 |
@@ -402,3 +406,52 @@ Doctor armed、fullProtection=true、capsule verified，版本 0.3.17/0.1.3-alph
 finalization job 退出 0，没有再次重启服务，先私有保留原 startup dump，再 pm2 save。新 dump/.bak 均 0600，exe/cwd/args/kill_timeout 与两项 Doctor env 和 live 匹配；PM2 PID `1348895`、restartCount `23` 保持。2026-09-08 12:58:29（Asia/Shanghai）state 写为 accepted、pm2Saved=true。现有用户 crontab 恰一条 @reboot pm2 resurrect 保留，未改启动机制；没有启用或新增 pm2-tzwl3 systemd 服务，也未执行整机重启演练。
 
 本机证据入口为 `deploy-artifacts/20260908-013-deploy/records/deployment-journal.md` 和 `.json`；服务器最终记录为本次 staging 的 cutover-state.json、finalization-report.json 及各 job 输出。完整测试仍为 Harness 18,196 通过/118 跳过/9 失败，聚焦九例通过不替代全量；Spend 公开一致性仍 42/43，公共 registry/五库锁/passwords npm ci/Web 开发锁及旧 CI smoke 缺口未消失。没有公共 npm publish、真实外部模型调用、浏览器视觉或完整数据恢复演练。
+
+## 11. 本次部署与故障修复交接（2026-09-08）
+
+本节汇总本次部署后的最终状态；服务器事实以 15:18 的验收记录为准。后续继续处理时，先核对运行版本和工作区差异，再接续下列未完成项。
+
+| 项目 | 已完成结果 | 详细记录 |
+|---|---|---|
+| 28 服务器部署 | 私有 Harness 0.1.3-alpha.1 与配套插件部署完成，启动状态已保存 | [部署记录 §27](server-28-deployment-runbook.md#27-2026-09-08-harness-013-alpha1-部署记录) |
+| Remote 配置 | 修正 aggregate shell 的嵌套配置，恢复配对与远程接口 | 部署记录 §27 的 remote 配置修复与验收 |
+| 大量空对话 | 重建 28 条旧空会话摘要，保留原日志和标题 | [部署记录 §28](server-28-deployment-runbook.md#28-2026-09-08-升级后空会话列表修复) |
+| 历史与模型加载 | 为 13 条旧日志发布有效 v2 后继；指定主会话历史和模型选择状态在两类账号下通过验证 | [部署记录 §29](server-28-deployment-runbook.md#29-2026-09-08-principal-历史迁移修复) |
+| 剩余历史异常 | 1 条旧子代理历史的 descriptor 位于继承区，当前 API 仍拒绝打开 | 部署记录 §29 的剩余限制 |
+
+### 11.1 尚未提交的 Harness 修改
+
+仓库 `/Users/wangzhipeng/deepseek-harness`，分支 `tzwl`。以下修复仍在本机工作区，尚未提交、推送或作为新运行包部署；线上历史修复使用了修正迁移库生成的数据后继，运行包仍是本次原发布版本。
+
+| 文件（相对 Harness 仓库） | 修改内容 |
+|---|---|
+| `packages/session/session-format-v0-to-v1/src/dispositions.ts` | 接受用户消息、turn/start、step/start 的可选 principal |
+| `packages/session/session-format-v0-to-v1/src/payload-validation.ts` | 校验身份字段及角色，仅用户消息允许携带 principal |
+| `packages/session/session-format-v0-to-v1/src/migration.ts` | 旧 steering/message 和 turn.trigger 归一化保留身份 |
+| `packages/session/session-format-v0-to-v1/tests/legacy.spec.ts` | 补充旧消息身份保留及无效角色拒绝用例 |
+| `packages/session/session-format-catalog/tests/principal.spec.ts` | 覆盖 v0/v1 到 v2 的身份保留、畸形字段与角色限制 |
+| `packages/test-support/llm-replay/tests/session-format-corpus.spec.ts` 及相邻 `__snapshots__/session-format-corpus.spec.ts.snap` | 录制语料经迁移后保持身份和模型重放输入 |
+| `packages/session/session-format-v0-to-v1/README.{md,zh.md,i18n.yaml}` | 更新迁移支持范围及双语配对 |
+| `.agents/notes/implemented/architecture/2026-09-05-principal-authorization-across-013-upstream.{md,zh.md,i18n.yaml}` | 记录已发布历史数据中的身份保留要求 |
+
+本仓库的本轮文档更新为 `docs/2026-09-08-changes-overview.md` 与 `docs/server-28-deployment-runbook.md`，当前也尚未提交或推送。前文源码状态表记录的是已部署阶段，不表示这些后续修改已经发布。
+
+### 11.2 证据与后续事项
+
+本机证据根目录为 `/Users/wangzhipeng/macproject/deploy-artifacts/20260908-013-deploy/records/`：`deployment-journal.*` 记录部署，`blank-session-repair-*-verification.json` 记录空会话修复，`history-principal-repair-summary.json` 和 `history-principal-repair-storage-verification.json` 记录历史迁移，`jobs/history-model-repair-final-acceptance/` 保存最终接口验收。完整备份、私有维护数据及失败候选保留位置见部署记录 §27–§29，不能将这些私有材料整体复制进 Git。
+
+后续事项：修复并验证那一条旧子代理历史的兼容问题；将工作区中的 principal 迁移修复按正常检查流程提交并纳入后续运行包；补充浏览器实际交互验收。原全量测试的 9 项失败、公共依赖锁缺口和历史归属未完全核验等限制继续保留，不能由本次聚焦检查替代。已验收的 v2 后继与原代均须保留，后续恢复前应先保存验收之后新增的数据。
+
+## 12. 2026-09-08 Context 与 Routing Suite 加入线上 DSH
+
+16:29 完成 28 服务器部署与启动保存。新增 Context 上下文面板、管理员插件注入管理、Graded 分级规划，以及 Router Standard / React / Spec 三个预设。克隆来源、最终版本、兼容修复、权限范围、首次安装失败后的自动回滚、最终验收和备份位置见 [部署记录 §30](server-28-deployment-runbook.md#30-2026-09-08-context-与-routing-suite-插件部署)。
+
+刷新网页后，已有对话中打开「上下文」；新会话选择 Router 预设；输入 `/graded <任务>` 使用分级规划；管理员在「设置 → 插件管理」注入服务器上的插件目录。生产历史、模型目录、两类账号的 Context 页面及预设列表均已验证。
+
+本机源码修改尚未提交或推送；私有包和完整证据位于 `deploy-artifacts/20260908-context-routing/`。既有旧子代理历史限制仍保留，另记录了未影响本次插件页面渲染的前端 `phase` 异常，详见部署记录。
+
+## 13. 2026-09-08 终端与任务看板账号隔离
+
+28 服务器已部署 `dsh-passwords@2.6.23`，修复普通账号终端 1006 和任务看板 `not found`/`forbidden`。终端按本人会话校验，只挂载自己的托管工作区；任务看板按账号保存，执行继续经过网关权限及额度检查。公网终端、双账号隔离、浏览器看板、原会话历史和模型列表均已验收，PM2 已保存。实现、测试、包摘要与回滚位置见 [部署记录 §31](server-28-deployment-runbook.md#31-2026-09-08-普通账号终端与任务看板修复)。
+
+终端中的 `/bin` 是沙盒内只读工具目录，允许 `cd` 进入，不能修改；这不等同于访问宿主机或其他账号目录。提示符已改为 `sandbox:`，当前没有实现禁止 `cd` 离开 `/workspace`。终端网络隔离、临时目录及既有前端异常的限制已明确记录，不能把提示符更名视为目录访问控制。

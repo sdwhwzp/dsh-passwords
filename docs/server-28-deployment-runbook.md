@@ -2,6 +2,8 @@
 
 本文记录 28 服务器（Tailscale `100.64.0.5`，局域网 `192.168.10.28`）上 DeepSeek Harness 多用户服务的功能、运行结构、数据位置、部署步骤、验收方法和故障处理。内容依据 2026-09-01 的 Harness Alpha.3 实际服务器盘点整理，不包含密码、API Key、OAuth Token、Tailscale Auth Key 或数据库口令。
 
+最新部署及修复状态见 §27–§29（2026-09-08）；工作区源码修改清单、证据索引和后续事项见 [本次改动清单 §11](2026-09-08-changes-overview.md)。早期章节保留对应日期的盘点背景。
+
 ## 1. 使用范围
 
 本手册用于重新部署 28、迁移到新机器、升级 dsh 或插件、恢复数据以及排查部署后功能缺失。任何复制到 Git 的版本都只能保留配置项名称和占位符，不得加入 `.env`、`settings.yaml`、`auth.json`、`mac.md` 或私钥内容。
@@ -1115,3 +1117,100 @@ finalization退出0、pm2Savedtrue、serviceRestartedfalse，PID `1348895` / res
 Harness完整测试仍18196通过/118跳过/9失败，原预算聚焦九项通过不替代全量；Spend公开一致性42/43保留。公共registry缺exact alpha.1、五插件旧公共锁、passwords npm ci和Web旧开发锁/CI smoke未恢复，私有Profile安装通过不能代替这些门禁。npm Arborist、Mac native file override和全部早期fixture失败保留。没有公共npm publish、真实外部模型、浏览器视觉或数据恢复演练。
 
 本机完整journal与JSON在 `deploy-artifacts/20260908-013-deploy/records/deployment-journal.*`，服务器state/report和jobs在本次staging。隔离Host必须分别设置DSH/Doctor/XDG根；网络guard不隔离文件。后续备份应保留五root及原bind mount，不能把旧staging依赖树移动为live或批量清理Doctor锁。
+
+## 28. 2026-09-08 升级后空会话列表修复
+
+2026-09-08 14:36:12（Asia/Shanghai）完成修复。alpha.1 的冷会话列表不再通过读取小日志判空；旧投影缓存缺少新的格式身份，未命中时 `blank` 默认为 false，导致历史空会话进入聊天列表。部署后的接口验收未覆盖这一旧缓存场景。
+
+完整逐帧读取压缩日志后，确认 28 条无 `turn/start` 的非 seeded 会话，且与旧缓存的 blank=true、空标题一致；另 13 条因格式或大小限制未纳入维护。早期 v2 诊断只解压首个 Zstandard frame，其 40 条判空结论已作废，未据此修改生产数据。有效 v3 计划 SHA256 为 `6f50fcd00a0960a583b5a956adba5fe61d3f0a0d6fd6b90b331a42ed7deb8411`。
+
+维护前备份了目标的全部现存日志代、投影缓存及原 Profile patch；通过临时 Host 插件执行官方完整读取和摘要重建，逐项确认缓存持久化。28 个旧日志代及备份哈希保持，官方读取新增 28 个 v2 后继日志，28 个 v7 缓存均标记 blank=true。没有删除会话、激活 Agent 或发送提示。临时插件已卸载，原 patch SHA256 `1625f2b49da6d0109d5f4ecd50e9266a962f286e37edc4d32b08f5438d1415ad` 恢复；三条 current、Host PID `1348895`、restartCount `23` 保持，服务未重启，未执行 PM2 save。
+
+修复后管理员仍有 49 条记录，blank=true 从 8 条变为 36 条；子账号仍有 18 条记录，blank=true 从 8 条变为 13 条。两账号的会话编号集合与标题映射哈希均未变化，标题数分别保持 11 和 4；临时验证 token 全部撤销。网关和数据库健康检查通过。前端已打开列表需刷新页面以重新应用空会话过滤；未执行浏览器视觉验收。
+
+本地验证包含完整多帧诊断、真实持久化与缓存服务的 7 项检查、维护编排的 15 项检查及实际 Loader/HMR 生命周期检查。生产备份和私有结果位于本次 staging 的 `blank-session-repair-v3-private`；本机汇总在 `records/blank-session-repair-api-verification.json`、`records/blank-session-repair-storage-verification.json` 和 `records/jobs/blank-session-cache-maintenance/`。该维护只修复已核实的 28 条历史空会话摘要，未改变产品源码或其余记录。
+
+## 29. 2026-09-08 principal 历史迁移修复
+
+2026-09-08 15:03:31（Asia/Shanghai）完成 13 条旧日志的 v2 后继发布，15:18:11 完成接口复核。用户报告的历史失败来自 v0→v1 迁移校验未接受既有用户消息、turn/start 和 step/start 的 principal 字段；会话快照失败同时阻断模型选择状态加载。模型目录接口本身可正常返回。
+
+Harness 工作区已补充 principal 的四个字段及角色校验，迁移和旧 steering/message、turn.trigger 归一化保留身份；畸形身份仍拒绝读取。该源码修复尚未提交或推送，线上运行包仍为原 alpha.1 cohort。维护程序使用修正后的迁移库，在私有副本中通过官方 ensureJsonlGenerationCurrent 生成后继，并以线上未修改的持久化后端逐条验证 list/stat/read。13 条日志的 477 处身份记录、标题及模型选择事件保留，随后采用排他发布写入新代；13 个原 v0 文件哈希保持。
+
+首批候选虽通过逻辑解码，却把头部与正文压入同一 Zstandard frame，违反生产后端的独立头帧要求，导致列表读取失败。确认所有候选未被追加后，已撤回这 13 个未验收的新文件并保留其字节；没有改动原 v0。失败候选保存在 staging 的 history-principal-repair-private/failed-physical-candidates，失败记录未覆盖。最终候选改用官方磁盘写入器，13 条均通过实际生产后端读取后才重新发布。
+
+有效计划 SHA256 为 `c6d64b4b07d5f391e9c777f12d8a1bf60327b9e23fe47552b5bbe06cabb87177`，迁移库 SHA256 为 `5bfd4357784424d9141e443c31309eed4a58c4ce3e85e4dd02a4eefdb4b4cc96`。最终备份、私有副本及发布结果位于本次 staging 的 history-principal-repair-v2-private。最终校验确认 13 个原代哈希和 13 个新代已发布前缀保持；服务 PID 1348895、restartCount 23、Profile patch 与三条 current 均未改变，网关和数据库健康，未重启服务。
+
+真实接口复核通过管理员 12 条普通历史分页及子账号 5 条有权访问的普通历史分页。用户报告的会话在两种身份下都返回历史快照与模型选择投影，cursor 保持 225，未发送提示或调用外部模型。最终目录返回管理员 17 个、子账号 14 个模型，各 5 组且 failures=0；动态模型数可能变化。两个临时 token 均已撤销。未执行浏览器视觉验收。
+
+仍有一条旧子代理历史不能通过 API 打开：其唯一 descriptor 位于继承区，当前服务返回 subagent descriptor is unavailable；未猜测或改写其归属。该项在最终验收中单独列为失败，普通历史与用户指定会话通过，报告状态为 passed-with-warnings，不能据此宣称全部子代理历史兼容。
+
+源码验证：迁移及语料聚焦检查 12 文件、244 项通过；补充旧 steering 身份用例后，legacy 文件 21 项通过。类型构建和变更文件 oxlint 通过，test:docs 15 项通过。doc-sync 首次 32 项通过、doc-typecheck 因新测试的 flatMap 类型推断失败；修正显式类型后单独重跑 doc-typecheck，通过 86 个代码块。其余已通过门禁未重复运行，原全量测试缺口不变。本机最终记录为 records/history-principal-repair-storage-verification.json 和 records/jobs/history-model-repair-final-acceptance/。
+
+## 30. 2026-09-08 Context 与 Routing Suite 插件部署
+
+2026-09-08 16:29:10（Asia/Shanghai）完成验收与 PM2 启动配置保存，目标为 `http://192.168.10.28:3081`。Harness 运行包仍为 `0.1.3-alpha.1`，runtime、web、plugins 三条 current 仍指向 `20260908-104825-593ee89-alpha1`；本次增加 Profile 插件和三个用户预设。
+
+| 组件 | 线上版本 / 位置 | 使用入口 |
+|---|---|---|
+| `dsh-context` | `0.46.0-dsh.20260908.1` | 打开已有对话 →「上下文」，或 `/context` |
+| `@dsh-external/dsh-super-injector` | `0.3.3-dsh.20260908.2` | 管理员「设置 → 插件管理」；输入服务器上的插件目录 |
+| `@dsh-external/dsh-graded-mode` | `0.0.1-dsh.20260908.1` | `/graded <任务描述>` 启动分级规划，`/graded off` 关闭 |
+| Router Standard / React / Spec | `$DSH_HOME/.agent-presets/router-{standard,react,spec}` | 新会话的 Agent 预设选择器 |
+
+### 来源、适配与权限
+
+按用户提供的两个仓库克隆：`sdwhwzp/dsh-context` 基线 `40a054b99b09bf15e044885e2bc92b1746c8c674`，`sdwhwzp/dsh-routing-suite` 基线 `e3f00b24db442cb45d12496915fabd7f3302d785`。本机源码分别位于 `/Users/wangzhipeng/macproject/dsh-context` 与 `/Users/wangzhipeng/macproject/dsh-routing-suite`；本轮修改尚未提交或推送，私有包来自这些工作区。
+
+Context 适配 alpha.1 内嵌 assistant stream 的首 token 时间，并为详情接口增加会话读取权限校验。Injector 统一使用当前 scoped Cordis/Schema SDK，保留宿主共享 SDK，更新客户端依赖声明；管理工具和 HTTP 接口要求管理员身份，卸载使用 unlink 移除目录链接并保留源目录。Graded 接入身份与会话归属检查，前端徽章按当前会话取状态，首次无状态目录时返回空清单。Router React 的旧 `session.events` 读取改为兼容 `snapshotEvents()`，未改变路由决策规则。
+
+Profile 的原 12 个 bundle 保留，新增上述 3 个 bundle。原 `cordis.patch.yml` SHA256 保持 `1625f2b49da6d0109d5f4ecd50e9266a962f286e37edc4d32b08f5438d1415ad`；密码门环境文件字节校验一致，PM2 的启动参数、环境及 30 秒退出等待配置保持。
+
+### 安装过程与验收证据
+
+最初候选安装通过，但锁文件包含依赖本地 tarball 的相对路径，首次线上固定锁安装因此失败；自动恢复原 Profile 后，网关、数据库和工作区监听恢复正常。保留该次失败记录，未使用失败依赖树继续启动。将文件与链接依赖统一为绝对路径后，在不同深度目录完成固定锁安装及 Linux 运行检查，再进行第二次切换。pnpm 为 `11.24.0`，Node 为 `22.21.1`，最终线上固定锁安装耗时约 4.3 秒，四个配置输入哈希保持一致。
+
+Context：74 个测试文件、1178 个用例通过，语句、分支、函数和行覆盖率均为 100%；源码和测试类型检查、lint、构建通过。Graded：63 个用例通过并重新构建。Injector：类型检查、构建以及真实注入、卸载、effect 释放、链接删除通过。Router Standard 自测通过。隔离 Linux Host 使用最终插件包和本地模拟模型，标准模式及三个 Router 预设均完成回复，Context 详情、分级命令、状态和跨账号拒绝检查通过；未调用外部模型。
+
+生产必需接口检查全部通过。管理员模型目录 17 个模型，普通账号 14 个模型，均无 provider failure；指定历史 `session-c71bea90-4832-478d-8489-e65cf8a38860` 在两种身份下均返回 14 条开场记录及模型选择投影，cursor 为 225。Context 详情两种身份均返回 200；普通账号访问全局插件管理、全局分级清单返回 403。验收前后会话清单无新增、删除或 blank 标记变化。
+
+生产浏览器已实际打开两类账号的 Context 面板，普通账号截图覆盖用户此前报错的历史；管理员插件管理页可见，两个账号均可列出三个 Router 预设且无 broken 标记。浏览器直连内网失败后，改经本机仅转发 28:3081 的临时代理完成验证。接口验收签发的 2 个临时 token 和三轮浏览器验证共 6 个临时 token 均已退出撤销。截图和界面文字含用户数据，仅保留在本机私有验收材料。
+
+最终 Host PID 为 `1388496`，PM2 restartCount 为 `23`；stop/start 场景下不能用该计数推断本次没有重启。最终健康检查通过，PM2 save 已执行且保存前备份原 dump，保存过程未再重启服务。Doctor 状态检查通过，原 capsule 可组合。
+
+### 记录、备份与限制
+
+本机证据根目录为 `/Users/wangzhipeng/macproject/deploy-artifacts/20260908-context-routing/`。`records/deployment-summary.json` 为汇总，`records/artifacts.json` 记录三个最终插件包和 Router 归档的 SHA256；源码补丁、含新增测试的源码归档、构建测试日志、接口结果及截图一并保留。服务器 staging 为 `/home/tzwl3/apps/deploy-staging/20260908-context-routing`，不可变包为 `/home/tzwl3/apps/dsh-plugins/addons/20260908-context-routing`。
+
+有效部署前备份为 `/home/tzwl3/apps/deploy-backups/pre-20260908-context-routing-v2`，其中 `profile/` 为原 Profile，另有原密码门环境与 PM2 私有快照。首次失败备份、候选目录及日志另行保留。以后若需回滚，须先保存新增 Profile 配置、预设和插件状态，再恢复原 Profile、移走本次新增预设并重启验收；不能直接再次运行已完成的切换脚本。用户会话日志、原有预设和旧发布代不应随插件回滚删除。
+
+既有一条旧子代理历史的 descriptor/继承区兼容问题仍未解决。浏览器启动时捕获了 `Cannot read properties of undefined (reading 'phase')`，但两种账号的 Context 及管理员插件管理页面均正常渲染；该异常来源尚未定位，未据此宣称浏览器无错误。Router 的真实外部模型规划质量、Injector 自动造插件与发布流程不在本次模拟模型验收范围内；原 Harness 全量测试及公共依赖锁的限制继续保留。
+
+## 31. 2026-09-08 普通账号终端与任务看板修复
+
+17:29 完成 28 服务器第二轮切换与 PM2 保存。最终密码门为 `dsh-passwords@2.6.23`，Host PID `1401411`；运行时仍为 `0.1.3-alpha.1-593ee89`，15 个 bundle、Router 预设与原会话数据保留。公网入口仍为 `http://wh.gr-iot.cn:3081`。
+
+### 故障原因与修复
+
+侧栏终端的 `/sidebar/ws/terminal` 没有通过网关 WebSocket 路由准入，浏览器显示 1006。原终端以共享服务器账号直接启动 Shell，不具备租户文件或进程隔离，不能直接对普通账号放行。新网关只将普通账号的这个精确路径转发至私有终端入口；Host 验证签名身份、当前账号状态、持久化会话归属和真实目录，拒绝其他账号会话、越界 cwd、符号链接逃逸及共享 agent PTY UUID。其他侧栏升级路径保持关闭，管理员沿用原有终端。
+
+普通账号终端由 root 所有的 `/usr/local/libexec/dsh-tenant-terminal` 启动 bubblewrap，挂载自己的 `u<ID>` 到 `/workspace`，隔离挂载、PID、IPC、UTS 和网络命名空间，清除服务环境变量，再由固定 `setpriv` 命令降为 UID/GID 1000、清空 capabilities 并启用 no-new-privileges。sudoers 只授权固定启动器及其 SHA256，不授权任意 bwrap。启动器最终 SHA256 为 `6bb4efc28ae1d7951c1b08e701712ea28ac0d8c2625c3adb276d26b5b79ae76f`。
+
+任务看板原 Host entry `web-ui-task-board` 被禁用，但客户端仍访问 `/api/task-board/*`，因此把 `not found` 当作 JSON 解析。新增账号适配层复用固定版本的看板 Host 引擎，按账号持久化账本；原全局 Host 继续禁用，客户端保留。后台执行、权限命令和历史读取均通过本机认证网关，以当前账号身份执行工作区、模型、沙盒和额度检查。只读 session/list 与 session/page 轮询不累计交互时长。浏览器实测还修复了 HTTP 页面 GET 不带 Origin 时被原看板路由误拒绝的问题：仅在签名身份和当前账号验证通过后补齐内部同源标记。
+
+部署增加四项环境配置：`MCP_TENANT_TERMINAL_LAUNCHER=/usr/local/libexec/dsh-tenant-terminal`、`MCP_TENANT_TASK_BOARD=true`、`MCP_TENANT_TASK_BOARD_DIR=/home/tzwl3/.dsh/tenant-task-boards`、`MCP_TENANT_TASK_BOARD_GATEWAY=http://127.0.0.1:3081`。已同步安装包 `.env` 与 canonical 密码门 `.env`，其他配置字节保留。终端默认每账号最多 8 个，断线 30 秒后回收；任务账本恢复后继续调度。
+
+### 范围说明：`cd /bin`
+
+用户反馈终端可以 `cd /bin`。已复现并确认 `/bin` 指向沙盒中的只读系统工具，写入失败；宿主机 home、其他账号目录与宿主机网络仍不可访问。当前实现允许进入沙盒内的 `/bin`、`/usr` 等只读运行目录，不承诺把 Shell 的当前目录固定在 `/workspace`。自己的持久化文件写入 `/workspace`，另有沙盒内临时 `/tmp` 和虚拟设备。提示符由 `workspace:` 改为 `sandbox:` 以准确显示运行环境；提示符更名不限制 `cd`，也不是安全控制。关于是否进一步禁止交互终端切换至只读运行目录，已向用户单独澄清。
+
+### 验收与记录
+
+本地构建通过；初轮网关、账号权限、终端和看板聚焦回归 20 项通过；补充轮询分类的相关检查 28 项通过；最终无 Origin 修复及终端路由检查 5 项通过。新增无外部模型的任务执行验证确认 create → rename → permission → prompt 全部经网关并携带同一账号身份，另验证账本重载、其他账号删除拒绝及符号链接逃逸拒绝。没有调用付费模型进行任务内容验收。
+
+Linux 原生 PTY、交互 Shell、UID 1000、零 capabilities、工作区文件写入与宿主机文件所有者、只读 `/bin` 写入拒绝、独立 PID 和网络均验证通过。生产账号 2 的内网及公网终端握手均为 101，账号 3 访问账号 2 会话、账号 2 指定账号 3 目录和共享 PTY UUID 均被 403 拒绝。看板创建验证任务后，另一账号不可见且删除返回 400；验证任务已删除。原报错会话仍返回 14 条历史记录，管理员模型目录 17 项、普通账号 14 项。浏览器已实际打开普通账号看板，原 404/JSON 错误与后续 forbidden 均消失；截图保存在本机私有证据目录。
+
+最终包 `dsh-passwords-2.6.23.tgz` 的 SHA256 为 `6b414498318366dcbc7ffd85d3330855c01c4c3b47928fc0f22174063ca3442c`。Profile patch 的 SHA256 保持 `1625f2b49da6d0109d5f4ecd50e9266a962f286e37edc4d32b08f5438d1415ad`。本机证据目录为 `/Users/wangzhipeng/macproject/deploy-artifacts/20260908-terminal-board`，服务器 staging 为 `/home/tzwl3/apps/deploy-staging/20260908-terminal-board`；最终状态在 `accepted.json`，包清单在 `artifacts-v23.json`。2.6.21 仅用于候选检查；2.6.22 经过接口验收后，在浏览器验证中发现缺少 Origin 的问题，后由 2.6.23 修复。
+
+初次切换前备份为 `/home/tzwl3/apps/deploy-backups/pre-20260908-terminal-board`（原 2.6.20 Profile、环境与 PM2 快照）；2.6.23 切换前备份为 `/home/tzwl3/apps/deploy-backups/pre-20260908-terminal-board-v23`。恢复前先保存后续新增配置与个人任务账本，停止服务后恢复目标 Profile 和对应密码门环境，再验收并保存 PM2；不能重跑已经完成的切换脚本。root 启动器与 sudoers 独立于 Profile，回滚时需核对匹配的摘要；旧提示符启动器保留在 `/usr/local/libexec/dsh-tenant-terminal.20260908-v1`。不得删除用户工作区、会话日志或个人任务账本来回滚插件。
+
+普通账号终端的宿主机网络与外网均未开放；管理员终端不使用该隔离启动器。既有旧子代理日志兼容问题及浏览器启动时两条 `Cannot read properties of undefined (reading 'phase')` 仍记录为未解决项，不影响本次看板页面验收，不宣称整站无错误。源码、文档修改尚未提交或推送。
