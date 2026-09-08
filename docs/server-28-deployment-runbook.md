@@ -1418,7 +1418,7 @@ pasta 方案也被否决：Ubuntu 24.10 的 2024-08 版 pasta 默认把宿主 lo
 
 ## 37. 2026-09-09 沙盒 HOME 迁至数据盘与 git 身份修复
 
-每账号沙盒 HOME 与编辑器状态从系统盘迁到 916G 数据盘 `/dev/sda1`，并修复改用 `/home/dsh` 后 git 身份失效的缺陷。两个 root 启动器更新为 `dsh-tenant-editor` `1a16aae0…`、`dsh-tenant-terminal` `2ae79f0b…`，sudoers 已重新 pin。DSH 主进程全程未重启（Host PID `1560213`，重启计数 38 不变），未部署任何插件，Profile 未改。
+每账号沙盒 HOME 与编辑器状态从系统盘迁到 916G 数据盘 `/dev/sda1`，并修复改用 `/home/dsh` 后 git 身份失效的缺陷。两个 root 启动器更新为 `dsh-tenant-editor` `d87bd17b…`、`dsh-tenant-terminal` `d4491d77…`，sudoers 已重新 pin。DSH 主进程全程未重启（Host PID `1560213`，重启计数 38 不变），未部署任何插件，Profile 未改。
 
 ### 落盘位置
 

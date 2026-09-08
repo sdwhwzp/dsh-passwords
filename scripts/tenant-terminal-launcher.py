@@ -22,7 +22,40 @@ HOME_ROOT = pathlib.Path('/var/lib/dsh-sandbox-home')
 NETWORK_FILES = ['/etc/resolv.conf', '/etc/hosts', '/etc/nsswitch.conf', '/etc/passwd', '/etc/group']
 
 
-def sandbox_home(owner, account):
+def git_identity(owner, extra):
+    """Name for the seeded git identity.
+
+    The caller's account name when it passes one, otherwise the account id the
+    home is keyed by. Both launchers derive it the same way, so the terminal and
+    the editor never seed one account with two different identities.
+    """
+    if extra and re.fullmatch(r'[A-Za-z0-9._-]{1,64}', extra[0]):
+        return extra[0]
+    return 'u' + owner
+
+
+def seed_git_identity(home, account, identity):
+    """Write this account's git identity once.
+
+    git refuses to record a commit without one and the sandbox home starts
+    empty. O_EXCL creates the file only when it is absent, so a user who edits
+    their name, email or any other setting keeps it across every later launch.
+    """
+    try:
+        descriptor = os.open(home / '.gitconfig', os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+    except FileExistsError:
+        return
+    try:
+        os.fchown(descriptor, account.pw_uid, account.pw_gid)
+        os.write(descriptor, (
+            '# Seeded by DSH for this account. Edit freely; DSH will not rewrite it.\n'
+            '[user]\n\tname = ' + identity + '\n\temail = ' + identity + '@dsh.local\n'
+        ).encode())
+    finally:
+        os.close(descriptor)
+
+
+def sandbox_home(owner, account, identity):
     """Create this account's sandbox home under a root-owned parent and return it."""
     if HOME_ROOT.exists():
         if HOME_ROOT.resolve(strict=True) != HOME_ROOT:
@@ -43,11 +76,12 @@ def sandbox_home(owner, account):
     link = home / 'workspace'
     if not link.exists(follow_symlinks=False):
         link.symlink_to('/workspace')
+    seed_git_identity(home, account, identity)
     return home
 
 
 def main():
-    if os.geteuid() != 0 or len(sys.argv) != 3 or not re.fullmatch(r'[1-9][0-9]{0,15}', sys.argv[1]):
+    if os.geteuid() != 0 or not 3 <= len(sys.argv) <= 4 or not re.fullmatch(r'[1-9][0-9]{0,15}', sys.argv[1]):
         raise ValueError('invalid terminal invocation')
     tenant = ROOT / ('u' + sys.argv[1])
     if ROOT.resolve(strict=True) != ROOT or tenant.resolve(strict=True) != tenant:
@@ -58,7 +92,7 @@ def main():
         raise ValueError('workspace directory required')
     account = pwd.getpwnam(ACCOUNT)
     sandbox = grp.getgrnam(SANDBOX_GROUP)
-    home = sandbox_home(sys.argv[1], account)
+    home = sandbox_home(sys.argv[1], account, git_identity(sys.argv[1], sys.argv[3:]))
     network = []
     for path in NETWORK_FILES:
         if pathlib.Path(path).exists():
