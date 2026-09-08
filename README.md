@@ -412,3 +412,11 @@ keyed slot "settings.plugin.item" requires options.key
 [BSD 3-Clause](./LICENSE) © 2026 slywalker2006——自由使用、修改、分发，保留版权声明即可。
 
 本项目是 dsh 的独立扩展，与 DeepSeek 无隶属关系。dsh 本身按它自己的许可证（MIT）授权。
+
+### 普通账号终端与任务看板
+
+普通账号的侧栏终端使用部署端安装的隔离启动器，只挂载该账号的托管工作区到 `/workspace`。连接必须携带本人会话，服务器按持久化的会话目录校验请求；其他账号会话、越界目录、符号链接逃逸及代理到原始终端均被拒绝。Shell 不继承服务密钥，使用独立的 PID、网络及挂载命名空间，以服务普通用户身份运行，不能访问宿主机接口或外网。断线在配置的宽限期后结束进程；管理员保留原有终端。普通账号不支持挂接共享的 agent PTY UUID。
+
+Linux 部署由管理员将 `scripts/tenant-terminal-launcher.py` 安装为 root 所有且不可被普通用户修改的 `/usr/local/libexec/dsh-tenant-terminal`，并配置只允许执行这个启动器的 sudoers 规则。启动器中的服务账号和托管根目录必须匹配部署；不得授权任意 `sudo bwrap`。设置 `MCP_TENANT_TERMINAL_LAUNCHER` 后启用，默认每账号最多 8 个终端、断线宽限期 30 秒，可用 `MCP_TENANT_TERMINAL_LIMIT` 和 `MCP_TENANT_TERMINAL_GRACE_MS` 调整。
+
+设置 `MCP_TENANT_TASK_BOARD=true` 启用按账号分开的任务看板，同时必须关闭聚合插件的全局 `web-ui-task-board` Host，保留客户端。账本保存在 `MCP_TENANT_TASK_BOARD_DIR`，重载后恢复定时任务；执行与历史读取经过 `MCP_TENANT_TASK_BOARD_GATEWAY` 指定的本机网关，沿用当前账号的工作区、模型、沙盒和额度检查。账号删除、禁用或身份不匹配会拒绝执行。旧全局账本不会自动合并进个人账本。

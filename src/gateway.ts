@@ -6813,7 +6813,7 @@ export function createGatewayServer(
       return;
     }
     const queryIndex = (req.url ?? '').indexOf('?');
-    const fwdPath = gatePath + (queryIndex >= 0 ? stripGatewayAuthQuery(req.url ?? '/', gatePath) : '');
+    let fwdPath = gatePath + (queryIndex >= 0 ? stripGatewayAuthQuery(req.url ?? '/', gatePath) : '');
     // 认证检查（复用 Cookie；与 HTTP 侧一致：校验 cv + banned + 登出吊销）
     const token = readCookie(req.headers.cookie, COOKIE_NAME);
     let authed = false;
@@ -6855,7 +6855,14 @@ export function createGatewayServer(
     }
     // WebSocket 仅是 dsh 的服务器→客户端事件下行通道；客户端消息是协议违规。
     // 不允许把任意 HTTP 路径升级为 WS，否则会绕过 HTTP 侧完整的权限模型。
+    const terminalPath = gatePath === '/sidebar/ws/terminal';
+    if (terminalPath && (req.headers['sec-fetch-site'] === 'cross-site' || !originHostMatches(req as Request))) { rejectUpgrade(socket, 403); return; }
+    if (terminalPath && userRole !== 'admin') {
+      if (!config.tenantTerminal?.launcher) { rejectUpgrade(socket, 403); return; }
+      fwdPath = '/api/dsh-passwords/tenant-terminal' + fwdPath.slice(gatePath.length);
+    }
     const builtinWsPath =
+      terminalPath ||
       gatePath === '/api/remote.mux' ||
       gatePath === '/api/events.mux' ||
       gatePath === '/api/events.host' ||

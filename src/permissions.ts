@@ -1083,6 +1083,7 @@ export function isPollingRequest(pathname: string): boolean {
     pathname.startsWith('/aionui-panel/events') ||
     pathname === '/api/live-stats' ||
     pathname === '/api/session.title' ||
+    /^\/api\/session[.\/](list|page)$/.test(pathname) ||
     /^\/api\/[^/]*heartbeat[^/]*/.test(pathname) ||
     /^\/api\/[^/]*poll[^/]*/.test(pathname)
   );

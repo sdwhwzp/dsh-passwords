@@ -1,12 +1,12 @@
 {
   "name": "dsh-passwords",
-  "version": "2.6.17",
+  "version": "2.6.23",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
     "": {
       "name": "dsh-passwords",
-      "version": "2.6.17",
+      "version": "2.6.23",
       "license": "BSD-3-Clause",
       "dependencies": {
         "bcryptjs": "^3.0.2",
@@ -14,7 +14,8 @@
         "express": "^4.21.0",
         "jsonwebtoken": "^9.0.2",
         "mysql2": "^3.15.3",
-        "ws": "^8.18.3"
+        "ws": "^8.18.3",
+        "node-pty": "^1.1.0"
       },
       "bin": {
         "dsh-local-workspace": "dist/local-workspace-cli.js",
@@ -7305,6 +7306,22 @@
       "funding": {
         "type": "github",
         "url": "https://github.com/sponsors/wooorm"
+      }
+    },
+    "node_modules/node-addon-api": {
+      "version": "7.1.1",
+      "resolved": "https://registry.npmmirror.com/node-addon-api/-/node-addon-api-7.1.1.tgz",
+      "integrity": "sha512-5m3bsyrjFWE1xf7nz7YXdN4udnVtXK6/Yfgn5qnahL6bCkf2yKt4k3nuTKAtT4r3IG8JNR2ncsIMdZuAzJjHQQ==",
+      "license": "MIT"
+    },
+    "node_modules/node-pty": {
+      "version": "1.1.0",
+      "resolved": "https://registry.npmmirror.com/node-pty/-/node-pty-1.1.0.tgz",
+      "integrity": "sha512-20JqtutY6JPXTUnL0ij1uad7Qe1baT46lyolh2sSENDd4sTzKZ4nmAFkeAARDKwmlLjPx6XKRlwRUxwjOy+lUg==",
+      "hasInstallScript": true,
+      "license": "MIT",
+      "dependencies": {
+        "node-addon-api": "^7.1.0"
       }
     }
   }

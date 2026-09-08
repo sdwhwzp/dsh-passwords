@@ -388,3 +388,11 @@ The UI is bilingual (Chinese/English) and follows dsh's language setting:
 [BSD 3-Clause](./LICENSE) © 2026 slywalker2006 — free to use, modify and distribute; keep the copyright notice.
 
 This project is an independent extension for dsh and is not affiliated with DeepSeek. dsh itself is licensed under its own terms (MIT).
+
+### Tenant terminals and task boards
+
+Restricted sidebar terminals mount only the authenticated account's managed workspace at `/workspace`. The Host verifies the durable session owner and directory on every attach, rejects foreign sessions, directory escapes and shared agent PTY UUIDs, and starts a shell without service secrets. Private mount, PID and network namespaces prevent access to Host services, other accounts and the Internet. The shell runs as the service's ordinary OS user with no capabilities. Administrators retain their existing terminal. Disconnected terminals expire after the configured grace period.
+
+On Linux, install `scripts/tenant-terminal-launcher.py` as the root-owned, non-user-writable `/usr/local/libexec/dsh-tenant-terminal`. Its account and managed root must match the deployment. Grant sudo access only to that fixed launcher, never arbitrary `sudo bwrap`. Enable it with `MCP_TENANT_TERMINAL_LAUNCHER`; `MCP_TENANT_TERMINAL_LIMIT` and `MCP_TENANT_TERMINAL_GRACE_MS` default to 8 terminals per account and 30000 milliseconds.
+
+Enable `MCP_TENANT_TASK_BOARD=true` only with the aggregate's global `web-ui-task-board` Host disabled and its client retained. Separate ledgers live under `MCP_TENANT_TASK_BOARD_DIR` and restore schedules after reload. All execution and history RPCs use the local `MCP_TENANT_TASK_BOARD_GATEWAY`, preserving current workspace, model, sandbox and quota checks. Deleted, banned or mismatched owners cannot execute tasks. Legacy global ledgers are retained and are not automatically imported into personal boards.

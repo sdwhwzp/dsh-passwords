@@ -31,6 +31,10 @@ export function resolveConfigPath(value: string, configRoot: string, fallbackNam
 }
 
 export interface PlatformConfig {
+  /** Optional Linux sandbox launcher. Empty disables restricted-account terminals. */
+  tenantTerminal?: { launcher: string; maxPerUser: number; reconnectGraceMs: number };
+  /** Isolated replacement for the global task-board Host; enable only with the global Host disabled. */
+  tenantTaskBoard?: { enabled: boolean; directory: string; gatewayOrigin: string };
   setupKey: string;
   /** Local data path used by SQLite and by filesystem-backed gateway state. */
   dbPath: string;
@@ -84,6 +88,12 @@ export interface PlatformConfig {
     adminAllowlist: string[];
     userAllowlist: string[];
   };
+}
+
+function positiveIntegerEnv(name: string, fallback: number): number {
+  const value = Number(readEnv(name, String(fallback)));
+  if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${name} must be a positive integer`);
+  return value;
 }
 
 export function loadConfig(): PlatformConfig {
@@ -216,6 +226,16 @@ export function loadConfig(): PlatformConfig {
       placeholderRoot: localWorkspacePlaceholderRoot,
     },
     managedWorkspaceRoot,
+    tenantTaskBoard: {
+      enabled: readEnv('MCP_TENANT_TASK_BOARD', 'false') === 'true',
+      directory: resolveEnvRelativePath(readEnv('MCP_TENANT_TASK_BOARD_DIR', ''), envFilePath(), path.join(homedir(), '.dsh', 'tenant-task-boards')),
+      gatewayOrigin: readEnv('MCP_TENANT_TASK_BOARD_GATEWAY', `http://127.0.0.1:${gatewayPort}`),
+    },
+    tenantTerminal: {
+      launcher: readEnv('MCP_TENANT_TERMINAL_LAUNCHER', ''),
+      maxPerUser: positiveIntegerEnv('MCP_TENANT_TERMINAL_LIMIT', 8),
+      reconnectGraceMs: positiveIntegerEnv('MCP_TENANT_TERMINAL_GRACE_MS', 30_000),
+    },
     patch: {
       dshRoot: readEnv('MCP_DSH_ROOT', ''),
       restartService,

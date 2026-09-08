@@ -24,6 +24,8 @@ import { fileURLToPath } from 'node:url';
 import { databaseTarget, loadConfig, type PlatformConfig } from './config.js';
 import { Database, type UserListRow } from './db.js';
 import { createFieldCrypto } from './encrypt.js';
+import { registerTenantTaskBoard } from './tenant-task-board.js';
+import { registerTenantTerminal } from './tenant-terminal.js';
 import { AuthService, AuthError, assertNoSqlInjection, type AuthedUser, type RequestMeta } from './auth.js';
 import { findDshRoot, patchStatus } from './patch.js';
 import { todayLocal } from './permissions.js';
@@ -410,6 +412,8 @@ export function apply(ctx: Context): void {
   if (db !== null) {
     registerManagedUserWorkspace(ctx, db, cfg);
     registerPrincipalAccess(ctx, db);
+    registerTenantTerminal(ctx, db, cfg);
+    registerTenantTaskBoard(ctx, db, cfg);
     if (auth !== null) registerBotBridge(ctx, db, auth);
     const remoteDb = db;
     ctx.inject(['typertGateway'], (scope) => {
