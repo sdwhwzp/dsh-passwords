@@ -1415,3 +1415,46 @@ pasta 方案也被否决：Ubuntu 24.10 的 2024-08 版 pasta 默认把宿主 lo
 ### 回滚
 
 `apps/deploy-backups/pre-20260909-sidebar-editor` 含切换前 Profile、密码门环境与 PM2 快照。root 启动器、sudoers、nftables 单元与 git 安装均独立于 Profile，回滚插件不会撤销它们。
+
+## 37. 2026-09-09 沙盒 HOME 迁至数据盘与 git 身份修复
+
+每账号沙盒 HOME 与编辑器状态从系统盘迁到 916G 数据盘 `/dev/sda1`，并修复改用 `/home/dsh` 后 git 身份失效的缺陷。两个 root 启动器更新为 `dsh-tenant-editor` `1a16aae0…`、`dsh-tenant-terminal` `2ae79f0b…`，sudoers 已重新 pin。DSH 主进程全程未重启（Host PID `1560213`，重启计数 38 不变），未部署任何插件，Profile 未改。
+
+### 落盘位置
+
+`/etc/fstab` 新增两条 bind，沿用该机既有的数据盘接入方式：
+
+```
+/srv/dsh-data/dsh-sandbox-home /var/lib/dsh-sandbox-home none bind 0 0
+/srv/dsh-data/dsh-vsceditor /var/lib/dsh-vsceditor none bind 0 0
+```
+
+必须是 bind 而非软链：两个启动器的 `trusted()` 与 `sandbox_home()` 都要求 `path.resolve(strict=True) == path`，软链会被直接拒绝；bind 不改变路径解析，且路径与其全部父目录仍是 root 属主、无组/他人写位，三道检查均通过。挂载选项从 `/srv/dsh-data` 继承 `nosuid,nodev,noatime`。
+
+迁移前停掉 u2 的编辑器与终端沙盒（杀持锁的特权父进程，`--die-with-parent` 使整棵沙盒退出），`rsync -aHAX --numeric-ids` 复制后逐项核对元数据树摘要、文件内容摘要与顶层属主权限，三者一致才写 fstab。原数据保留在挂载点之下未删除，`umount` 即回到迁移前状态。已演练 `umount` 后 `mount -a` 复原。
+
+会话日志 `~/.dsh/sessions`（当前 14M）仍在系统盘，增长慢，本次不动。
+
+### git 身份失效的原因与修复
+
+`seedGitIdentity` 把 `.gitconfig` 写在 `<stateRoot>/<tenant>/data/`，即沙盒内的 `/editor-data/.gitconfig`；HOME 改为 `/home/dsh` 后 git 不再读到它，两个启动器也都没有设 `GIT_CONFIG_GLOBAL`。实测沙盒内 `git config --global --list` 报 `fatal: unable to read config file '/home/dsh/.gitconfig'`，所有账号的 `git commit` 都会失败。`clone`/`pull`/`push` 不依赖身份，故此前验收未暴露。
+
+身份是账号属性而非编辑器属性，因此改由创建 HOME 的启动器播种。两个启动器新增 `git_identity()` 与 `seed_git_identity()`，实现逐字节相同：可选的第三个 argv 传入账号名，通过 `[A-Za-z0-9._-]{1,64}` 校验则采用，否则回落到 HOME 所用的 `u<id>`，两个沙盒因而不会给同一账号播下两个身份。写入用 `O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW` 与 `0600`：文件不存在才创建，用户改过的姓名、邮箱及其他设置在后续每次启动都保留；已存在的软链被 `O_EXCL` 视为已存在，既不跟随也不改写其目标。
+
+调用方仍传两个参数，因此新账号目前播下的是 `u<id>`。u2 迁移前已有的 `wzp` 身份在部署时从编辑器状态复制进 HOME，未被降级。要让身份直接是 DSH 用户名，需 `dsh-passwords` 与 `dsh-sidebar-vscode` 在调用启动器时多传一个账号名，启动器侧已就绪，届时无需再改启动器或 sudoers。
+
+### 验证
+
+启动器函数级测试 26 项通过（身份取值、回落、64 字符边界、注入回落、0600 权限、幂等不覆盖、软链不跟随）。
+
+真实沙盒端到端：u2 终端 `HOME` 落在 `/dev/sda1`、`user.name=wzp`、`git commit` 成功且作者为 `wzp <wzp@dsh.local>`；u3 首次启动由启动器创建 HOME 并播种 `u3`，`git commit` 成功；第三参数传 `zhangsan` 时身份即为 `zhangsan`；传入含换行与 `[core] sshCommand=touch /tmp/pwned` 的构造值时回落为 `u9` 且未产生该文件。编辑器启动器直调后 code-server 起来、socket 就绪、Unix socket 上 HTTP 返回 302，沙盒 cmdline 确认 `/var/lib/dsh-sandbox-home/u2 → /home/dsh` 与 `/var/lib/dsh-vsceditor/u2/{data,run}` 三处挂载。网关 `/gateway/readyz` 返回 200。
+
+### 已知限制
+
+数据盘未启用配额，100 个账号共用 915G，任一账号可耗尽全盘。ext4 project quota 可按目录限额，限额值与超限提示未规划，本次不做。
+
+编辑器状态里 `<stateRoot>/<tenant>/data/.gitconfig` 仍会被 `seedGitIdentity` 写入，现已无人读取；它是 u2 身份的迁移来源，暂时保留。
+
+### 回滚
+
+启动器备份为 `/usr/local/libexec/dsh-tenant-{editor,terminal}.20260909-git-identity`，旧摘要 `d473dd25…` / `f0b17031…`，sudoers 备份在 `/root/sudoers-dsh-tenant-*.20260909-git-identity.bak`；换回旧文件后须重新 pin sudoers。fstab 备份为 `/root/fstab.20260909-sandbox-home.bak`；注释掉两条 bind 并 `umount` 即回到系统盘上的原副本，该副本未被删除。
