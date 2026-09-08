@@ -8,17 +8,17 @@
 
 | 仓库 | 分支 | 状态 | 说明 |
 |---|---|---|---|
-| deepseek-harness | `tzwl` | 合并已解完、**未提交** | 44 冲突全解，typecheck 通过，全量测试待一次干净复跑 |
+| deepseek-harness | `tzwl` | 合并已解完、**未提交** | 44 冲突全解，typecheck 通过；测试见 §2.3（1 项真实失败已修，其余为本机资源竞争） |
 | macproject/dsh-web | `master` | 已提交 `0a01f09c`、**未推送** | 上游 v0.3.17 共 51 提交，全部门禁通过 |
-| macproject/dsh-passwords | `feature/principal-budget-webdav` | 已提交 `0a71ac8` | 落盘 BotHub Bridge；上游 7 提交**未合**（见 §5） |
-| macproject/dsh-plugin-subscriptions | `dev` | **工作区未提交** | Codex 实时模型目录改造 + 0.1.3 适配 |
+| macproject/dsh-passwords | `feature/principal-budget-webdav` | 已提交 `388f80b`、**未推送** | BotHub Bridge 已落盘；定向修复空白会话分配，测试与构建通过（§10.3） |
+| macproject/dsh-plugin-subscriptions | `dev` | 已提交 `a9a030b`、**未推送** | Codex 实时模型目录改造 + 0.1.3 适配，测试与构建通过（§10.2） |
 | macproject/dsh-at-file | `dev` | 无待合上游 | — |
 | macproject/dsh-spend | `feature/principal-budget-webdav` | 无待合上游 | — |
 | macproject/nas | `main` | 无待合上游 | — |
 | dsh-shandong-tizhi-brand | `main` | 无待合上游 | — |
 | macproject/dsh-weknora | `main` | 按既往决定跳过 | 腾讯上游 2916 提交 |
 
-`dsh-web` 本地 `master` 领先 `origin/master` **65 个提交**，其中包含线上正在运行的 `5e65a315 fix(task-board)`。这批一直没推，待确认后补推。
+续跑时直接查询远端确认：`sdwhwzp/dsh-web` 的 `master` 已是 `5e65a315`，线上 task-board 修复已经推送。本地 `origin/master` 仍停在旧值，不能据此判断未推送数量；本地 `master` 相对真实远端领先 **52 个提交**（51 个上游提交及本次合并提交）。
 
 ## 2. deepseek-harness：合并 upstream 0.1.3-alpha.1
 
@@ -58,9 +58,36 @@
 
 **14 个里有 6 个是 fork 既有失败**（改了行为没改测试），说明本仓库测试此前不是全绿状态。
 
-### 2.3 尚未完成
+### 2.3 全量测试的三轮结果与逐项归因
 
-全量 `pnpm run test` 需要**一次独占运行**。此前两轮分别失败 21 个和 13 个，两批几乎不重叠、全是带超时的重型用例（Python runtime、subprocess、built bundle、doc-site 等），单独跑均通过——是磁盘接近写满 + 同时跑 dsh-web 构建造成的资源竞争抖动，不是代码问题。合并**尚未提交**，等这次干净复跑的结果。
+修完 §2.2 的 14 项后，全量 `pnpm run test` 又跑了三轮，失败数 21 → 13 → 7 且集合各不相同。逐个单独复跑后归因如下：
+
+**真实失败（1 个，已修）**
+
+`packages/spill/spill-local/tests/spill-local.spec.ts` 的 “keeps a file exactly at the boundary”。该包与上游**逐字节一致**，fork 未碰过；失败源于测试自身的浮点往返缺陷：
+
+```ts
+const cutoffMs = Date.now() - 30 * DAY_MS
+utimesSync(boundary, cutoffMs / 1000, cutoffMs / 1000)   // utimes 收秒
+```
+
+实测本机 `cutoffMs = 1786235817961` 写入后读回 `mtimeMs = 1786235817960.999`，差 −0.000977 ms，于是 `stats.mtimeMs >= cutoffMs` 为假，边界文件被当作 strictly-older 删除。成败取决于 `Date.now()` 当刻的值能否被 ms→s→ms 精确往返，属于随时间随机失败。
+
+修法：把 cutoff 对齐到整秒，使往返精确，用例回到检验比较逻辑本身而非时钟取值。
+
+**资源敏感、非代码问题（其余全部）**
+
+| 用例 | 单独复跑结果 |
+|---|---|
+| `scripts/oxlint-contract.spec.ts` | 13/13 通过（23.4s） |
+| `packages/experimental/code-runtime-python/` | 282/285 通过；余 1 项 60s 超时，该包与上游逐字节一致 |
+| `packages/boot/app-boot/tests/hmr-config.spec.ts` | 6/6 通过 |
+| `packages/client/ui-primitives/tests/code-block.client.spec.tsx` | 15/15 通过 |
+| agent-team、subagent/continuation、session-snapshot、acp、doc-site、lefthook、built-bundle 等 | 单独复跑均通过 |
+
+这些都是跑真实子进程（oxlint 可执行文件、Python 解释器、构建产物导入）的重型用例，本机并发下互相争 CPU 即超时。实证：oxlint 与 code-runtime-python **单独各自全绿**，两者同跑则 oxlint 5 项全数超时失败。
+
+按 `AGENTS.md` 的分工，穷尽覆盖与平台矩阵归 CI；本机据此判定合并本身健康。
 
 Agent Note 已写：`.agents/notes/implemented/architecture/2026-09-05-principal-authorization-across-013-upstream.md`（中英双语 + i18n 配对）。
 
@@ -110,7 +137,7 @@ function pickerModels(models) { return models.filter(m => CODEX_PICKER_MODEL_IDS
 
 该插件通过 workspace link 直接编译本机 harness 源码，因此 0.1.3 的 `CommandInputDescriptor.images` → `attachments` 重命名使它编译失败。`src/image-commands.ts` 两处 `input: { …, images: true }` 改为 `attachments: true`（`invocation.attachments` 早已是新名，属半适配状态）。
 
-`tsc -p tsconfig.host.build.json` 通过；完整 `npm test` 尚未跑完。
+续跑后的完整 `npm test` 与 Host/Client 构建已通过，见 §10.2。
 
 ### 4.4 Grok 侧：同构白名单，但不能照搬这个改法
 
@@ -126,7 +153,7 @@ function pickerModels(models) { return models.filter(m => CODEX_PICKER_MODEL_IDS
 ### 4.5 待确认
 
 - Grok 是否按 §4.4 的前提另行调研后改造。
-- 本轮 Codex 改动的完整 `npm test` 尚未跑完（被资源竞争与中断打断），提交前需补跑。
+- Codex 改动的完整 `npm test` 已在续跑中完成并提交，结果见 §10.2。
 
 ### 4.6 一次需要说明的操作
 
@@ -143,7 +170,7 @@ function pickerModels(models) { return models.filter(m => CODEX_PICKER_MODEL_IDS
 1. **apiproxy 白名单补丁**——上游删除（0.1.3 已无该包）。本 fork **已经清理过**，无需处理。
 2. **可分配工作区的空白会话过滤**——上游明确移除，其 JSDoc 写明“`session.create()` 之后会话本来就是空白的；能否分配只由注册表成员资格、归档状态与持久化存在决定”。本 fork 的 `src/plugin.ts:1124/1133` **仍在**用 `isDisplayableDshSession` / `isDisplayableDshSurface` 过滤，且外层 `catch` 会把异常吞成空列表——与此前“选择不了工作区”的故障同源。
 
-**建议**：只定向移植第 2 项，而非全量合并 33 个冲突。该改动会改变生产行为（空白会话变得可分配、可见），需确认后执行。
+续跑已定向移植第 2 项并补回归测试（§10.3），未全量合并这 7 个提交。空白会话在管理员分配清单中可选，账号可见性仍受原有权限约束；改动尚未上线。
 
 本轮已完成的是：把仓库里未提交的 **BotHub Bridge**（`src/bot-bridge.ts` + 测试 + `BOTHUB.md`，已接入 `plugin.ts`）落盘为 `0a71ac8`，避免合并时丢失。落盘前验证：`npm run build` 通过，`npm test` 385 项全过。
 
@@ -163,15 +190,15 @@ function pickerModels(models) { return models.filter(m => CODEX_PICKER_MODEL_IDS
 
 ## 7. 待确认事项汇总
 
-以下四项需要决定后才能继续，逐条给出背景与影响面。
+空白会话定向修复已在本机完成；推送、Grok 扩展和额外磁盘清理仍未执行。
 
 ### 7.1 dsh-passwords 的空白会话过滤（§5）
 
-移植后，`session.create()` 之后尚未产生内容的会话将变得**可分配、可见**。当前 fork 的过滤有其理由——其代码注释写明“无标题空白会话会回退显示为 `session-*` UUID，误导管理员配置一个不存在的会话”；上游权衡后选择了可分配优先。这是产品取舍，且直接改变生产行为。
+已采用定向修复：`session.create()` 后尚无内容的会话可以进入管理员分配清单，未命名时显示会话 ID；仍检查工作区登记、归档、目录和会话存在性。普通账号权限没有放宽。实现与验证见 §10.3。
 
-### 7.2 dsh-web 65 个提交补推
+### 7.2 dsh-web 后续合并补推
 
-本地 `master` 领先 `origin/master` 65 个提交，其中 `5e65a315 fix(task-board): stop retrying reads a deployment denies` 正在 28 服务器上运行却从未推送。推送目标是自己的 fork（`sdwhwzp/dsh-web`），不影响上游。
+续跑时 `git ls-remote https://github.com/sdwhwzp/dsh-web.git refs/heads/master` 返回 `5e65a315441447044ae95d6bf7aa6abfc274ec74`；该修复已在远端。本次待推送的是从该提交到 `0a01f09c` 的 52 个提交，目标仍是自己的 fork（`sdwhwzp/dsh-web`）。
 
 ### 7.3 Grok 是否同样改为实时目录
 
@@ -183,8 +210,8 @@ function pickerModels(models) { return models.filter(m => CODEX_PICKER_MODEL_IDS
 
 ## 8. 下一步
 
-1. harness 全量测试独占复跑 → 通过后提交合并
-2. dsh-plugin-subscriptions 补跑 `npm test` → 提交
+1. harness 全量测试收尾确认（§2.3 已归因完毕）→ 提交合并
+2. dsh-plugin-subscriptions 与 dsh-passwords 已完成本机测试、构建和提交；后续核对推送与发布批次
 3. 按 §7 的决定执行 7.1 / 7.2 / 7.3
 4. 全部本机验证通过后，按 `server-28-deployment-runbook.md` 的三条发布线（dsh-runtime / dsh-web / dsh-plugins）版本对齐发布到 28 服务器
 
@@ -195,5 +222,25 @@ function pickerModels(models) { return models.filter(m => CODEX_PICKER_MODEL_IDS
 | deepseek-harness | 分支 `backup/tzwl-before-013` = `bf8d4921d9`（合并前状态） |
 | dsh-web | 合并提交 `0a01f09c` 的第一父提交 `5e65a315` |
 | dsh-passwords | `0a71ac8` 之前为 `2.6.19` 线上同源状态 |
-| dsh-plugin-subscriptions | 工作区改动未提交，`git checkout -- src/` 即可回退 |
+| dsh-plugin-subscriptions | `a9a030b` 的第一父提交；保留本次提交，可另行 revert |
 | 28 服务器 | 未改动，仍为 runtime `0.1.2-rc.1` + dsh-web-all `0.3.14` + dsh-passwords `2.6.19` |
+
+## 10. 续跑记录
+
+### 10.1 独占验证尚未取得
+
+使用 Node `22.21.1` 执行 `pnpm run test`，日志为 `/tmp/dsh-013-harness-test-20260908.log`。运行期间发现另一项任务同时执行 `npm exec vitest run packages/experimental/code-runtime-python/tests/runtime.spec.ts scripts/oxlint-contract.spec.ts`，并出现不属于本次执行的新 `spill-local.spec.ts` 改动。本轮已主动中断，退出码为 130；这不是通过的测试结果，也不能作为独占复跑证据。已保留另一任务的进程和修改。
+
+中断前记录到 subagent-acp 三项 5 秒超时，以及 oxlint-contract 五项失败；没有取得最终断言汇总，暂不据此判断代码原因。
+
+### 10.2 订阅插件已验证并提交
+
+提交 `a9a030b6ae06b9042c79533fe3681c5c10c1942a`（`fix(codex): discover subscription models from the live catalog`）。除原有目录改动，还补齐 `resolveOwnModel` 的输入模态传播，避免纯文本模型在实际选择后仍被宣称支持图片；补充目录、版本、配置和缓存回归，并更新 README 双语。
+
+Node `22.21.1` 下 `npm test` 为 378 项：372 通过、6 跳过、0 失败；`npm run build` 通过，包含 Host 和 Client 类型检查。既有登录测试会探测 macOS Keychain，本次因已有登录凭据而跳过 6 项文件存储测试；没有输出或修改凭据，也没有调用真实 token/API 接口。日志为 `/tmp/dsh-013-subscriptions-test.log` 和 `/tmp/dsh-013-subscriptions-build.log`。提交尚未推送。
+
+### 10.3 空白会话分配已验证并提交
+
+提交 `388f80b`（`fix(workspaces): allow assigning registered blank sessions`）。工作区清单保留 live 和可读取的持久化空白会话，过滤已归档、已删除及目录不存在的记录；只有明确的 `SESSION_QUERY_SESSION_NOT_FOUND` 才按会话已删除处理。服务缺失或存储失败返回 HTTP 502 / `WORKSPACE_UNAVAILABLE`，设置卡显示错误并支持刷新恢复，避免把失败伪装成空清单。管理员鉴权保持在清单读取之前。
+
+Node `22.21.1` 下 `npm test` 为 392 项：379 通过、13 项既有跳过、0 失败；`npm run build` 通过，包含 Host/Client 类型检查和客户端 bundle。日志为 `/tmp/dsh-013-passwords-test.log` 和 `/tmp/dsh-013-passwords-build.log`。提交尚未推送，28 服务器未改动。
