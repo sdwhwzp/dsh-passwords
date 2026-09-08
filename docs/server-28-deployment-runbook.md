@@ -1371,3 +1371,47 @@ pasta 方案也被否决：Ubuntu 24.10 的 2024-08 版 pasta 默认把宿主 lo
 ### 回滚
 
 装回 `/usr/local/libexec/*.20260908-v2` 并从 `/root/sudoers-*.20260908-v2.bak` 恢复两条 sudoers（`visudo -c` 校验后再替换），沙盒即恢复 `--unshare-net` 且以账号 gid 运行。`systemctl disable --now dsh-sandbox-nft.service` 删表；`groupdel dsh-sandbox` 可选。git 与 nftables 单元独立于 Profile，回滚 `dsh-vsceditor` 到 `pre-20260908-vsceditor-v7` 不会撤销它们。
+
+## 36. 2026-09-09 侧栏编辑器接管、dsh-vsceditor 退役与两处既有缺陷修复
+
+编辑器 UI 换成 `dsh-sidebar-vscode` 的侧栏标签页（整页编辑器 + 右侧会话框），`dsh-vsceditor` 从 Profile 中移除、其运行时并入前者。同轮修复了两处与本次改动无关的既有缺陷。线上 `dsh-sidebar-vscode@0.2.8-dsh.20260909.9`、`dsh-passwords@2.6.26`、`dsh-better-sidebar@0.18.1-alpha.0`，Host PID `1553119`，Profile 17 个 bundle，`pm2 save` 已执行。root 启动器内容与摘要全程未变（`e5338ecb…`），sudoers 未重新 pin。
+
+### 为什么不是直接换插件
+
+`dsh-sidebar-vscode` 上游按单一信任边界设计：其 README 自述内置反代面向单上游、全局共享，且「能访问该端口的客户端即可使用被代理的工作台」；`src/` 中没有任何 principal 或会话校验，而 spool 目录按 `slug(工作区路径)` 寻址——多租户下每个账号看到的都是 `/workspace/...`，会直接撞进同一个目录，那是跨账号读写通道而非功能缺失。因此改为在 fork 中补隔离：停用其内置反代，spool 按认证账号寻址且使用鉴权返回的 folder 而非浏览器所报，随后把 `dsh-vsceditor` 的运行时按字节搬入 `runtime/`（鉴权与沙盒边界以已验证的形态搬迁，不重写为 TypeScript）。
+
+### 部署过程中暴露的三个坑
+
+**Cordis 的 inject 形态**：`{ required, optional }` 对象形式被这个版本读成服务名，条目永远 pending。改用嵌套可选 inject，单账号组合仍可装载，服务未就绪的 spool 请求一律拒绝。装配冒烟捕获。
+
+**锁文件的相对路径**：候选 Profile 放在与线上不同深度的目录时，`pnpm install` 重解析会按候选目录重写 `file:` 相对路径，正式路径随后 `--frozen-lockfile` 安装即失败（找 `/home/tzwl3/dsh-plugins/...` 而非 `/home/tzwl3/apps/dsh-plugins/...`）。前几次切换用冻结安装不重解析，从未暴露。候选改放 `.dsh/profiles/` 下的同层兄弟目录。自动回滚正常，生产全程健康。此外锁文件同时以绝对与相对两种形式记录同一 tarball，只替换其一会静默保留旧解析——换包必须同时替换两种形式与 `sha512` 完整性。
+
+**网关的路径白名单**：把编辑器路由改名为 `/sidebar-vscode/editor/` 后，工作台报 `WebSocket close 1006`。`dsh-passwords/dist/gateway.js` 硬编码了它转发的路径前缀，其中有 `/dsh-vsceditor/` 而无 `/sidebar-vscode/`；HTTP 走通用转发路径仍然可用，只有 WebSocket 升级被静默丢弃，两侧日志皆无记录。前缀改回 `/dsh-vsceditor/`——这个名字要活得比它来源的那个包更久，除非网关先动。原因已写进 `runtime/tenant-access.cjs` 与 fork 的 FORK.md。
+
+### 同轮修复的两处既有缺陷
+
+**新建工作区需刷新才可见**。`/api/session/list` 读取前要过一轮有界归属扫描（单次 15 秒截止，`partial` 后 30 秒不重扫）。一条 2026-09-01 起就无法读取归属的子代理会话（Session 服务对其历史分页返回 `session/agent-busy`，即交接文档中「descriptor 位于继承区仍无法打开」的那条）每轮都吃满预算，扫描永远 `partial`，窗口内所有读取都拿不完整快照，新建工作区因而被当作「认不出归属」过滤。日志此前只说「被拒绝」不带错误码，先发 2.6.25 把 sessionId、transport 与上游错误码带进日志才定位到。2.6.26 把「已尝试且确定读不了」的行记入内存集合，不再每轮重试、也不再让整轮判定不完整；该行仍不可见（归管理员，安全的答案），但不再拖累其他读取。重启后该警告从每 30 秒一次降为共 1 次。
+
+顺带修正 `test/update.test.ts`：它硬编码 `assert.equal(pkg.version, '2.6.20')`，断言的是一个时刻而非行为，自 2.6.21 起一直失败，线上运行的 2.6.24 也在失败之列；改为断言版本领先于 2.6.19 基线，即更新流程真正依赖的关系。
+
+**新建工作区仍不即时出现（未修）**。`packages/api/workspace-controller/src/principal-feed.ts` 的 `upsert` 分支要先向 `principalAccess` 确认可读性，不可读即整帧丢弃；而 `dsh-passwords/src/principal-access.ts` 以 `workspaceRegistry.list()` 快照解析 id→路径，新建工作区此刻尚不在快照中，`workspacePath` 为 `undefined` 判定不可读。刷新走 `baseline` 分支时快照已包含它，故表现为「刷新才有」。位置与机制已定位，改动未做。
+
+### 合并过程中引入并已修复的两处回归
+
+**编辑器不再跟随 DSH 主题**：开启调用从 `dsh-vsceditor` 的客户端移到侧栏插件后发送空载荷，主机半判定「无主题」并删除主题键。账号 `settings.json` 中只剩四个 chrome 键是发现线索。0.2.8-dsh.20260909.8 把调色板随开启调用送出，并以 body 属性观察者推送后续变化。
+
+**背景色全部丢失**：客户端手写正则只认 `rgb()` 与 hex，而注册主题（品牌皮肤）把 token 以内联样式写成其它 CSS 颜色形式，不认识即静默丢弃——前景色与边框写入而所有 `bg-*` 键缺失。0.2.8-dsh.20260909.9 改由浏览器自身解析归一化。
+
+### 验收结果
+
+装配冒烟（真实 `dsh --profile web`，隔离 home）：`proxy.status` 宣告租户模式、`open.capability` 与编辑器 `open` 对未授权会话均返回 `Session access denied`。插件自测 480 项 + 运行时 10 项通过；`dsh-passwords` 384 项通过。切换后健康检查连续 30 秒通过。
+
+产品侧已由使用者确认：侧栏 VSCode 标签页可加载工作台；编辑器内选中代码右键发送可在对话输入框生成引用 chip（走 `refs.json` 队列，因公网 HTTP 无 `navigator.clipboard`，原剪贴板桥静默失效）；沙盒内 `git clone`/`pull` 可用；工作区可创建并显示；Git 图谱分支显示正常。主题跟随在 0.2.8-dsh.20260909.9 后尚未复验。
+
+### 已知限制
+
+`dsh-better-sidebar` 为首次挂载，版本为 `0.18.1-alpha.0`（Profile 原有 spec 决定），整个侧边栏 UI 随之改变。VS Code 扩展 `dsh.selection-reference@0.1.5` 目前逐账号手工安装，`admin-u1` 与 `u3` 尚未安装，其文件打开通道在装好前降级为 URL payload。Git 图谱只列本地分支，`git clone` 只创建默认分支，其余需 `git branch --track` 建出。第 32–35 节的其余限制保持不变。
+
+### 回滚
+
+`apps/deploy-backups/pre-20260909-sidebar-editor` 含切换前 Profile、密码门环境与 PM2 快照。root 启动器、sudoers、nftables 单元与 git 安装均独立于 Profile，回滚插件不会撤销它们。

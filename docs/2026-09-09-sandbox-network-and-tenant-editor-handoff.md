@@ -57,6 +57,16 @@ pasta 方案实测否决：Ubuntu 24.10 的 2024-08 版 pasta 默认把宿主 lo
 
 这些检查不替代浏览器验收，也不证明多账号编辑器可用——它的客户端与部署尚未完成。
 
+## 2026-09-09 后续：编辑器接管与两处既有缺陷
+
+编辑器 UI 已换成 `dsh-sidebar-vscode` 的侧栏标签页，`dsh-vsceditor` 退出 Profile、运行时并入前者，root 启动器内容与摘要全程未变。线上 `dsh-sidebar-vscode@0.2.8-dsh.20260909.9`、`dsh-passwords@2.6.26`、`dsh-better-sidebar@0.18.1-alpha.0`。
+
+使用者已确认可用：侧栏标签页加载工作台、编辑器选中代码右键送出引用 chip、沙盒内 `git clone`/`pull`、工作区创建与显示、Git 图谱分支。
+
+同轮定位并修复了一处与本次改动无关的既有缺陷：一条自 2026-09-01 起无法读取归属的子代理会话每轮吃满归属扫描的 15 秒预算，使扫描永远 `partial`，其 30 秒窗口内所有读取都拿不完整快照——新建工作区因而要刷新才可见。`2.6.26` 让「已尝试且确定读不了」的行不再重试也不再判定整轮不完整。另一处已定位未修：`principal-feed.ts` 的 `upsert` 帧因 `workspaceRegistry.list()` 快照尚无新 id 而被丢弃。
+
+三个部署坑与两处自引入回归的完整记录见[部署手册第 36 节](server-28-deployment-runbook.md#36-2026-09-09-侧栏编辑器接管dsh-vsceditor-退役与两处既有缺陷修复)。
+
 ## 未完成项
 
 **浏览器视觉验收未执行**，三次切换的 `accepted-v*.json` 均记为 `healthy-pending-visual-acceptance`。本轮没有签发临时令牌，没有写入任何账号的真实编辑器设置或工作区文件。
