@@ -220,7 +220,7 @@ WeKnora 知识库插件已纳入跨机器安装清单，来源固定为 `github:
 | `/home/tzwl3/apps/dsh-plugins/current/dsh-passwords/.env` | 网关、MySQL、签名和加密密钥 | 是，极敏感，权限 0600 |
 | `/home/tzwl3/dsh-user-workspaces/` | 子账号专属文件 | 是；删除账号不会删除这里的数据 |
 | `/home/tzwl3/mac.md` | kmMac SSH 连接信息 | 是，极敏感，权限 0600；推荐改用 SSH Key |
-| `/home/tzwl3/.pm2/dump.pm2` | PM2 开机恢复清单 | 是；当前权限 0664，建议改为 0600 |
+| `/home/tzwl3/.pm2/dump.pm2` 与 `.bak` | PM2 开机恢复清单及备份 | 是；本次验收后两者权限均为 0600 |
 | `/etc/systemd/system/kmmac-model-monitor.*` | kmMac 监控 service 和 timer | 是 |
 | `/home/tzwl3/.local/bin/kmMac-model-monitor` | kmMac 上线监控脚本 | 是 |
 | `/home/tzwl3/.local/share/kmMac-model-monitor/start-llama.sh` | 发送给 kmMac 的启动脚本 | 是 |
@@ -468,9 +468,12 @@ chmod 700 /home/tzwl3/dsh-user-workspaces
 
 ```bash
 export PATH=/home/tzwl3/.local/opt/node-v22.21.1-linux-x64/bin:/home/tzwl3/.local/bin:$PATH
+export DSH_DOCTOR_REAL_DSH=/home/tzwl3/apps/dsh-runtime/current/node_modules/.bin/dsh
+export DSH_DOCTOR_PACKAGE_DIR=/home/tzwl3/apps/dsh-web/current/packages/dsh-doctor
 cd /home/tzwl3/dsh-workspace
 pm2 start /home/tzwl3/apps/dsh-runtime/current/node_modules/@deepseek-ai/dsh/lib/bin.js \
   --name dsh-web \
+  --kill-timeout 30000 \
   --interpreter /home/tzwl3/.local/opt/node-v22.21.1-linux-x64/bin/node \
   -- web --no-open --port 3080
 pm2 save

@@ -172,7 +172,7 @@ function pickerModels(models) { return models.filter(m => CODEX_PICKER_MODEL_IDS
 逐条核对 `590b2ca` 的 0.1.3 适配，只有两项与本 fork 相关：
 
 1. **apiproxy 白名单补丁**——上游删除（0.1.3 已无该包）。本 fork **已经清理过**，无需处理。
-2. **可分配工作区的空白会话过滤**——上游明确移除，其 JSDoc 写明“`session.create()` 之后会话本来就是空白的；能否分配只由注册表成员资格、归档状态与持久化存在决定”。本 fork 的 `src/plugin.ts:1124/1133` **仍在**用 `isDisplayableDshSession` / `isDisplayableDshSurface` 过滤，且外层 `catch` 会把异常吞成空列表——与此前“选择不了工作区”的故障同源。
+2. **可分配工作区的空白会话过滤**——上游明确移除，其 JSDoc 写明“`session.create()` 之后会话本来就是空白的；能否分配只由注册表成员资格、归档状态与持久化存在决定”。当时本 fork 的 `src/plugin.ts:1124/1133` **仍在**用 `isDisplayableDshSession` / `isDisplayableDshSurface` 过滤，且外层 `catch` 会把异常吞成空列表——与此前“选择不了工作区”的故障同源。
 
 续跑已定向移植第 2 项并补回归测试（§10.3），未全量合并这 7 个提交。空白会话在管理员分配清单中可选，账号可见性仍受原有权限约束；该阶段改动尚未上线，现已随 §10.11–10.16 部署。
 
