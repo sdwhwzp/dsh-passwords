@@ -9,6 +9,8 @@ import { chmodSync, existsSync, readFileSync, renameSync, unlinkSync, writeFileS
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import type { MysqlConnectionOptions } from './mysql-sync.js';
+import { parseWebSocketAllowlist } from './permissions.js';
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 // dsh 进程里没有本项目的 .env（通过 DSH_PASSWORDS_ENV_FILE 显式指定网关 .env 路径）
@@ -22,10 +24,22 @@ function readEnv(name: string, fallback: string): string {
   return (process.env[name] ?? '').trim() || fallback;
 }
 
+/** Resolve a configured path against its deployment directory. */
+export function resolveConfigPath(value: string, configRoot: string, fallbackName: string): string {
+  const configured = value.trim() || fallbackName;
+  return path.isAbsolute(configured) ? path.normalize(configured) : path.resolve(configRoot, configured);
+}
+
 export interface PlatformConfig {
+  /** Optional Linux sandbox launcher. Empty disables restricted-account terminals. */
+  tenantTerminal?: { launcher: string; maxPerUser: number; reconnectGraceMs: number };
+  /** Isolated replacement for the global task-board Host; enable only with the global Host disabled. */
+  tenantTaskBoard?: { enabled: boolean; directory: string; gatewayOrigin: string };
   setupKey: string;
-  /** SQLite 数据库文件路径（Node 内置 node:sqlite，无需外部数据库） */
+  /** Local data path used by SQLite and by filesystem-backed gateway state. */
   dbPath: string;
+  /** Durable account repository. SQLite remains the default. */
+  database: { driver: 'sqlite'; path: string } | MysqlConnectionOptions;
   /** 数据静态加密密钥（可选，留空则从 SETUP_KEY 派生） */
   dbEncKey: string;
   /** 登录网关（dsh 访问门卫）：对外端口 + 上游 dsh 地址 */
@@ -57,6 +71,8 @@ export interface PlatformConfig {
     port: number;
     /** 对浏览器展示的完整 ws(s) 地址；留空时按当前访问主机与端口生成。 */
     publicUrl: string;
+    /** Stable host directory used for companion workspace registrations. */
+    placeholderRoot: string;
   };
   /** 宿主机上为子用户自动创建的专属工作区根目录。 */
   managedWorkspaceRoot: string;
@@ -67,6 +83,17 @@ export interface PlatformConfig {
     /** 补丁应用后要重启的 dsh systemd 服务名；留空则不自动重启 */
     restartService: string;
   };
+  /** Optional third-party WebSocket routes; built-in alpha transports stay explicit in the gateway. */
+  webSocket?: {
+    adminAllowlist: string[];
+    userAllowlist: string[];
+  };
+}
+
+function positiveIntegerEnv(name: string, fallback: number): number {
+  const value = Number(readEnv(name, String(fallback)));
+  if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${name} must be a positive integer`);
+  return value;
 }
 
 export function loadConfig(): PlatformConfig {
@@ -97,6 +124,13 @@ export function loadConfig(): PlatformConfig {
     // 默认基于模块目录而非 cwd：无论从哪个目录运行都指向同一数据库。
     path.resolve(moduleDir, '..', 'data', 'platform.db'),
   );
+  const driverRaw = readEnv('DSH_PASSWORDS_DB_DRIVER', 'sqlite').toLowerCase();
+  if (driverRaw !== 'sqlite' && driverRaw !== 'mysql') {
+    throw new Error('DSH_PASSWORDS_DB_DRIVER 仅支持 sqlite 或 mysql');
+  }
+  const database: PlatformConfig['database'] = driverRaw === 'sqlite'
+    ? { driver: 'sqlite', path: dbPath }
+    : loadMysqlConfig();
 
   // MCP_DSH_RESTART_SERVICE 语义：未设置→默认 'dsh-web'；显式空值→不自动重启。
   // （不能用 readEnv：它会把空值当未设置回退到默认，导致 Windows 上
@@ -125,7 +159,10 @@ export function loadConfig(): PlatformConfig {
   const autoTls = !userCerts && !autoOff && (autoOn || autoTlsRaw === '');
   const acmeDir = path.join(path.dirname(dbPath), 'acme');
 
-  const gatewayPortRaw = readEnv('MCP_GATEWAY_PORT', '8080').trim();
+  // 自动 HTTPS 的 CLI 默认监听 443；插件、网关 Broker 和健康轮询必须在
+  // 同一配置阶段看到这个端口，不能等 cli.ts 启动后再局部改写，否则插件会
+  // 把 Cookie 同步到 8080，而公网网关实际在 443。
+  const gatewayPortRaw = readEnv('MCP_GATEWAY_PORT', autoTls ? '443' : '8080').trim();
   const gatewayPortNum = Number(gatewayPortRaw);
   // 端口非法（非数字/越界）回退默认 8080，避免 listen(NaN) 的泛化报错
   const gatewayPort =
@@ -138,10 +175,21 @@ export function loadConfig(): PlatformConfig {
     Number.isInteger(localWorkspacePortNum) && localWorkspacePortNum > 0 && localWorkspacePortNum <= 65535
       ? localWorkspacePortNum
       : Math.min(gatewayPort + 1, 65535);
+  const managedWorkspaceRoot = resolveEnvRelativePath(
+    readEnv('MCP_MANAGED_WORKSPACE_ROOT', ''),
+    envFilePath(),
+    path.join(homedir(), 'dsh-user-workspaces'),
+  );
+  const localWorkspacePlaceholderRoot = resolveEnvRelativePath(
+    readEnv('MCP_LOCAL_WORKSPACE_PLACEHOLDER_ROOT', ''),
+    envFilePath(),
+    path.join(path.dirname(managedWorkspaceRoot), 'dsh-local-workspaces'),
+  );
 
   return {
     setupKey,
     dbPath,
+    database,
     dbEncKey: readEnv('MCP_DB_ENC_KEY', ''),
     gateway: {
       host: readEnv('MCP_GATEWAY_HOST', '0.0.0.0'),
@@ -175,17 +223,89 @@ export function loadConfig(): PlatformConfig {
       host: readEnv('MCP_LOCAL_WORKSPACE_HOST', '0.0.0.0'),
       port: localWorkspacePort,
       publicUrl: readEnv('MCP_LOCAL_WORKSPACE_PUBLIC_URL', ''),
+      placeholderRoot: localWorkspacePlaceholderRoot,
     },
-    managedWorkspaceRoot: resolveEnvRelativePath(
-      readEnv('MCP_MANAGED_WORKSPACE_ROOT', ''),
-      envFilePath(),
-      path.join(homedir(), 'dsh-user-workspaces'),
-    ),
+    managedWorkspaceRoot,
+    tenantTaskBoard: {
+      enabled: readEnv('MCP_TENANT_TASK_BOARD', 'false') === 'true',
+      directory: resolveEnvRelativePath(readEnv('MCP_TENANT_TASK_BOARD_DIR', ''), envFilePath(), path.join(homedir(), '.dsh', 'tenant-task-boards')),
+      gatewayOrigin: readEnv('MCP_TENANT_TASK_BOARD_GATEWAY', `http://127.0.0.1:${gatewayPort}`),
+    },
+    tenantTerminal: {
+      launcher: readEnv('MCP_TENANT_TERMINAL_LAUNCHER', ''),
+      maxPerUser: positiveIntegerEnv('MCP_TENANT_TERMINAL_LIMIT', 8),
+      reconnectGraceMs: positiveIntegerEnv('MCP_TENANT_TERMINAL_GRACE_MS', 30_000),
+    },
     patch: {
       dshRoot: readEnv('MCP_DSH_ROOT', ''),
       restartService,
     },
+    webSocket: {
+      adminAllowlist: parseWebSocketAllowlist(
+        process.env.MCP_GATEWAY_WS_ADMIN_ALLOWLIST,
+        'MCP_GATEWAY_WS_ADMIN_ALLOWLIST',
+      ),
+      userAllowlist: parseWebSocketAllowlist(
+        process.env.MCP_GATEWAY_WS_USER_ALLOWLIST,
+        'MCP_GATEWAY_WS_USER_ALLOWLIST',
+      ),
+    },
   };
+}
+
+/** Return the constructor target for the configured account repository. */
+export function databaseTarget(config: PlatformConfig): string | MysqlConnectionOptions {
+  return config.database.driver === 'sqlite' ? config.database.path : config.database;
+}
+
+function loadMysqlConfig(): MysqlConnectionOptions {
+  const host = readEnv('DSH_PASSWORDS_MYSQL_HOST', '');
+  const user = readEnv('DSH_PASSWORDS_MYSQL_USER', '');
+  const password = process.env.DSH_PASSWORDS_MYSQL_PASSWORD ?? '';
+  const database = readEnv('DSH_PASSWORDS_MYSQL_DATABASE', '');
+  if (host === '' || user === '' || password === '' || database === '') {
+    throw new Error('MySQL 模式必须配置 DSH_PASSWORDS_MYSQL_HOST、DSH_PASSWORDS_MYSQL_USER、DSH_PASSWORDS_MYSQL_PASSWORD、DSH_PASSWORDS_MYSQL_DATABASE');
+  }
+  if (!/^[A-Za-z0-9_]+$/.test(database)) {
+    throw new Error('DSH_PASSWORDS_MYSQL_DATABASE 只能包含字母、数字和下划线');
+  }
+  const port = parseBoundedInteger(readEnv('DSH_PASSWORDS_MYSQL_PORT', '3306'), 1, 65535, 'DSH_PASSWORDS_MYSQL_PORT');
+  const queryTimeoutMs = parseBoundedInteger(
+    readEnv('DSH_PASSWORDS_MYSQL_QUERY_TIMEOUT_MS', '15000'),
+    1000,
+    120000,
+    'DSH_PASSWORDS_MYSQL_QUERY_TIMEOUT_MS',
+  );
+  const tlsRaw = readEnv('DSH_PASSWORDS_MYSQL_TLS', 'off').toLowerCase();
+  if (tlsRaw !== 'off' && tlsRaw !== 'required' && tlsRaw !== 'verify-ca') {
+    throw new Error('DSH_PASSWORDS_MYSQL_TLS 仅支持 off、required 或 verify-ca');
+  }
+  const tlsCaRaw = readEnv('DSH_PASSWORDS_MYSQL_TLS_CA', '');
+  const tlsCa = tlsCaRaw === ''
+    ? undefined
+    : resolveEnvRelativePath(tlsCaRaw, envFilePath(), tlsCaRaw);
+  if (tlsRaw === 'verify-ca' && tlsCa === undefined) {
+    throw new Error('DSH_PASSWORDS_MYSQL_TLS=verify-ca 时必须配置 DSH_PASSWORDS_MYSQL_TLS_CA');
+  }
+  return {
+    driver: 'mysql',
+    host,
+    port,
+    user,
+    password,
+    database,
+    tls: tlsRaw,
+    ...(tlsCa === undefined ? {} : { tlsCa }),
+    queryTimeoutMs,
+  };
+}
+
+function parseBoundedInteger(raw: string, min: number, max: number, name: string): number {
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new Error(`${name} 必须是 ${String(min)}-${String(max)} 的整数`);
+  }
+  return value;
 }
 
 /** 当前生效的 .env 文件路径（与 loadConfig 的读取路径保持一致） */

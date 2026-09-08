@@ -8,6 +8,7 @@
 //      dsh 升级覆盖补丁后，主用户在设置页点"重载补丁"即可，无需登录服务器。
 import type { Context } from '@deepseek-ai/cordis';
 import type {} from '@deepseek-ai/dsh-agent';
+import type {} from '@deepseek-ai/dsh-client-connection';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver';
 import http from 'node:http';
@@ -20,19 +21,25 @@ import { createReadStream, existsSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadConfig, type PlatformConfig } from './config.js';
+import { databaseTarget, loadConfig, type PlatformConfig } from './config.js';
 import { Database, type UserListRow } from './db.js';
 import { createFieldCrypto } from './encrypt.js';
+import { registerTenantTaskBoard } from './tenant-task-board.js';
+import { registerTenantTerminal } from './tenant-terminal.js';
 import { AuthService, AuthError, assertNoSqlInjection, type AuthedUser, type RequestMeta } from './auth.js';
 import { findDshRoot, patchStatus } from './patch.js';
-import { isDisplayableDshSession, isDisplayableDshSurface, todayLocal } from './permissions.js';
+import { todayLocal } from './permissions.js';
+import { listAssignableWorkspaces } from './assignable-workspaces.js';
 import {
   DEVICE_APPROVAL_ERROR,
   LocalWorkspaceHub,
 } from './local-workspace-hub.js';
-import { ManagedWorkspaceProvisioner } from './managed-workspace.js';
-import { RequestPrincipalService } from './principal.js';
+import { ManagedWorkspaceProvisioner, registerManagedUserWorkspace } from './managed-workspace.js';
+import { AgentTurnPrincipalTracker, registerRequestPrincipal } from './principal.js';
 import type { AuthenticatedPrincipal } from './principal.js';
+import { registerPrincipalAccess } from './principal-access.js';
+import { registerBotBridge } from './bot-bridge.js';
+import { DshPasswordsRemote } from './remote.js';
 import { backupSqliteBeforeMigration } from './db-backup.js';
 import { createMonthlyBudgetResolver } from './spend-budget.js';
 import {
@@ -42,6 +49,11 @@ import {
   spendCheckUnavailableError,
 } from './quota-notice.js';
 import { CUSTOMER_MODEL_IDS, customerModelAllowed } from './model-policy.js';
+import {
+  supportsUpstreamBrowserAuthentication,
+  UPSTREAM_BROWSER_AUTH_REQUEST,
+  UPSTREAM_BROWSER_AUTH_RESPONSE,
+} from './upstream-browser-auth.js';
 
 interface SpendAccounting {
   reconcile(): Promise<void>;
@@ -65,8 +77,8 @@ declare module '@deepseek-ai/cordis' {
 /** 稳定 cordis 插件名（insert 进 cordis.yml 时用同一个名字） */
 export const name = 'dsh-passwords';
 
-/** 依赖 dsh 主机侧的 webServer 服务（路由挂载点） */
-export const inject = ['webServer'];
+/** 依赖 Host Web 服务与其进程内浏览器认证服务。 */
+export const inject = ['webServer', 'connection'];
 
 /** 网关会话 cookie 名（与 gateway.ts 保持一致） */
 const COOKIE_NAME = 'dsh_gateway_token';
@@ -275,23 +287,57 @@ function startGateway(ctx: Context, cfg: PlatformConfig): void {
           // 拿不到就用默认值
         }
         const explicitUpstream = process.env.MCP_GATEWAY_UPSTREAM?.trim() ?? '';
+        const upstreamRoot = explicitUpstream !== ''
+          ? explicitUpstream
+          : `http://127.0.0.1:${String(upstreamPort)}`;
+        const connection: unknown = ctx.connection;
+        const upstreamBrowserAuthenticationRequired = supportsUpstreamBrowserAuthentication(connection);
         const gatewayArgs =
           explicitUpstream !== ''
             ? [cliPath, 'serve-gateway']
-            : [cliPath, 'serve-gateway', '--upstream', `http://127.0.0.1:${String(upstreamPort)}`];
-        child = spawn(process.execPath, gatewayArgs, {
+            : [cliPath, 'serve-gateway', '--upstream', upstreamRoot];
+        const spawned = spawn(process.execPath, gatewayArgs, {
           cwd: INSTALL_ROOT,
           env: {
             ...process.env,
             DSH_GATEWAY_PARENT_PID: String(process.pid),
+            DSH_GATEWAY_BROWSER_AUTH_REQUIRED: upstreamBrowserAuthenticationRequired ? '1' : '0',
             DSH_PASSWORDS_ENV_FILE: path.join(INSTALL_ROOT, '.env'),
           },
-          stdio: ['ignore', 'inherit', 'inherit'],
+          stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
         });
-        child.on('error', (error) => {
+        child = spawned;
+        spawned.on('message', (message: unknown) => {
+          if (
+            !upstreamBrowserAuthenticationRequired ||
+            disposed ||
+            message === null ||
+            typeof message !== 'object' ||
+            (message as { type?: unknown }).type !== UPSTREAM_BROWSER_AUTH_REQUEST ||
+            !spawned.connected
+          ) return;
+          let authenticatedUrl: string;
+          try {
+            if (!supportsUpstreamBrowserAuthentication(connection)) throw new Error('unavailable');
+            authenticatedUrl = connection.authenticatedUrl(upstreamRoot);
+          } catch {
+            console.error('[dsh-passwords] 无法创建 Host 浏览器认证会话，密码门停止启动');
+            spawned.kill('SIGTERM');
+            return;
+          }
+          spawned.send(
+            { type: UPSTREAM_BROWSER_AUTH_RESPONSE, authenticatedUrl },
+            (error) => {
+              if (error === null) return;
+              console.error('[dsh-passwords] Host 浏览器认证 IPC 传递失败，密码门停止运行');
+              if (spawned.exitCode === null) spawned.kill('SIGTERM');
+            },
+          );
+        });
+        spawned.on('error', (error) => {
           console.error('[dsh-passwords] 密码门拉起失败:', error);
         });
-        child.on('exit', (code, signal) => {
+        spawned.on('exit', (code, signal) => {
           if (disposed) return;
           const reason = code ?? signal ?? 'unknown';
           if (reason === EXIT_CERT_FAILED) {
@@ -302,6 +348,8 @@ function startGateway(ctx: Context, cfg: PlatformConfig): void {
             console.error(`[dsh-passwords] 密码门进程已退出（code=${String(reason)}）。重启 dsh 会自动再次拉起`);
           }
         });
+      }).catch(() => {
+        if (!disposed) console.error('[dsh-passwords] 密码门启动前检查失败');
       });
 
       return () => {
@@ -339,7 +387,7 @@ export function apply(ctx: Context): void {
   const configured =
     cfg.setupKey !== '' && cfg.setupKey !== 'change-me-to-a-strong-random-key';
   if (configured) {
-    new RequestPrincipalService(ctx, cfg);
+    registerRequestPrincipal(ctx, cfg);
   }
   /** patch/reload 冷却（10 分钟一次，防认证后横向 DoS） */
   const PATCH_RELOAD_COOLDOWN_MS = 10 * 60 * 1000;
@@ -348,8 +396,8 @@ export function apply(ctx: Context): void {
   let auth: AuthService | null = null;
   if (configured) {
     try {
-      backupSqliteBeforeMigration(cfg.dbPath);
-      db = new Database(cfg.dbPath, createFieldCrypto(cfg.dbEncKey, cfg.setupKey));
+      if (cfg.database.driver === 'sqlite') backupSqliteBeforeMigration(cfg.database.path);
+      db = new Database(databaseTarget(cfg), createFieldCrypto(cfg.dbEncKey, cfg.setupKey));
       db.init();
       auth = new AuthService(cfg, db);
     } catch (error) {
@@ -361,6 +409,17 @@ export function apply(ctx: Context): void {
 
   const localWorkspaceHub = db === null ? null : new LocalWorkspaceHub(ctx, db, cfg);
   const managedWorkspaces = db === null ? null : new ManagedWorkspaceProvisioner(db, cfg);
+  if (db !== null) {
+    registerManagedUserWorkspace(ctx, db, cfg);
+    registerPrincipalAccess(ctx, db);
+    registerTenantTerminal(ctx, db, cfg);
+    registerTenantTaskBoard(ctx, db, cfg);
+    if (auth !== null) registerBotBridge(ctx, db, auth);
+    const remoteDb = db;
+    ctx.inject(['typertGateway'], (scope) => {
+      new DshPasswordsRemote(scope, remoteDb);
+    });
+  }
   let userMutationTail: Promise<void> = Promise.resolve();
   const mutateUser = <T>(operation: () => Promise<T>): Promise<T> => {
     const result = userMutationTail.then(operation, operation);
@@ -412,13 +471,12 @@ export function apply(ctx: Context): void {
   // accounting is unavailable; local administrators are intentionally unlimited.
   if (db !== null) {
     const budgetDb = db;
+    const stepPrincipals = new AgentTurnPrincipalTracker();
     ctx.inject(['spendAccounting'], (scope) =>
       scope.spendAccounting.registerBudgetResolver(createMonthlyBudgetResolver(budgetDb)));
 
     ctx.on('agent/pre-step', async (payload, next) => {
-      // The released dsh-agent typings predate the optional principal field;
-      // the local harness carries it on this same durable event contract.
-      const principal = (payload as typeof payload & { principal?: AuthenticatedPrincipal }).principal;
+      const principal = stepPrincipals.resolve(payload);
       if (principal === undefined) return next();
       if (principal.source !== 'dsh-passwords' || !/^[1-9][0-9]*$/.test(principal.id)) return { kind: 'reject' } as const;
       const user = db!.getUserById(Number(principal.id));
@@ -478,7 +536,7 @@ export function apply(ctx: Context): void {
     // authorization control and also covers crafted RPC calls or stale clients.
     ctx.on('agent/request', async (payload, next) => {
       const config = await next();
-      const principal = (payload as typeof payload & { principal?: AuthenticatedPrincipal }).principal;
+      const principal = stepPrincipals.resolve(payload);
       if (principal === undefined) return config;
       if (principal.source !== 'dsh-passwords' || !/^[1-9][0-9]*$/.test(principal.id)) {
         throw new Error('无法验证当前账号的模型权限，请重新登录后再试。');
@@ -1036,66 +1094,21 @@ export function apply(ctx: Context): void {
           writeJson(res, 403, { ok: false, code: 'FORBIDDEN', error: '仅主用户可操作' });
           return;
         }
-        // 读取 dsh 已注册的工作区目录（供主用户配置子用户可访问文件夹时下拉选择）
         try {
-          const reg = ctx.get('workspaceRegistry') as unknown as
-            | {
-                list(): Array<{ path: string; title: string; sessionIds: readonly string[] }>;
-                archivedSessionIds: readonly string[];
-              }
-            | undefined;
-          const sessions = ctx.get('sessions') as unknown as
-            | { get(id: string): unknown }
-            | undefined;
-          const sessionTitle = ctx.get('sessionTitle') as unknown as
-            | { get(session: unknown): { title?: string } | undefined }
-            | undefined;
-          const sessionQuery = ctx.get('sessionQuery') as unknown as
-            | {
-                readSurface(id: string): Promise<{ events: readonly unknown[] }>;
-                readTitle?(id: string): Promise<{ title?: string } | undefined>;
-              }
-            | undefined;
-          // Workspace.sessionIds 保留用于恢复排序的空白槽位。设置页只展示真实会话，
-          // 否则无标题空白会话会回退显示为 session-* UUID，误导管理员配置一个不存在的会话。
-          const archived = new Set((reg?.archivedSessionIds ?? []).map((id) => String(id)));
-          const workspaces = await Promise.all(
-            (reg?.list() ?? []).map(async (workspace) => {
-              const sessionEntries = await Promise.all(
-                workspace.sessionIds
-                  .map((sessionId) => String(sessionId))
-                  .filter((sessionId) => !archived.has(sessionId))
-                  .map(async (id) => {
-                    const liveSession = sessions?.get(id);
-                    if (liveSession !== undefined) {
-                      if (!isDisplayableDshSession(liveSession)) return null;
-                      const title = sessionTitle?.get(liveSession)?.title;
-                      return { id, title: title || id };
-                    }
-                    // sessions.get() 只覆盖 live session；sessionQuery 会补上持久化会话，
-                    // 否则旧的空白持久化槽位会被错误地按 UUID 展示。
-                    if (sessionQuery === undefined) return { id, title: id };
-                    try {
-                      const surface = await sessionQuery.readSurface(id);
-                      if (!isDisplayableDshSurface(surface.events)) return null;
-                      const title = await sessionQuery.readTitle?.(id);
-                      return { id, title: title?.title || id };
-                    } catch {
-                      // 存储短暂不可用时保留配置项，不能把正常会话静默隐藏。
-                      return { id, title: id };
-                    }
-                  }),
-              );
-              return {
-                path: workspace.path,
-                title: workspace.title,
-                sessions: sessionEntries.filter((session): session is { id: string; title: string } => session !== null),
-              };
-            }),
+          const workspaces = await listAssignableWorkspaces(
+            ctx.get('workspaceRegistry'),
+            ctx.get('sessions'),
+            ctx.get('sessionTitle'),
+            ctx.get('sessionQuery'),
           );
           writeJson(res, 200, { ok: true, workspaces });
         } catch {
-          writeJson(res, 200, { ok: true, workspaces: [] });
+          // Registry or persistence failures must not look like a successful empty inventory.
+          writeJson(res, 502, {
+            ok: false,
+            code: 'WORKSPACE_UNAVAILABLE',
+            error: '工作区服务暂不可用，请稍后重试',
+          });
         }
       },
     },

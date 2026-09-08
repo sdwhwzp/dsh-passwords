@@ -12,7 +12,7 @@ rem   - Standalone:          download install.bat and run it anywhere
 if exist "%SCRIPT_DIR%scripts\install.mjs" goto run
 
 where node >nul 2>nul || (
-  echo [dsh-passwords] Node.js not found. Install Node.js 22.5+ first: https://nodejs.org/
+  echo [dsh-passwords] Node.js not found. Install Node.js 22.19+ or 24+ first: https://nodejs.org/
   exit /b 1
 )
 where git >nul 2>nul || (

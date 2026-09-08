@@ -1,11 +1,13 @@
 /** Host-side workspace provisioning for dsh-passwords subusers. */
 
+import type { Context } from '@deepseek-ai/cordis';
 import type { Workspace, WorkspaceRegistry } from '@deepseek-ai/dsh-workspace';
 import { randomBytes } from 'node:crypto';
 import { chmod, lstat, mkdir, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import type { PlatformConfig } from './config.js';
 import { Database, type UserListRow, type UserPermissionsRow } from './db.js';
+import type { AuthenticatedPrincipal } from './principal.js';
 
 /** The sandbox level that permits writes inside a session workspace only. */
 export const MANAGED_WORKSPACE_SANDBOX = 'workspace-write';
@@ -14,6 +16,62 @@ export const MANAGED_WORKSPACE_SANDBOX = 'workspace-write';
 export interface ManagedWorkspaceRegistration {
   path: string;
   title: string;
+}
+
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    managedUserWorkspace: ManagedUserWorkspaceProvider;
+  }
+}
+
+/** Resolves the private host directory owned by one authenticated account. */
+export class ManagedUserWorkspaceProvider {
+  constructor(
+    private readonly db: Database,
+    private readonly config: PlatformConfig,
+  ) {}
+
+  /** Return the account's canonical private root, or undefined for a stale or forged principal. */
+  async resolve(principal: AuthenticatedPrincipal): Promise<string | undefined> {
+    if (principal.source !== 'dsh-passwords' || !/^[1-9][0-9]*$/u.test(principal.id)) return undefined;
+    const user = this.db.getUserListRowById(Number(principal.id));
+    if (user === null || user.username !== principal.username || user.role !== principal.role) return undefined;
+    if (user.role === 'admin') {
+      const parent = await ensureDirectory(this.config.managedWorkspaceRoot);
+      return ensureDirectory(path.join(parent, `admin-u${String(user.id)}`));
+    }
+    const managed = this.db.getManagedWorkspace(user.id);
+    if (managed === null) return undefined;
+    if (!managedDirectoryName(user.id, path.basename(path.resolve(managed.path)))) return undefined;
+    const info = await lstat(managed.path).catch(() => undefined);
+    if (info === undefined) return undefined;
+    if (info.isSymbolicLink() || !info.isDirectory()) return undefined;
+    return realpath(managed.path);
+  }
+
+  /** Return current account identities so dependent services can restore durable per-account resources. */
+  async listPrincipals(): Promise<AuthenticatedPrincipal[]> {
+    return this.db.listUsers().map((user) => ({
+      source: 'dsh-passwords',
+      id: String(user.id),
+      username: user.username,
+      role: user.role,
+    }));
+  }
+}
+
+/** Publish account-private workspace resolution without exposing the user database. */
+export function registerManagedUserWorkspace(
+  ctx: Context,
+  db: Database,
+  config: PlatformConfig,
+): ManagedUserWorkspaceProvider {
+  const provider = new ManagedUserWorkspaceProvider(db, config);
+  ctx.effect(
+    () => ctx.root.provide('managedUserWorkspace', provider),
+    'dsh-passwords: managed user workspace provider',
+  );
+  return provider;
 }
 
 /** Creates, registers, restores, and revokes host directories owned by subusers. */
@@ -83,6 +141,7 @@ export class ManagedWorkspaceProvisioner {
           const registration = await registry.create(workspacePath, workspaceTitle(user));
           if (registration.title !== workspaceTitle(user)) await registration.setTitle(workspaceTitle(user));
           if (!samePath(existing.path, workspacePath)) this.db.setManagedWorkspace(user.id, workspacePath);
+          this.db.setPermissions(user.id, mergedPermissions(workspacePath, this.db.getPermissions(user.id)));
         }
       } catch (error) {
         failures.push(error);
@@ -253,7 +312,7 @@ function mergedPermissions(
     };
   }
   const allowedFolders = current.allowed_folders.length === 0
-    ? []
+    ? [workspacePath]
     : current.allowed_folders.some((entry) => samePath(entry, workspacePath))
       ? current.allowed_folders
       : current.allowed_folders.length === 1 && current.allowed_folders[0] === '__deny__'

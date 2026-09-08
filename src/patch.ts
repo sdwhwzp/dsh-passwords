@@ -1,400 +1,171 @@
-// 远程设置补丁：强制启用。
-//
-// 背景：dsh 把 settings 等特权面设计成 loopback-only——
-//   1. 客户端（dsh-client-ui-settings/lib/client.js）：
-//      connection.isLoopback ? "host" : "memory" → 远程浏览器走 memory 模式，
-//      设置表单不可用
-//   2. 主机侧（dsh-host-apiproxy/lib/index.js）：
-//      WEB_SETTINGS_NAMESPACES 硬编码白名单，第三方插件命名空间不在其中
-// 网关把 Host/Origin 改写为 127.0.0.1:3080，主机侧栅栏对经网关的流量放行，
-// 所以只需把客户端持久化强制为 host 模式 + 把插件命名空间加进白名单。
-//
-// 信任边界：只有通过密码门登录的浏览器能写设置（直连 3080 的局域网浏览器
-// 仍会被主机侧栅栏拒绝）。无论本地直连还是远程，强制打此补丁影响都不大，
-// 因此不提供开关：网关每次启动自动应用（幂等），dsh 升级覆盖文件后重启
-// 网关自动重打，或在设置页点"重载补丁"。
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { createHash } from 'node:crypto';
+/** Native Harness compatibility and optional service restart helpers. */
+
+import { existsSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 
-const BAK_SUFFIX = '.bak-dshpw';
-const BAK_META_SUFFIX = '.sha256-dshpw';
-
-function contentHash(content: string | Buffer): string {
-  return createHash('sha256').update(content).digest('hex');
+interface DshPackageMetadata {
+  name?: unknown;
+  version?: unknown;
 }
 
-function backupMetaPath(target: string): string {
-  return target + BAK_META_SUFFIX;
-}
-
-/**
- * 保存当前 dsh bundle 的原始版本，并写入内容哈希。
- * 固定 .bak 文件名会跨 dsh 升级残留；每次明确识别到全新未打补丁源码时
- * 都刷新备份，避免 rollbackPatch 把旧 rc.7 文件恢复到 rc.8。
- */
-interface BackupMeta {
-  originalSha256: string;
-  patchedSha256: string;
-}
-
-function saveOriginalBackup(target: string, content: string, patchedContent: string): void {
-  writeFileSync(target + BAK_SUFFIX, content);
-  const meta: BackupMeta = {
-    originalSha256: contentHash(content),
-    patchedSha256: contentHash(patchedContent),
-  };
-  writeFileSync(backupMetaPath(target), `${JSON.stringify(meta)}\n`);
-}
-
-function readBackupMeta(target: string): BackupMeta | null {
-  const backup = target + BAK_SUFFIX;
-  const meta = backupMetaPath(target);
-  if (!existsSync(backup) || !existsSync(meta)) return null;
+function dshPackageRoot(candidate: string): string | null {
+  const resolved = path.resolve(candidate);
+  const packageFile = path.join(resolved, 'package.json');
+  if (!existsSync(packageFile)) return null;
   try {
-    const value = JSON.parse(readFileSync(meta, 'utf8')) as Partial<BackupMeta>;
-    if (
-      typeof value.originalSha256 !== 'string' ||
-      typeof value.patchedSha256 !== 'string' ||
-      !/^[a-f0-9]{64}$/.test(value.originalSha256) ||
-      !/^[a-f0-9]{64}$/.test(value.patchedSha256)
-    ) {
-      return null;
-    }
-    const content = readFileSync(backup);
-    return contentHash(content) === value.originalSha256 ? value as BackupMeta : null;
+    const metadata = JSON.parse(readFileSync(packageFile, 'utf8')) as DshPackageMetadata;
+    return metadata.name === '@deepseek-ai/dsh' ? resolved : null;
   } catch {
     return null;
   }
 }
 
-function ensureOriginalBackup(target: string, content: string, patchedContent: string): void {
-  const existing = readBackupMeta(target);
-  const originalSha256 = contentHash(content);
-  const patchedSha256 = contentHash(patchedContent);
-  if (existing?.originalSha256 === originalSha256 && existing.patchedSha256 === patchedSha256) return;
-  if (existing?.originalSha256 === originalSha256) {
-    writeFileSync(backupMetaPath(target), `${JSON.stringify({ originalSha256, patchedSha256 })}\n`);
-    return;
+function findFrom(start: string): string | null {
+  let directory = path.resolve(start);
+  for (;;) {
+    const direct = dshPackageRoot(directory);
+    if (direct !== null) return direct;
+    const dependency = dshPackageRoot(path.join(directory, 'node_modules', '@deepseek-ai', 'dsh'));
+    if (dependency !== null) return dependency;
+    const parent = path.dirname(directory);
+    if (parent === directory) return null;
+    directory = parent;
   }
-  saveOriginalBackup(target, content, patchedContent);
 }
 
-function currentMatchesPatchedBackup(target: string): boolean {
-  const meta = readBackupMeta(target);
-  if (!meta || !existsSync(target)) return false;
+function findOwningDshRoot(start: string): string | null {
+  let directory = path.resolve(start);
+  for (;;) {
+    const direct = dshPackageRoot(directory);
+    if (direct !== null) return direct;
+    const parent = path.dirname(directory);
+    if (parent === directory) return null;
+    directory = parent;
+  }
+}
+
+function runtimeEntrypoints(): string[] {
+  const entrypoints = typeof process.argv[1] === 'string' ? [process.argv[1]] : [];
+  if (process.platform === 'linux') {
+    try {
+      entrypoints.push(...readFileSync('/proc/self/cmdline', 'utf8').split('\0').slice(1));
+    } catch {
+      // Linux environments may mount procfs without exposing this process's command line.
+    }
+  }
+  return [...new Set(entrypoints.filter((entrypoint) => entrypoint !== ''))];
+}
+
+function findConfiguredRoot(configured: string): string | null {
+  const resolved = path.resolve(configured);
+  return dshPackageRoot(resolved)
+    ?? dshPackageRoot(path.join(resolved, 'node_modules', '@deepseek-ai', 'dsh'));
+}
+
+/** Resolve an explicit profile, running CLI, local, or global `@deepseek-ai/dsh` installation. */
+export function findDshRoot(explicit: string, entrypoints = runtimeEntrypoints()): string | null {
+  if (explicit !== '') {
+    const fromExplicit = findConfiguredRoot(explicit);
+    if (fromExplicit !== null) return fromExplicit;
+  }
+  for (const entrypoint of entrypoints) {
+    const resolvedEntrypoint = path.resolve(entrypoint);
+    if (!existsSync(resolvedEntrypoint)) continue;
+    const fromEntrypoint = findOwningDshRoot(path.dirname(resolvedEntrypoint));
+    if (fromEntrypoint !== null) return fromEntrypoint;
+  }
   try {
-    return contentHash(readFileSync(target)) === meta.patchedSha256;
+    const globalRoot = spawnSync('npm', ['root', '-g'], { encoding: 'utf8' }).stdout.trim();
+    const candidate = dshPackageRoot(path.join(globalRoot, '@deepseek-ai', 'dsh'));
+    if (candidate !== null) return candidate;
+  } catch {
+    // A local installation may still be available when npm is absent.
+  }
+  const local = findFrom(process.cwd());
+  if (local !== null) return local;
+  for (const candidate of [
+    '/usr/local/lib/node_modules/@deepseek-ai/dsh',
+    '/usr/lib/node_modules/@deepseek-ai/dsh',
+  ]) {
+    const installed = dshPackageRoot(candidate);
+    if (installed !== null) return installed;
+  }
+  return null;
+}
+
+function nativeHarnessAvailable(dshRoot: string): boolean {
+  const packageFile = path.join(dshRoot, 'package.json');
+  if (!existsSync(packageFile)) return false;
+  try {
+    const metadata = JSON.parse(readFileSync(packageFile, 'utf8')) as DshPackageMetadata;
+    return typeof metadata.version === 'string' && /^0\.1\.2-alpha\./u.test(metadata.version);
   } catch {
     return false;
   }
 }
 
-/**
- * 将旧版本留下的无元数据备份安全迁移到哈希格式。
- * 只有“旧备份经当前补丁算法转换后精确等于当前文件”才允许迁移；
- * rc.7 备份与 rc.8 当前 bundle 不一致时不会被误认，也不会覆盖任何文件。
- */
-function migrateLegacyBackup(
-  target: string,
-  currentContent: string,
-  patch: (original: string) => string | null,
-): void {
-  if (readBackupMeta(target) !== null || !existsSync(target + BAK_SUFFIX)) return;
-  try {
-    const original = readFileSync(target + BAK_SUFFIX, 'utf8');
-    const patched = patch(original);
-    if (patched !== null && patched !== original && patched === currentContent) {
-      saveOriginalBackup(target, original, currentContent);
-    }
-  } catch {
-    // 迁移是兼容性加固，失败时保留旧备份但不把它当作可回滚备份。
-  }
-}
-
-/** 客户端设置持久化文件（强制 host 模式） */
-const SETTINGS_TARGET = path.join(
-  'node_modules', '@deepseek-ai', 'dsh-client-ui-settings', 'lib', 'client.js',
-);
-/** 主机侧 settings 白名单文件（补插件命名空间） */
-const WHITELIST_TARGET = path.join(
-  'node_modules', '@deepseek-ai', 'dsh-host-apiproxy', 'lib', 'index.js',
-);
-/** 工作区侧栏搜索文件（无结果搜索自动收起子补丁） */
-const WORKSPACE_TARGET = path.join(
-  'node_modules', '@deepseek-ai', 'dsh-client-ui-workspace', 'lib', 'client.js',
-);
-
-const SETTINGS_FROM = 'connection.isLoopback ? "host" : "memory"';
-const SETTINGS_TO = '"host"';
-
-// dsh 上游行为：搜索 query 非空时点击侧栏外只 blur 不收起——无结果时
-// 「无匹配会话」死状态会永久滞留侧栏（打开设置/卡片等任何点击都无法消除，
-// 只能手动按 Esc/X）。子补丁：无结果（ready/error 且 0 条）时点击别处自动清空并收起。
-// rc.7/rc.8 都保留同一行为契约，但 rc.8 的 bundle 压缩了换行并给 effect
-// 依赖增加 searchOnExpand。按语义片段匹配，不能依赖具体格式，否则补丁会静默跳过。
-const SEARCH_STICKY_RE =
-  /(searchInput\.current\?\.\s*blur\(\);\s*)if\s*\(normalizedQuery\s*!==\s*""\)\s*return;\s*(setSearchExpanded\(false\);)/;
-const SEARCH_STICKY_TO =
-  '$1if (normalizedQuery === "") { $2 } else if (remoteSearch.status !== "loading" && remoteSearch.items.length === 0) { setQuery(""); $2 }';
-// 上面新增了 remoteSearch 读取：click-outside effect 的依赖数组必须补上，否则闭包里的
-// remoteSearch 是注册时的旧值（结果到达后不重新注册）→ 永远看到 loading，补丁失效。
-// 只匹配同时含 normalizedQuery/wide/searchExpanded 的该 effect 依赖数组，兼容 rc.8
-// 新增的 searchOnExpand 和不同的换行/缩进。
-const SEARCH_DEPS_RE =
-  /(\},\s*\[\s*)(normalizedQuery\s*,\s*wide\s*,\s*searchExpanded)/;
-const SEARCH_DEPS_TO = '$1remoteSearch, $2';
-const SEARCH_DEPS_PATCHED_RE =
-  /\},\s*\[\s*remoteSearch\s*,\s*normalizedQuery\s*,\s*wide\s*,\s*searchExpanded/;
-
-function hasSettingsNamespace(content: string, namespace: string): boolean {
-  const escaped = namespace.replace(/[.*+?^${}()|[\[\]\\]/g, '\\$&');
-  return new RegExp(`["']${escaped}["']`).test(content);
-}
-
-// dsh 上游行为：搜索输入框无 autocomplete/name 属性——浏览器密码管理器在页面出现
-// 密码框时会用启发式找用户名框（DOM 里密码框之前最近的文本框），侧栏搜索框会被
-// 选中并填入已存用户名（实测被填 "admin" → 触发搜索 → 无匹配会话，见 PROCESS.md
-// 步骤 32）。子补丁：给搜索框加 autocomplete="off" + 中性 name，摘掉用户名框资格。
-const SEARCH_AUTOFILL_MARK = 'dshpw-session-search';
-const SEARCH_AUTOFILL_HARDEN_MARK = 'data-dshpw-autofill-harden';
-const SEARCH_AUTOFILL_RE =
-  /(className:\s*WorkspaceBrowser_module_css_default\.searchInput,\s*type:\s*"text",)/;
-// v2：autocomplete=off 会被部分密码管理器忽略；search + 折叠态 readOnly + 厂商忽略
-// 标记组合更稳。readOnly 只在搜索框折叠时生效，用户主动展开后仍可正常输入。
-const SEARCH_AUTOFILL_TO =
-  '$1\n\t\t\t\t\t\t\tautoComplete: "search",\n\t\t\t\t\t\t\tname: "dshpw-session-search",\n\t\t\t\t\t\t\treadOnly: !searchExpanded,\n\t\t\t\t\t\t\t\'data-dshpw-autofill-harden\': "v2",\n\t\t\t\t\t\t\t\'data-lpignore\': "true",\n\t\t\t\t\t\t\t\'data-1p-ignore\': "true",\n\t\t\t\t\t\t\t\'data-bwignore\': "true",';
-const SEARCH_AUTOFILL_V2_RE =
-  /(autoComplete:\s*)"off"(,\s*name:\s*[\"']dshpw-session-search[\"'],)/;
-const SEARCH_AUTOFILL_V2_TO =
-  '$1"search"$2\n\t\t\t\t\t\t\treadOnly: !searchExpanded,\n\t\t\t\t\t\t\t\'data-dshpw-autofill-harden\': "v2",\n\t\t\t\t\t\t\t\'data-lpignore\': "true",\n\t\t\t\t\t\t\t\'data-1p-ignore\': "true",\n\t\t\t\t\t\t\t\'data-bwignore\': "true",';
-
-/**
- * 命名空间白名单补丁是否适用当前 dsh。
- * dsh 0.1.0-rc.7+ 移除了主机侧硬编码 WEB_SETTINGS_NAMESPACES 白名单
- * （改用 settings.describe() 动态枚举命名空间），此时无对象可打 →
- * 视为原生支持，无需（也无法）再插 "dsh-passwords"。
- * 旧版 dsh（<=rc.6）仍需要追加白名单，走插入分支。
- */
-function whitelistPatchApplicable(content: string): boolean {
-  return /WEB_SETTINGS_NAMESPACES\s*=/.test(content);
-}
-
-/** 找到 dsh 安装根目录（@deepseek-ai/dsh），找不到返回 null */
-export function findDshRoot(explicit: string): string | null {
-  if (explicit) return existsSync(explicit) ? explicit : null;
-  try {
-    const globalRoot = spawnSync('npm', ['root', '-g'], { encoding: 'utf8' }).stdout.trim();
-    const candidate = path.join(globalRoot, '@deepseek-ai', 'dsh');
-    if (existsSync(candidate)) return candidate;
-  } catch {
-    // npm 不可用时走兜底路径
-  }
-  // 本地依赖：从 cwd 向上找 node_modules/@deepseek-ai/dsh
-  // （覆盖 npm i 到项目本地而非全局的场景，如 Windows/开发机/手动部署）
-  let dir = process.cwd();
-  for (;;) {
-    const candidate = path.join(dir, 'node_modules', '@deepseek-ai', 'dsh');
-    if (existsSync(candidate)) return candidate;
-    const parent = path.dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  for (const candidate of [
-    '/usr/local/lib/node_modules/@deepseek-ai/dsh',
-    '/usr/lib/node_modules/@deepseek-ai/dsh',
-  ]) {
-    if (existsSync(candidate)) return candidate;
-  }
-  return null;
-}
-
-/** 补丁当前状态（用于 status 展示） */
+/** Native alpha.1 exposes Settings and model selection without bundle rewriting. */
 export function patchStatus(
   dshRoot: string,
 ): { settingsHostMode: boolean; whitelist: boolean; workspaceSearch: boolean } {
-  const settingsFile = path.join(dshRoot, SETTINGS_TARGET);
-  const wlFile = path.join(dshRoot, WHITELIST_TARGET);
-  const wsFile = path.join(dshRoot, WORKSPACE_TARGET);
-  let settingsHostMode = false;
-  let whitelist = false;
-  let workspaceSearch = false;
-  try {
-    const s = readFileSync(settingsFile, 'utf8');
-    settingsHostMode = !s.includes(SETTINGS_FROM) && s.includes(SETTINGS_TO);
-  } catch { /* 文件缺失按未打处理 */ }
-  try {
-    const w = readFileSync(wlFile, 'utf8');
-    // rc.7+ 已移除 WEB_SETTINGS_NAMESPACES 白名单 → 原生支持，视为已满足
-    whitelist = !whitelistPatchApplicable(w) || hasSettingsNamespace(w, 'dsh-passwords');
-  } catch { /* 同上 */ }
-  try {
-    const ws = readFileSync(wsFile, 'utf8');
-    // 打过 = 不再含旧行为串 + 含子补丁标记（文件缺失按未打处理）
-    // 括号显式分组：自动填充「已打 v2 标记」与「不适用（RE 无匹配）」必须
-    // 先于粘滞态子补丁成立——否则 (A&&B&&C)||D 在 D 恒真时会把
-    // 未打粘滞态的文件误报为已打。
-    workspaceSearch =
-      !ws.includes('if (normalizedQuery !== "") return;') &&
-      ws.includes('remoteSearch.status !== "loading"') &&
-      SEARCH_DEPS_PATCHED_RE.test(ws) &&
-      // 搜索框自动填充加固：v2 标记存在才算完成；旧 v1（仅 off+name）会自动升级
-      (ws.includes(SEARCH_AUTOFILL_HARDEN_MARK) || !SEARCH_AUTOFILL_RE.test(ws));
-  } catch { /* 同上 */ }
-  return { settingsHostMode, whitelist, workspaceSearch };
+  const ready = nativeHarnessAvailable(dshRoot);
+  return { settingsHostMode: ready, whitelist: ready, workspaceSearch: ready };
 }
 
-/** 应用补丁（幂等）：返回 'applied'（本次有改动）或 'unchanged' 或 'missing'（目标文件不在） */
+/** Validate native Harness support; no installed package is modified. */
 export function applyRemotePatch(dshRoot: string): 'applied' | 'unchanged' | 'missing' {
-  const settingsFile = path.join(dshRoot, SETTINGS_TARGET);
-  const wlFile = path.join(dshRoot, WHITELIST_TARGET);
-  if (!existsSync(settingsFile) || !existsSync(wlFile)) return 'missing';
-  let changed = false;
-
-  // 先完整预检白名单目标。不能先写 settings 再发现白名单结构损坏，
-  // 否则 applyRemotePatch() 返回 missing 时会留下半应用状态。
-  const w = readFileSync(wlFile, 'utf8');
-  migrateLegacyBackup(wlFile, w, (original) => {
-    if (!whitelistPatchApplicable(original) || hasSettingsNamespace(original, 'dsh-passwords')) return null;
-    const re = /const WEB_SETTINGS_NAMESPACES = \[([\s\S]*?)\];/;
-    const match = re.exec(original);
-    if (!match) return null;
-    const inserted = match[1].replace(/(\s*[\'"][^\'"]+[\'"])/, `$1,\n\t"dsh-passwords"`);
-    return original.replace(re, `const WEB_SETTINGS_NAMESPACES = [${inserted}];`);
-  });
-  let whitelistPatched: string | null = null;
-  if (whitelistPatchApplicable(w) && !hasSettingsNamespace(w, 'dsh-passwords')) {
-    const re = /const WEB_SETTINGS_NAMESPACES = \[([\s\S]*?)\];/;
-    const match = re.exec(w);
-    if (!match) return 'missing';
-    const currentBlock = match[1];
-    const existing = [...currentBlock.matchAll(/[\'"]([^\'"]+)[\'"]/g)].map((m) => m[1]);
-    if (!existing.includes('dsh-passwords')) {
-      const inserted = currentBlock.replace(/(\s*[\'"][^\'"]+[\'"])/, `$1,\n\t"dsh-passwords"`);
-      whitelistPatched = w.replace(re, `const WEB_SETTINGS_NAMESPACES = [${inserted}];`);
-    }
-  }
-
-  // 1) 客户端 settings 强制 host 模式
-  const s = readFileSync(settingsFile, 'utf8');
-  migrateLegacyBackup(settingsFile, s, (original) =>
-    original.includes(SETTINGS_FROM) ? original.replace(SETTINGS_FROM, SETTINGS_TO) : null,
-  );
-  if (s.includes(SETTINGS_FROM)) {
-    const patched = s.replace(SETTINGS_FROM, SETTINGS_TO);
-    ensureOriginalBackup(settingsFile, s, patched);
-    writeFileSync(settingsFile, patched);
-    changed = true;
-  }
-
-  // 2) 白名单补齐（仅 rc.6 及以下适用）。rc.7+ 已移除该机制，预检结果为 null。
-  if (whitelistPatched !== null) {
-    ensureOriginalBackup(wlFile, w, whitelistPatched);
-    writeFileSync(wlFile, whitelistPatched);
-    changed = true;
-  }
-
-  // 3) 工作区侧栏搜索两个子补丁（可选：目标文件不存在则跳过，不影响 1/2）
-  //    ① 无结果搜索点击别处自动收起并清空（消除「无匹配会话」死状态滞留）
-  //    ② 搜索框 autocomplete="off" + 中性 name（阻断密码管理器把搜索框当用户名框自动填充）
-  const wsFile = path.join(dshRoot, WORKSPACE_TARGET);
-  if (existsSync(wsFile)) {
-    const ws = readFileSync(wsFile, 'utf8');
-    migrateLegacyBackup(wsFile, ws, (original) => {
-      let next = original;
-      if (SEARCH_STICKY_RE.test(next) && SEARCH_DEPS_RE.test(next)) {
-        next = next.replace(SEARCH_STICKY_RE, SEARCH_STICKY_TO).replace(SEARCH_DEPS_RE, SEARCH_DEPS_TO);
-      }
-      if (!next.includes(SEARCH_AUTOFILL_HARDEN_MARK)) {
-        if (SEARCH_AUTOFILL_RE.test(next) && !next.includes(SEARCH_AUTOFILL_MARK)) {
-          next = next.replace(SEARCH_AUTOFILL_RE, SEARCH_AUTOFILL_TO);
-        } else if (SEARCH_AUTOFILL_V2_RE.test(next)) {
-          next = next.replace(SEARCH_AUTOFILL_V2_RE, SEARCH_AUTOFILL_V2_TO);
-        } else if (next.includes(SEARCH_AUTOFILL_MARK)) {
-          const nameRe = /(name:\s*[\"']dshpw-session-search[\"'],)/;
-          if (nameRe.test(next)) {
-            next = next.replace(nameRe, '$1\n\t\t\t\t\t\t\treadOnly: !searchExpanded,\n\t\t\t\t\t\t\t\'data-dshpw-autofill-harden\': "v2",\n\t\t\t\t\t\t\t\'data-lpignore\': "true",\n\t\t\t\t\t\t\t\'data-1p-ignore\': "true",\n\t\t\t\t\t\t\t\'data-bwignore\': "true",');
-          }
-        }
-      }
-      return next === original ? null : next;
-    });
-    let wsNext = ws;
-    let wsChanged = false;
-    if (SEARCH_STICKY_RE.test(wsNext) && SEARCH_DEPS_RE.test(wsNext)) {
-      wsNext = wsNext.replace(SEARCH_STICKY_RE, SEARCH_STICKY_TO).replace(SEARCH_DEPS_RE, SEARCH_DEPS_TO);
-      wsChanged = true;
-    }
-    if (!wsNext.includes(SEARCH_AUTOFILL_HARDEN_MARK)) {
-      if (SEARCH_AUTOFILL_RE.test(wsNext) && !wsNext.includes(SEARCH_AUTOFILL_MARK)) {
-        wsNext = wsNext.replace(SEARCH_AUTOFILL_RE, SEARCH_AUTOFILL_TO);
-        wsChanged = true;
-      } else if (SEARCH_AUTOFILL_V2_RE.test(wsNext)) {
-        // 已应用 v1：只升级属性，不重复插入 name/搜索字段
-        wsNext = wsNext.replace(SEARCH_AUTOFILL_V2_RE, SEARCH_AUTOFILL_V2_TO);
-        wsChanged = true;
-      } else if (wsNext.includes(SEARCH_AUTOFILL_MARK)) {
-        // 容错：dsh bundle 格式变化但保留 v1 name，补齐 v2 属性
-        const nameRe = /(name:\s*[\"']dshpw-session-search[\"'],)/;
-        if (nameRe.test(wsNext)) {
-          wsNext = wsNext.replace(
-            nameRe,
-            '$1\n\t\t\t\t\t\t\treadOnly: !searchExpanded,\n\t\t\t\t\t\t\t\'data-dshpw-autofill-harden\': "v2",\n\t\t\t\t\t\t\t\'data-lpignore\': "true",\n\t\t\t\t\t\t\t\'data-1p-ignore\': "true",\n\t\t\t\t\t\t\t\'data-bwignore\': "true",',
-          );
-          wsChanged = true;
-        }
-      }
-    }
-    if (wsChanged) {
-      ensureOriginalBackup(wsFile, ws, wsNext);
-      writeFileSync(wsFile, wsNext);
-      changed = true;
-    }
-  }
-
-  return changed ? 'applied' : 'unchanged';
+  return nativeHarnessAvailable(dshRoot) ? 'unchanged' : 'missing';
 }
 
-/**
- * 回滚补丁：从 .bak-dshpw 备份恢复目标文件。
- * 备份不存在（从未打过补丁）时返回 'no-backup'。
- */
+/** Native Harness has no dsh-passwords bundle rewrite to roll back. */
 export function rollbackPatch(dshRoot: string): 'rolled-back' | 'no-backup' | 'missing' {
-  const settingsFile = path.join(dshRoot, SETTINGS_TARGET);
-  const wlFile = path.join(dshRoot, WHITELIST_TARGET);
-  if (!existsSync(settingsFile) || !existsSync(wlFile)) return 'missing';
-  let changed = false;
-  for (const target of [settingsFile, wlFile, path.join(dshRoot, WORKSPACE_TARGET)]) {
-    // 只恢复带哈希元数据且内容未被篡改的当前版本原始备份；历史遗留的
-    // .bak-dshpw 没有元数据时拒绝恢复，避免跨 dsh 版本回滚污染。
-    if (currentMatchesPatchedBackup(target)) {
-      writeFileSync(target, readFileSync(target + BAK_SUFFIX));
-      changed = true;
-    }
-  }
-  return changed ? 'rolled-back' : 'no-backup';
+  return nativeHarnessAvailable(dshRoot) ? 'no-backup' : 'missing';
 }
 
-/** 延迟重启 dsh 网页服务（补丁生效需要 dsh 重新加载模块）；仅适用于常驻进程
- *  用 spawnSync 参数数组（不拼 shell），杜绝命令注入；服务名仍做字符白名单
- *  双保险（systemctl 只接受合法 unit 名）。 */
+/** Restart a configured systemd unit and report whether systemd accepted it. */
+export function restartDshWebChecked(
+  service: string,
+  delayMs = 2500,
+): Promise<{ ok: boolean; message: string }> {
+  return new Promise((resolve) => {
+    if (service === '') {
+      resolve({ ok: false, message: '未配置 dsh-web 服务名' });
+      return;
+    }
+    if (!/^[A-Za-z0-9_.@-]+$/u.test(service)) {
+      resolve({ ok: false, message: '重启服务名非法' });
+      return;
+    }
+    const timer = setTimeout(() => {
+      try {
+        const result = spawnSync('systemctl', ['restart', service], { stdio: 'ignore' });
+        if (result.status !== 0 || result.error !== undefined) {
+          resolve({
+            ok: false,
+            message: result.error instanceof Error
+              ? result.error.message
+              : `systemctl exit ${String(result.status)}`,
+          });
+          return;
+        }
+        resolve({ ok: true, message: '' });
+      } catch (error) {
+        resolve({ ok: false, message: error instanceof Error ? error.message : String(error) });
+      }
+    }, delayMs);
+    timer.unref();
+  });
+}
+
+/** Restart a configured systemd unit after a deployment-level operation. */
 export function restartDshWeb(service: string, delayMs = 2500): void {
-  if (!service) return;
-  if (!/^[A-Za-z0-9_.@-]+$/.test(service)) {
+  if (service === '') return;
+  if (!/^[A-Za-z0-9_.@-]+$/u.test(service)) {
     console.error(`[dsh-passwords] 重启服务名非法（拒绝执行）：${service}`);
     return;
   }
-  setTimeout(() => {
-    try {
-      const result = spawnSync('systemctl', ['restart', service], { stdio: 'ignore' });
-      // spawnSync 对 ENOENT 不抛异常而是写 result.error；两者都要显式检查，
-      // 否则 systemctl 失败（如服务不存在）会被静默吞掉，补丁表面“已应用”实际未生效。
-      if (result.status !== 0 || result.error) {
-        console.error(`[dsh-passwords] 重启 ${service} 失败（补丁将在下次 dsh 重启后生效）:`, result.error ?? `exit ${String(result.status)}`);
-      }
-    } catch (error) {
-      console.error(`[dsh-passwords] 重启 ${service} 失败（补丁将在下次 dsh 重启后生效）:`, error);
-    }
-  }, delayMs).unref();
+  void restartDshWebChecked(service, delayMs).then((result) => {
+    if (!result.ok) console.error(`[dsh-passwords] 重启 ${service} 失败: ${result.message}`);
+  });
 }

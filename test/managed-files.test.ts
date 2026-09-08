@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -10,7 +10,7 @@ import { AuthService } from '../src/auth.js';
 import type { PlatformConfig } from '../src/config.js';
 import { Database } from '../src/db.js';
 import { createFieldCrypto } from '../src/encrypt.js';
-import { createGatewayServer } from '../src/gateway.js';
+import { createGatewayServer, type GatewayServerOptions } from '../src/gateway.js';
 
 interface TestResponse {
   status: number;
@@ -35,7 +35,9 @@ async function withManagedFiles(
     db: Database;
     userId: number;
     request(method: string, requestPath: string, body?: Buffer): Promise<TestResponse>;
+    requestChunked(method: string, requestPath: string, chunks: readonly Buffer[]): Promise<TestResponse>;
   }) => Promise<void>,
+  options: GatewayServerOptions = {},
 ): Promise<void> {
   const tempDir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-managed-files-'));
   const dbPath = path.join(tempDir, 'data', 'platform.db');
@@ -71,7 +73,7 @@ async function withManagedFiles(
     },
     jwtSecret: 'test-secret',
     internalSecret: 'test-internal',
-    localWorkspace: { host: '127.0.0.1', port: 0, publicUrl: '' },
+    localWorkspace: { host: '127.0.0.1', port: 0, publicUrl: '', placeholderRoot: path.join(path.dirname(root), 'local') },
     managedWorkspaceRoot: path.dirname(root),
     patch: { dshRoot: '', restartService: '' },
   };
@@ -90,7 +92,7 @@ async function withManagedFiles(
     sandboxMode: 'workspace-write',
     disabledSessions: [],
   });
-  const server = createGatewayServer(config, new AuthService(config, db), db);
+  const server = createGatewayServer(config, new AuthService(config, db), db, options);
   const port = await listen(server);
   const token = jwt.sign(
     { sub: String(user.id), username: user.username, cv: 0 },
@@ -129,8 +131,40 @@ async function withManagedFiles(
       req.end(body);
     });
 
+  const requestChunked = (
+    method: string,
+    requestPath: string,
+    chunksToWrite: readonly Buffer[],
+  ): Promise<TestResponse> => new Promise((resolve, reject) => {
+    const req = http.request({
+      host: '127.0.0.1',
+      port,
+      method,
+      path: requestPath,
+      headers: {
+        cookie: `dsh_gateway_token=${token}`,
+        'content-type': 'application/octet-stream',
+      },
+    }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (chunk: Buffer) => chunks.push(chunk));
+      res.on('end', () => {
+        const responseBody = Buffer.concat(chunks);
+        resolve({
+          status: res.statusCode ?? 0,
+          headers: res.headers,
+          body: responseBody,
+          json: <T>() => JSON.parse(responseBody.toString('utf8')) as T,
+        });
+      });
+    });
+    req.on('error', reject);
+    for (const chunk of chunksToWrite) req.write(chunk);
+    req.end();
+  });
+
   try {
-    await run({ root, outside, db, userId: user.id, request });
+    await run({ root, outside, db, userId: user.id, request, requestChunked });
   } finally {
     await close(server);
     db.close();
@@ -140,6 +174,10 @@ async function withManagedFiles(
 
 test('subuser lists and downloads only regular files inside the private host folder', async () => {
   await withManagedFiles(async ({ root, request }) => {
+    const status = await request('GET', '/gateway/api/managed-files/status');
+    assert.equal(status.status, 200, status.body.toString('utf8'));
+    assert.deepEqual(status.json<{ ok: boolean; available: boolean }>(), { ok: true, available: true });
+
     const listing = await request('GET', '/gateway/api/managed-files?path=');
     assert.equal(listing.status, 200, listing.body.toString('utf8'));
     const value = listing.json<{
@@ -240,5 +278,77 @@ test('subuser uploads atomically into the selected private directory and cannot 
       '/gateway/api/managed-files/upload?path=&name=blocked.txt',
       Buffer.from('blocked'),
     )).status, 403);
+  });
+});
+
+test('chunked managed uploads drain after the hard limit and leave no partial file', async () => {
+  await withManagedFiles(async ({ root, requestChunked }) => {
+    const [oversize, neighbor] = await Promise.all([
+      requestChunked(
+        'PUT',
+        '/gateway/api/managed-files/upload?path=&name=too-large.bin',
+        [Buffer.from('123456'), Buffer.from('789abc')],
+      ),
+      requestChunked(
+        'PUT',
+        '/gateway/api/managed-files/upload?path=&name=neighbor.bin',
+        [Buffer.from('1234'), Buffer.from('5678')],
+      ),
+    ]);
+    assert.equal(oversize.status, 413, oversize.body.toString('utf8'));
+    assert.equal(oversize.json<{ code: string }>().code, 'FILE_TOO_LARGE');
+    assert.equal(neighbor.status, 201, neighbor.body.toString('utf8'));
+    assert.equal(readFileSync(path.join(root, 'neighbor.bin'), 'utf8'), '12345678');
+    assert.equal(existsSync(path.join(root, 'too-large.bin')), false);
+    assert.equal(readdirSync(root).some((name) => name.startsWith('.dsh-upload-')), false);
+  }, { managedFileUploadMaxBytes: 8 });
+});
+
+test('subuser deletes files and non-empty folders without deleting the private root or escaped paths', async () => {
+  await withManagedFiles(async ({ root, outside, db, userId, request }) => {
+    writeFileSync(path.join(root, 'remove.txt'), 'remove me');
+    mkdirSync(path.join(root, 'remove-folder', 'nested'), { recursive: true });
+    writeFileSync(path.join(root, 'remove-folder', 'nested', 'remove.txt'), 'remove me too');
+
+    const fileResponse = await request('DELETE', '/gateway/api/managed-files?path=remove.txt');
+    assert.equal(fileResponse.status, 200, fileResponse.body.toString('utf8'));
+    assert.deepEqual(fileResponse.json<{ deleted: { path: string; kind: string } }>().deleted, {
+      path: 'remove.txt',
+      kind: 'file',
+    });
+    assert.equal(existsSync(path.join(root, 'remove.txt')), false);
+
+    const folderResponse = await request('DELETE', '/gateway/api/managed-files?path=remove-folder');
+    assert.equal(folderResponse.status, 200, folderResponse.body.toString('utf8'));
+    assert.deepEqual(folderResponse.json<{ deleted: { path: string; kind: string } }>().deleted, {
+      path: 'remove-folder',
+      kind: 'directory',
+    });
+    assert.equal(existsSync(path.join(root, 'remove-folder')), false);
+
+    assert.equal((await request('DELETE', '/gateway/api/managed-files?path=')).status, 403);
+    assert.equal(existsSync(root), true);
+    assert.equal((await request('DELETE', '/gateway/api/managed-files?path=..%2Foutside%2Fsecret.txt')).status, 403);
+    assert.equal(readFileSync(path.join(outside, 'secret.txt'), 'utf8'), 'secret');
+    if (process.platform !== 'win32') {
+      assert.equal((await request('DELETE', '/gateway/api/managed-files?path=escape-dir')).status, 403);
+      assert.equal(existsSync(outside), true);
+    }
+
+    writeFileSync(path.join(root, 'permission-blocked.txt'), 'keep');
+    const current = db.getPermissions(userId)!;
+    db.setPermissions(userId, {
+      allowedFolders: current.allowed_folders,
+      hourlyTokenLimit: current.hourly_token_limit,
+      dailyMinutesLimit: current.daily_minutes_limit,
+      monthlyBudgetMicros: current.monthly_budget_micros,
+      allowUpload: false,
+      allowGitDownload: current.allow_git_download,
+      banned: current.banned,
+      sandboxMode: current.sandbox_mode,
+      disabledSessions: current.disabled_sessions,
+    });
+    assert.equal((await request('DELETE', '/gateway/api/managed-files?path=permission-blocked.txt')).status, 403);
+    assert.equal(readFileSync(path.join(root, 'permission-blocked.txt'), 'utf8'), 'keep');
   });
 });

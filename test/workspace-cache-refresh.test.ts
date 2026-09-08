@@ -32,6 +32,7 @@ async function runScenario(
   mkdirSync(placeholderPath, { recursive: true });
   const db = new Database(path.join(tempDir, 'test.db'), createFieldCrypto('testkey', 'testkey'));
   db.init();
+  db.createUser('admin', '$2a$10$dummyhashdummyhashdummyhashdu', 'admin');
   const user = db.createUser('subuser', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.createLocalWorkspace({
     id: 'local-pairing',

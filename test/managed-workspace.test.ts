@@ -9,7 +9,7 @@ import { AuthService } from '../src/auth.js';
 import type { PlatformConfig } from '../src/config.js';
 import { Database } from '../src/db.js';
 import { createFieldCrypto } from '../src/encrypt.js';
-import { ManagedWorkspaceProvisioner } from '../src/managed-workspace.js';
+import { ManagedUserWorkspaceProvider, ManagedWorkspaceProvisioner } from '../src/managed-workspace.js';
 
 class FakeWorkspaceRegistry {
   readonly workspaces: Array<{
@@ -65,7 +65,7 @@ async function harness() {
     },
     jwtSecret: 'jwt',
     internalSecret: 'internal',
-    localWorkspace: { host: '127.0.0.1', port: 8081, publicUrl: '' },
+    localWorkspace: { host: '127.0.0.1', port: 8081, publicUrl: '', placeholderRoot: path.join(directory, 'local') },
     managedWorkspaceRoot: path.join(directory, 'users'),
     patch: { dshRoot: '', restartService: '' },
   };
@@ -103,6 +103,48 @@ test('new subuser receives a private registered workspace with workspace-write p
   }
 });
 
+test('principal workspace provider resolves private roots and rejects stale or forged identities', async () => {
+  const env = await harness();
+  try {
+    const created = env.db.createUser('alice', await bcrypt.hash('UserPassword1!', 4), 'user');
+    const registry = new FakeWorkspaceRegistry();
+    const provisioner = new ManagedWorkspaceProvisioner(env.db, env.config);
+    const userRoot = await provisioner.provisionNewUser(
+      registry as unknown as WorkspaceRegistry,
+      env.db.getUserListRowById(created.id)!,
+    );
+    const provider = new ManagedUserWorkspaceProvider(env.db, env.config);
+
+    assert.deepEqual(await provider.listPrincipals(), [
+      { source: 'dsh-passwords', id: '1', username: 'admin', role: 'admin' },
+      { source: 'dsh-passwords', id: String(created.id), username: 'alice', role: 'user' },
+    ]);
+
+    assert.equal(await provider.resolve({
+      source: 'dsh-passwords', id: String(created.id), username: 'alice', role: 'user',
+    }), userRoot);
+    assert.equal(await provider.resolve({
+      source: 'dsh-passwords', id: String(created.id), username: 'mallory', role: 'user',
+    }), undefined);
+    assert.equal(await provider.resolve({
+      source: 'other', id: String(created.id), username: 'alice', role: 'user',
+    }), undefined);
+    await rm(userRoot, { recursive: true, force: true });
+    assert.equal(await provider.resolve({
+      source: 'dsh-passwords', id: String(created.id), username: 'alice', role: 'user',
+    }), undefined);
+
+    const adminRoot = await provider.resolve({
+      source: 'dsh-passwords', id: '1', username: 'admin', role: 'admin',
+    });
+    assert.equal(adminRoot, path.join(await realpath(env.config.managedWorkspaceRoot), 'admin-u1'));
+    assert.equal((await stat(adminRoot!)).isDirectory(), true);
+    if (process.platform !== 'win32') assert.equal((await stat(adminRoot!)).mode & 0o777, 0o700);
+  } finally {
+    await env.cleanup();
+  }
+});
+
 test('startup backfills existing subusers and preserves their explicit quotas and sandbox restriction', async () => {
   const env = await harness();
   try {
@@ -129,6 +171,38 @@ test('startup backfills existing subusers and preserves their explicit quotas an
     const restartedRegistry = new FakeWorkspaceRegistry();
     await provisioner.restore(restartedRegistry as unknown as WorkspaceRegistry);
     assert.equal(restartedRegistry.workspaces[0].path, managed.path);
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test('startup converts a legacy unrestricted folder list to the private managed workspace', async () => {
+  const env = await harness();
+  try {
+    const created = env.db.createUser('legacy-open', await bcrypt.hash('UserPassword1!', 4), 'user');
+    env.db.setPermissions(created.id, {
+      allowedFolders: [], hourlyTokenLimit: 321, dailyMinutesLimit: 12, monthlyBudgetMicros: 4_000_000,
+      allowUpload: true, allowGitDownload: true, banned: false, sandboxMode: null, disabledSessions: [],
+    });
+    const registry = new FakeWorkspaceRegistry();
+    const provisioner = new ManagedWorkspaceProvisioner(env.db, env.config);
+
+    await provisioner.restore(registry as unknown as WorkspaceRegistry);
+
+    const managed = env.db.getManagedWorkspace(created.id)!;
+    const permissions = env.db.getPermissions(created.id)!;
+    assert.deepEqual(permissions.allowed_folders, [managed.path]);
+    assert.equal(permissions.hourly_token_limit, 321);
+    assert.equal(permissions.daily_minutes_limit, 12);
+    assert.equal(permissions.monthly_budget_micros, 4_000_000);
+    assert.equal(permissions.allow_git_download, true);
+
+    env.db.setPermissions(created.id, {
+      allowedFolders: [], hourlyTokenLimit: 321, dailyMinutesLimit: 12, monthlyBudgetMicros: 4_000_000,
+      allowUpload: true, allowGitDownload: true, banned: false, sandboxMode: null, disabledSessions: [],
+    });
+    await provisioner.restore(new FakeWorkspaceRegistry() as unknown as WorkspaceRegistry);
+    assert.deepEqual(env.db.getPermissions(created.id)!.allowed_folders, [managed.path]);
   } finally {
     await env.cleanup();
   }

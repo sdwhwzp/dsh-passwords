@@ -73,6 +73,11 @@ export function loadProfilePlugins(file) {
         || candidate.minimumReleaseAgeExclude.some(value => typeof value !== 'string' || value.trim() === ''))) {
       throw new Error(`profile plugin manifest: ${name}.minimumReleaseAgeExclude must contain non-empty strings`);
     }
+    if (candidate.allowBuildPackages !== undefined
+      && (!Array.isArray(candidate.allowBuildPackages)
+        || candidate.allowBuildPackages.some(value => typeof value !== 'string' || !PLUGIN_NAME_RE.test(value)))) {
+      throw new Error(`profile plugin manifest: ${name}.allowBuildPackages must contain package names`);
+    }
     if (candidate.localPrepare !== undefined) {
       if (candidate.localPrepare === null || typeof candidate.localPrepare !== 'object'
         || Array.isArray(candidate.localPrepare)) {
@@ -162,13 +167,13 @@ export function resolveProfilePlugins(plugins, existingDependencies, installRoot
       && existingDependencies[plugin.name].trim() !== ''
       ? existingDependencies[plugin.name].trim()
       : undefined;
+    const adjacentLocalSpecifier = localSpecifier(plugin, installRoot);
+    const recordedSpecifier = plugin.enforceDefault === true
+      ? adjacentLocalSpecifier ?? plugin.defaultSpecifier
+      : existingSpecifier ?? adjacentLocalSpecifier ?? plugin.defaultSpecifier;
     const specifier = plugin.self === true
       ? `link:${installRoot}`
-      : environmentSpecifier
-        ?? (plugin.enforceDefault === true ? plugin.defaultSpecifier : undefined)
-        ?? existingSpecifier
-        ?? localSpecifier(plugin, installRoot)
-        ?? plugin.defaultSpecifier;
+      : environmentSpecifier ?? recordedSpecifier;
 
     if (specifier === undefined) {
       if (plugin.optional === true) {
@@ -178,7 +183,10 @@ export function resolveProfilePlugins(plugins, existingDependencies, installRoot
       throw new Error(`profile plugin manifest: no install source for ${plugin.name}`);
     }
     dependencies[plugin.name] = specifier;
-    if (specifier.startsWith('link:')) {
+    // Companion packages and prepare commands describe the manifest's adjacent
+    // source tree. An unrelated existing link (for example a separate dsh-web
+    // release root) must stay intact without resolving nonexistent siblings.
+    if (adjacentLocalSpecifier !== undefined && specifier === adjacentLocalSpecifier) {
       for (const candidate of plugin.localWorkspacePackages ?? []) {
         const companion = requiredLocalWorkspacePackage(candidate, installRoot, plugin.name);
         if (companion.name === plugin.name) {
@@ -199,6 +207,7 @@ export function resolveProfilePlugins(plugins, existingDependencies, installRoot
     }
     if (plugin.activation === 'bundle') bundles.push(plugin.name);
     if (plugin.allowBuild === true) allowBuilds.push(plugin.name);
+    allowBuilds.push(...(plugin.allowBuildPackages ?? []));
     minimumReleaseAgeExcludes.push(...(plugin.minimumReleaseAgeExclude ?? []));
     if (plugin.activation === 'profile-patch') {
       patches.push({ id: plugin.patchId, yaml: plugin.patchYaml });
@@ -231,18 +240,40 @@ export function mergeBundles(existing, recorded, replaced = []) {
 
 /** Add pnpm build permissions required by Git-source plugins. */
 export function mergeAllowBuilds(workspace, packageNames) {
-  const missing = [...new Set(packageNames)].filter(name =>
-    !new RegExp(`^  (?:["']${name.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}["']|${name.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}):\\s*true\\s*$`, 'm').test(workspace));
-  if (missing.length === 0) return workspace.endsWith('\n') ? workspace : `${workspace}\n`;
   const lines = workspace.replace(/\n?$/, '\n').split('\n');
   const start = lines.findIndex(line => line === 'allowBuilds:');
-  const rows = missing.map(name => `  ${JSON.stringify(name)}: true`);
   if (start < 0) {
     const prefix = lines.at(-1) === '' ? lines.slice(0, -1) : lines;
+    const rows = [...new Set(packageNames)].map(name => `  ${JSON.stringify(name)}: true`);
     return [...prefix, 'allowBuilds:', ...rows, ''].join('\n');
   }
   let end = start + 1;
   while (end < lines.length && (lines[end] === '' || /^\s/.test(lines[end]))) end += 1;
+  const allowed = [...new Set(packageNames)];
+  const permits = key => allowed.some(name => key === name || key.startsWith(`${name}@`));
+  for (let index = end - 1; index > start; index -= 1) {
+    const line = lines[index];
+    if (line.trim() === '' || /^\s*#/.test(line)) continue;
+    const row = /^  (?:"([^"]+)"|'([^']+)'|(.+)):\s*(true|false|set this to true or false)\s*$/.exec(line);
+    const key = (row?.[1] ?? row?.[2] ?? row?.[3])?.trim();
+    if (key === undefined || key === '') {
+      lines.splice(index, 1);
+      end -= 1;
+      continue;
+    }
+    if (row?.[4] === 'set this to true or false' || permits(key)) {
+      lines[index] = `  ${JSON.stringify(key)}: ${permits(key) ? 'true' : 'false'}`;
+    }
+  }
+  const missing = [];
+  for (const name of allowed) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const row = new RegExp(`^  (?:["']${escaped}["']|${escaped}):`);
+    const index = lines.findIndex((line, lineIndex) => lineIndex > start && lineIndex < end && row.test(line));
+    if (index < 0) missing.push(name);
+    else lines[index] = `  ${JSON.stringify(name)}: true`;
+  }
+  const rows = missing.map(name => `  ${JSON.stringify(name)}: true`);
   lines.splice(end, 0, ...rows);
   return lines.join('\n');
 }

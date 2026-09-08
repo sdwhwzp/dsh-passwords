@@ -1,0 +1,13 @@
+.git
+node_modules
+data
+.env
+.env.*
+!.env.example
+setup-key.txt
+*.tgz
+*.log
+dist
+coverage
+npm-debug.log*
+docker/.env

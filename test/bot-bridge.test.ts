@@ -1,0 +1,38 @@
+import {createHash} from 'node:crypto';
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {createServer} from 'node:http';
+import {once} from 'node:events';
+import {mkdtemp,rm,realpath} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {createBotBridge} from '../src/bot-bridge.js';
+
+test('BotHub grants enforce account ownership, preset permissions, revocation and stable per-chat sessions',async t=>{
+ const root=await realpath(await mkdtemp(join(tmpdir(),'dsh-bot-')));
+ const users=[{id:1,username:'admin',role:'admin',credential_version:0},{id:2,username:'alice',role:'user',credential_version:0},{id:3,username:'bob',role:'user',credential_version:0}];
+ const settings=new Map<string,string>(),owners=new Map<string,number>(),workspaces=new Map<string,any>(),calls:any[]=[];let allowed:string[]|null=['bot-safe'],banned=false;
+ const db:any={getUserById:(id:number)=>users.find(u=>u.id===id),getUserByUsername:(n:string)=>users.find(u=>u.username===n),listUsers:()=>users,getPermissions:()=>({banned,allowed_agent_presets:allowed}),getSetting:(key:string)=>settings.get(key)??null,setSetting:(key:string,value:string)=>settings.set(key,value),audit:()=>undefined,getSessionOwner:(id:string)=>owners.get(id)??null,claimSessionOwner:(id:string,owner:number)=>{if(!owners.has(id))owners.set(id,owner);return owners.get(id);}};
+ const gateway={invoke:async(r:any)=>{calls.push(r);return r.method==='create'?{sessionId:r.args.request.sessionId,agentPreset:r.args.request.agentPreset}:{};},stream:async(r:any)=>{calls.push(r);return (async function*(){yield {type:'snapshot',records:[]};yield {type:'event',event:{type:'turn/start',data:{turn:1}}};yield {type:'event',event:{type:'user/message',data:{source:{rpcId:calls.filter(c=>c.method==='prompt').at(-1).args.request.requestId}}}};yield {type:'event',event:{type:'assistant/message',data:{turn:1,message:{content:[{type:'text',text:'模型测试结果'}]}}}};yield {type:'event',event:{type:'turn/end',data:{turn:1,reason:{kind:'completed'}}}};})();}};
+ const services:any={typertGateway:gateway,managedUserWorkspace:{resolve:async(p:any)=>join(root,p.id)},workspaceRegistry:{get:(id:string)=>workspaces.get(id),create:async(path:string)=>{const w={id:'workspace-'+path.split('/').pop(),path};workspaces.set(w.id,w);return w;}},principalAccess:{resolve:async(_p:any,s:any)=>({readableWorkspaceIds:new Set(s.workspaceIds),readableSessionIds:new Set(s.sessionIds??[])})}};
+ const auth:any={login:async({username,password}:any)=>{if(!users.some(u=>u.username===username)||password!=='test-pass')throw new Error('invalid');}};
+ const bridge=createBotBridge({root:{get:(n:string)=>services[n]}} as any,db,auth),server=createServer(bridge.app);server.listen(0,'127.0.0.1');await once(server,'listening');
+ t.after(async()=>{bridge.close();await new Promise<void>(resolve=>server.close(()=>resolve()));await rm(root,{recursive:true,force:true});});
+ const url=`http://127.0.0.1:${(server.address() as any).port}`;
+ const call=async(path:string,token?:string,body?:any)=>{const r=await fetch(url+path,{method:body?'POST':'GET',headers:{'Content-Type':'application/json',...(token?{Authorization:`Bearer ${token}`}:{})},body:body?JSON.stringify(body):undefined});return {status:r.status,data:await r.json()};};
+ const alice=(await call('/login',undefined,{username:'alice',password:'test-pass'})).data.token;
+ const admin=(await call('/login',undefined,{username:'admin',password:'test-pass'})).data.token;
+ assert.equal((await call('/grants',alice,{botId:'bot-1',ownerId:'3'})).status,403);
+ assert.equal((await call('/grants',admin,{botId:'bot-1',ownerId:'1'})).status,400);
+ const created=await call('/grants',alice,{botId:'bot-1',ownerId:'2'});assert.equal(created.status,201);const g=created.data;assert.ok(g.workspacePath.startsWith(join(root,'2','bots')));assert.ok(!settings.get('bot_grant:'+g.grantId)!.includes(g.token));
+ const first=await call('/run',g.token,{runId:'r1',conversationId:'group:one',prompt:'summarize'});assert.equal(first.status,200);assert.equal(first.data.text,'模型测试结果');assert.ok(calls.every(c=>c.principal.id==='2'&&c.principal.role==='user'));assert.equal(owners.get(first.data.sessionId),2);
+ const count=calls.length;assert.equal((await call('/run',g.token,{runId:'r1',conversationId:'group:one',prompt:'retry'})).status,200);assert.equal(calls.length,count);
+ const next=await call('/run',g.token,{runId:'r2',conversationId:'group:one',prompt:'next'});assert.equal(next.data.sessionId,first.data.sessionId);
+ const other=await call('/run',g.token,{runId:'r3',conversationId:'group:two',prompt:'next'});assert.notEqual(other.data.sessionId,first.data.sessionId);
+ allowed=[];assert.equal((await call('/run',g.token,{runId:'denied',prompt:'x'})).status,403);allowed=['bot-safe'];
+ banned=true;assert.equal((await call('/run',g.token,{runId:'banned',prompt:'x'})).status,403);banned=false;
+ users[1].role='admin';assert.equal((await call('/run',g.token,{runId:'promoted',prompt:'x'})).status,403);users[1].role='user';
+ const bob=(await call('/login',undefined,{username:'bob',password:'test-pass'})).data.token;assert.equal((await call('/revoke',bob,{grantId:g.grantId})).status,403);
+ assert.equal((await call('/revoke',alice,{grantId:g.grantId})).status,200);const before=calls.length;assert.equal((await call('/run',g.token,{runId:'revoked',prompt:'x'})).status,403);assert.equal(calls.length,before);
+ users[1].credential_version++;assert.equal((await call('/me',alice)).status,401);
+});

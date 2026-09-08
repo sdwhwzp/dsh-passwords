@@ -350,7 +350,7 @@ export class AuthService {
     caller: AuthedUser,
     username: string,
     password: string,
-    provision: (user: UserListRow) => Promise<void>,
+    provision: (user: UserListRow) => Promise<void> = async () => undefined,
     meta: RequestMeta = {},
   ): Promise<void> {
     if (caller.role !== 'admin') throw new AuthError('FORBIDDEN_ADD_USER', {}, 403);
@@ -371,6 +371,9 @@ export class AuthService {
       monthlyBudgetMicros: 0,
       allowUpload: true,
       allowGitDownload: false,
+      allowWorkspaceCreate: false,
+      allowedWebSocketPaths: [],
+      allowedAgentPresets: [],
       banned: false,
       sandboxMode: null,
       disabledSessions: [],

@@ -1,4 +1,8 @@
-import { Service, type Context } from '@deepseek-ai/cordis';
+import type { Context } from '@deepseek-ai/cordis';
+import type {
+  ConnectionPrincipalRequest,
+  RequestPrincipalProvider as RequestPrincipalProviderContract,
+} from '@deepseek-ai/dsh-client-connection';
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { PlatformConfig } from './config.js';
 
@@ -7,6 +11,52 @@ export interface AuthenticatedPrincipal {
   id: string;
   username: string;
   role: 'admin' | 'user';
+}
+
+/** Return a structurally complete authenticated principal without inspecting display text. */
+export function authenticatedPrincipal(value: unknown): AuthenticatedPrincipal | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const row = value as Record<string, unknown>;
+  if (typeof row.source !== 'string' || row.source.length === 0) return undefined;
+  if (typeof row.id !== 'string' || row.id.length === 0) return undefined;
+  if (typeof row.username !== 'string' || row.username.length === 0) return undefined;
+  if (row.role !== 'admin' && row.role !== 'user') return undefined;
+  return value as AuthenticatedPrincipal;
+}
+
+/** Resolve a principal carried by an authenticated user message. */
+export function principalFromMessages(messages: unknown): AuthenticatedPrincipal | undefined {
+  if (!Array.isArray(messages)) return undefined;
+  for (const message of messages) {
+    if (message === null || typeof message !== 'object' || Array.isArray(message)) continue;
+    const principal = authenticatedPrincipal((message as Record<string, unknown>).principal);
+    if (principal !== undefined) return principal;
+  }
+  return undefined;
+}
+
+/** Preserve one authenticated owner between pre-step and request hooks on older agent loops. */
+export class AgentTurnPrincipalTracker {
+  private readonly turns = new WeakMap<object, { turn: number; principal?: AuthenticatedPrincipal }>();
+
+  /** Resolve this hook's owner and retain it for later hooks in the same turn. */
+  resolve(payload: unknown): AuthenticatedPrincipal | undefined {
+    if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) return undefined;
+    const row = payload as Record<string, unknown>;
+    const direct = authenticatedPrincipal(row.principal);
+    const principal = direct ?? principalFromMessages(row.messages);
+    const agent = row.agent !== null && typeof row.agent === 'object' ? row.agent : undefined;
+    const turn = typeof row.turn === 'number' && Number.isSafeInteger(row.turn) ? row.turn : undefined;
+    if (agent === undefined || turn === undefined) return principal;
+    if (principal !== undefined) {
+      this.turns.set(agent, { turn, principal });
+      return principal;
+    }
+    const current = this.turns.get(agent);
+    if (current?.turn === turn) return current.principal;
+    this.turns.set(agent, { turn });
+    return undefined;
+  }
 }
 
 interface PrincipalEnvelope extends AuthenticatedPrincipal {
@@ -18,6 +68,19 @@ interface PrincipalEnvelope extends AuthenticatedPrincipal {
 
 const PRINCIPAL_HEADER = 'x-dsh-principal';
 const SIGNATURE_HEADER = 'x-dsh-principal-signature';
+
+type PrincipalHeaderSource =
+  | Pick<Headers, 'get'>
+  | Readonly<Record<string, string | readonly string[] | undefined>>;
+
+function principalHeader(headers: PrincipalHeaderSource, name: string): string | null {
+  const webHeaders = headers as Pick<Headers, 'get'>;
+  if (typeof webHeaders.get === 'function') return webHeaders.get(name);
+  const record = headers as Readonly<Record<string, string | readonly string[] | undefined>>;
+  const value = record[name] ?? record[name.toLowerCase()];
+  if (Array.isArray(value)) return value.join(', ');
+  return typeof value === 'string' ? value : null;
+}
 
 function signature(value: string, secret: string): Buffer {
   return createHmac('sha256', secret).update(value, 'utf8').digest();
@@ -70,12 +133,12 @@ function parseEnvelope(encoded: string): PrincipalEnvelope {
 
 /** Verify one signed gateway assertion. Browser-submitted body fields are ignored. */
 export function verifyPrincipalHeaders(
-  headers: Pick<Headers, 'get'>,
+  headers: PrincipalHeaderSource,
   secret: string,
   now = Date.now(),
 ): AuthenticatedPrincipal | undefined {
-  const encoded = headers.get(PRINCIPAL_HEADER);
-  const suppliedRaw = headers.get(SIGNATURE_HEADER);
+  const encoded = principalHeader(headers, PRINCIPAL_HEADER);
+  const suppliedRaw = principalHeader(headers, SIGNATURE_HEADER);
   if (encoded === null && suppliedRaw === null) return undefined;
   if (encoded === null || suppliedRaw === null) throw new Error('incomplete identity assertion');
   let supplied: Buffer;
@@ -101,19 +164,20 @@ export function verifyPrincipalHeaders(
   });
 }
 
-declare module '@deepseek-ai/cordis' {
-  interface Context {
-    requestPrincipal: RequestPrincipalService;
+/** Trusted Host authentication adapter consumed by client-connection. */
+export class RequestPrincipalProvider implements RequestPrincipalProviderContract {
+  constructor(private readonly config: PlatformConfig) {}
+
+  authenticate(request: ConnectionPrincipalRequest): AuthenticatedPrincipal | undefined {
+    return verifyPrincipalHeaders(request.headers, this.config.internalSecret);
   }
 }
 
-/** Trusted Host authentication adapter consumed by client-connection. */
-export class RequestPrincipalService extends Service {
-  constructor(ctx: Context, private readonly config: PlatformConfig) {
-    super(ctx, 'requestPrincipal');
-  }
-
-  authenticate(request: Request): AuthenticatedPrincipal | undefined {
-    return verifyPrincipalHeaders(request.headers, this.config.internalSecret);
-  }
+/** Publish authentication at the root so an already-mounted Connection can resolve it. */
+export function registerRequestPrincipal(ctx: Context, config: PlatformConfig): void {
+  const provider = new RequestPrincipalProvider(config);
+  ctx.effect(
+    () => ctx.root.provide('requestPrincipal', provider),
+    'dsh-passwords: root request principal provider',
+  );
 }

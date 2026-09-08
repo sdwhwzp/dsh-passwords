@@ -8,13 +8,11 @@
     },
     {
       "name": "@linxin666/dsh-web-all",
-      "defaultSpecifier": "github:sdwhwzp/dsh-web#dev&path:/packages/dsh-web-all",
+      "defaultSpecifier": "github:sdwhwzp/dsh-web#master&path:/packages/dsh-web-all",
       "localCandidates": [
         "../dsh-web/packages/dsh-web-all"
       ],
       "localWorkspacePackages": [
-        "../dsh-web/packages/dsh-chat-recovery",
-        "../dsh-web/packages/dsh-aionui-panel",
         "../dsh-web/packages/dsh-community-plugins",
         "../dsh-web/packages/dsh-git-graph",
         "../dsh-web/packages/dsh-market",
@@ -23,7 +21,6 @@
         "../dsh-web/packages/skins/skin-center",
         "../dsh-web/packages/dsh-task-board",
         "../dsh-web/packages/dsh-web-settings",
-        "../dsh-web/packages/dsh-desktop-launcher",
         "../dsh-web/packages/dsh-doctor",
         "../dsh-web/packages/dsh-liangshen",
         "../dsh-web/packages/dsh-pet",
@@ -60,11 +57,58 @@
       "activation": "bundle"
     },
     {
+      "name": "@huanlin/dsh-plugin-better-sidebar-plugin-office",
+      "defaultSpecifier": "0.1.2",
+      "minimumReleaseAgeExclude": [
+        "@huanlin/dsh-plugin-better-sidebar-plugin-office@0.1.2"
+      ],
+      "activation": "bundle"
+    },
+    {
       "name": "dsh-plugin-subscriptions",
       "defaultSpecifier": "github:sdwhwzp/dsh-plugin-subscriptions#dev",
+      "localCandidates": [
+        "../dsh-plugin-subscriptions"
+      ],
       "activation": "bundle",
       "allowBuild": true,
       "enforceDefault": true
+    },
+    {
+      "name": "dsh-at-file",
+      "defaultSpecifier": "github:sdwhwzp/dsh-at-file#dev",
+      "localCandidates": [
+        "../dsh-at-file"
+      ],
+      "localPrepare": {
+        "cwd": "../dsh-at-file",
+        "command": [
+          "node",
+          "scripts/link-runtime-peers.mjs"
+        ]
+      },
+      "allowBuildPackages": [
+        "protobufjs"
+      ],
+      "enforceDefault": true,
+      "activation": "bundle"
+    },
+    {
+      "name": "@wxg-prc-cpg/dsh-weknora",
+      "defaultSpecifier": "github:sdwhwzp/dsh-weknora#main",
+      "localCandidates": [
+        "../dsh-weknora"
+      ],
+      "localPrepare": {
+        "cwd": "../dsh-weknora",
+        "command": [
+          "npm",
+          "run",
+          "build"
+        ]
+      },
+      "activation": "bundle",
+      "allowBuild": true
     },
     {
       "name": "dsh-passwords",

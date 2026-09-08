@@ -1,7 +1,7 @@
 // 判断「当前安装是否已具备可运行的预构建产物」。
 //
-// 发布到 npm 的包只带 dist/（不含 src/ 与 tsconfig.json），因此 registry 安装
-// 必须走“已构建”分支，绝不能回退到 tsc 编译。这里的关键是运行时依赖判定：
+// 产物判定对安装来源一视同仁（源码 clone 与 npm 发布包均带 src/ 与 tsconfig.json，
+// 产物缺失时由 install.mjs 决定退回 tsc 编译）。这里的关键是运行时依赖判定：
 // npm install --prefix <dir> 会把依赖提升到 <dir>/node_modules/，而不是放进
 // 包自身的 node_modules/，所以不能只看 pkg/node_modules/<name> 是否存在，
 // 必须用 Node 模块解析（createRequire().resolve()），它会沿父目录向上查找。

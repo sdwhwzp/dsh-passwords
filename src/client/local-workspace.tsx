@@ -1,6 +1,7 @@
 /** Settings panel for downloading the Windows companion and revoking local workspaces. */
 
 import { createElement as h, useEffect, useState } from 'react';
+import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots';
 
 interface WorkspaceView {
   id: string;
@@ -14,7 +15,7 @@ interface WorkspaceView {
 }
 
 interface Props {
-  t: (key: string, params?: Record<string, string | number>) => string;
+  t: TranslateNS<'dshpw'>;
   busy: boolean;
   setBusy(value: boolean): void;
   setError(value: string): void;

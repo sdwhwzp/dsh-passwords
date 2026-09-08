@@ -93,6 +93,7 @@ before(async () => {
     jwtSecret: 'test-secret',
     internalSecret: 'test-internal',
     patch: { dshRoot: '', restartService: '' },
+    webSocket: { adminAllowlist: [], userAllowlist: [] },
   };
 
   const auth = new AuthService(config, db);
@@ -138,8 +139,8 @@ test('留言：POST 三条 → since 增量拉取只返回新消息（升序）'
   const incIds = (inc.body.messages ?? []).map((m) => m.id);
   assert.deepEqual(incIds, [ids[1], ids[2]], 'since 增量应只含新消息且升序');
 
-  // since 等于最新消息：增量应返回空数组（越过最新 id 的 reset 语义见 security-hardening M-5b）
+  // since 越过最新消息：应返回空数组
   const empty = await req('GET', `/gateway/api/messages?since=${ids[2]}`);
   assert.equal(empty.status, 200);
-  assert.deepEqual(empty.body.messages ?? [], [], 'since 等于最新 id 时增量应为空');
+  assert.deepEqual(empty.body.messages ?? [], [], 'since 超出最新 id 时应为空');
 });
