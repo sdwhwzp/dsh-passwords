@@ -499,4 +499,4 @@ finalization job 退出 0，没有再次重启服务，先私有保留原 startu
 
 编辑器首次打开会写入该账号的 `.gitconfig`（`user.name` 为账号名），各账号的 git 配置与凭据互相独立。**终端的 git 身份尚未自动写入**，首次提交前需自行 `git config --global user.name`/`user.email`。远程 git 走 HTTP + Personal Access Token，仅限内网路径；公网路径已被规则拦掉以免 PAT 明文穿越互联网。
 
-放行公网 443 的副作用是沙盒可访问任意 HTTPS 站点，`npm install`、`pip install` 与在线扩展市场随之可用——这是明确接受的取舍。设计权衡、规则集、启动器摘要与验收矩阵见[部署记录第 35 节](server-28-deployment-runbook.md#35-2026-09-08-沙盒联网账号-git-与出站策略)。
+放行公网 443 的副作用是沙盒可访问任意 HTTPS 站点，`npm install`、`pip install` 与在线扩展市场随之可用——这是明确接受的取舍。设计权衡、规则集、启动器摘要与验收矩阵见[部署记录第 35 节](server-28-deployment-runbook.md#35-2026-09-08-沙盒联网账号-git-与出站策略)。本轮完整交接（含多账号编辑器改造的进度与未完成项）见[2026-09-09 交接总结](2026-09-09-sandbox-network-and-tenant-editor-handoff.md)。
