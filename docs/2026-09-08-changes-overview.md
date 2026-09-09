@@ -538,3 +538,9 @@ finalization job 退出 0，没有再次重启服务，先私有保留原 startu
 ## 25. dsh-spend 0.6.7：全网搜索计价（2026-09-09，已上线 30）
 
 DeepSeek 搜索是独立的 `deepseek-v4-flash` 调用、单独计费，此前完全不在 spend 账内（30 上有 14 次）。因日志只记请求不记响应用量，按派发次数计量，归属到发起该搜索的步骤，价格取搜索自身模型的 `searchPerCall`（默认 0，只计次不计费）。详见 [部署手册 §43](server-28-deployment-runbook.md)。
+
+## 26. dsh-spend / dsh-context 计价与打通（2026-09-09，均已上线 30）
+
+一天内围绕费用做了四件事：把全网搜索纳入计价（按派发次数，DeepSeek 无按次费）、合并上游 0.6.3、按实际在用模型校准价格（vision-exp 从 V4 Pro 改为与 Flash 同价，账本此前高估约 59%；补齐 Kimi 与 GPT-6 Astra）、以及让 dsh-context 的费用卡改由 dsh-spend 账本计价（此前只算 DeepSeek V4，GLM/Kimi/GPT 完全不计）。
+
+期间线上出现悬浮球点击后组件消失，回退上游的 refresh 改动后恢复；同时查出并修复两个真实缺陷（丢失的 `return`、`schedule.phases` 未参与货币换算）。详见[部署手册 §43–§46](server-28-deployment-runbook.md)与 [dsh-spend FORK.md](../../dsh-spend/FORK.md)。
