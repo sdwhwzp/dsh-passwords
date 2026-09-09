@@ -526,3 +526,11 @@ finalization job 退出 0，没有再次重启服务，先私有保留原 startu
 ## 23. 2026-09-09 Harness 升至 0.1.5-alpha.1 与两个受阻插件合并（未部署）
 
 `deepseek-harness` 的 `tzwl` 合入上游 879 个提交，80 处冲突全部解决；上游没有 principal 传播，本 fork 的多账号归属能力逐处重贴到其重构之后的代码上。第 20 节列为受阻的两个插件随之解除：`@changfenhuang/dsh-genui` 升至 0.9.9（fork 的 alpha 垫片全部作废），`dsh-plugin-subscriptions` 升至 0.8.0-dsh.20260909.1（上游的 provider 设置取代 fork 的硬编码白名单，授权与 `/image` 命令保留）。三个仓库均已提交、未推送、未部署，部署前仍缺快照重录、两个 SDK 预期输出、session-log-v3 迁移与 Harness 内部发布。详见[部署手册第 41 节](server-28-deployment-runbook.md#41-2026-09-09-harness-升至-015-alpha1-与两个受阻插件的合并尚未部署)。
+
+## 24. 服务器 30 升至 Harness 0.1.5-alpha.1（2026-09-09，已上线）
+
+发布 ID `20260909-132137-dd1548b-alpha1`，runtime / web / plugins 三条 release 同 ID，`dsh-base` 0.1.3→0.1.5、genui 0.9.8→0.9.9、subscriptions 0.6.4→0.8.0，passwords 保持 2.6.28。
+
+部署前用真实日志做迁移审计，发现并修复一个会让 5 个 u3 会话打不开的回归（`at-file-mention` 来源种类未被 v2→v3 接纳）。切换过程暴露两处与上游 0.1.5 相关的部署适配：`bin.js` 新增 `import.meta.main` 守卫使 pm2 fork 模式下 CLI 不启动，需经入口 shim 调用导出的 `runCli`；新建 profile 需预建 `.dsh-module-fallback` 两跳投影，否则加载器先于 app-boot 治愈而失败。
+
+细节、回滚路径与未完成项见 [部署手册 §42](server-28-deployment-runbook.md)。

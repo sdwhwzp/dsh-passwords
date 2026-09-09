@@ -1637,3 +1637,63 @@ Profile 的真正版本锁不在 `package.json` 的 `dependencies`，而在 `pnp
 4. 本部署的 Harness 发布到内部 registry，以解除上一节的 `link:` 依赖
 
 **落地顺序**：本轮改动应先上 28（现为灰度）验证多账号隔离未被破坏，再考虑 30（现为正式）。不得直接上 30。
+
+## 42. 2026-09-09 服务器 30 升级至 Harness 0.1.5-alpha.1（已上线）
+
+用户指示跳过灰度、直接部署到 30（正式环境）。发布 ID `20260909-132137-dd1548b-alpha1`，三条 release（runtime / web / plugins）同 ID。
+
+### 部署前发现并修复的生产回归
+
+把 30 上全部 106 份会话日志取下来，用合并后的 catalog 逐个还原，**9 份失败，其中 5 份是会话的最新世代**——即升级后这 5 个会话在产品里打不开，全部属于用户 u3。
+
+根因不是 principal，而是 `user/message` 上的 `source.kind: 'at-file-mention'`（13 处）。写它的是 30 上安装的 `dsh-at-file` 插件，而该种类在合并后的树、合并前 fork 顶点、上游 master 中都不存在。上游 v2→v3 按封闭清单对消息来源分类，不认识就拒绝整个 Session（`SessionFormatUnsupportedMigrationError`）。
+
+修复见 harness 提交 `dd1548b696`：已发布 v2 来源清单接纳 `at-file-mention`。原生 V3 不对来源种类分类，插件今后照常写入。修复后 106 份全部迁移到 v3（57 份来自 v2，49 份来自 v0），无一拒绝。
+
+同时更正了此前 runbook 记录的两条"阻塞项"，两条都不成立：`test:snapshot:refresh` 是无钥匙的，不需要 `DEEPSEEK_API_KEY`；principal 早已随 `RELEASED_V0_EVENT_DISPOSITIONS` 继承进 V2 白名单。
+
+### 切换失败四次的两个真实原因
+
+**其一：`import.meta.main` 入口守卫。** 上游 0.1.5 把 `bin.js` 末尾改成 `if (import.meta.main) await runCli()`。pm2 的 fork 模式由包装器 import 目标脚本，目标不是进程入口，守卫恒为假，CLI 永不启动——进程 online、闲置在 `ep_poll`、日志零字节。
+
+修复：pm2 改为启动 `/home/tzwl3/apps/dsh-runtime/dsh-cli-entry.mjs`，它 import `current` 下的 `bin.js` 并显式调用导出的 `runCli`；对更早的、在模块顶层直接启动的版本，仅 import 即完成启动，`runCli` 不存在时不重复调用，因此回滚到 0.1.3 同样可用。
+
+**其二：`.dsh-module-fallback` 模块投影。** profile 的 `node_modules/@linxin666/*` 共 18 项，只有 `dsh-web-all` 由 pnpm 安装，其余 17 项经两跳解析到 web release：`node_modules/@linxin666/X` → `.dsh-module-fallback/node_modules/@linxin666/X` → web release 内的实际包。这些链接由 app-boot 在启动过程中逐步建立，新建 profile 首次启动时加载器会先于治愈失败（`Cannot find package '@linxin666/dsh-i18n'`），必须预建。
+
+预建方式：以线上 profile 的投影为模板，release 内目标改指本次 release，profile 内目标写成**相对路径**（保证候选改名为 `web` 后仍成立）；pnpm 存储哈希随 tarball 路径变化，须按"属主包名 + 包名"在候选存储中重新定位，不能字符串替换。本次重建 506 条投影 + 503 条第二跳，零悬空。
+
+> 直接照搬旧 release 的投影会把旧 release 路径混入新 profile，是 0.1.3 手册明令禁止的；正确做法是重建而非复制或删除。
+
+### 另一个教训：诊断会污染候选
+
+排演时用 `DSH_HOME=<排演目录>` 且把 `profiles/web` 符号链接到候选，0.1.5 主机会把模块投影**写回候选的 `node_modules`**，指向排演目录。此后候选不可再用于部署。候选一旦被任何排演指向过，必须重建。
+
+### 本次改写配置时踩到的两个坑
+
+- **overrides 才是权威，不是 dependencies。** 线上 `dsh-passwords` 在 `dependencies` 写 2.6.26、在 `overrides` 写 2.6.28，生效的是后者。首版生成脚本用 dependencies 覆盖 overrides，会把 passwords 降级到 2.6.26 并丢掉 MariaDB 排序规则修复；另有 `dsh-vsceditor` 只存在于 overrides，一并丢失。两处均在切换前发现。
+- **`allowBuilds` 的键用 pnpm 规范化后的相对路径**（`file:../../../apps/dsh-runtime/...`），写成绝对路径会导致 `dsh-subprocess-local` 的 postinstall 被跳过。
+
+### 上线结果
+
+| 组件 | 部署前 | 部署后 |
+|---|---|---|
+| `@deepseek-ai/dsh-base` | 0.1.3-alpha.1 | **0.1.5-alpha.1** |
+| `@changfenhuang/dsh-genui` | 0.9.8 | **0.9.9** |
+| `dsh-plugin-subscriptions` | 0.6.4 | **0.8.0-dsh.20260909.1** |
+| `dsh-passwords` | 2.6.28 | 2.6.28（未变，已确认无降级） |
+| dsh-context / better-sidebar / office / sidebar-vscode | 不变 | 不变 |
+
+runtime 270 个 tarball 冻结安装；native 入口 `@deepseek-ai/node-addon-system@0.1.2` 来自官方 registry，四个平台包因发布未满最小年龄而进入 `minimumReleaseAgeExclude`，其 linux-x64 的 SHA512 与锁内记录一致。
+
+验收：健康门第 26 秒通过（gateway 200 / web 401），静置 100 秒 pm2 online、0 重启、0 新增致命错误，两个数据库连接正常；用线上已部署代码还原此前失败的会话，14 份全部 v2→v3 成功。
+
+### 回滚
+
+`web-pre015-20260909-144430` 保留完整旧 profile；三条 `current` 指回 `20260908-104825-593ee89-alpha1` 即回到 0.1.3。切换脚本内置回滚，四次失败均自动回滚成功，服务最长 7 秒恢复。
+
+### 仍未完成
+
+1. TypeScript 与 Python 两个 SDK 的预期输出更新（`pnpm run test` 覆盖不到）
+2. 本部署的 Harness 发布到内部 registry，以解除 `dsh-plugin-subscriptions` 的 `link:` 依赖
+3. 28（灰度）仍在 0.1.3，与 30 已不同版本；`dsh-at-file` 同样装在 28 上，其会话日志迁移需要同一修复
+4. `principal-feed.ts` 的 upsert 时序问题、两块数据盘的配额，仍未处理
