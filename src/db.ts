@@ -246,6 +246,12 @@ CREATE TABLE IF NOT EXISTS session_model_selections (
 
 `;
 
+/**
+ * 排序规则用 utf8mb4_unicode_ci，而非 MySQL 8 的默认 utf8mb4_0900_ai_ci：后者是 MySQL 8
+ * 专有，MariaDB 解析到即报 Unknown collation，而 init() 每次启动都重跑整段建表语句，
+ * `IF NOT EXISTS` 不能绕开。utf8mb4_unicode_ci 在 MySQL 8 与 MariaDB 10.11 上都存在，
+ * 因此同一份代码在两种服务端上通用。
+ */
 const MYSQL_SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
   id                 INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -257,11 +263,11 @@ CREATE TABLE IF NOT EXISTS users (
   created_at         DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   last_login_at      DATETIME(3),
   UNIQUE KEY idx_users_hash (username_hash)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE IF NOT EXISTS platform_settings (
   k VARCHAR(191) PRIMARY KEY,
   v TEXT NOT NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE IF NOT EXISTS audit_logs (
   id         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   event_type VARCHAR(191) NOT NULL,
@@ -271,7 +277,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   detail     MEDIUMTEXT,
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   KEY idx_audit_created (created_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE IF NOT EXISTS login_attempts (
   id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   username_hash VARCHAR(128) NOT NULL,
@@ -280,14 +286,14 @@ CREATE TABLE IF NOT EXISTS login_attempts (
   locked_until  DATETIME(3),
   updated_at    DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   UNIQUE KEY idx_login_identity (username_hash, ip_hash)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE IF NOT EXISTS ip_throttle (
   ip_hash         VARCHAR(128) PRIMARY KEY,
   failed_count    INT NOT NULL DEFAULT 0,
   window_started  DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   throttled_until DATETIME(3),
   updated_at      DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE IF NOT EXISTS user_permissions (
   user_id               INT UNSIGNED PRIMARY KEY,
   allowed_folders       MEDIUMTEXT,
@@ -303,7 +309,7 @@ CREATE TABLE IF NOT EXISTS user_permissions (
   sandbox_mode          VARCHAR(64),
   disabled_sessions     MEDIUMTEXT NOT NULL,
   updated_at            DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE IF NOT EXISTS user_usage (
   user_id             INT UNSIGNED NOT NULL,
   day                 CHAR(10) NOT NULL,
@@ -313,7 +319,7 @@ CREATE TABLE IF NOT EXISTS user_usage (
   hourly_window_start DATETIME(3),
   hourly_tokens       BIGINT NOT NULL DEFAULT 0,
   PRIMARY KEY (user_id, day)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE IF NOT EXISTS messages (
   id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   sender_id    INT UNSIGNED NOT NULL,
@@ -322,7 +328,7 @@ CREATE TABLE IF NOT EXISTS messages (
   tags         MEDIUMTEXT NOT NULL,
   created_at   DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   KEY idx_messages_created (id DESC)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE IF NOT EXISTS local_workspaces (
   id               VARCHAR(200) PRIMARY KEY,
   user_id          INT UNSIGNED NOT NULL,
@@ -337,25 +343,25 @@ CREATE TABLE IF NOT EXISTS local_workspaces (
   last_seen_at     DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   revoked_at       DATETIME(3),
   KEY idx_local_workspaces_user (user_id, revoked_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE IF NOT EXISTS managed_workspaces (
   user_id    INT UNSIGNED PRIMARY KEY,
   path       VARCHAR(768) NOT NULL UNIQUE,
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE IF NOT EXISTS session_owners (
   session_id VARCHAR(200) PRIMARY KEY,
   user_id    INT UNSIGNED NOT NULL,
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   KEY idx_session_owners_user (user_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE IF NOT EXISTS session_model_selections (
   session_id       VARCHAR(200) PRIMARY KEY,
   provider         VARCHAR(512) NOT NULL,
   model            VARCHAR(512) NOT NULL,
   reasoning_effort VARCHAR(191),
   updated_at       DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 `;
 
 /** 安全解析 JSON 字符串数组（权限目录 / 留言标签）；损坏时返回空数组 */
