@@ -18,6 +18,13 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import jwt from 'jsonwebtoken';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const { WebSocketServer, WebSocket: NodeWebSocket } = require('ws') as {
+  WebSocketServer: new (options?: { noServer?: boolean }) => any;
+  WebSocket: new (url: string, options?: { headers?: Record<string, string> }) => any;
+};
 
 import { createGatewayServer } from '../src/gateway.js';
 import { AuthService } from '../src/auth.js';
@@ -163,6 +170,161 @@ function sendLargeHistory(res: http.ServerResponse, historyBytes: number): void 
  *  这正是生产环境 dsh 的行为，也是触发原 bug 的前提 */
 function startMockUpstream(): Promise<http.Server> {
   return new Promise((resolve) => {
+    const remoteMux = new WebSocketServer({ noServer: true });
+    remoteMux.on('connection', (client: any) => {
+      client.on('message', (data: Buffer) => {
+        const frame = JSON.parse(data.toString()) as Record<string, unknown> & { type?: string; streamId?: string; endpoint?: string };
+        if (frame.type !== 'open' || typeof frame.streamId !== 'string' || typeof frame.endpoint !== 'string') return;
+        remoteMuxOpenEndpoints.push(frame.endpoint);
+        remoteMuxOpenFrames.push(frame);
+        if (frame.endpoint === 'workspace/follow') {
+          client.send(JSON.stringify({
+            type: 'item',
+            streamId: frame.streamId,
+            value: {
+              type: 'baseline',
+              value: {
+                items: [
+                  {
+                    workspaceId: 'workspace-visible',
+                    path: '/workspaces/visible',
+                    title: 'Visible workspace',
+                    sessionIds: ['session-visible'],
+                  },
+                  {
+                    workspaceId: 'workspace-hidden',
+                    path: '/workspaces/hidden',
+                    title: 'Hidden workspace',
+                    sessionIds: ['session-hidden'],
+                  },
+                ],
+                archivedSessionIds: [],
+              },
+            },
+          }));
+          // The Host publishes the durable attach once the delayed create
+          // request is received, while its unary response is still pending.
+          if (delaySessionCreateResponse) {
+            delayedWorkspaceClient = client;
+            delayedWorkspaceStreamId = frame.streamId;
+          }
+          return;
+        }
+        if (frame.endpoint === '$events') {
+          client.send(JSON.stringify({
+            type: 'item',
+            streamId: frame.streamId,
+            value: { type: 'ready', clientId: 'remote-client', host: { home: '/root' } },
+          }));
+          client.send(JSON.stringify({
+            type: 'item',
+            streamId: frame.streamId,
+            value: {
+              type: 'emit', event: 'api-session/added',
+              args: [{ sessionId: 'session-visible', cwd: '/workspaces/visible', parentSessionId: 'admin-session' }],
+            },
+          }));
+          client.send(JSON.stringify({
+            type: 'item',
+            streamId: frame.streamId,
+            value: { type: 'emit', event: 'api-session/status', args: ['session-hidden', true] },
+          }));
+          client.send(JSON.stringify({
+            type: 'item',
+            streamId: frame.streamId,
+            value: {
+              type: 'waterfall', event: 'user-questions/request', eventId: 'question-visible', agentId: 'session-visible',
+              request: { questions: [{ id: 'language', question: 'Choose language', options: [{ label: 'Chinese' }, { label: 'English' }] }] },
+            },
+          }));
+          client.send(JSON.stringify({
+            type: 'item',
+            streamId: frame.streamId,
+            value: {
+              type: 'waterfall', event: 'user-questions/request', eventId: 'question-hidden', agentId: 'session-hidden',
+              request: { questions: [{ id: 'secret', question: 'Hidden question', options: [{ label: 'No' }] }] },
+            },
+          }));
+          client.send(JSON.stringify({
+            type: 'item',
+            streamId: frame.streamId,
+            value: {
+              type: 'waterfall', event: 'approval/request', eventId: 'approval-visible', agentId: 'session-visible',
+              request: { approvalId: 'approval-1', toolName: 'shell' },
+            },
+          }));
+          return;
+        }
+        if (frame.endpoint === 'session/follow') {
+          if (remoteMuxHistoryPayloadBytes > 0) {
+            client.send(JSON.stringify({
+              type: 'item',
+              streamId: frame.streamId,
+              value: {
+                type: 'snapshot',
+                header: { id: 'session-visible' },
+                cursor: 1,
+                records: [{ type: 'event', event: { type: 'user/message', seq: 1, time: 1, data: 'x'.repeat(remoteMuxHistoryPayloadBytes) } }],
+                hasMore: false,
+                projections: { asOfSeq: 1, values: {} },
+              },
+            }));
+            return;
+          }
+          const payload = frame.payload as Record<string, unknown> | undefined;
+          const args = payload?.args as Record<string, unknown> | undefined;
+          const request = args?.request as Record<string, unknown> | undefined;
+          const address = request?.address as Record<string, unknown> | undefined;
+          if (address?.kind === 'subagent') {
+            client.send(JSON.stringify({
+              type: 'item',
+              streamId: frame.streamId,
+              value: {
+                type: 'snapshot',
+                header: { id: address.childSessionId, origin: 'subagent', parentSession: address.parentSessionId },
+                cursor: 17,
+                records: [{ type: 'event', event: { type: 'message', seq: 17, text: 'child history' } }],
+                projections: { model: 'test-model' },
+                hasMore: true,
+              },
+            }));
+            client.send(JSON.stringify({
+              type: 'item',
+              streamId: frame.streamId,
+              value: { type: 'event', seq: 18, records: ['child-live-event'] },
+            }));
+          } else {
+            client.send(JSON.stringify({
+              type: 'item',
+              streamId: frame.streamId,
+              value: {
+                type: 'snapshot',
+                header: { id: 'session-visible' },
+                cursor: 1,
+                records: [{ type: 'event', event: { type: 'user/message', seq: 1, time: 1, data: 'authorized session history' } }],
+                hasMore: false,
+                projections: { asOfSeq: 1, values: {} },
+              },
+            }));
+          }
+          return;
+        }
+        if (frame.endpoint === 'session/control') {
+          client.send(JSON.stringify({
+            type: 'item',
+            streamId: frame.streamId,
+            value: {
+              type: 'baseline',
+              value: {
+                queues: { 'session-visible': { active: true }, 'session-hidden': { active: true } },
+                jobs: {},
+                projections: {},
+              },
+            },
+          }));
+        }
+      });
+    });
     const server = http.createServer((req, res) => {
       lastUpstreamHeaders = req.headers;
       lastUpstreamMethod = req.method ?? '';
@@ -362,6 +524,24 @@ function startMockUpstream(): Promise<http.Server> {
   });
 }
 
+function extractSessionIdForTest(value: unknown, depth = 0): string | null {
+  if (depth > 8 || value === null || typeof value !== 'object') return null;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = extractSessionIdForTest(item, depth + 1);
+      if (found !== null) return found;
+    }
+    return null;
+  }
+  const object = value as Record<string, unknown>;
+  if (typeof object.sessionId === 'string' && object.sessionId.length > 0) return object.sessionId;
+  for (const child of Object.values(object)) {
+    const found = extractSessionIdForTest(child, depth + 1);
+    if (found !== null) return found;
+  }
+  return null;
+}
+
 function rawNames(rawHeaders: string[]): string[] {
   const names: string[] = [];
   for (let i = 0; i < rawHeaders.length; i += 2) names.push(rawHeaders[i].toLowerCase());
@@ -501,6 +681,36 @@ function assertNoClTe(rawHeaders: string[]): void {
     !(names.includes('content-length') && names.includes('transfer-encoding')),
     `响应同时携带 Content-Length 与 Transfer-Encoding（Nginx 会 502）：${JSON.stringify(rawHeaders)}`,
   );
+}
+
+function chunkedGatewayRequest(
+  url: string,
+  headers: Record<string, string>,
+  chunkCount: number,
+  chunkSize: number,
+): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = http.request({
+      host: '127.0.0.1',
+      port: gatewayPort,
+      method: 'POST',
+      path: url,
+      headers: {
+        cookie,
+        'content-type': 'application/octet-stream',
+        'transfer-encoding': 'chunked',
+        ...headers,
+      },
+    }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (chunk: Buffer) => chunks.push(chunk));
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') }));
+    });
+    req.on('error', reject);
+    const chunk = Buffer.alloc(chunkSize, 0x61);
+    for (let i = 0; i < chunkCount; i += 1) req.write(chunk);
+    req.end();
+  });
 }
 
 before(async () => {
@@ -1740,8 +1950,8 @@ test('流式透传路径（session.list，管理员）：保留 chunked，不带
   const names = rawNames(r.rawHeaders);
   assert.ok(names.includes('transfer-encoding'), '透传路径应保留上游的 chunked 分帧');
   assert.ok(!names.includes('content-length'), '透传路径不得出现 content-length');
-  const parsed = JSON.parse(r.body);
-  assert.equal(parsed.ok, true);
+  const parsed = JSON.parse(r.body) as { result?: { value?: { items?: unknown[] } } };
+  assert.ok(Array.isArray(parsed.result?.value?.items), '管理员透传的 session.list body 必须完整');
 });
 
 test('管理员模型目录保持完整，子用户只过滤 Codex 的旧模型', async () => {

@@ -373,6 +373,7 @@ export class AuthService {
       allowGitDownload: false,
       allowWorkspaceCreate: false,
       allowedWebSocketPaths: [],
+      allowSsh: false,
       allowedAgentPresets: [],
       banned: false,
       sandboxMode: null,

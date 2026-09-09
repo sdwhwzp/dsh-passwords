@@ -38,9 +38,9 @@ test('WebSocket 白名单只支持精确路径和显式子路径', () => {
   assert.equal(webSocketAccessForPath('/plugin/ws/run', ['/plugin/ws/*'], ['/plugin/ws/*'], 'user', false), 'authenticated');
   assert.equal(webSocketAccessForPath('/plugin/ws/run', ['/plugin/ws/*'], [], 'admin', false), 'authenticated');
   assert.equal(webSocketAccessForPath('/api/events.mux', [], [], 'user', true), 'authenticated');
-  assert.equal(webSocketAccessForPath('/unknown', [], 'admin', false), 'deny');
+  assert.equal(webSocketAccessForPath('/unknown', [], [], 'admin', false), 'deny');
   for (const value of ['/gateway/x', '/api/dsh-passwords/internal/x', '/*', '/x/../y', '/x%2fy', '/x?y=1']) {
-    assert.throws(() => parseWebSocketAllowlist(value, 'TEST'), value);
+    assert.throws(() => parseWebSocketAllowlist(value, 'TEST'));
   }
 });
 
@@ -106,7 +106,8 @@ test('工作区管理权限只开放创建、删除和重命名', () => {
   assert.equal(isWorkspaceCreate('/api/workspace.delete'), false);
   assert.equal(isWorkspaceDirectoryCreate('/api/host.createDirectory'), true);
   assert.equal(isWorkspaceDirectoryCreate('/api/host/createDirectory'), true);
-  assert.equal(isWorkspaceDirectoryCreate('/api/directoryPicker/createDirectory'), true);
+  assert.equal(isWorkspaceDirectoryCreate('/api/directoryPicker/createDirectory'), true, 'alpha.3 directory picker');
+  assert.equal(isWorkspaceDirectoryCreate('/api/directoryPicker.createDirectory'), true, 'legacy-compatible directory picker');
   assert.equal(isWorkspaceDirectoryCreate('/api/host.listDirectory'), false);
   assert.equal(isWorkspaceDirectoryCreate('/api/workspace.create'), false);
   assert.equal(isWorkspaceDeleteOrRename('/api/workspace.delete'), true);

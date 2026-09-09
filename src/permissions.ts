@@ -643,7 +643,9 @@ export function isUploadRequest(method: string, pathname: string): boolean {
     pathname === '/api/filePathBridge/importFile' ||
     pathname === '/api/dsh-ssh/upload' ||
     pathname === '/sidebar/upload' ||
-    pathname === '/describe-image/attach'
+    pathname === '/describe-image/attach' ||
+    pathname === '/api/session/uploadFileBinary' ||
+    pathname === '/api/fileUploads/upload'
   );
 }
 
@@ -692,6 +694,37 @@ export function containsSessionReference(value: unknown, depth = 0): boolean {
  *     （GET /download）仍由 allowGitDownload 门控，保持原权限语义。
  * 这些端点不在白名单/沙盒/配额模型内，对子用户一律 403（deny-list 兜底）。
  */
+/** SSH 插件路由族；子用户只有在 allowSsh 且 alias 归属当前用户时可访问。 */
+export function isSshPluginEndpoint(pathname: string): boolean {
+  return pathname === '/api/dsh-ssh' || pathname.startsWith('/api/dsh-ssh/');
+}
+
+/** SSH 不具备单 alias 归属的批量/导入能力，始终仅限主用户。 */
+export function isUnscopedSshEndpoint(pathname: string): boolean {
+  return pathname === '/api/dsh-ssh/hosts/import-ssh-config' ||
+    pathname === '/api/dsh-ssh/cluster' || pathname === '/api/dsh-ssh/tunnel';
+}
+
+/** 使用 query alias 的 SSH 操作；调用方必须在转发前检查归属。 */
+export function isSshAliasQueryEndpoint(pathname: string): boolean {
+  return pathname === '/api/dsh-ssh/ls' || pathname === '/api/dsh-ssh/download' || pathname === '/api/dsh-ssh/upload';
+}
+
+/** 使用 JSON body alias 的 SSH 操作；调用方必须在转发前检查归属。 */
+export function isSshAliasBodyEndpoint(pathname: string): boolean {
+  return pathname === '/api/dsh-ssh/test' || pathname === '/api/dsh-ssh/exec';
+}
+
+/** PTY terminal is a real WebSocket and carries its alias in the query string. */
+export function isSshTerminalEndpoint(pathname: string): boolean {
+  return pathname === '/api/dsh-ssh/terminal';
+}
+
+/** dsh-ssh 客户端只读的静态依赖，不携带 host 凭据或远端资源标识。 */
+export function isSshPublicAssetEndpoint(method: string, pathname: string): boolean {
+  return (method === 'GET' || method === 'HEAD') && pathname.startsWith('/api/dsh-ssh/vendor/');
+}
+
 export function isAdminOnlyPluginEndpoint(method: string, pathname: string): boolean {
   return (
     /^\/api\/settings[.\/](?:describe|openSettingsDocument|openAgentPresetDirectory|canOpenAgentPresetDirectory)$/.test(pathname) ||
@@ -708,8 +741,6 @@ export function isAdminOnlyPluginEndpoint(method: string, pathname: string): boo
     pathname === '/api/dynamicCordisRunner' ||
     pathname.startsWith('/api/dynamicCordisRunner/') ||
     pathname === '/api/sessionReferenceResolver/candidates' ||
-    pathname === '/api/dsh-ssh' ||
-    pathname.startsWith('/api/dsh-ssh/') ||
     pathname === '/api/skin-center' ||
     pathname.startsWith('/api/skin-center/') ||
     pathname === '/modlens' ||
@@ -1087,4 +1118,113 @@ export function isPollingRequest(pathname: string): boolean {
     /^\/api\/[^/]*heartbeat[^/]*/.test(pathname) ||
     /^\/api\/[^/]*poll[^/]*/.test(pathname)
   );
+}
+
+export type SessionAddress =
+  | { kind: 'session'; sessionId: string }
+  | {
+      kind: 'subagent';
+      parentSessionId: string;
+      childSessionId: string;
+      mode: 'one-shot' | 'continuable';
+    };
+
+/**
+ * Parse the RC.1 SessionAddress without changing any protocol fields. The
+ * gateway uses only the parent identity for authorization; DSH still receives
+ * and validates the complete address.
+ */
+export function parseSessionAddress(value: unknown): SessionAddress | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return null;
+  const row = value as Record<string, unknown>;
+  const validId = (id: unknown): id is string =>
+    typeof id === 'string' && id.length > 0 && id.length <= 200;
+  if (row.kind === 'session' && validId(row.sessionId)) {
+    return { kind: 'session', sessionId: row.sessionId };
+  }
+  if (
+    row.kind === 'subagent' &&
+    validId(row.parentSessionId) &&
+    validId(row.childSessionId) &&
+    (row.mode === 'one-shot' || row.mode === 'continuable')
+  ) {
+    return {
+      kind: 'subagent',
+      parentSessionId: row.parentSessionId,
+      childSessionId: row.childSessionId,
+      mode: row.mode,
+    };
+  }
+  return null;
+}
+
+/**
+ * Collect only the session identities that authorize a request. RC.1 child
+ * addresses intentionally contribute their parent ID, while the child ID and
+ * mode remain in the forwarded payload for DSH's own lineage validation.
+ * A malformed structured subagent request returns null so callers can reject
+ * it instead of falling back to recursive, ambiguous ID guessing.
+ */
+
+export function collectAuthorizedSessionIds(value: unknown): Set<string> | null {
+  const out = new Set<string>();
+  const visit = (current: unknown, depth: number): boolean => {
+    if (depth > 8 || current === null || typeof current !== 'object') return true;
+    if (Array.isArray(current)) return current.every((item) => visit(item, depth + 1));
+    const row = current as Record<string, unknown>;
+    if (Object.hasOwn(row, 'address')) {
+      const address = parseSessionAddress(row.address);
+      if (address === null) return false;
+      if (address.kind === 'session') out.add(address.sessionId);
+      else out.add(address.parentSessionId);
+    }
+    const hasSubagentFields = Object.hasOwn(row, 'parentSessionId') ||
+      Object.hasOwn(row, 'childSessionId');
+    if (hasSubagentFields) {
+      const hasChildFields = Object.hasOwn(row, 'childSessionId') || Object.hasOwn(row, 'mode');
+      if (hasChildFields) {
+        const address = parseSessionAddress({
+          kind: 'subagent',
+          parentSessionId: row.parentSessionId,
+          childSessionId: row.childSessionId,
+          mode: row.mode,
+        });
+        if (address === null || address.kind !== 'subagent') return false;
+        out.add(address.parentSessionId);
+      } else if (typeof row.parentSessionId === 'string') {
+        out.add(row.parentSessionId);
+      } else {
+        return false;
+      }
+    }
+    for (const [key, child] of Object.entries(row)) {
+      if (key === 'address' || key === 'parentSessionId' || key === 'childSessionId' || key === 'mode') continue;
+      if (key === 'sessionId' || key === 'agentId') {
+        if (typeof child !== 'string') return false;
+        out.add(child);
+        continue;
+      }
+      if (!visit(child, depth + 1)) return false;
+    }
+    return true;
+  };
+  return visit(value, 0) ? out : null;
+}
+
+
+export function filterSessionSearchItems(
+  value: unknown,
+  keep: (id: string) => boolean,
+): unknown[] | null {
+  if (!Array.isArray(value)) return null;
+  const output: unknown[] = [];
+  for (const item of value) {
+    if (item === null || typeof item !== 'object' || Array.isArray(item)) continue;
+    const row = item as Record<string, unknown>;
+    if (typeof row.sessionId !== 'string' || row.sessionId.length === 0 || !keep(row.sessionId)) continue;
+    output.push({ ...row });
+  }
+  return output;
 }

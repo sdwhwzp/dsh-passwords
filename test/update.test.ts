@@ -160,7 +160,7 @@ test('the package version stays ahead of the 2.6.19 update baseline', () => {
   assert.equal(compareVersions(pkg.version, '2.6.19'), 1);
 });
 
-test('Harness peer and compiler dependencies stay pinned to 0.1.3-alpha.1', () => {
+test('Harness compiler links resolve the same native build declared by runtime peers', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
     peerDependencies: Record<string, string>;
     devDependencies: Record<string, string>;
@@ -170,13 +170,15 @@ test('Harness peer and compiler dependencies stay pinned to 0.1.3-alpha.1', () =
     .filter(([name]) => name.startsWith('@deepseek-ai/dsh-'));
   assert.ok(harnessPeers.length > 0);
   for (const [name, version] of harnessPeers) {
-    assert.equal(version, '0.1.3-alpha.1', `${name} peer version`);
     if (pkg.peerDependenciesMeta?.[name]?.optional !== true) {
-      assert.equal(pkg.devDependencies[name], version, `${name} compiler version`);
+      const specifier = pkg.devDependencies[name];
+      assert.ok(specifier.startsWith('file:'), `${name} needs the personal Harness checkout`);
+      const linked = JSON.parse(readFileSync(new URL(`${specifier.slice(5)}/package.json`, new URL('../', import.meta.url)), 'utf8'));
+      assert.equal(linked.name, name);
+      assert.equal(version, `^${linked.version}`, `${name} compiler and runtime versions agree`);
     }
   }
   assert.equal(pkg.peerDependenciesMeta?.['@deepseek-ai/dsh-principal-access']?.optional, true);
-  assert.equal(pkg.peerDependencies['@deepseek-ai/dsh-tools'], '0.1.3-alpha.1');
 });
 
 test('source archives without .git still use the npm update runtime', () => {

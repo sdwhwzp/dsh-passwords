@@ -19,7 +19,7 @@ test('本机工作区 CLI、Windows 构建和发布文件均已接入 package', 
 
   assert.equal(pkg.bin?.['dsh-local-workspace'], 'dist/local-workspace-cli.js');
   assert.ok(pkg.files?.includes('release/*.exe'));
-  assert.equal(pkg.dependencies?.ws, '^8.18.3');
+  assert.equal(pkg.dependencies?.ws, '^8.21.0');
   assert.equal(pkg.scripts?.prepare, 'npm run build', 'Git 安装必须先生成未提交的 dist');
   assert.match(pkg.scripts?.['build:windows-assistant'] ?? '', /山东梯智物联AI本机助手\.exe/);
   assert.equal(pkg.repository?.url, 'git+https://github.com/sdwhwzp/dsh-passwords.git');

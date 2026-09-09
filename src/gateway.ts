@@ -52,6 +52,12 @@ import {
   isUploadRequest,
   isGitRequest,
   isAdminOnlyPluginEndpoint,
+  isSshPluginEndpoint,
+  isUnscopedSshEndpoint,
+  isSshAliasQueryEndpoint,
+  isSshAliasBodyEndpoint,
+  isSshTerminalEndpoint,
+  isSshPublicAssetEndpoint,
   webSocketAccessForPath,
   isAionuiFileWrite,
   isAionuiPanel,
@@ -136,9 +142,17 @@ export function proxyRequestBodyLimitFor(
 }
 
 /** 网关内部扩展请求：权限执行时把用户/权限附在 req 上，供后续中间件与代理读取 */
+function isSafeSshAlias(value: string): boolean {
+  return value.length > 0 && value.length <= 256 && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value);
+}
+function isPlainJsonRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
+}
+
 type Req = Request & {
   dshpwUser?: number;
   dshpwIsAdmin?: boolean;
+  dshpwSshClaimedAlias?: string;
   dshpwPerms?: UserPermissionsRow;
   /** The authenticated subuser's host-managed workspace root. */
   dshpwManagedWorkspaceRoot?: string;
@@ -2048,6 +2062,7 @@ export function createGatewayServer(
         // 主用户需要时按需开启；已有权限行的子用户不受影响
         allow_git_download: false,
         allow_workspace_create: false,
+        allow_ssh: false,
         allowed_websocket_paths: [],
         allowed_agent_presets: [],
         banned: false,
@@ -2667,6 +2682,7 @@ export function createGatewayServer(
           allowUpload: perms.allow_upload,
           allowGitDownload: perms.allow_git_download,
           allowWorkspaceCreate: perms.allow_workspace_create,
+          allowSsh: perms.allow_ssh,
           allowedWebSocketPaths,
           allowedAgentPresets: perms.allowed_agent_presets,
           banned: perms.banned,
@@ -3425,6 +3441,10 @@ export function createGatewayServer(
       res.status(400).json({ ok: false, code: 'FORBIDDEN', error: '不能修改主用户权限' });
       return;
     }
+    if (!Array.isArray(body.allowedFolders) || body.allowedFolders.some((folder) => typeof folder !== 'string')) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: '允许的工作区必须是路径数组' });
+      return;
+    }
     const requestedFolders = stringArray(body.allowedFolders);
     // 空字符串、当前目录和根目录会被 folderAllowed 归一为“全盘允许”，与 UI 的
     // “允许的工作区”语义相反；显式拒绝，管理员应使用空数组表示不限制。
@@ -3483,34 +3503,102 @@ export function createGatewayServer(
           const [whole, fraction = ''] = rawMonthlyBudget.split('.');
           return Number(whole) * 1_000_000 + Number(fraction.padEnd(2, '0')) * 10_000;
         })();
-    const allowUpload = body.allowUpload !== false;
-    const allowGitDownload = body.allowGitDownload !== false;
-    const allowWorkspaceCreate = typeof body.allowWorkspaceCreate === 'boolean'
-      ? body.allowWorkspaceCreate
-      : db.getPermissions(userId)?.allow_workspace_create ?? false;
-    const allowedWebSocketPaths = Array.isArray(body.allowedWebSocketPaths)
-      ? stringArray(body.allowedWebSocketPaths, 200)
-      : undefined;
+    const currentPermissions = effectivePermissions(userId);
+    const readBooleanPermission = (name: string, value: unknown, current: boolean): boolean | null => {
+      if (value === undefined) return current;
+      if (typeof value !== 'boolean') {
+        res.status(400).json({ ok: false, code: 'INVALID', error: `${name} 必须是布尔值` });
+        return null;
+      }
+      return value;
+    };
+    const allowUpload = readBooleanPermission('allowUpload', body.allowUpload, currentPermissions.allow_upload);
+    if (allowUpload === null) return;
+    const allowGitDownload = readBooleanPermission('allowGitDownload', body.allowGitDownload, currentPermissions.allow_git_download);
+    if (allowGitDownload === null) return;
+    const allowWorkspaceCreate = readBooleanPermission('allowWorkspaceCreate', body.allowWorkspaceCreate, currentPermissions.allow_workspace_create);
+    if (allowWorkspaceCreate === null) return;
+    const allowSsh = readBooleanPermission('allowSsh', body.allowSsh, currentPermissions.allow_ssh);
+    if (allowSsh === null) return;
+    const banned = readBooleanPermission('banned', body.banned, currentPermissions.banned);
+    if (banned === null) return;
+    let sandboxMode: 'read-only' | 'workspace-write' | 'danger-full-access' | null;
+    if (body.sandboxMode === undefined) {
+      // 权限卡片/旧客户端可能只提交部分字段；省略沙盒字段必须保留既有
+      // 收紧策略，不能把已有 read-only 静默变成“不限制”。显式 null 才表示清除。
+      // 损坏的历史值按最严格的 read-only 处理，不能借部分更新把它放宽。
+      sandboxMode = currentPermissions.sandbox_mode === 'read-only' ||
+        currentPermissions.sandbox_mode === 'workspace-write' ||
+        currentPermissions.sandbox_mode === 'danger-full-access'
+        ? currentPermissions.sandbox_mode
+        : currentPermissions.sandbox_mode === null
+          ? null
+          : 'read-only';
+    } else if (body.sandboxMode === null) {
+      sandboxMode = null;
+    } else if (
+      typeof body.sandboxMode === 'string' &&
+      (body.sandboxMode === 'read-only' || body.sandboxMode === 'workspace-write' || body.sandboxMode === 'danger-full-access')
+    ) {
+      sandboxMode = body.sandboxMode as 'read-only' | 'workspace-write' | 'danger-full-access';
+    } else {
+      res.status(400).json({ ok: false, code: 'INVALID', error: 'sandboxMode 无效' });
+      return;
+    }
+    const submittedAgentPresets = body.allowedAgentPresets;
+    if (submittedAgentPresets !== undefined && submittedAgentPresets !== null && !Array.isArray(submittedAgentPresets)) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: 'Agent preset 权限必须是数组或 null' });
+      return;
+    }
     if (
-      allowedWebSocketPaths !== undefined &&
-      allowedWebSocketPaths.some((rule) => !userGrantableWebSocketPaths.includes(rule))
+      Array.isArray(submittedAgentPresets) &&
+      (submittedAgentPresets.length > 256 || submittedAgentPresets.some((id) => typeof id !== 'string' || id.length === 0 || id.length > 200))
+    ) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: 'Agent preset 权限列表无效' });
+      return;
+    }
+    const allowedAgentPresets = submittedAgentPresets === undefined
+      ? currentPermissions.allowed_agent_presets
+      : submittedAgentPresets === null
+        ? null
+        : [...new Set(submittedAgentPresets as string[])];
+    const submittedWebSocketPaths = body.allowedWebSocketPaths;
+    if (submittedWebSocketPaths !== undefined && !Array.isArray(submittedWebSocketPaths)) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: 'WebSocket 权限必须是路径数组' });
+      return;
+    }
+    if (
+      submittedWebSocketPaths !== undefined &&
+      (submittedWebSocketPaths.length > 64 || submittedWebSocketPaths.some((value) => typeof value !== 'string'))
     ) {
       res.status(400).json({ ok: false, code: 'INVALID', error: 'WebSocket 权限列表无效' });
       return;
     }
-    const allowedAgentPresets = body.allowedAgentPresets === null
-      ? null
-      : Array.isArray(body.allowedAgentPresets)
-        ? stringArray(body.allowedAgentPresets, 2_000)
-        : undefined;
-    const banned = body.banned === true;
-    const rawSandbox = typeof body.sandboxMode === 'string' ? body.sandboxMode : '';
-    const sandboxMode =
-      rawSandbox === 'read-only' || rawSandbox === 'workspace-write' || rawSandbox === 'danger-full-access'
-        ? rawSandbox
-        : null;
-    const disabledSessions = stringArray(body.disabledSessions, 2000)
-      .filter((id) => id.length > 0 && id.length <= 200);
+    const registeredWebSocketPaths = new Set(userGrantableWebSocketPaths);
+    const existingWebSocketPaths = currentPermissions.allowed_websocket_paths
+      .filter((rule) => registeredWebSocketPaths.has(rule));
+    const allowedWebSocketPaths = submittedWebSocketPaths === undefined
+      ? existingWebSocketPaths
+      : [...new Set(submittedWebSocketPaths as string[])];
+    let disabledSessions: string[];
+    if (body.disabledSessions === undefined) {
+      // 同样遵循部分更新语义。省略 disabledSessions 不得恢复此前被主用户
+      // 关闭的会话；显式数组才替换当前集合。
+      disabledSessions = [...currentPermissions.disabled_sessions];
+    } else if (
+      !Array.isArray(body.disabledSessions) ||
+      body.disabledSessions.length > 2000 ||
+      body.disabledSessions.some((id) => typeof id !== 'string' || id.length === 0 || id.length > 200)
+    ) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: '禁用会话列表无效' });
+      return;
+    } else {
+      disabledSessions = [...new Set(body.disabledSessions as string[])];
+    }
+    if (allowedWebSocketPaths.some((rule) => !registeredWebSocketPaths.has(rule))) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: 'WebSocket 权限列表无效' });
+      return;
+    }
     // 配额语义："改配额 = 重新给额度"——当 token/时长上限发生变化时
     // 重置该子用户已累计的用量（不同子用户每时段用量不同，改上限应重新计）。
     // 只改文件夹/上传/封禁等非配额字段时不重置（避免误清用量）。
@@ -3525,6 +3613,7 @@ export function createGatewayServer(
       allowUpload,
       allowGitDownload,
       allowWorkspaceCreate,
+      allowSsh,
       ...(allowedWebSocketPaths === undefined ? {} : { allowedWebSocketPaths }),
       ...(allowedAgentPresets === undefined ? {} : { allowedAgentPresets }),
       banned,
@@ -3551,6 +3640,7 @@ export function createGatewayServer(
         allowUpload,
         allowGitDownload,
         allowWorkspaceCreate,
+      allowSsh,
         ...(allowedWebSocketPaths === undefined ? {} : { allowedWebSocketPaths }),
         ...(allowedAgentPresets === undefined ? {} : { allowedAgentPresets }),
         banned,
@@ -3926,6 +4016,32 @@ export function createGatewayServer(
           denyRequest(req, res, lang, t(lang, 'gw.noUpload'));
           return;
         }
+        // 第三方 SSH 插件不是普通的 WebSocket/插件静态资源：它能执行远程命令、
+        // 访问 SFTP 和打开真实 PTY。allowSsh 只打开当前子用户自己创建并认领的
+        // alias 作用域，不能把整个 /api/dsh-ssh/** 变成共享管理员面。
+        if (isSshPluginEndpoint(requestPath)) {
+          const publicAsset = isSshPublicAssetEndpoint(req.method, requestPath);
+          const aliasQuery = parsed.searchParams.get('alias');
+          const aliasQueryValid = aliasQuery !== null && isSafeSshAlias(aliasQuery);
+          const ownedQueryAlias = aliasQueryValid && db.getSshHostOwner(aliasQuery) === user.userId;
+          const hostsList = req.method === 'GET' && requestPath === '/api/dsh-ssh/hosts';
+          const hostsCreate = req.method === 'POST' && requestPath === '/api/dsh-ssh/hosts';
+          const aliasQueryOperation = isSshAliasQueryEndpoint(requestPath);
+          const aliasBodyOperation = isSshAliasBodyEndpoint(requestPath);
+          if (
+            !perms.allow_ssh ||
+            isUnscopedSshEndpoint(requestPath) ||
+            (!publicAsset && !hostsList && !hostsCreate && !aliasQueryOperation && !aliasBodyOperation)
+          ) {
+            denyRequest(req, res, lang, t(lang, 'gw.adminOnly'));
+            return;
+          }
+          if ((aliasQueryOperation && (!aliasQueryValid || !ownedQueryAlias)) ||
+              (isSshTerminalEndpoint(requestPath) && (!aliasQueryValid || !ownedQueryAlias))) {
+            denyRequest(req, res, lang, t(lang, 'gw.adminOnly'));
+            return;
+          }
+        }
         // F-09/F-12：第三方插件“运维面”端点（dsh-ssh 主机清单/隧道、skin-center、modlens、
         // dsh-uploads 列表/删除等）不在网关权限模型内，对子用户一律 403（仅主用户可访问）
         if (isAdminOnlyPluginEndpoint(req.method, requestPath)) {
@@ -4294,6 +4410,13 @@ export function createGatewayServer(
    * 不影响其他响应。
    * 上游中途出错时销毁客户端连接（头未发出，无法再写错误页）。
    */
+  function decodeUpstreamBody(input: Buffer, contentEncoding: string): Buffer {
+    const encoding = contentEncoding.trim().toLowerCase();
+    if (encoding === '' || encoding === 'identity') return input;
+    if (encoding === 'gzip') return gunzipBounded(input);
+    throw new Error(`unsupported content-encoding: ${encoding}`);
+  }
+
   function bufferUpstream(
     upstreamRes: http.IncomingMessage,
     res: Response,
@@ -5307,6 +5430,18 @@ export function createGatewayServer(
       req.resume();
       return;
     }
+    const needsSshPermissionCheck =
+      reqAs.dshpwUser !== undefined &&
+      reqAs.dshpwIsAdmin !== true &&
+      (req.method === 'POST' || req.method === 'PATCH' || req.method === 'PUT') &&
+      (proxyPath === '/api/dsh-ssh/hosts' || isSshAliasBodyEndpoint(proxyPath));
+    // A Remote waterfall result is a separate browser HTTP RPC. Restrict it to
+    // the subuser, client generation, and authorized session that received it.
+    const needsRemoteEventResultCheck =
+      reqAs.dshpwPerms !== undefined &&
+      req.method === 'POST' &&
+      proxyPath === '/api/$events/result';
+
     if (getListRpcBody !== null) {
       headers['content-type'] = 'application/json';
       headers['content-length'] = String(getListRpcBody.length);
@@ -5407,6 +5542,62 @@ export function createGatewayServer(
                 ? '502 Upstream response too large'
                 : '502 Upstream response unprocessable';
               if (!res.headersSent) res.status(502).type('text/plain').send(message);
+            }
+          });
+          return;
+        }
+
+        // ── dsh-ssh 主机响应：子用户只看到自己认领的 alias ──
+        if (reqAs.dshpwUser !== undefined && reqAs.dshpwIsAdmin !== true &&
+            ((req.method === 'GET' && proxyPath === '/api/dsh-ssh/hosts') ||
+              (req.method === 'POST' && proxyPath === '/api/dsh-ssh/hosts'))) {
+          bufferUpstream(upstreamRes, res, (raw) => {
+            try {
+              const status = upstreamRes.statusCode ?? 500;
+              if (status < 200 || status >= 300) {
+                const respHeaders = headersForStreaming(upstreamRes.headers);
+                if (!res.headersSent) res.writeHead(status, respHeaders);
+                if (!res.writableEnded) res.end(raw);
+                return;
+              }
+              const decoded = decodeUpstreamBody(raw, String(upstreamRes.headers['content-encoding'] ?? ''));
+              const parsed: unknown = JSON.parse(decoded.toString('utf8'));
+              if (req.method === 'GET' && proxyPath === '/api/dsh-ssh/hosts') {
+                if (!isPlainJsonRecord(parsed) || !Array.isArray(parsed.hosts)) {
+                  if (!res.headersSent) res.status(502).type('text/plain').send('502 SSH host response unprocessable');
+                  return;
+                }
+                const hosts = parsed.hosts.filter((host): host is Record<string, unknown> =>
+                  isPlainJsonRecord(host) && typeof host.alias === 'string' &&
+                  isSafeSshAlias(host.alias) && db.getSshHostOwner(host.alias) === reqAs.dshpwUser,
+                );
+                const out = Buffer.from(JSON.stringify({ ...parsed, hosts }), 'utf8');
+                const respHeaders = headersForRewrittenBody(upstreamRes.headers);
+                respHeaders['content-length'] = String(out.length);
+                if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+                if (!res.writableEnded) res.end(out);
+                return;
+              }
+              if (req.method === 'POST' && proxyPath === '/api/dsh-ssh/hosts') {
+                const userId = reqAs.dshpwUser;
+                const host = isPlainJsonRecord(parsed) && isPlainJsonRecord(parsed.host) ? parsed.host : null;
+                const alias = typeof host?.alias === 'string' && isSafeSshAlias(host.alias) ? host.alias : null;
+                if (userId === undefined) {
+                  if (!res.headersSent) res.status(502).type('text/plain').send('502 SSH owner context missing');
+                  return;
+                }
+                // dsh-ssh's documented create response is exactly { host: { alias, ... } }.
+                // Do not recursively accept an unrelated alias nested in a plugin error/debug payload.
+                if (alias === null || alias !== reqAs.dshpwSshClaimedAlias || !db.claimSshHost(alias, userId)) {
+                  if (!res.headersSent) res.status(409).type('text/plain').send('409 SSH host alias could not be claimed');
+                  return;
+                }
+              }
+              const respHeaders = headersForStreaming(upstreamRes.headers);
+              if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+              if (!res.writableEnded) res.end(raw);
+            } catch {
+              if (!res.headersSent) res.status(502).type('text/plain').send('502 SSH host response unprocessable');
             }
           });
           return;
@@ -6104,7 +6295,7 @@ export function createGatewayServer(
     if (getListRpcBody !== null) {
       completeProxyRequestBody();
       upstreamReq.end(getListRpcBody);
-    } else if (needsFolderCheck || needsSandboxCheck || needsCommandCheck || needsApprovalCheck || needsOwnershipCheck || needsAgentPresetCheck || needsSshHostCheck) {
+    } else if (needsFolderCheck || needsSandboxCheck || needsCommandCheck || needsApprovalCheck || needsOwnershipCheck || needsAgentPresetCheck || needsSshHostCheck || needsSshPermissionCheck) {
       const chunks: Buffer[] = [];
       let size = 0;
       let settled = false;
@@ -6116,7 +6307,7 @@ export function createGatewayServer(
         !needsSandboxCheck &&
         !needsCommandCheck &&
         !needsApprovalCheck &&
-        !needsSshHostCheck;
+        !needsSshHostCheck && !needsSshPermissionCheck;
       const bodyLimit = Math.min(
         requestBodyLimit,
         isAionuiPanel(proxyPath)
@@ -6206,6 +6397,31 @@ export function createGatewayServer(
           }
           if (requiresExplicitPreset) {
             reqAs.dshpwSelectedSessionId = extractSessionId(bodyObj) ?? extractAgentId(bodyObj) ?? undefined;
+          }
+        }
+
+        if (needsSshPermissionCheck) {
+          const row = isPlainJsonRecord(bodyObj) ? bodyObj : null;
+          const alias = row?.alias;
+          if (typeof alias !== 'string' || !isSafeSshAlias(alias)) {
+            upstreamReq.destroy();
+            res.status(400).type('text/plain').send('400 Invalid SSH alias');
+            return;
+          }
+          const owner = db.getSshHostOwner(alias);
+          if (proxyPath === '/api/dsh-ssh/hosts') {
+            // A host is claimable only after the upstream plugin confirms creation.
+            // An existing claim is never replaceable by another subuser.
+            if (owner !== null && owner !== reqAs.dshpwUser) {
+              upstreamReq.destroy();
+              denyRequest(req, res, lang, t(lang, 'gw.adminOnly'));
+              return;
+            }
+            reqAs.dshpwSshClaimedAlias = alias;
+          } else if (owner !== reqAs.dshpwUser) {
+            upstreamReq.destroy();
+            denyRequest(req, res, lang, t(lang, 'gw.adminOnly'));
+            return;
           }
         }
 
@@ -7264,6 +7480,19 @@ export function createGatewayServer(
       if (!config.tenantTerminal?.launcher) { rejectUpgrade(socket, 403); return; }
       fwdPath = '/api/dsh-passwords/tenant-terminal' + fwdPath.slice(gatePath.length);
     }
+    // SSH terminal 是第三方插件提供的真实 RFC 6455 PTY。它不走 Remote mux，
+    // 也不能由通用的 userAllowlist 单独放行：子用户必须显式开启 SSH，且 query
+    // alias 必须是该子用户通过网关创建并认领的主机。
+    if (userRole === 'user' && isSshTerminalEndpoint(gatePath)) {
+      const terminalUrl = new URL(req.url ?? '/', `http://${req.headers.host || 'localhost'}`);
+      const alias = terminalUrl.searchParams.get('alias');
+      const perms = authedUserId === null ? null : effectivePermissions(authedUserId);
+      if (perms === null || !perms.allow_ssh || alias === null || !isSafeSshAlias(alias) ||
+          db.getSshHostOwner(alias) !== authedUserId) {
+        socket.end('HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
+        return;
+      }
+    }
     const builtinWsPath =
       editorPath ||
       terminalPath ||
@@ -7273,7 +7502,7 @@ export function createGatewayServer(
       gatePath === '/plugins/events' ||
       gatePath === '/aionui-panel/events' ||
       gatePath.startsWith('/aionui-panel/events/');
-    const wsAccess = webSocketAccessForPath(
+    const wsAccess = userRole === 'user' && isSshTerminalEndpoint(gatePath) ? 'allow' : webSocketAccessForPath(
       gatePath,
       userRole === 'admin'
         ? [...adminOnlyWebSocketPaths, ...userGrantableWebSocketPaths]

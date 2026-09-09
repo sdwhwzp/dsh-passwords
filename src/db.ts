@@ -64,6 +64,7 @@ export interface UserPermissionsRow {
   allow_upload: boolean;
   allow_git_download: boolean;
   allow_workspace_create: boolean;
+  allow_ssh: boolean;
   allowed_websocket_paths: string[];
   /** Null preserves unrestricted legacy accounts; an empty array denies every preset. */
   allowed_agent_presets: string[] | null;
@@ -184,6 +185,7 @@ CREATE TABLE IF NOT EXISTS user_permissions (
   allow_upload       INTEGER NOT NULL DEFAULT 1,
   allow_git_download INTEGER NOT NULL DEFAULT 0,
   allow_workspace_create INTEGER NOT NULL DEFAULT 0,
+  allow_ssh INTEGER NOT NULL DEFAULT 0,
   allowed_websocket_paths TEXT NOT NULL DEFAULT '[]',
   allowed_agent_presets TEXT,
   banned             INTEGER NOT NULL DEFAULT 0,
@@ -191,6 +193,12 @@ CREATE TABLE IF NOT EXISTS user_permissions (
   disabled_sessions  TEXT NOT NULL DEFAULT '[]',    -- 已开启工作区内逐会话关闭的 sessionId JSON 数组
   updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS ssh_host_owners (
+  alias              TEXT PRIMARY KEY,
+  user_id            INTEGER NOT NULL,
+  created_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ssh_host_owners_user ON ssh_host_owners(user_id);
 CREATE TABLE IF NOT EXISTS user_usage (
   user_id             INTEGER,
   day                 TEXT,                          -- YYYY-MM-DD（本地时区）
@@ -303,12 +311,19 @@ CREATE TABLE IF NOT EXISTS user_permissions (
   allow_upload          TINYINT NOT NULL DEFAULT 1,
   allow_git_download    TINYINT NOT NULL DEFAULT 0,
   allow_workspace_create TINYINT NOT NULL DEFAULT 0,
+  allow_ssh TINYINT NOT NULL DEFAULT 0,
   allowed_websocket_paths MEDIUMTEXT NOT NULL,
   allowed_agent_presets MEDIUMTEXT,
   banned                TINYINT NOT NULL DEFAULT 0,
   sandbox_mode          VARCHAR(64),
   disabled_sessions     MEDIUMTEXT NOT NULL,
   updated_at            DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+CREATE TABLE IF NOT EXISTS ssh_host_owners (
+  alias VARCHAR(256) COLLATE utf8mb4_bin PRIMARY KEY,
+  user_id INT UNSIGNED NOT NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  KEY idx_ssh_host_owners_user (user_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE IF NOT EXISTS user_usage (
   user_id             INT UNSIGNED NOT NULL,
@@ -532,6 +547,7 @@ export class Database {
     };
     add('allow_upload', 'INTEGER NOT NULL DEFAULT 0', 'TINYINT NOT NULL DEFAULT 0');
     add('allow_git_download', 'INTEGER NOT NULL DEFAULT 0', 'TINYINT NOT NULL DEFAULT 0');
+    add('allow_ssh', 'INTEGER NOT NULL DEFAULT 0', 'TINYINT NOT NULL DEFAULT 0');
     add('allow_workspace_create', 'INTEGER NOT NULL DEFAULT 0', 'TINYINT NOT NULL DEFAULT 0');
     add('allowed_websocket_paths', "TEXT NOT NULL DEFAULT '[]'", 'MEDIUMTEXT NULL');
     add('allowed_agent_presets', 'TEXT', 'MEDIUMTEXT');
@@ -830,6 +846,7 @@ export class Database {
       }
 
       this.stmt('DELETE FROM user_permissions WHERE user_id = ?').run(id);
+      this.stmt('DELETE FROM ssh_host_owners WHERE user_id = ?').run(id);
       this.stmt('DELETE FROM user_usage WHERE user_id = ?').run(id);
       this.stmt('DELETE FROM messages WHERE sender_id = ? OR recipient_id = ?').run(id, id);
       this.stmt('DELETE FROM local_workspaces WHERE user_id = ?').run(id);
@@ -1031,7 +1048,7 @@ export class Database {
   // ── 子用户权限（网关强制执行） ────────────────────────────
   getPermissions(userId: number): UserPermissionsRow | null {
     const row = this.stmt(
-      'SELECT user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, monthly_budget_micros, allow_upload, allow_git_download, allow_workspace_create, allowed_websocket_paths, allowed_agent_presets, banned, sandbox_mode, disabled_sessions, updated_at FROM user_permissions WHERE user_id = ?',
+      'SELECT user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, monthly_budget_micros, allow_upload, allow_git_download, allow_workspace_create, allow_ssh, allowed_websocket_paths, allowed_agent_presets, banned, sandbox_mode, disabled_sessions, updated_at FROM user_permissions WHERE user_id = ?',
     ).get(userId) as
       | {
           user_id: number;
@@ -1042,6 +1059,7 @@ export class Database {
           allow_upload: number;
           allow_git_download: number;
           allow_workspace_create: number;
+      allow_ssh: number;
           allowed_websocket_paths: string | null;
           allowed_agent_presets: string | null;
           banned: number;
@@ -1060,6 +1078,7 @@ export class Database {
       allow_upload: row.allow_upload === 1,
       allow_git_download: row.allow_git_download === 1,
       allow_workspace_create: row.allow_workspace_create === 1,
+      allow_ssh: row.allow_ssh === 1,
       allowed_websocket_paths: parseJsonArray(row.allowed_websocket_paths),
       allowed_agent_presets: row.allowed_agent_presets === null ? null : parseJsonArray(row.allowed_agent_presets),
       banned: row.banned === 1,
@@ -1079,18 +1098,19 @@ export class Database {
       allowUpload: boolean;
       allowGitDownload: boolean;
       allowWorkspaceCreate?: boolean;
+      allowSsh?: boolean;
       allowedWebSocketPaths?: string[];
       allowedAgentPresets?: string[] | null;
       banned: boolean;
-      sandboxMode: string | null;
+      sandboxMode?: string | null;
       disabledSessions?: string[];
     },
   ): void {
     // 防御性清洗：空串/当前目录/根目录条目在 folderAllowed 里语义=全盘允许
     // （fail-open 陷阱）——网关端点已拒绝，数据层再兑底一次。
     const allowedFolders = sanitizeAllowedFolders(perms.allowedFolders);
-    const disabledSessions = [...new Set((perms.disabledSessions ?? []).filter((id) => typeof id === 'string' && id.length > 0 && id.length <= 200))].slice(0, 2000);
     const existing = this.getPermissions(userId);
+    const disabledSessions = [...new Set((perms.disabledSessions ?? existing?.disabled_sessions ?? []).filter((id) => typeof id === 'string' && id.length > 0 && id.length <= 200))].slice(0, 2000);
     const allowWorkspaceCreate = perms.allowWorkspaceCreate ?? existing?.allow_workspace_create ?? false;
     const allowedWebSocketPaths = perms.allowedWebSocketPaths === undefined
       ? existing?.allowed_websocket_paths ?? []
@@ -1101,8 +1121,8 @@ export class Database {
         ? null
         : [...new Set(perms.allowedAgentPresets.filter((entry) => typeof entry === 'string' && entry.length > 0 && entry.length <= 512))];
     this.stmt(
-      `INSERT INTO user_permissions (user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, monthly_budget_micros, allow_upload, allow_git_download, allow_workspace_create, allowed_websocket_paths, allowed_agent_presets, banned, sandbox_mode, disabled_sessions)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO user_permissions (user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, monthly_budget_micros, allow_upload, allow_git_download, allow_workspace_create, allow_ssh, allowed_websocket_paths, allowed_agent_presets, banned, sandbox_mode, disabled_sessions)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(user_id) DO UPDATE SET
          allowed_folders = excluded.allowed_folders,
          hourly_token_limit = excluded.hourly_token_limit,
@@ -1111,6 +1131,7 @@ export class Database {
          allow_upload = excluded.allow_upload,
          allow_git_download = excluded.allow_git_download,
          allow_workspace_create = excluded.allow_workspace_create,
+         allow_ssh = excluded.allow_ssh,
          allowed_websocket_paths = excluded.allowed_websocket_paths,
          allowed_agent_presets = excluded.allowed_agent_presets,
          banned = excluded.banned,
@@ -1122,16 +1143,38 @@ export class Database {
       JSON.stringify(allowedFolders),
       perms.hourlyTokenLimit,
       perms.dailyMinutesLimit,
-      perms.monthlyBudgetMicros ?? 0,
+      perms.monthlyBudgetMicros ?? existing?.monthly_budget_micros ?? 0,
       perms.allowUpload ? 1 : 0,
       perms.allowGitDownload ? 1 : 0,
       allowWorkspaceCreate ? 1 : 0,
+      (perms.allowSsh ?? existing?.allow_ssh ?? false) ? 1 : 0,
       JSON.stringify(allowedWebSocketPaths),
       allowedAgentPresets === null ? null : JSON.stringify(allowedAgentPresets),
       perms.banned ? 1 : 0,
-      perms.sandboxMode,
+      perms.sandboxMode === undefined ? existing?.sandbox_mode ?? null : perms.sandboxMode,
       JSON.stringify(disabledSessions),
     );
+  }
+
+  // ── SSH host alias 归属 ─────────────────────────
+  /** 未登记的 alias 属于历史/管理员全局配置，不自动对外共享。 */
+  getSshHostOwner(alias: string): number | null {
+    const row = this.stmt('SELECT user_id FROM ssh_host_owners WHERE alias = ?').get(alias) as { user_id: number } | undefined;
+    return row?.user_id ?? null;
+  }
+
+  listSshHostAliases(userId: number): string[] {
+    return (this.stmt('SELECT alias FROM ssh_host_owners WHERE user_id = ? ORDER BY alias').all(userId) as { alias: string }[]).map((row) => row.alias);
+  }
+
+  claimSshHost(alias: string, userId: number): boolean {
+    if (typeof alias !== 'string' || alias.length === 0 || alias.length > 256) return false;
+    this.stmt(this.mysql ? 'INSERT IGNORE INTO ssh_host_owners (alias, user_id) VALUES (?, ?)' : 'INSERT OR IGNORE INTO ssh_host_owners (alias, user_id) VALUES (?, ?)').run(alias, userId);
+    return this.getSshHostOwner(alias) === userId;
+  }
+
+  releaseSshHost(alias: string, userId: number): void {
+    this.stmt('DELETE FROM ssh_host_owners WHERE alias = ? AND user_id = ?').run(alias, userId);
   }
 
   // ── 用户用量（时间 / token 配额） ─────────────────────────

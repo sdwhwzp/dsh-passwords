@@ -11,6 +11,7 @@ import {
   filterOwnedSessionIds,
   normalizePath,
   sandboxPresetRank,
+  filterSessionSearchItems,
   isAdminOnlyPluginEndpoint,
   isSharedSettingsWrite,
   containsSessionReference,
@@ -158,9 +159,9 @@ test('clampSessionHistorySandbox：preset/mode/currentValue 超过授权级别�
   });
   const changed = clampSessionHistorySandbox(target, 'read-only');
   assert.equal(changed, true);
-  assert.equal((target.events[0].event as any).data.preset, 'read-only');
-  assert.equal((target.events[1].event as any).data.mode, 'read-only');
-  assert.equal((target.projections.values.permissions as any).currentValue, 'read-only');
+  assert.equal(((target as any).events[0].event as any).data.preset, 'read-only');
+  assert.equal(((target as any).events[1].event as any).data.mode, 'read-only');
+  assert.equal(((target as any).projections.values.permissions as any).currentValue, 'read-only');
 });
 
 test('clampSessionHistorySandbox：同级别/更低级别不改', () => {
@@ -169,7 +170,7 @@ test('clampSessionHistorySandbox：同级别/更低级别不改', () => {
     projections: { values: { permissions: { currentValue: 'read-only' } } },
   });
   assert.equal(clampSessionHistorySandbox(target, 'workspace-write'), false);
-  assert.equal((target.events[0].event as any).data.mode, 'read-only');
+  assert.equal(((target as any).events[0].event as any).data.mode, 'read-only');
 });
 
 test('clampSessionHistorySandbox：allowedMode=null 时不动（主用户不限）', () => {
@@ -242,6 +243,35 @@ test('filterOwnedSessionIds：sessionIds 混入非字符串时丢弃异常元素
     ['s1', 's2'],
     '非字符串 id 不能绕过归属过滤：一律丢弃，不整数组跳过过滤',
   );
+});
+
+// ── filterSessionSearchItems（rc.1 session/search 授权过滤） ────
+
+test('filterSessionSearchItems：只保留授权会话并保留摘要字段', () => {
+  const visible = { sessionId: 's-visible', snippet: 'allowed', score: 0.9 };
+  const hidden = { sessionId: 's-hidden', snippet: 'secret' };
+  const out = filterSessionSearchItems([visible, hidden], (id) => id === 's-visible');
+  assert.deepEqual(out, [visible]);
+  assert.notEqual(out?.[0], visible, '过滤结果应创建新对象，避免把上游对象交给后续调用方');
+});
+
+test('filterSessionSearchItems：非法或缺少 sessionId 的项直接丢弃', () => {
+  const out = filterSessionSearchItems([
+    null,
+    1,
+    'not-an-object',
+    [],
+    {},
+    { sessionId: '' },
+    { sessionId: 42, snippet: 'invalid id' },
+    { sessionId: 's-visible', snippet: 'allowed' },
+  ], () => true);
+  assert.deepEqual(out, [{ sessionId: 's-visible', snippet: 'allowed' }]);
+});
+
+test('filterSessionSearchItems：非数组结果返回 null，触发上层 fail-closed', () => {
+  assert.equal(filterSessionSearchItems(null, () => true), null);
+  assert.equal(filterSessionSearchItems({ items: [] }, () => true), null);
 });
 
 // ── sandboxPresetRank（级别映射） ──────────────────────────────

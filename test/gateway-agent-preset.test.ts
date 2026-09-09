@@ -181,7 +181,10 @@ test('Issue #22: 授权 preset 允许创建会话，并登记缓存供 prompt �
   const beforePrompt = await request('/api/session.prompt', JSON.stringify({ sessionId: 'existing-session', text: 'hi' }));
   assert.equal(beforePrompt.status, 403);
   // select 成功后 prompt 放行
-  const select = await request('/api/agentPreset.select', JSON.stringify({ sessionId: 'existing-session', agentPreset: 'preset/allowed' }));
+  const select = await request('/api/agentPresets/select', JSON.stringify({
+    type: 'client-request', rpcId: 'preset-select-1', method: 'agentPresets/select',
+    payload: { args: { agentId: 'existing-session', agentPreset: 'preset/allowed' } },
+  }));
   assert.equal(select.status, 200, select.body);
   const afterPrompt = await request('/api/session.prompt', JSON.stringify({ sessionId: 'existing-session', text: 'hi' }));
   assert.equal(afterPrompt.status, 200, afterPrompt.body);
@@ -254,7 +257,10 @@ test('Issue #22: select 失败后不更新缓存，prompt 仍按旧缓存判断'
   // 上游失败：select 本身经网关放行后由上游返回 500，网关不得登记该 preset
   selectBlocked = true;
   try {
-    const failedSelect = await request('/api/agentPreset.select', JSON.stringify({ sessionId: 'existing-session', agentPreset: 'preset/allowed' }));
+    const failedSelect = await request('/api/agentPresets/select', JSON.stringify({
+      type: 'client-request', rpcId: 'preset-select-3', method: 'agentPresets/select',
+      payload: { args: { agentId: 'existing-session', agentPreset: 'preset/allowed' } },
+    }));
     assert.equal(failedSelect.status, 200, failedSelect.body);
     const afterPrompt = await request('/api/session.prompt', JSON.stringify({ sessionId: 'existing-session', text: 'hi' }));
     assert.equal(afterPrompt.status, 200, 'select 失败不得污染既有缓存');

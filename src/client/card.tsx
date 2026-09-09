@@ -50,6 +50,7 @@ export interface PermOverview {
       monthlyBudgetMicros: number | null;
       allowUpload: boolean;
       allowGitDownload: boolean;
+      allowSsh: boolean;
       banned: boolean;
       sandboxMode: string | null;
       disabledSessions: string[];
@@ -71,6 +72,7 @@ interface PermDraft {
   monthlyBudget: string;
   upload: boolean;
   git: boolean;
+  ssh: boolean;
   banned: boolean;
   sandbox: string;
   disabledSessions: string[];
@@ -250,6 +252,7 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
                   monthlyBudget: ((u.permissions.monthlyBudgetMicros ?? 0) / 1_000_000).toFixed(2),
                   upload: u.permissions.allowUpload,
                   git: u.permissions.allowGitDownload,
+                  ssh: u.permissions.allowSsh,
                   banned: u.permissions.banned,
                   sandbox: u.permissions.sandboxMode ?? '',
                   disabledSessions: [...(u.permissions.disabledSessions ?? [])],
@@ -491,6 +494,7 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
           monthlyBudgetYuan: d.monthlyBudget.trim(),
           allowUpload: d.upload,
           allowGitDownload: d.git,
+          allowSsh: d.ssh,
           banned: d.banned,
           sandboxMode: d.sandbox === '' ? null : d.sandbox,
           disabledSessions: d.disabledSessions.filter((id) => liveEnabledSessions.has(id)),
@@ -1016,6 +1020,11 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
                   }),
                   t('permsGit'),
                 ),
+                h('label', { className: 'dshpw-check' },
+                  h('input', {
+                    type: 'checkbox', checked: d.ssh,
+                    onChange: (e: { target: { checked: boolean } }) => setDraft(u.id, { ssh: e.target.checked }),
+                  }), t('permsSsh')),
                 h(
                   'label',
                   { className: 'dshpw-check danger' },

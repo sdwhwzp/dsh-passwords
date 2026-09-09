@@ -42,6 +42,38 @@ test('会话归属原子持久化、不可转移且拒绝非法 ID', () => {
   }
 });
 
+test('SSH alias 认领按用户隔离、互斥并在重启后保留', () => {
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-ssh-owner-'));
+  const dbPath = path.join(tempDir, 'owners.db');
+  const crypto = createFieldCrypto('test-key', 'test-key');
+  const db = new Database(dbPath, crypto);
+  try {
+    db.init();
+    const first = db.createUser('ssh-owner-first', '$2a$10$dummyhashdummyhashdummyhashdu');
+    const second = db.createUser('ssh-owner-second', '$2a$10$dummyhashdummyhashdummyhashdu');
+    assert.equal(db.claimSshHost('work-host', first.id), true);
+    assert.equal(db.claimSshHost('work-host', second.id), false, '同一 alias 不得跨子用户认领');
+    assert.equal(db.getSshHostOwner('work-host'), first.id);
+    assert.deepEqual(db.listSshHostAliases(first.id), ['work-host']);
+    db.releaseSshHost('work-host', second.id);
+    assert.equal(db.getSshHostOwner('work-host'), first.id, '非 owner 不得释放 alias');
+    db.close();
+
+    const reopened = new Database(dbPath, crypto);
+    try {
+      reopened.init();
+      assert.equal(reopened.getSshHostOwner('work-host'), first.id, '认领关系必须跨重启持久化');
+      reopened.releaseSshHost('work-host', first.id);
+      assert.equal(reopened.getSshHostOwner('work-host'), null);
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    try { db.close(); } catch { /* closed for reopen assertion */ }
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test('极旧 user_permissions 表缺少上传与 git 列时会补齐并默认关闭', () => {
   const tempDir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-db-legacy-upload-'));
   const dbPath = path.join(tempDir, 'legacy-upload.db');
@@ -65,6 +97,7 @@ test('极旧 user_permissions 表缺少上传与 git 列时会补齐并默认关
     const migrated = db.getPermissions(7);
     assert.equal(migrated?.allow_upload, false);
     assert.equal(migrated?.allow_git_download, false);
+    assert.equal(migrated?.allow_ssh, false);
   } finally {
     db.close();
     rmSync(tempDir, { recursive: true, force: true });
@@ -106,6 +139,7 @@ test('旧 user_permissions 表会迁移 WebSocket 授权列，并保留现有权
       allow_upload: true,
       allow_git_download: true,
       allow_workspace_create: false,
+      allow_ssh: false,
       allowed_websocket_paths: [],
       allowed_agent_presets: null,
       banned: false,
@@ -153,6 +187,39 @@ test('旧 user_permissions 表会迁移 WebSocket 授权列，并保留现有权
       disabledSessions: [],
     });
     assert.equal(db.getPermissions(7)?.allowed_agent_presets, null, 'NULL 必须保留不限制的兼容语义');
+
+    db.setPermissions(7, {
+      allowedFolders: ['/srv/project'],
+      hourlyTokenLimit: 10,
+      dailyMinutesLimit: 20,
+      allowUpload: true,
+      allowGitDownload: true,
+      allowWorkspaceCreate: false,
+      banned: false,
+    });
+    assert.equal(db.getPermissions(7)?.sandbox_mode, 'workspace-write', '省略 sandboxMode 不得清除既有策略');
+    assert.deepEqual(db.getPermissions(7)?.disabled_sessions, [], '省略 disabledSessions 应保留当前集合');
+
+    db.setPermissions(7, {
+      allowedFolders: ['/srv/project'],
+      hourlyTokenLimit: 10,
+      dailyMinutesLimit: 20,
+      allowUpload: true,
+      allowGitDownload: true,
+      allowWorkspaceCreate: false,
+      banned: false,
+      disabledSessions: ['disabled-session'],
+    });
+    db.setPermissions(7, {
+      allowedFolders: ['/srv/project'],
+      hourlyTokenLimit: 10,
+      dailyMinutesLimit: 20,
+      allowUpload: true,
+      allowGitDownload: true,
+      allowWorkspaceCreate: false,
+      banned: false,
+    });
+    assert.deepEqual(db.getPermissions(7)?.disabled_sessions, ['disabled-session'], '省略 disabledSessions 不得恢复被禁用会话');
   } finally {
     db.close();
     rmSync(tempDir, { recursive: true, force: true });

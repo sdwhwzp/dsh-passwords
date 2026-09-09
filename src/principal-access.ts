@@ -46,6 +46,7 @@ function defaultPermissions(userId: number): UserPermissionsRow {
     allow_upload: true,
     allow_git_download: false,
     allow_workspace_create: false,
+    allow_ssh: false,
     allowed_websocket_paths: [],
     allowed_agent_presets: [],
     banned: false,
