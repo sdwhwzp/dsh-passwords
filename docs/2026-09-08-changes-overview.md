@@ -518,3 +518,7 @@ finalization job 退出 0，没有再次重启服务，先私有保留原 startu
 当天三项改动的合并交接见 [2026-09-09 服务器 30 迁移与 MariaDB 切换交接总结](2026-09-09-server30-migration-handoff.md)。
 
 服务器 30 的 DSH 已在 `http://192.168.10.30:3081/` 提供服务，用户库读写全部落在 MariaDB `192.168.10.73:3306`。`utf8mb4_0900_ai_ci` 是 MySQL 8 专有、MariaDB 拒绝解析，改为两端都有的 `utf8mb4_unicode_ci`；13 张表逐表搬迁并核对行数一致；`dsh-nas-webdav` 在 cordis 配置里另有一套库地址，与 `.env` 一并改掉后到旧 MySQL 的连接归零。旧 MySQL 数据未删除，28 仍连 MySQL 并正常服务。详见[部署手册第 39 节](server-28-deployment-runbook.md#39-2026-09-09-用户库从-mysql-迁至-mariadb服务器-30-已切28-未动)。
+
+## 22. 2026-09-09 上游同步与环境角色反转
+
+十七个 bundle 逐个对上游比对：`dsh-context` 升到 0.47.0-dsh.20260909.1（上游已吸收本 fork 的计时修复）、`dsh-better-sidebar` 快进到 0.18.1、`@huanlin/…-plugin-office` 升到 0.2.0，均已在 30 上生效且插件树无未激活告警。`dsh-plugin-subscriptions` 与 `@changfenhuang/dsh-genui` 因架构分叉与 Harness 版本转向而受阻，合并已中止、仓库保持干净。Harness 本体落后上游 879 个提交且含会话日志 V3，须单独规划。自本日起 30 为正式环境、28 为灰度环境。详见[部署手册第 40 节](server-28-deployment-runbook.md#40-2026-09-09-上游同步三个插件升级两个受阻30-转为正式环境)。

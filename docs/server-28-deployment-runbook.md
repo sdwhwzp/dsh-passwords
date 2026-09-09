@@ -1534,3 +1534,49 @@ MariaDB 装有密码策略（要求大小写混合与特殊字符），原 64 �
 ### 回滚
 
 30 侧：`.env` 备份为同目录 `.env.pre-mariadb`，`cordis.patch.yml.pre-mariadb`，凭据 `mysql-password.pre-mariadb`，插件 `apps/dsh-plugins/addons/dsh-passwords-2.6.26-rollback.tgz`（含 dist 与 package.json）。恢复这四项并重启即回到 MySQL。旧 MySQL 的库与账号完好，未做任何删除。
+
+## 40. 2026-09-09 上游同步：三个插件升级，两个受阻；30 转为正式环境
+
+服务器 30 现为正式环境，服务器 28 转为灰度环境（使用者 2026-09-09 决定）。此前文档中「28 是对外权威」的表述自本节起失效；公网入口切换仍待网络管理员配合。
+
+### 逐包比对结果
+
+十七个 bundle 全部装自本地 tarball，机器上未配 registry，因此逐个对公共 npm 比对。`latest` 标签不等于最高版本：`@deepseek-ai/dsh-base` 与 `dsh-web-app` 的 `latest` 是 `0.0.1-rc.1`，新版在 `alpha` 标签下；`dsh-better-sidebar` 有 `beta`/`alpha`/`latest` 三个标签指向不同版本。按 `latest` 安装会降级。
+
+`dsh-shandong-tizhi-brand`、`dsh-nas-webdav`、`@dsh-external/dsh-super-injector`、`@dsh-external/dsh-graded-mode` 在公共 npm 上不存在，无从比对。`dsh-passwords`、`dsh-spend`、`dsh-at-file`、`@wxg-prc-cpg/dsh-weknora`、`dsh-sidebar-vscode` 的本地版本高于上游，升级反而回退。
+
+### 已升级（30 上生效）
+
+`dsh-context` 0.46.0-dsh.20260908.1 → **0.47.0-dsh.20260909.1**。上游把本 fork 的嵌入式流计时修复吸收为 `host/logShapes` 的 `firstTokenTimeOfStream`，它直接读紧凑记录联合而不经 `dsh-llm` 展开，比 fork 版本更完整，故丢弃 fork 实现取上游。上游同时删除了自己的对话统计行跳转（`7c08143`），`composer.dock` slot 与其测试随之移除。fork 只保留一件上游不带的事：本部署跑 dsh `0.1.3-alpha.1`，而上游 0.47.0 只声明 `0.1.3-alpha.2` 与 `0.1.5-alpha.1`，因此兼容表与 peer 范围重新写回 alpha.1。合并后 81 个测试文件、1279 项通过、覆盖率 100%。
+
+`dsh-better-sidebar` 0.18.1-alpha.0 → **0.18.1**。本地 fork 无自有提交，直接快进到上游 main（落后 43 个提交）。
+
+`@huanlin/dsh-plugin-better-sidebar-plugin-office` 0.1.3 → **0.2.0**。上游未声明源码仓库，直接取 npm tarball；它要求 `dsh-better-sidebar@^0.17.0`，与升级后的 0.18.1 相容。
+
+`dsh-passwords` 的 override 一并从 2.6.26 改为 2.6.28 的正式 tarball——此前 2.6.28 是以覆盖 `dist/` 的方式部署的，任何重新解析都会把它打回 2.6.26。
+
+### 受阻（已中止合并，仓库保持干净）
+
+`dsh-plugin-subscriptions` 0.6.4 → 0.8.0 是**架构分叉**而非文本冲突。本 fork 把订阅 RPC 迁到 Typert 远程加 `AuthenticatedPrincipal` 鉴权（多账号网关所需，见 `fix: authenticate subscription RPC endpoints` 与 `fix: restrict subscription credential controls`），上游仍用 `connection.rpc.handle` 的 `{ authority: 'loopback' }` 模型并新增了 `ProviderSettingsController`。七个文件十六处冲突，合并等于把上游新功能在本 fork 的架构上重新实现，不是解冲突能完成的。
+
+`@changfenhuang/dsh-genui` 0.9.8 → 0.9.9 受阻于同一根因的另一面：该 fork 存在的意义就是把上游适配到 dsh `0.1.3-alpha.1`，而 0.9.9 的 peer 声明已从 `^0.1.2-rc.1 || ^0.1.3-alpha.1` 改成 `^0.1.2-rc.1 || ^0.1.5-alpha.1`，即上游已转向 0.1.5 的客户端 API。十五个文件冲突，硬合会产出无法对 0.1.3-alpha.1 验证的结果。
+
+两处均已 `git merge --abort`，工作区零改动；`upstream` remote 与 `backup/pre-upstream-20260909` 备份分支保留，可随时续做。
+
+### Harness 本体：落后 879 个提交，含会话日志 V3
+
+`@deepseek-ai/dsh-base` 与 `dsh-web-app` 0.1.3-alpha.1 → 0.1.5-alpha.1。`deepseek-harness` 的 `tzwl` 分支落后 `upstream/master` 879 个提交、领先 42 个，其间上游发布了 **session-log-v3**（会话日志格式大版本，见 `release/session-log-v3` 与 `fix(session): audit every historical content carrier before V3 migration`）。工作区另有 15 个未提交改动集中在 `packages/session/session-format-v0-to-v1`。这是一次会触及全部已提交会话日志的迁移，且上述两个受阻插件都在等它，须单独规划，不能与插件升级同批进行。
+
+### 一个必须记住的安装机制
+
+Profile 的真正版本锁不在 `package.json` 的 `dependencies`，而在 `pnpm-workspace.yaml` 的 `overrides`（该文件为 JSON 格式，47KB）。只改 `dependencies` 后 `pnpm install` 会正常结束却不改变任何版本。换包必须改 `overrides`。
+
+`pnpm install` 会以 tarball 内容重建包目录，从而删除 `dsh-passwords` 的 `.env`——该文件不在包内，是部署时写入的。每次重装后都要从备份恢复它，否则网关因缺少数据库配置而无法初始化。
+
+### 验证
+
+30 上十七个 bundle 全部装载，插件树无未激活告警，网关 `/gateway/readyz` 返回 `{"ok":true,"database":true}`，首页 302，数据库连接全部指向 MariaDB `192.168.10.73`，数据盘可用 7.3T。
+
+### 回滚
+
+`apps/deploy-backups/pre-20260909-upstream-sync/` 含切换前的 `package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`cordis.patch.yml` 与 `dsh-passwords.env`。恢复 `pnpm-workspace.yaml` 与 `package.json` 后重新 `pnpm install`，再恢复 `.env` 并重启即可。旧 tarball 仍在 `apps/dsh-plugins/releases/` 与 `addons/20260908-context-routing/` 下，未删除。
