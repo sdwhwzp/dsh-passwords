@@ -2,7 +2,7 @@
 
 本文记录 28 服务器（Tailscale `100.64.0.5`，局域网 `192.168.10.28`）上 DeepSeek Harness 多用户服务的功能、运行结构、数据位置、部署步骤、验收方法和故障处理。内容依据 2026-09-01 的 Harness Alpha.3 实际服务器盘点整理，不包含密码、API Key、OAuth Token、Tailscale Auth Key 或数据库口令。
 
-最新部署及修复状态见 §27–§29（2026-09-08）；工作区源码修改清单、证据索引和后续事项见 [本次改动清单 §11](2026-09-08-changes-overview.md)。早期章节保留对应日期的盘点背景。
+最新部署及修复状态见 §47（2026-09-09，服务器 30）；工作区源码修改清单、证据索引和后续事项见 [本次改动清单 §11](2026-09-08-changes-overview.md)。早期章节保留对应日期的盘点背景。
 
 ## 1. 使用范围
 
@@ -1836,6 +1836,8 @@ dsh-context 在折叠时就把用量分进 peak/off 桶，这条路径仍在（�
 
 **未完全证实**：恢复与一次浏览器强刷同时发生，因此不能断定上游写法是唯一成因；也未定位到其中具体哪一步导致抛错。该分歧已记入 [dsh-spend FORK.md](../../dsh-spend/FORK.md)，下次同步上游若要重新采纳，须先在灰度单独验证展开路径。
 
+> **后续更正（2026-09-09 晚）**：退回之后同一现象再次出现，上游 refresh 写法**不是**成因。本节记录的定位结论作废，真实成因至今未定位。dsh-spend 0.6.18 已加渲染边界以在下次复现时留下证据，见 §47.4；[FORK.md](../../dsh-spend/FORK.md) §1 已同步更正。
+
 ### 期间查出并修复的两个真实缺陷（均非本次崩溃成因）
 
 - **0.6.15**：合并上游时丢掉了 `refresh` 的 `return`。`savePricing` / `deletePricing` 依赖 `await refresh()` 才能显示改价后的快照，上游写法使该 await 立即返回、面板仍显示改价前数据。
@@ -1853,3 +1855,59 @@ Harness 0.1.5-alpha.1 · dsh-spend 0.6.16 · dsh-context 0.47.0-dsh.20260909.2 �
 ### 教训
 
 同一天对同一插件连发七版（0.6.8 → 0.6.16），其中多版是在没有根因的情况下推进的。**客户端渲染类问题应先取到浏览器控制台的组件栈再动手**——本次直到最后也没拿到，只能靠回退定位，且因与强刷同时发生而未能完全证实。下次遇到类似现象，第一步是让用户先开控制台并勾选 Preserve log，再复现。
+
+## 47. 2026-09-09 计量覆盖修复与 Harness 0.1.5-alpha.2（30，已上线）
+
+用户发现 dsh-spend 与 dsh-context 只记录到 `deepseek-official/deepseek-v4.1-flash-expires-on-0910` 一个模型，另外两个在用模型完全没有账。追下去是三条互相独立的缺陷，跨 harness 和插件两侧，一并修掉后重新出版本部署。
+
+### 47.1 扫描器读错了会话代次（dsh-spend 0.6.17）
+
+扫描器按固定文件名打开 `session.jsonl.zstd`。会话格式迁移遵循"相邻迁移"：新增一个以版本命名的后继文件，从不改写前代。因此当天迁到 v3 的会话仍在用出生时那一代回答，而迁移之后新建的会话根本没有这个文件名、整个消失。
+
+线上实测：扫描只看到 87 个会话中的 49 个、1306 个采样中的 514 个。改为按目录挑选**最新代次**（`/^session(?:\.v(\d+))?\.jsonl\.zstd$/`，取版本号最大者）后全部纳入。
+
+### 47.2 委派出去的调用无人认领（dsh-spend 0.6.17）
+
+子会话自己的 turn 不记录 principal，所以 workflow 交给 subagent 的每一次调用都无主：发起人看不到，也不进按账号的计量；而同样的活儿留在父会话里则正常计费。改为沿 `parentSession` 链上溯到最近一个记录了 principal 的祖先，1306 个采样里有 662 个由此归属。继承来的归属打 `principalInherited: true` 标记，消费者可与实录归属区分；父会话本次扫描没见到的，保持无主而不是就近攀附。
+
+流式折叠路径自建会话元数据、不走 `metaOf`，所以 `parentSession` 在两处都要带上。
+
+### 47.3 委派链上根本没有传 owner（Harness 0.1.5-alpha.2）
+
+上面两条修完仍有缺口：workflow 派生的子会话，其 turn 里**本来就没有** principal 可记。归属是这个 fork 用来做计量、按账号预算和会话可见性的依据，所以委派出去的活儿既不计费也不对发起人显示。触发这次排查的那次分析，48 次模型调用里有 42 次是委派出去的。
+
+委派工具原本已经把 `exec.principal` 传给 `subagents.start`，`SubagentStartRequest.principal` 也已文档化为会持久化到子会话的 prompt 上。所以这次只是把这一个字段穿过 workflow 这条路：工具填入 → 引擎为整个 run 持有 → 每次 start 传下去。run 本身无 owner 时，子会话保持无主，不做替代。
+
+改动落在 `packages/workflow/tool-workflow/src/index.ts`、`workflow-worker-thread/src/host.ts`、`workflow/src/runtime-types.ts`（提交 `26c05e7942`）。
+
+### 47.4 渲染失败不再吞掉整个组件（dsh-spend 0.6.18）
+
+§46 那次"点击后消失"最终没能拿到证据，原因是渲染抛错卸载了 React 根，容器变空、控制台什么也不剩，服务端也复现不了。0.6.18 加了边界：把错误信息和组件栈就地渲染出来，附重载按钮。下次再犯，现象自己会报告自己。
+
+### 47.5 部署记录
+
+发布 `20260909-201921-34810ad-alpha2`（dsh 家族 0.1.5-alpha.2，提交 `34810adae9`）。三条线齐发：runtime 270 个 tarball、plugins（从 alpha1 复制 `artifacts` 与 `dsh-passwords`）、web。切换 27 秒通过健康门，`gateway 200 / web 401`，pm2 零重启，切换后错误日志为空。
+
+线上版本：Harness 0.1.5-alpha.2 · dsh-spend 0.6.18 · dsh-context 0.47.0-dsh.20260909.2 · dsh-passwords 2.6.28 · dsh-better-sidebar 0.18.1 · dsh-at-file 0.7.3 · dsh-sidebar-vscode 0.2.8-dsh.20260909.9。备份 profile `/home/tzwl3/.dsh/profiles/web-pre-20260909-204246`。
+
+### 47.6 第一次切换失败：6 分钟中断
+
+第一次切换未通过健康门，**且自动回滚也没能恢复服务**，生产中断约 6 分钟。两个独立缺陷：
+
+**候选 profile 缺 `dsh-passwords/.env`。** `.env` 不在包里，是部署时单独放进 profile 的 `node_modules` 的。候选漏了这一步，插件报 `SETUP_KEY 未配置：请先运行安装脚本或手动配置 .env` 而不激活，于是它提供的 `requestPrincipal` 和 `managedUserWorkspace` 缺失，`dsh-nas-webdav` 永远 pending，启动以 `1 entry did not activate` 失败。切换前的预检只验了 **plugins release 里**的 `.env`，没验**候选 profile 里安装好的那一份**——两者是不同的文件。
+
+**回滚用了 `bin.js` 而不是 shim。** 回滚脚本按 0.1.3 时代的写法，直接以 `current/node_modules/@deepseek-ai/dsh/lib/bin.js` 注册 pm2。但回滚目标 alpha1 已经是 0.1.5，`bin.js` 末尾的 `import.meta.main` 守卫在 pm2 fork 模式下恒为假，进程起来但 CLI 永不启动——pm2 显示 online、端口无监听。所以是一次本该 15 秒的失败切换，变成了 6 分钟中断。手工用 shim 重启后 14 秒恢复。
+
+**另有一条后遗**：失败那轮里候选被改名为 `web`，app-boot 在它的 `.dsh-module-fallback` 里新增了一条**绝对路径**指向 `/profiles/web/...`；回滚改回名后这条链接失效。重试前须扫一遍候选 fallback 里指向 `/profiles/web/` 的绝对链接并改写。
+
+### 47.7 切换脚本的加固（`cutover015e.sh`）
+
+- **预检加两道**：候选 profile 内安装好的 `dsh-passwords/.env` 存在且含非空 `SETUP_KEY`；候选 `.dsh-module-fallback` 断链数为 0（`find -xtype l`）。任一不满足直接拒绝切换，不动线上。
+- **回滚同样经 shim 启动**。shim 本就是双版本兼容的（有 `runCli` 就调用，没有则 import 即已启动），回滚路径没有任何理由绕开它。
+- **失败时先抓日志再回滚**：回滚会覆盖 pm2 日志的后续内容，所以在停服务之前先 `tail` 一段错误日志并打印出来。
+
+### 47.8 教训
+
+发布前的检查项要**验最终生效的那份文件**，不要验它的来源。`.env` 在 release 目录里齐全，不代表它已经进了候选 profile 安装出来的包目录——这次正是死在这个差别上。
+
+回滚路径必须和正常路径走同一套启动方式。回滚代码平时不执行，一旦执行就是在故障中执行；它落后于正常路径一个版本这件事，只有在最坏的时刻才会暴露。
