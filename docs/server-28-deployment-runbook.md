@@ -2068,7 +2068,7 @@ retryPolicy:
 
 安装后恢复 Profile 内 `dsh-passwords/.env`，数据库仍为 `192.168.10.73`。模块链接按新安装包的实际名称解析，切换前后断链均为 0。随附预设复制到 `/home/tzwl3/.dsh/presets-30-20260910-071200-bf3afe-alpha2`，三个 workflow 预设均设置 `maxConcurrentAgents: 3`，Profile 指向这个新目录。旧预设保留。
 
-SSH 使用用户提供的 `wh.gr-iot.cn:6022`，主机密钥与原 `.30` 一致。该 SSH 映射不代表公网 Web `:3081` 已切到 30；本次未变更网络转发。
+SSH 使用用户提供的 `wh.gr-iot.cn:6022`，主机密钥与原 `.30` 一致。用户随后确认访问 `http://wh.gr-iot.cn:3081/`；浏览器实际显示 `0.1.5-alpha.2-bf3afe0`，确认该公网入口已提供本次 30 构建。旧迁移记录中公网 3081 仍指向 28 的描述不再代表当前状态。本次未变更网络转发。
 
 ### 51.2 验证
 
@@ -2083,3 +2083,13 @@ SSH 使用用户提供的 `wh.gr-iot.cn:6022`，主机密钥与原 `.30` 一致�
 旧 release 为 `20260909-201921-34810ad-alpha2`；旧 Profile 完整保存在 `/home/tzwl3/.dsh/profiles/web-before-20260910-071200-bf3afe-alpha2`。发布记录目录为 `/home/tzwl3/apps/deploy-staging/20260910-071200-bf3afe-alpha2`，包含切换前链接与配置摘要、PM2 状态、共享模块链接备份，以及 13 张 InnoDB 表 / 173 行的一致性数据库快照 `database-before.sql.gz`（权限 600）。数据库备份只保留在服务器，未上传 Git。
 
 恢复代码时先保存切换后配置和新增数据，再停止本次服务、恢复旧 Profile 和三个旧 release 链接，仍通过 `/home/tzwl3/apps/dsh-runtime/dsh-cli-entry.mjs` 启动。不得因回退代码而删除 SSH 权限表、会话后继或用户工作区；数据库恢复是独立操作，不能直接覆盖上线后的数据。未改动 28，也未进行 npm / tag 发布。
+
+### 51.4 alpha.2 新功能在当前插件组合中的入口
+
+浏览器确认本次构建号后，检查会话文件入口、右侧栏和命令菜单：本体 `ui-sidebar-documentpreview`、`ui-deliverables`、`ui-message-feedback`、`command-feedback` 均在最终组合中，没有禁用。
+
+`dsh-better-sidebar` 以 `extension` 优先级认领全部 `dsh-resource://file/**`，高于本体文档预览的 `fallback`；因此点击会话文件进入插件的编辑 / 文件查看器，界面不会显示本体新的 Markdown、代码、HTML、PDF、图片预览工具栏。插件还以优先级 `-1` 接管有产出文件的 turn-tail 区域；VSCode 插件启用默认打开时使用 `-2`。这属于插件组合的行为，不能仅凭主程序版本号认定本体界面已可见。恢复本体预览时需同时保留业务正在使用的 Excel / Office 查看器，不能直接禁用整个侧栏插件。
+
+本体显式交付卡片来自 `present` 工具；新版 `standard`、`ptc`、`cordis` 预设均包含该工具。旧会话仅写文件名或通过 Bash 创建文件而没有 `present` 记录，不会自动生成新的显式交付卡片。
+
+`/feedback` 的 Host 描述带 `<text>` 参数提示，命令菜单在消息中间过滤带参数提示的命令；已有草稿、光标在其后的菜单会只显示适合当前位置的条目。在消息开头调用 `/feedback` 才能选择其反馈弹窗入口。浏览器检查未提交反馈，也未发送模型任务。
