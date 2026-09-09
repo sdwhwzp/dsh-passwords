@@ -1723,3 +1723,11 @@ runtime 270 个 tarball 冻结安装；native 入口 `@deepseek-ai/node-addon-sy
 首次改写配置时，`pnpm-workspace.yaml` 已被 pnpm 改写成真正的 YAML，按 JSON 解析失败，于是只有 `package.json` 被改到 0.6.7、override 仍指 0.6.6——**override 胜出，装的还是旧版**，与 §42 里 `dsh-passwords` 那次是同一条规律。改用与格式无关的文本替换后成功。改这两个文件时不要假定它们仍是 JSON 形态。
 
 备份：`/home/tzwl3/apps/deploy-staging/spend-20260909-151419`（三份配置 + passwords 的 .env）。回滚即恢复配置后重装。
+
+### 补记：合并上游 0.6.3 后重发 0.6.8（同日）
+
+`dsh-spend` 的上游是 `github.com/nonewind/dsh-spend`（fork 为 `sdwhwzp/dsh-spend`）。上游 0.6.3 把用量扫描移出事件循环：`foldSession` 改为 `createSessionFolder` 的流式折叠器，`scanSessions` 先收集文件列表再按文件复用缓存（持久化到 `storages/dsh-spend-scan-cache.json`），客户端对在途刷新加了工作区变更保护。
+
+按上游优先合并，fork 的改动适配到新结构：主体（含搜索分支）自动合并干净，5 处冲突手工解决——按用户隔离的 `compute()` 参数与作用域缓存键保留、同时采纳并行汇率与扫描缓存；搜索计数变成折叠器的闭包状态，并入样本的循环放进 `finish()`；客户端的按用户查询参数与 cwd 一同捕获，使在途请求保持单一身份；扫描段 fork 无改动，整段取上游。
+
+版本沿 fork 线到 0.6.8（高于上游 0.6.3）。47 项自测全过；合并前后用真实日志各验一次，均为 13 个步骤 / 14 次派发 / 13 个归属到用户。健康门第 27 秒通过。备份 `/home/tzwl3/apps/deploy-staging/spend-20260909-152851`。
