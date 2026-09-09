@@ -1502,3 +1502,35 @@ DSH 主进程尚未在 30 启动。它会连同一个 MySQL 用户库，与 28 �
 ### 回滚
 
 30 侧：`/root/fstab.20260909-dsh-data.bak`、`/root/fstab.20260909-binds.bak`、`/root/grub-default.20260909.bak`，启动器备份 `/usr/local/libexec/dsh-tenant-{editor,terminal}.20260909-pre-aa`。28 侧启动器备份同名，旧摘要 `d87bd17b…` / `d4491d77…`；换回后须重新 pin sudoers。迁移用的一次性 ssh 公钥已从 28 的 `authorized_keys` 删除，30 侧私钥已删除。
+
+## 39. 2026-09-09 用户库从 MySQL 迁至 MariaDB（服务器 30 已切，28 未动）
+
+服务器 30 的 DSH 已在 `http://192.168.10.30:3081/` 提供服务，用户库读写全部落在 MariaDB `192.168.10.73:3306`，与旧 MySQL `192.168.10.95` 的连接为 0。28 仍连 MySQL、仍在正常服务，本节的插件与配置改动都未落到 28。
+
+### 端口与账号
+
+MariaDB 实为 `192.168.10.73:3306`，不是记录里的 3007——3007 在两台机器上都拒绝连接，3306 可达。服务端 `10.11.6-MariaDB`，管理账号 `wzp@%` 持 `GRANT ALL PRIVILEGES ON *.*`，认证插件 `mysql_native_password`（mysql2 可用，MariaDB 的 ed25519 则不可用）。该实例还承载 `gr_bis`、`lottery`、`website`、`zentao` 等生产库，迁移只新建 `dsh_passwords_platform`，未触碰其他库。
+
+### 排序规则是唯一的代码阻塞
+
+`utf8mb4_0900_ai_ci` 是 MySQL 8 专有，MariaDB 解析即报 Unknown collation；而 `Database.init()` 每次启动重跑整段建表语句，`IF NOT EXISTS` 不能绕开，因此必须改。`src/db.ts` 中 12 处改为 `utf8mb4_unicode_ci`，该规则在 MySQL 8.0.28 与 MariaDB 10.11.6 上均存在（两端 `SHOW COLLATION` 实测），故同一份构建两种服务端通用。24 张表的 JOIN 键全是整数，不存在跨表字符串比较，语义不变。其余语法均可移植：无 JSON 列、无窗口函数、无 CTE、无 CHECK 约束、无生成列，`ON DUPLICATE KEY UPDATE` 仅 1 处且 MariaDB 支持。
+
+### 数据搬迁
+
+未用 mysqldump：程序化逐表 `SHOW CREATE TABLE`、改写排序规则、建表、按 200 行一批 INSERT，最后比对行数。13 张表全部一致（`audit_logs` 62、`session_owners` 56、`user_usage` 11、`users` 3、`managed_workspaces` 2、`user_permissions` 2、`local_workspaces` 2、`platform_settings` 3、`nas_webdav_credentials` 1，其余 0）。库总量 384 KB。**旧 MySQL 未删除任何数据**，是回滚依据。
+
+### 应用账号换了密码
+
+MariaDB 装有密码策略（要求大小写混合与特殊字符），原 64 位小写十六进制密码被 `ER_NOT_VALID_PASSWORD` 拒绝，且该错误把密码原文打进了日志。因此不复用旧密码，改为生成 34 位含四类字符的新密码，建 `dsh_passwords_app@192.168.10.28` 与 `@192.168.10.30` 两个来源。旧 MySQL 侧的账号与密码保持原样，28 不受影响。
+
+### 库地址有两个来源，都要改
+
+`.env` 的 `DSH_PASSWORDS_MYSQL_*` 只覆盖密码门自身。`dsh-nas-webdav` 在 `cordis.patch.yml` 里另有一套 `mysqlHost`/`mysqlPort`/`mysqlUser`，密码取自凭据目录 `~/.dsh/credentials/dsh-nas-webdav/mysql-password`（明文文件，非 `.env`）。只改 `.env` 时进程仍保持一条到 `192.168.10.95` 的连接；两处都改并重启后，到 `.95` 的连接归零。任何后续换库都必须同时处理这两个来源。
+
+### 30 上部署的插件版本
+
+30 装的是 `dsh-passwords@2.6.28`，它包含尚未上过生产的 `2.6.27`（账号管理 UI 重做与托管目录的 git clone/pull）。**28 的迁移不应沿用这个包**：数据库迁移与未验收的 UI 变更不该捆在一次变更里，28 应另出一个「线上 2.6.26 + 本节排序规则修改」的最小包。
+
+### 回滚
+
+30 侧：`.env` 备份为同目录 `.env.pre-mariadb`，`cordis.patch.yml.pre-mariadb`，凭据 `mysql-password.pre-mariadb`，插件 `apps/dsh-plugins/addons/dsh-passwords-2.6.26-rollback.tgz`（含 dist 与 package.json）。恢复这四项并重启即回到 MySQL。旧 MySQL 的库与账号完好，未做任何删除。

@@ -512,3 +512,7 @@ finalization job 退出 0，没有再次重启服务，先私有保留原 startu
 ## 20. 2026-09-09 服务器 30 迁移准备
 
 服务器 30 已具备承载 DSH 的完整条件：7.3T 数据盘按 28 的形态格式化并挂载、`tzwl3` 账户与目录骨架建立、4.7G 数据迁移完成、沙盒与网络策略端到端通过。同轮修复 Ubuntu 26.04 上 AppArmor 使 bwrap 内 `setpriv` 无法降权的问题，两台机器现共用同一份启动器源码。DSH 主进程尚未在 30 启动，公网入口仍指向 28。详见[部署手册第 38 节](server-28-deployment-runbook.md#38-2026-09-09-服务器-30-迁移准备与-bwrap-apparmor-修复)。
+
+## 21. 2026-09-09 用户库迁至 MariaDB（服务器 30）
+
+服务器 30 的 DSH 已在 `http://192.168.10.30:3081/` 提供服务，用户库读写全部落在 MariaDB `192.168.10.73:3306`。`utf8mb4_0900_ai_ci` 是 MySQL 8 专有、MariaDB 拒绝解析，改为两端都有的 `utf8mb4_unicode_ci`；13 张表逐表搬迁并核对行数一致；`dsh-nas-webdav` 在 cordis 配置里另有一套库地址，与 `.env` 一并改掉后到旧 MySQL 的连接归零。旧 MySQL 数据未删除，28 仍连 MySQL 并正常服务。详见[部署手册第 39 节](server-28-deployment-runbook.md#39-2026-09-09-用户库从-mysql-迁至-mariadb服务器-30-已切28-未动)。
