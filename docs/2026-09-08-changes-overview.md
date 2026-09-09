@@ -534,3 +534,7 @@ finalization job 退出 0，没有再次重启服务，先私有保留原 startu
 部署前用真实日志做迁移审计，发现并修复一个会让 5 个 u3 会话打不开的回归（`at-file-mention` 来源种类未被 v2→v3 接纳）。切换过程暴露两处与上游 0.1.5 相关的部署适配：`bin.js` 新增 `import.meta.main` 守卫使 pm2 fork 模式下 CLI 不启动，需经入口 shim 调用导出的 `runCli`；新建 profile 需预建 `.dsh-module-fallback` 两跳投影，否则加载器先于 app-boot 治愈而失败。
 
 细节、回滚路径与未完成项见 [部署手册 §42](server-28-deployment-runbook.md)。
+
+## 25. dsh-spend 0.6.7：全网搜索计价（2026-09-09，已上线 30）
+
+DeepSeek 搜索是独立的 `deepseek-v4-flash` 调用、单独计费，此前完全不在 spend 账内（30 上有 14 次）。因日志只记请求不记响应用量，按派发次数计量，归属到发起该搜索的步骤，价格取搜索自身模型的 `searchPerCall`（默认 0，只计次不计费）。详见 [部署手册 §43](server-28-deployment-runbook.md)。

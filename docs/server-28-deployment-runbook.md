@@ -1697,3 +1697,29 @@ runtime 270 个 tarball 冻结安装；native 入口 `@deepseek-ai/node-addon-sy
 2. 本部署的 Harness 发布到内部 registry，以解除 `dsh-plugin-subscriptions` 的 `link:` 依赖
 3. 28（灰度）仍在 0.1.3，与 30 已不同版本；`dsh-at-file` 同样装在 28 上，其会话日志迁移需要同一修复
 4. `principal-feed.ts` 的 upsert 时序问题、两块数据盘的配额，仍未处理
+
+## 43. 2026-09-09 dsh-spend 0.6.7：把全网搜索纳入计价（30，已上线）
+
+### 缺口
+
+`dsh-web-search-deepseek` 每执行一次搜索，会向 DeepSeek **另发一次 `deepseek-v4-flash` 调用**（同一个 API key，DeepSeek 单独计费），并在会话日志留下 `web/deepseek-search-llm-request` 事件。spend 的扫描器只认 `assistant/message` 的用量，这些调用此前完全不在账内。30 上的生产日志有 14 次。
+
+查证过 DeepSeek 官方定价：**没有按次的搜索费**，搜索按承载模型的 token 计费。而该事件**只记请求、不记响应用量**，日志里没有这次调用的 token 数——可计量的单位只有"派发次数"。
+
+### 实现（仅改 dsh-spend）
+
+`foldSession` 把每次派发归到**发起它的那一步**。关键在于事件顺序：派发发生在该步 `assistant/message` 之后（此时 step 状态已被删除），所以归属依据是"最近一次已发射的样本"，而不是"打开中的步骤"。样本携带搜索自身的模型，按该模型的价格行取 `searchPerCall`，而不是按步骤模型。
+
+`searchPerCall` 默认 0：DeepSeek 未公布按次费率，未设定时只计次、不产生费用，由部署方按实际账单设定单次均价。存量价格覆盖没有该字段，读作未计价；`spend_pricing_overrides` 表对已有库执行 `ALTER TABLE ADD COLUMN`（列已存在时的 duplicate column name 属预期，其余错误照抛）。
+
+要精确到 token，需要搜索提供方把响应用量也写进会话日志——那是 harness 侧的改动，本次未做。
+
+### 验证
+
+部署前后各用真实生产日志跑一遍：**13 个步骤、14 次派发、13 个归属到用户、模型全为 `deepseek-v4-flash`**，两次结果一致。插件自测 46 项全通过（顺带修正两条自 0.6.6 起就失效的版本钉子）。健康门第 27 秒通过，静置 60 秒 gateway 200 / web 401 / 0 新增致命错误。
+
+### 部署中的一个复发教训
+
+首次改写配置时，`pnpm-workspace.yaml` 已被 pnpm 改写成真正的 YAML，按 JSON 解析失败，于是只有 `package.json` 被改到 0.6.7、override 仍指 0.6.6——**override 胜出，装的还是旧版**，与 §42 里 `dsh-passwords` 那次是同一条规律。改用与格式无关的文本替换后成功。改这两个文件时不要假定它们仍是 JSON 形态。
+
+备份：`/home/tzwl3/apps/deploy-staging/spend-20260909-151419`（三份配置 + passwords 的 .env）。回滚即恢复配置后重装。
