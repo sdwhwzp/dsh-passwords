@@ -1810,3 +1810,46 @@ dsh-spend 51 项、dsh-context 1285 项全过，且 dsh-context 的 **100% 覆�
 ### 固有限制
 
 dsh-context 在折叠时就把用量分进 peak/off 桶，这条路径仍在（作为回退）。横跨 9/10 12:00 调价点的会话，其回退估算会用同一套费率算两侧的 token——除非改它的持久化投影结构。走账本时不受此限，因为账本按每次调用自身时间戳计价。
+
+## 46. 2026-09-09 dsh-spend 悬浮球点击后组件消失（已恢复）
+
+### 现象与证据
+
+用户报告点击悬浮球后 dsh-spend 整个组件消失，控制台无报错。DOM 前后对比是定位的关键：
+
+```
+点击前  <div id="dsh-spend-widget"><div class="dsu-widget"><button class="dsu-pill">…</button></div></div>
+点击后  <div id="dsh-spend-widget"></div>
+```
+
+容器仍在、内部子树全空。挂载效应的清理函数会把容器一并删除，容器还在即说明它没有执行；组件本身无提前 `return`，任何路径都会返回 `div.dsu-widget`。因此只可能是**渲染抛错、React 卸载了根**。药丸上当时正常显示 `¥13.33 · 54.72M`，说明数据已到位，问题出在展开分支。
+
+### 排除过程
+
+宿主侧健康：在线上直接构造服务调用 `queryForPrincipal`，0.2 秒返回，`callCount` 514、31 个顶层字段、`bySession` 与 `pricing` 齐全。服务端日志无相关错误。两个客户端 bundle 均可解析（非语法错误）。主题 CSS 变量由新 runtime 的 `dsh-client-ui-theme` 正常定义。计划卡的 `subscription` / `quota` 解引用、价格表的 `schedule` 读取均有兜底。`scalePriceFields` 对缺失字段有类型检查。
+
+当日客户端实质只变过两处：上游 0.6.3 重写的 refresh 逻辑，以及新增一行 Remote descriptor。**样式一行未动。**
+
+### 恢复
+
+0.6.15 把 refresh 退回 fork 原版（保留全部计价成果），随后恢复正常。
+
+**未完全证实**：恢复与一次浏览器强刷同时发生，因此不能断定上游写法是唯一成因；也未定位到其中具体哪一步导致抛错。该分歧已记入 [dsh-spend FORK.md](../../dsh-spend/FORK.md)，下次同步上游若要重新采纳，须先在灰度单独验证展开路径。
+
+### 期间查出并修复的两个真实缺陷（均非本次崩溃成因）
+
+- **0.6.15**：合并上游时丢掉了 `refresh` 的 `return`。`savePricing` / `deletePricing` 依赖 `await refresh()` 才能显示改价后的快照，上游写法使该 await 立即返回、面板仍显示改价前数据。
+- **0.6.16**：`scalePriceFields` 只换算 `schedule.peak/offPeak/after`，不认识 §44 新增的 `schedule.phases`。人民币面板会把其余费率换算、却把这些留在美元，**峰谷列显示值约低 7.2 倍**。账本计价不受影响——它从未换算的行计价并自行乘汇率。
+
+### 过程中纠正的两处操作失误
+
+- 0.6.13 的包里含有未提交的代码（`sessionCost` 等），同一版本号对应两份字节。已升 0.6.14 使部署产物对应到提交。
+- 配对部署时 sed 的 `[^"]*` 匹配过头，把配置里的 `file:` 前缀一并吃掉。后续改用 JSON/正则感知的精确改写，并已修正。
+
+### 线上最终状态
+
+Harness 0.1.5-alpha.1 · dsh-spend 0.6.16 · dsh-context 0.47.0-dsh.20260909.2 · genui 0.9.9 · subscriptions 0.8.0-dsh.20260909.1 · dsh-passwords 2.6.28；gateway 200 / web 401。
+
+### 教训
+
+同一天对同一插件连发七版（0.6.8 → 0.6.16），其中多版是在没有根因的情况下推进的。**客户端渲染类问题应先取到浏览器控制台的组件栈再动手**——本次直到最后也没拿到，只能靠回退定位，且因与强刷同时发生而未能完全证实。下次遇到类似现象，第一步是让用户先开控制台并勾选 Preserve log，再复现。
