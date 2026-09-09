@@ -1995,7 +1995,7 @@ retryPolicy:
 
 `tool-workflow/*` 事件无 `surfaceOp`，workflow 跑动期间界面无任何进度（用户看到"没有反应"的另一半原因）。已在 §50 处理。
 
-## 50. 2026-09-09 workflow 跑动期间"看不出在动"（已提交，待随下次 harness 发版上线）
+## 50. 2026-09-09 workflow 跑动期间"看不出在动"（2026-09-10 已上线）
 
 ### 50.1 先排除了什么
 
@@ -2034,12 +2034,52 @@ retryPolicy:
 
 夹具脱敏：只保留事件类型、seq、time 与 `tool-workflow/*` 的原始载荷（runId/childId 是 uuid，label 是 `p1_recv` 一类通用名）；工具脚本、客户工作区路径、模型推理文本全部替换为 `<redacted>`，并断言产物中不含 `/home/`、`tzwl`、地名等串。
 
-### 50.5 尚未上线
+### 50.5 发布状态
 
-改动已提交（`b280c625b3`、`f80700a6cb`），**未部署**。该包是 harness 工作区包，不像插件那样能单独换 tarball——同版本号替换字节正是 §46 记过的错误。它应随下一次 harness 发版（0.1.5-alpha.3）走完整发布 + 切换流程上线。
+改动提交 `b280c625b3`、`f80700a6cb` 已包含在 §51 的 Harness 提交 `bf3afe0077`，于 2026-09-10 随完整工作区发布到 30。发布使用独立 release 路径及 tarball SHA256；未覆盖旧 release 或发布 npm 同名版本。
 
 ### 50.6 过程中发现的两个环境问题
 
 - **本机 Node 版本不符**：仓库要求 `^22.19 || >=24`，当前 shell 是 22.16。用 22.16 跑构建会得到误导性的 `tsdown: no packages/*/*/package.json declares the name …`（unrun 把配置搬到 `node_modules/.unrun/` 后 `../..` 不再是仓库根）。`nvm` 里已装 22.21.1，**pre-push 与本地构建必须切到它**（手册 §"Run relevant checks locally" 早有此要求）。
 - **vitest 不做类型检查**：`startedAt` 在测试夹具里漏填了 23 处，`vitest run` 全绿，只有 `pnpm run typecheck`（pre-push 门禁）才报出来。改动数据类型后，**跑测试不等于跑通**。
 
+## 51. 2026-09-10 源仓库同步及服务器 30 发布（已上线）
+
+按用户指示更新本体和在用 DSH 插件，排除 `dsh-weknora`。源实现合并进各仓库当前分支后完成适配，所有本地分支的提交均已存在于自有 fork；再次 fetch 确认 11 个仓库均无缺失的源分支提交。原作者地址只读，上传目标均为已核实的 `sdwhwzp` fork。`dsh-spend/main` 的远端领先本地且包含本地提交，保留该远端历史；其当前部署分支也已包含远端 main。
+
+### 51.1 版本与发布位置
+
+| 项目 | 30 上的版本 / 源提交 |
+| --- | --- |
+| Harness | `0.1.5-alpha.2` / `bf3afe0077` |
+| dsh-web 全家族 | `0.3.19` / `5f3d841e` |
+| dsh-passwords | `2.6.29` / `037a6a80` |
+| dsh-context | `0.48.0` / `7c365e17` |
+| dsh-spend | `0.6.20` / `13cc4cfc` |
+| dsh-better-sidebar | `0.19.0-alpha.1` / `77c34e57` |
+| dsh-genui | `0.9.9` / `9e83edf8` |
+| dsh-at-file | `0.7.4` |
+| dsh-plugin-subscriptions | `0.8.0-dsh.20260909.1` |
+| dsh-sidebar-vscode | `0.2.8-dsh.20260909.9` |
+| super-injector / graded-mode | `0.3.3-dsh.20260908.2` / `0.0.1-dsh.20260908.1` |
+| dsh-weknora | 保留 `0.1.2` |
+
+发布目录名为 `20260910-071200-bf3afe-alpha2`，三个 `/home/tzwl3/apps/dsh-{runtime,web,plugins}/current` 指向各自同名 release。共装配 275 个 Harness / vendor 包、21 个 Web 包及 10 个插件包，Profile 保留 17 个 bundle。`dsh-spend` 和 `dsh-context` 工作区另有未提交费用展示改动，本次保留且排除；这两个部署包从上述已提交快照单独构建，并使用带提交号的文件名。
+
+安装后恢复 Profile 内 `dsh-passwords/.env`，数据库仍为 `192.168.10.73`。模块链接按新安装包的实际名称解析，切换前后断链均为 0。随附预设复制到 `/home/tzwl3/.dsh/presets-30-20260910-071200-bf3afe-alpha2`，三个 workflow 预设均设置 `maxConcurrentAgents: 3`，Profile 指向这个新目录。旧预设保留。
+
+SSH 使用用户提供的 `wh.gr-iot.cn:6022`，主机密钥与原 `.30` 一致。该 SSH 映射不代表公网 Web `:3081` 已切到 30；本次未变更网络转发。
+
+### 51.2 验证
+
+源码检查涵盖本体的相关行为测试、Session / 持久化 987 项、交付工具 32 项、工作流 / 子代理 UI 28 项、选定录制快照、Host / Client 类型检查、lint、34 个文档 gate、构建、受影响 hygiene gate 和正式打包。Web 全家族 3825 项测试通过、9 项跳过，脚本 282 项、desktop 19 项及类型、构建、文档等门禁通过。密码门全套测试后修正两个版本约束问题，并通过对应 20 项更新测试和 5 项 SSH 网关测试；最终构建通过。详细命令日志在部署导出记录中，不将这些结果视为全平台 CI 或真实模型端到端验收。
+
+独立复制 Profile 到隔离 home，使用 SQLite 临时库和 `38080–38082` 端口排演；排演禁用 NAS，未读取生产会话数据。配置组合成功，应用和网关就绪，启动错误数为 0。正式切换后保留生产 NAS 配置和 MariaDB。
+
+2026-09-10 07:29:12 切换，07:29:47 健康门通过，随后稳定观察 60 秒并保存 PM2。Host PID `1727560`，重启次数 `0`。验证结果：网关健康 200、Host 未认证访问 401、登录页 200、内部健康接口未认证访问 403；带现有内部密钥的健康接口确认数据库、应用首页、工作区列表和会话列表均就绪。3 个账号保留，新增 `user_permissions.allow_ssh` 和 `ssh_host_owners` 已存在。切换前记录的 195 个会话文件全部保留且未缩短；这不代替逐条会话内容或人工登录界面验收。
+
+### 51.3 回滚记录
+
+旧 release 为 `20260909-201921-34810ad-alpha2`；旧 Profile 完整保存在 `/home/tzwl3/.dsh/profiles/web-before-20260910-071200-bf3afe-alpha2`。发布记录目录为 `/home/tzwl3/apps/deploy-staging/20260910-071200-bf3afe-alpha2`，包含切换前链接与配置摘要、PM2 状态、共享模块链接备份，以及 13 张 InnoDB 表 / 173 行的一致性数据库快照 `database-before.sql.gz`（权限 600）。数据库备份只保留在服务器，未上传 Git。
+
+恢复代码时先保存切换后配置和新增数据，再停止本次服务、恢复旧 Profile 和三个旧 release 链接，仍通过 `/home/tzwl3/apps/dsh-runtime/dsh-cli-entry.mjs` 启动。不得因回退代码而删除 SSH 权限表、会话后继或用户工作区；数据库恢复是独立操作，不能直接覆盖上线后的数据。未改动 28，也未进行 npm / tag 发布。
