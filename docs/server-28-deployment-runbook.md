@@ -1580,3 +1580,60 @@ Profile 的真正版本锁不在 `package.json` 的 `dependencies`，而在 `pnp
 ### 回滚
 
 `apps/deploy-backups/pre-20260909-upstream-sync/` 含切换前的 `package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`cordis.patch.yml` 与 `dsh-passwords.env`。恢复 `pnpm-workspace.yaml` 与 `package.json` 后重新 `pnpm install`，再恢复 `.env` 并重启即可。旧 tarball 仍在 `apps/dsh-plugins/releases/` 与 `addons/20260908-context-routing/` 下，未删除。
+
+## 41. 2026-09-09 Harness 升至 0.1.5-alpha.1 与两个受阻插件的合并（尚未部署）
+
+第 40 节列为受阻的两个插件已随 Harness 升级解除。本节记录的全部改动**都还没有部署**：28 与 30 上运行的仍是 `0.1.3-alpha.1` 与合并前的插件版本。原则是**上游优先，本 fork 做适配**——每个文件先取上游版本，再把 fork 真正拥有的能力贴回去。
+
+### Harness 0.1.3-alpha.1 → 0.1.5-alpha.1
+
+`deepseek-harness` 的 `tzwl` 分支合入 `upstream/master` 的 879 个提交，80 处冲突（源码 31、生成类文档 12、i18n 配对 21、README 与中文 20、锁文件与快照 4）。合并后相对上游只多 44 个提交，全是 fork 自有能力。
+
+决定做法的事实：**上游没有实现 principal 传播**——`core/session`、`api/session-controller`、`core/agent` 三处源码里一个 `principal` 都没有，`AuthenticatedPrincipal` 是本 fork 定义在 `packages/llm/llm/src/message.ts` 的类型。因此多账号归属能力必须逐处重贴到上游重构之后的代码上，这是本次合并的主体工作量。
+
+上游的三处重构，principal 随之搬迁。agent 循环把每步数据收进 `PreparedStep`，principal 也随 `decision` 流动。`Inbox` 从 `core/agent/src/inbox.ts` 移到 `core/agent-loop/src/inbox.ts` 并由具体类改为接口加 `ReactLoopInbox` 实现，归属过滤的 `claim`、`nextPrincipal` 与 `messageBelongsToPrincipal` 跟随具体实现，**不加宽上游给驱动方的窄接口**；fork 的 Inbox 测试同步迁到 `agent-loop/tests/inbox.spec.ts`。`subagent/continuation.ts` 从 1758 行重构到 537 行并抽出三个新文件，principal 分别贴回消息构造器、Activation 的 `principal` 字段与 `submitAdmitted`、`sendToParent`、三条投递入口，以及 `startContinuable` 的初始投递——最后这处最初漏了，冷恢复后子代归属变成 `undefined`，是测试抓到的；这类错误不抛异常，只会静默破坏多账号隔离。`client/connection` 保留上游的路由结构，鉴权换回 fork 的 `authorizeRequest`，principal 才能到达 fetch handler。
+
+上游吸收或取代了 fork 的三处改动，已丢弃：`hasNextStepForPrincipal` 守卫（上游改用「本次领取为空」判断，而 `claim` 本身按归属过滤，守卫成为冗余）、`openWorkspacePath`（上游改用 `sidebarRight.openResource`）、`ModelSelect` 的 confirmed 标签 ref（上游自行移除）。fork 独有的 `rootCallSeq` 与 `image`/`read-image` 两条命令保留，跟随上游改名 `tool/code-dispatch*` → `tool/ptc-dispatch*`、`catalog.<name>.description` → `description.<name>`。
+
+顺带修正两处仓库规范问题：本 fork 曾往**冻结的归档 Agent Note** 里加「已被取代」链接，违反归档规则，已整体恢复上游；`docs/architecture.md` 超出词数上限，按「重定位优先」把工具占用标识那段移回 `packages/core/tools/README.md`（该处本就完整记载）。
+
+验证：`typecheck` 两个 face 通过；21,326 项测试通过，principal 关键面 4,590 项全过；`lint` 干净；`doc-sync` 34 个门全过，771 对双语文档一致。其余失败逐个核实为环境类——Windows PATH 语义在 macOS 上执行（该文件与上游逐字节相同）、oxlint 与 publint 的工具契约、脏工作树的版本元数据、并行下的超时抖动，单独运行均通过。
+
+本机构建需 node `^22.19.0 || >=24.0.0`；22.16 上 tsdown 的 workspace 解析会失败，22.21.1 通过。另需显式声明 `unrun`（tsdown 0.22 加载 TS 配置所用，pnpm 未从锁文件落地）。
+
+### `@changfenhuang/dsh-genui` 0.9.8 → 0.9.9
+
+该 fork 原本只是 Harness alpha 兼容垫片，上游 0.9.9 已声明 `^0.1.5-alpha.1`，垫片全部作废，整棵树取上游，仅保留一个守卫测试。该守卫原先钉死 `^0.1.2-alpha.3` 这类某一时刻的字符串，改为断言关系：每条 Harness peer 范围都必须容纳本部署运行的版本线。502 项测试通过，与上游仅差该文件。
+
+### `dsh-plugin-subscriptions` 0.6.4 → 0.8.0-dsh.20260909.1
+
+上游取代了 fork 的四样东西，均已丢弃：`ProviderSettingsStore` 把模型可见性做成可配置的持久化偏好，取代 fork 硬编码的 Codex 与 Grok 白名单；上游重写的客户端取代 fork 的 Typert Remote 半边；Responses 的 strict 处理与 pool-usage 修复上游已自行完成。
+
+两样上游承载不了的保留。**授权走共享认证通道**：上游把端点注册在自有通道并配 `loopback` 权限，但本部署的网关只转发固定前缀清单（`/api/`、`/sidebar/api/`、`/dsh-vsceditor/` 等），自有通道根本不可达，而 `loopback` 权限在多账号网关下等于任何已登录账号都能触及主账号的 provider 凭据。因此端点改走 `/api` 上的 `connection.rpc.intercept`，前缀 `subscriptions-auth/`——这是唯一携带传输层已验证 principal 的路径。在其之上，只有管理员可变更凭据或查看配额，子账号的 `status` 回包既不含 provider 账号也不含管理能力标志。**`/image` 命令**是本部署自有的命令入口，上游只有工具。
+
+合并取上游测试文件时曾把 fork 的两条授权测试一并丢失，已补回：`test/login.spec.ts` 与 `test/usage.spec.ts` 各自断言子账号被拒。421 项测试通过。
+
+同轮在 Harness 中把 `ConnectionRpcHandler` 的 principal 改为可选形参（语义不变，本就是 `| undefined`），使不做授权判断的处理器保持三参数形态，上游形态的消费方无需改写。
+
+### 依赖形态：本插件只能对本部署的 Harness 构建做类型检查
+
+`AuthenticatedPrincipal` 与四参数的共享通道处理器都不存在于已发布的 `@deepseek-ai/*`——npm 上的 `0.1.5-alpha.1` 是上游版。因此 `dsh-plugin-subscriptions` 的 Harness 依赖以 `link:` 指向同级的 `deepseek-harness` 检出（相对本目录 `../../deepseek-harness`），与生产 profile 钉自建 tarball 的做法一致。**把本部署的 Harness 构建发布到内部 registry 后**，这些 link 才能换回普通版本号；在此之前，该同级检出是类型检查的前提。细节见该仓库的 `FORK.md`。
+
+### 提交
+
+| 仓库 | 提交 |
+|---|---|
+| `deepseek-harness` (`tzwl`) | `fdb4b614fb` 会话格式保留 principal、`5505934a14` 合并上游 0.1.5-alpha.1、`ebda8d9e3c` principal 形参改可选 |
+| `dsh-genui` (`dev`) | `dac008c` |
+| `dsh-plugin-subscriptions` (`codex/internal-013-deploy-20260908`) | `424b789` |
+
+三个仓库工作区均干净，**均未推送远程**。合并前的备份分支：`backup/tzwl-pre-0.1.5-20260909`、各插件的 `backup/pre-upstream-20260909`。
+
+### 部署前仍未完成的四项
+
+1. 快照重录（`pnpm run test:snapshot:record` 需 `DEEPSEEK_API_KEY`）
+2. TypeScript 与 Python 两个 SDK 的预期输出更新，`pnpm run test` 覆盖不到
+3. **session-log-v3**：上游在这 879 个提交里发布了会话日志格式大版本。30 上有 57 份生产会话日志，该迁移独立于本合并，须单独规划
+4. 本部署的 Harness 发布到内部 registry，以解除上一节的 `link:` 依赖
+
+**落地顺序**：本轮改动应先上 28（现为灰度）验证多账号隔离未被破坏，再考虑 30（现为正式）。不得直接上 30。

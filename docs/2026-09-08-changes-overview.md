@@ -522,3 +522,7 @@ finalization job 退出 0，没有再次重启服务，先私有保留原 startu
 ## 22. 2026-09-09 上游同步与环境角色反转
 
 十七个 bundle 逐个对上游比对：`dsh-context` 升到 0.47.0-dsh.20260909.1（上游已吸收本 fork 的计时修复）、`dsh-better-sidebar` 快进到 0.18.1、`@huanlin/…-plugin-office` 升到 0.2.0，均已在 30 上生效且插件树无未激活告警。`dsh-plugin-subscriptions` 与 `@changfenhuang/dsh-genui` 因架构分叉与 Harness 版本转向而受阻，合并已中止、仓库保持干净。Harness 本体落后上游 879 个提交且含会话日志 V3，须单独规划。自本日起 30 为正式环境、28 为灰度环境。详见[部署手册第 40 节](server-28-deployment-runbook.md#40-2026-09-09-上游同步三个插件升级两个受阻30-转为正式环境)。
+
+## 23. 2026-09-09 Harness 升至 0.1.5-alpha.1 与两个受阻插件合并（未部署）
+
+`deepseek-harness` 的 `tzwl` 合入上游 879 个提交，80 处冲突全部解决；上游没有 principal 传播，本 fork 的多账号归属能力逐处重贴到其重构之后的代码上。第 20 节列为受阻的两个插件随之解除：`@changfenhuang/dsh-genui` 升至 0.9.9（fork 的 alpha 垫片全部作废），`dsh-plugin-subscriptions` 升至 0.8.0-dsh.20260909.1（上游的 provider 设置取代 fork 的硬编码白名单，授权与 `/image` 命令保留）。三个仓库均已提交、未推送、未部署，部署前仍缺快照重录、两个 SDK 预期输出、session-log-v3 迁移与 Harness 内部发布。详见[部署手册第 41 节](server-28-deployment-runbook.md#41-2026-09-09-harness-升至-015-alpha1-与两个受阻插件的合并尚未部署)。
