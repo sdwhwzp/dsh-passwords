@@ -1948,3 +1948,50 @@ Harness 0.1.5-alpha.1 · dsh-spend 0.6.16 · dsh-context 0.47.0-dsh.20260909.2 �
 
 只在某个条件下才展示的内容，构造也要放在那个条件里。"消费处有门控"不等于安全。
 
+## 49. 2026-09-09 侧栏 @ 选文件提交失败、workflow 429 限流（30，已上线）
+
+### 49.1 `slash: no serializer for reference source "reference"`
+
+**现象**：dsh-better-sidebar 里点文件插入 `@` 芯片后，发送被拒，控制台报上面这句。
+
+**根因**：侧栏是上游仓库（omdsh-dev），按宿主约定用名字 `reference` 指代 `@` 文件源（宿主的 `dsh-client-ui-reference` 就叫这个名）。本 fork 的 `dsh-at-file` 用 `cordis.patch.yml` 禁用了宿主源、顶替成自己的 `@` 源，却以 `at-file` 之名注册、且无 codec。提交时 `ui-input-trigger` 按 `reference` 在 roster 里找不到带 codec 的归属，整条提交被拒（设计如此：不静默降级为剪贴板文本）。
+
+**修复（dsh-at-file 0.7.4，`878531c`）**：按"上游优先、我们做适配"不改侧栏，让顶替者顶替完整——源名改为 `reference`，并提供 codec（芯片的 `ref` 即 `@path`，原样进模型，与手工键入走同一条服务端解析）。设置/文案命名空间仍是 `at-file`。178 项测试通过，新增两条断言源名与 codec。单插件配对部署，27 秒过门；线上产物 `"reference"` 1 处（源名）、`"at-file"` 3 处（命名空间）。
+
+### 49.2 workflow 并发子代理撞 429 后全部失败
+
+**证据**：zhouqiaorong 8 月工作区那次分析，28 个会话文件里 33 条 `llm/retry`，全是 `RATE_LIMIT`，`maxRetries=5`，其中 5 条会话打到第 5 次后放弃——6 个并发子代理里 5 个死于限流。默认策略 5 次 / 0.5s 起 / 封顶 10s，总等待约 15 秒，6 路同时重试根本不够。
+
+两处都改：
+
+**加长退避（热加载，无需重启）**：`/home/tzwl3/.dsh/settings.yaml` 给 `llm-deepseek:` 顶层与 `llm-pi-ai.providers.{mac-qwen,zai,kimi-coding}` 各加
+
+```yaml
+retryPolicy:
+  mode: normal
+  maxRetries: 8
+  backoff: { initialDelayMs: 1000, maxDelayMs: 30000, jitterRatio: 0.3 }
+```
+
+总等待约两分钟；抖动 0.3 让并发调用者错开；封顶 30s 也让提供方的 `Retry-After` 在 30s 内被接受而非（默认 10s 上限下）直接放弃。`llm-deepseek` 的 `retryPolicy` 变更会触发 `registration.replace`，settings 文件热加载即生效。备份 `deploy-staging/settings-pre-retry-20260909-211412.yaml`。
+
+**压并发（需重启）**：引擎 `@deepseek-ai/dsh-workflow-worker-thread` 有 `maxConcurrentAgents`，默认 `min(16, 核数-2)`，30 是 12 核即 10 路。web 模式下该引擎不在宿主树，而在**每会话的 agent preset** 里（随附 preset `standard/ptc/cordis`）。不改仓库里的随附文件，用文档化的部署口子：把随附 preset 复制为 `/home/tzwl3/.dsh/presets-30/`，三个带引擎的 preset 设 `maxConcurrentAgents: 3`，profile `cordis.patch.yml` 追加
+
+```yaml
+- id: agent-presets
+  config:
+    default: standard
+    includeShippedRoot: false
+    roots:
+      - path: /home/tzwl3/.dsh/presets-30
+        trust: system
+```
+
+`config` 是整段替换，所以 `default` 必须重述。重启 27 秒过门；用线上安装包自己的 `scanRoot` 对新 root 扫描：4 个 preset 全部发现、无 `broken`、含 `standard`。备份 `deploy-staging/presets30-20260909-211718/`。
+
+**升级时必须做的事**：`presets-30` 是随附 preset 的副本，**Harness 升级后要用新随附 preset 重做副本并重新打上 `maxConcurrentAgents`**，否则 preset 会停在旧版本。把这一步加进 §7.5/§42 的发布步骤。
+
+### 49.3 未处理
+
+`tool-workflow/*` 事件无 `surfaceOp`，workflow 跑动期间界面无任何进度（用户看到"没有反应"的另一半原因）。这需要在 harness 的 tool-workflow 客户端卡片上做，属于独立改动。
+
