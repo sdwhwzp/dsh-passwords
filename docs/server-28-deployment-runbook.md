@@ -1458,3 +1458,47 @@ pasta 方案也被否决：Ubuntu 24.10 的 2024-08 版 pasta 默认把宿主 lo
 ### 回滚
 
 启动器备份为 `/usr/local/libexec/dsh-tenant-{editor,terminal}.20260909-git-identity`，旧摘要 `d473dd25…` / `f0b17031…`，sudoers 备份在 `/root/sudoers-dsh-tenant-*.20260909-git-identity.bak`；换回旧文件后须重新 pin sudoers。fstab 备份为 `/root/fstab.20260909-sandbox-home.bak`；注释掉两条 bind 并 `umount` 即回到系统盘上的原副本，该副本未被删除。
+
+## 38. 2026-09-09 服务器 30 迁移准备与 bwrap AppArmor 修复
+
+服务器 30（`wh.gr-iot.cn:6022`，内网 192.168.10.30，Ubuntu 26.04 / 内核 7.0 / glibc 2.43）已具备承载 DSH 的完整条件：数据盘、账户、目录、系统组件、沙盒与网络策略全部就位并通过端到端验证。28 全程在线未重启（Host PID `1560213`，重启计数 38 不变），公网入口未改动，两台机器尚未同时对外服务。
+
+### 硬件与两机差异
+
+30 为 40 核 Xeon 4210R、123Gi 内存、系统盘 893G（可用 795G）、数据盘 7.3T，顺序写 2.0 GB/s；28 为 12 核 i5-10400F、14Gi 内存。用户库是外部 MySQL `192.168.10.95`，两机均可达，账号数据无需迁移。
+
+必须记录的三处环境差异：`dsh-sandbox` 在 28 是 gid 984，在 30 被 `nm-openvpn` 占用，改由系统分配为 973——启动器按组名解析，只有 `/etc/dsh-sandbox.nft` 的 `meta skgid` 需要按机器填值。`tzwl3` 在 28 是 uid 1000，在 30 是 1002（1000/1001 已属该机真实用户），路径不变故无需改代码，rsync 后按 uid 归位即可。30 的 `tzwl3` 不加入 `sudo` 组：`sudoers.d` 逐条按用户名授权两个启动器，通用 sudo 权限并非必需。
+
+### 7.3T 盘
+
+该盘原为研华出厂预装的 Windows，`Users/` 仅有空的 OEM 账户 `Advantech`（78M，各目录只剩 `desktop.ini`），80G 占用中 74G 是 `hiberfil.sys` 与 `pagefile.sys`。整盘擦除后重建 GPT 与单个 ext4，参数与 28 数据盘一致（label `dsh-data`、`-m 0`、`defaults,noatime,nodev,nosuid`、按 UUID 挂 `/srv/dsh-data`），并按 28 的形态建立六条 bind。UEFI 中的 Windows Boot Manager 已删除，GRUB 菜单不再列出 Windows，`BootOrder` 首项与 `BootCurrent` 同为 Ubuntu——该机不再有启动到 Windows 而使服务下线的路径。
+
+### sudo-rs 不支持摘要 pin
+
+Ubuntu 26.04 的默认 `sudo` 是 sudo-rs 0.2.13，它在解析 `sha256:` 摘要规则时报 `digest specifications are not supported` 并**整体拒绝服务**，装入这两条规则后该机 `sudo` 立即不可用。经典 sudo 1.9.17 以 `/usr/bin/sudo.ws`（setuid root）与之并存，`update-alternatives --set sudo /usr/bin/sudo.ws` 即恢复，且摘要 pin 得以保留。visudo 同样切到 `/usr/sbin/visudo.ws`。在 26.04 及更高版本上部署本套启动器前必须先完成这一步，否则会把该机的 sudo 打挂；恢复通道是直接调用 `/usr/bin/sudo.ws`。
+
+### bwrap 在 AppArmor 下无法降权
+
+26.04 为 bwrap 附带 AppArmor 配置，沙盒进入子配置 `bwrap//&unpriv_bwrap (enforce)`，其中 `/etc/apparmor.d/bwrap-userns-restrict` 带 `audit deny capability`。结果是沙盒内虽为 uid 0 且 `CapEff` 满，`setpriv` 的 `setresuid(1002,1002,1002)` 仍返回 `EPERM`，终端与编辑器都起不来。已排除 user namespace（沙盒与宿主同 namespace、`uid_map` 为全量映射）与 POSIX 能力（`--cap-add ALL` 无效），strace 定位到系统调用本身被拒。
+
+两个启动器改为在 aa-exec 存在时经 `aa-exec -p unconfined --` 启动 bwrap。启动器本就是 root 且自建隔离，不依赖这层配置；沙盒进程最终仍是目标 uid/gid、四个能力集全空、`no_new_privs=1`。28 无 bwrap 配置、bwrap 本就 unconfined，实测该改动逐项无差异（uid/gid、`unconfined`、`CapEff`/`CapBnd` 全零、`NoNewPrivs=1`、网络策略一致），故两机共用同一份启动器源码，摘要为 `dsh-tenant-editor` `8e2eb293…`、`dsh-tenant-terminal` `acb73638…`，两机 sudoers 均已重新 pin。
+
+### 迁移过程中的两个取数陷阱
+
+rsync 以 `tzwl3` 身份拉取时，`/srv/dsh-data/dsh-sandbox-home`（root `0711`）与 `/srv/dsh-data/dsh-vsceditor`（root `0755`，租户目录 `root:tzwl3 0710`）只能穿越不能列目录，子项被静默跳过且 rsync 不报错。这两棵树改由 28 侧 root 打 tar、按摘要核对后在 30 侧解包。同类风险适用于任何以非 root 身份拉取 root 目录的迁移。
+
+`ssh` 默认读取 stdin，写在经 stdin 送入的脚本里会把脚本正文本身吃掉，表现为脚本在该行之后静默停止。所有此类脚本中的独立 `ssh` 调用需加 `-n`。
+
+### 已完成并验证
+
+30 上：数据 1.1G 落 `/srv/dsh-data`，`~/.dsh` 1.9G（57 份会话日志）、`~/apps` 13G、`~/.local` 3.7G 落系统盘；三个工作区 `admin-u1`/`u2`/`u3` 与两个沙盒 HOME `u2`/`u3` 完整；`u2` 的 git 身份 `wzp` 保留。终端沙盒实测 uid 1002/gid 973、`HOME` 落 `/dev/sdb1`、`git commit` 成功且作者为 `wzp <wzp@dsh.local>`、工作区可见；网络策略按 gid 973 生效（GitLab `192.168.10.73:30000` 放行，网关 3081 与 NAS 445 拒绝，443 出网可用）。编辑器沙盒 code-server 起来、Unix socket 上 HTTP 302。跨 OS 最大的未知项——原生模块——已验证：`node-pty` 与 `fs-ext` 均可加载（glibc 2.40 编译、2.43 运行，方向兼容）。`dsh-sandbox-nft.service` 已 enable 并 active，`@reboot pm2 resurrect` 已装。
+
+### 尚未做
+
+DSH 主进程尚未在 30 启动。它会连同一个 MySQL 用户库，与 28 的在跑实例产生并发写（会话归属、工作区注册），并行灰度前需先定这一项。公网 NAT 仍指向 28：`wh.gr-iot.cn:3081`（网页）与 3082（本地工作区 WebSocket）要改指 30，且 `MCP_LOCAL_WORKSPACE_PUBLIC_URL=ws://192.168.10.28:3082` 需同步改写；这两项需网络管理员配合。30 上 `sqlite3` 与 `rclone` 未安装，后者是 NAS WebDAV 挂载所需。
+
+30 的公网出口被 clash-verge 以策略路由导入 TUN（`198.18.0.0/30 dev Meta`，table 2022），内网 `192.168.10.0/24` 直连不受影响；按使用者指示本次不做处理，但 DeepSeek API 调用会经该代理。该机仍在跑图形会话与 AweSun 远程控制。
+
+### 回滚
+
+30 侧：`/root/fstab.20260909-dsh-data.bak`、`/root/fstab.20260909-binds.bak`、`/root/grub-default.20260909.bak`，启动器备份 `/usr/local/libexec/dsh-tenant-{editor,terminal}.20260909-pre-aa`。28 侧启动器备份同名，旧摘要 `d87bd17b…` / `d4491d77…`；换回后须重新 pin sudoers。迁移用的一次性 ssh 公钥已从 28 的 `authorized_keys` 删除，30 侧私钥已删除。

@@ -22,6 +22,22 @@ HOME_ROOT = pathlib.Path('/var/lib/dsh-sandbox-home')
 NETWORK_FILES = ['/etc/resolv.conf', '/etc/hosts', '/etc/nsswitch.conf', '/etc/passwd', '/etc/group']
 
 
+# Ubuntu 26.04 attaches an AppArmor profile to bwrap whose sandbox sub-profile
+# carries `audit deny capability`, which makes setpriv's setresuid fail with
+# EPERM before it can drop to the account uid. This launcher is already root and
+# builds its own confinement, so bwrap runs unconfined; the sandboxed process
+# still ends with every capability set empty and no_new_privs on. Hosts that
+# ship no such profile see no change, and hosts without aa-exec are left alone.
+AA_EXEC = '/usr/bin/aa-exec'
+
+
+def unconfined(args):
+    """Prefix the bwrap argv with the AppArmor escape this host needs."""
+    if not os.path.exists(AA_EXEC):
+        return args
+    return [AA_EXEC, '-p', 'unconfined', '--', *args]
+
+
 def git_identity(owner, extra):
     """Name for the seeded git identity.
 
@@ -97,7 +113,7 @@ def main():
     for path in NETWORK_FILES:
         if pathlib.Path(path).exists():
             network += ['--ro-bind', path, path]
-    args = ['/usr/bin/bwrap', '--unshare-ipc', '--unshare-pid', '--unshare-uts', '--unshare-cgroup-try', '--die-with-parent', '--clearenv',
+    args = unconfined(['/usr/bin/bwrap', '--unshare-ipc', '--unshare-pid', '--unshare-uts', '--unshare-cgroup-try', '--die-with-parent', '--clearenv',
             '--ro-bind', '/usr', '/usr', '--symlink', 'usr/bin', '/bin',
             '--symlink', 'usr/sbin', '/sbin', '--symlink', 'usr/lib', '/lib',
             '--symlink', 'usr/lib64', '/lib64', '--proc', '/proc', '--dev', '/dev',
@@ -111,7 +127,7 @@ def main():
             '--setenv', 'HOME', '/home/dsh', '--setenv', 'PATH', '/usr/bin:/bin',
             '--setenv', 'TERM', 'xterm-256color', '--setenv', 'LANG', 'C.UTF-8',
             '--setenv', 'TMPDIR', '/tmp', '--setenv', 'PS1', r'sandbox:\w\$ ',
-            '--', '/usr/bin/setpriv', '--reuid', str(account.pw_uid), '--regid', str(sandbox.gr_gid), '--clear-groups', '--no-new-privs', '--bounding-set=-all', '/bin/bash', '--noprofile', '--norc', '-i']
+            '--', '/usr/bin/setpriv', '--reuid', str(account.pw_uid), '--regid', str(sandbox.gr_gid), '--clear-groups', '--no-new-privs', '--bounding-set=-all', '/bin/bash', '--noprofile', '--norc', '-i'])
     os.execve(args[0], args, {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'})
 
 
