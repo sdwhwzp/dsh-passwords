@@ -2106,10 +2106,34 @@ Node 22.21.1 下，better-sidebar 的产物选择、槽位接管和原生侧栏�
 
 浏览器在 `http://wh.gr-iot.cn:3081/` 新建“文件交付功能验收测试”会话。真实模型通过两次 `write` 写入测试 Markdown 和 HTML，再通过一次 `present` 交付两文件。只读检查该会话的压缩日志确认 `deliverables/presented` 位于 seq 29，含两条路径和说明。切换前页面只有插件的“本次产出”标签；切换后刷新同一会话显示两张本体交付卡片及说明。点击 Markdown 卡片在右侧读到“模型显式交付验证成功”；HTML 卡片打开对应侧栏页面。测试会话和两个文件保留，未改写已有会话日志。
 
-浏览器开启侧栏期间也观察到 `Remote stream WebSocket closed` 的历史加载提示，刷新后卡片恢复；这个流连接问题未在本次修改中修复。上述证据验证显式交付、卡片持久恢复和 Markdown 读取，不代表所有预览格式或长时间流连接均已验收。30 没有桌面，原生默认应用及文件管理器菜单仍禁用。
+浏览器开启侧栏期间也观察到 `Remote stream WebSocket closed` 的历史加载提示，刷新后卡片恢复；这个流连接问题随后由 §53 修复。上述证据验证显式交付、卡片持久恢复和 Markdown 读取，不代表所有预览格式或长时间流连接均已验收。30 没有桌面，原生默认应用及文件管理器菜单仍禁用。
 
 ### 52.2 发布与回滚
 
 插件 release 为 `20260910-080000-delivery-cards`。08:03:57 切换 Profile 和 `/home/tzwl3/apps/dsh-plugins/current`，Harness 与 Web 的 current 仍指向 `20260910-071200-bf3afe-alpha2`。08:04:32 健康门通过，随后稳定观察 60 秒并保存 PM2，PID `1735970`、重启次数 0。网关健康 200、Host 未认证 401、内部健康未认证 403；认证内部健康确认数据库、工作区和会话就绪。两个线上插件的清单和 client bundle 与部署 tarball 字节一致。
 
 备份 Profile 在 `/home/tzwl3/.dsh/profiles/web-before-20260910-080000-delivery-cards`，部署证据和一致性数据库备份在 `/home/tzwl3/apps/deploy-staging/20260910-080000-delivery-cards`。切换前记录的会话文件均保留且未缩短，模块链接无断链，3 个账号保留。回退时保留新增数据，恢复备份 Profile 和上一个插件 current，使用既有 `dsh-cli-entry.mjs` 启动；不恢复旧数据库覆盖上线后的写入。WeKnora 保留 `0.1.2`，未改动 28。
+
+## 53. 文件预览流与普通账号模型范围（2026-09-10，已上线）
+
+`dsh-passwords 2.6.31` 包含两项适配：`eed004a0eb2fb62f989b5bc5391a87e43b707734` 为本人会话开放 `workspaceFiles/changes`，避免打开预览时关闭共享 Remote 连接；`966dbecf6c84a60273dc8814c0209f5719b7f18b` 按用户要求放行 Codex 服务商的 GPT-5.6 及以上模型，包括 GPT-6 Astra。模型目录、选模接口和 agent 请求校验共用版本判断；其他服务商及管理员范围保留。实现依据见 [文件订阅](plans/2026-09-10-workspace-file-stream.md) 和 [模型版本策略](plans/2026-09-10-customer-model-versions.md)。
+
+文件订阅只接受 `payload.args.workspaceFileScopeId` 中的会话 id。网关在打开订阅和转发变更时校验会话归属、允许目录及禁用状态；关闭预览只取消该逻辑流。未知、其他账号、禁用及伪造作用域均被拒绝。
+
+### 53.1 检查与线上验收
+
+Node 22.21.1 下，三个 Remote mux / 事件测试文件共 10 项、`model-policy.test.ts` 3 项、`gateway-proxy-headers.test.ts` 47 项通过。文件订阅和模型网关用例分别通过两个并行进程检查。移除文件订阅端点的负对照能够复现失败。网关测试夹具使用当前 Session / Workspace RPC 响应字段及请求 rpcId。`npm run build`、构建产物的解析 / 模型判断检查、`npm pack` 和 Git 空白检查通过。
+
+普通账号浏览器菜单显示 GPT-6-Astra、GPT-5.6-Sol、Terra 和 Luna，并成功选中 Astra。模型检查覆盖目录和选模，本次没有额外发起计费模型生成请求。已有“文件交付功能验收测试”会话的完整 id 为 `session-c42fba2e-5835-453c-bd47-0fba306b78d3`，以持久化日志头为准。该会话已有 `present` 的两张交付卡片保留，点击 Markdown 卡片打开右侧栏。
+
+线上以现有普通账号执行补充只读检查：`report.md` 和 `preview.html` 都返回 200 且包含“模型显式交付验证成功”；在同一 WebSocket 上订阅历史和文件变化，收到文件订阅的 ready，取消文件订阅后再次读取历史成功，连接保持打开。浏览器期间有其他操作切换页面，因此流连续性由此线上协议检查和本地回归用例共同验证。
+
+### 53.2 发布、并发更新与回滚
+
+最终插件 release 为 `20260910-084000-preview-models`，08:40:45 切换，08:41:19 健康门通过，08:42:21 完成 60 秒稳定观察并保存 PM2；PID `1747378`，重启次数 0。Harness / Web 保持 `20260910-071200-bf3afe-alpha2`。部署包 `dsh-passwords-2.6.31-966dbecf.tgz` 的 SHA256 为 `cfcd71b42217e73e7ca39a6c716021e43e5b021e6a0e0fc73c48ac9cd9aeed85`，线上清单及相关 Host / Client 文件与 tarball 字节一致。
+
+首次尝试 `20260910-083500-preview-models` 在稳定观察期间遇到另一项 `dsh-spend 0.6.24` 部署执行 `pm2 restart dsh-web`（08:34:13），自动回滚完成。新候选保留该更新；再次切换前核对正式环境与候选的其他包一致。最终保留 `dsh-spend 0.6.24`、`dsh-context 0.48.0-dsh.20260910.3` 和 §52 的两个侧栏版本，未重建这些包。WeKnora 保留 `0.1.2`，未改动 28。
+
+网关健康 200、Host 未认证 401、内部健康未认证 403；认证内部检查确认数据库、工作区、会话及归属引导均就绪。3 个账号与切换前的 197 个会话文件保留，文件未缩短，模块链接无断链。一致性数据库备份包含 14 张表、174 行，仅以权限 600 保留在服务器。
+
+备份 Profile 为 `/home/tzwl3/.dsh/profiles/web-before-20260910-084000-preview-models`，证据和数据库备份在 `/home/tzwl3/apps/deploy-staging/20260910-084000-preview-models`。恢复代码时保留新增数据，恢复备份 Profile 和之前的插件 current，仍通过既有 `dsh-cli-entry.mjs` 启动；不覆盖上线后的数据库写入。此前失败候选及部署日志保留用于核对并发更新。
