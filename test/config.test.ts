@@ -4,7 +4,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { isPublicIp, resolveEnvRelativePath } from '../src/config.js';
+import { isPublicIp, parseTenantSshEnabled, resolveEnvRelativePath } from '../src/config.js';
+
+test('principal-scoped SSH requires an explicit valid deployment opt-in', () => {
+  for (const value of [undefined, '', 'false', ' FALSE ']) assert.equal(parseTenantSshEnabled(value), false);
+  for (const value of ['true', ' TRUE ']) assert.equal(parseTenantSshEnabled(value), true);
+  for (const value of ['yes', '1', 'falsee']) assert.throws(() => parseTenantSshEnabled(value), /TENANT_SSH_ENABLED/);
+});
 
 test('MCP_DB_PATH 相对 .env 解析，不受进程工作目录影响', () => {
   const envFile = path.join(path.parse(process.cwd()).root, 'srv', 'dsh-passwords', '.env');

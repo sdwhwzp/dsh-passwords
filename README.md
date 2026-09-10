@@ -323,7 +323,7 @@ dsh-local-workspace                      # 使用已保存的设备令牌恢复�
 - **防暴力破解**：连续输错密码锁定，锁定时长随失败轮次退避（1 → 5 → 15 → 60 分钟封顶）；主用户不会被多 IP 轮换全局锁死（仅单 IP 锁定，防账号级 DoS）。
 - **防密码喷洒（IP 级节流）**：同一 IP 在 15 分钟内累计 50 次登录失败 → 该 IP 全局节流 15 分钟（跨用户名累计，专门对付“单 IP 轮换多个用户名”的喷洒手法；节流期间不消耗 bcrypt，登录成功自动解除）。NAT/共享出口的大团队若误触发，等 15 分钟自动恢复，无需人工干预。
 - **会话吊销**：登出即服务端吊销（该 token 立即失效）；改密/改名后所有旧会话失效。
-- **子用户隔离（第三方插件面）**：dsh-ssh（SSH 主机/隧道）、skin-center、modlens、dsh-uploads 列表/删除等运维面端点仅主用户可用；上传/下载按 `allow_upload` / `allowGitDownload` 权限门控，**新子用户默认禁 git 下载**（含 dsh-uploads 下载等外带通道），主用户按需开启。better-sidebar 的普通文件预览与下载另行绑定到当前账号拥有的 Session 及其获准工作区，伪造 `sessionId`、`cwd` 或文件路径会返回 403；子用户文件由网关在授权后锁定同一文件描述符读取，路径并发替换不会把读取目标切换到其他账号的文件。
+- **子用户隔离（第三方插件面）**：SSH 通过账号权限和独立连接存储隔离；skin-center、modlens、dsh-uploads 列表/删除等共享运维端点仅主用户可用。上传/下载按 `allow_upload` / `allowGitDownload` 权限门控，**新子用户默认禁 git 下载**（含 SSH 远程文件下载和 dsh-uploads 下载），主用户按需开启；账号隔离模式的 SSH 目录列表只要求 SSH 权限。better-sidebar 的普通文件预览与下载另行绑定到当前账号拥有的 Session 及其获准工作区，伪造 `sessionId`、`cwd` 或文件路径会返回 403；子用户文件由网关在授权后锁定同一文件描述符读取，路径并发替换不会把读取目标切换到其他账号的文件。
 - **新版 Remote 隔离**：子用户调用命令、目标、子代理、反馈、模型切换或本机路径打开接口时都要重新校验所属会话；路径还必须位于该会话工作区内。插件清单、动态 Cordis、共享设置、凭据和 Agent Preset 管理入口不会加载到子用户启动图，直接构造请求同样返回 403。
 - **慢速连接防护**：显式请求超时（半开头部 20s 切断）+ 并发连接上限（网关 512 / 跳转端 256），抵御 slowloris 类慢连接耗尽。
 - **路径归一化**：门卫从原始 URL 迭代解码（防双重编码）+ 压平斜杠 + WHATWG 归一化做前缀判定，`%2f..%2f` / `%252f..` 等 SPA 壳绕过变体全部拦截。
@@ -433,7 +433,7 @@ Linux 部署由管理员将 `scripts/tenant-terminal-launcher.py` 安装为 root
 
 当前分支合入 `slywalker2006/dsh-passwords` 的 `590b2ca`（2.6.11）。本部署构建为 `2.6.32`，配合包含原生 principal 扩展的 Harness 0.1.5-alpha.2 使用；普通 npm 上游 Harness 包不提供这些私有扩展，部署时必须统一指向本次 Harness 构建。
 
-上游的 SSH 开关默认关闭；开启后，用户只能查看和操作自己创建并成功认领的 SSH alias。批量导入、cluster、tunnel 等全局能力仍只供管理员使用。列表响应必须可解析且符合预期字段；操作失败或响应 alias 不符时不授予归属。SSH alias 归属同时支持 SQLite 和 MySQL/MariaDB，删除用户时清理归属记录。
+未设置 `TENANT_SSH_ENABLED=true` 时，网关保留旧版 SSH alias 归属检查：普通账号只能使用本人已认领的连接，导入、cluster 和 tunnel 仍仅供管理员。SSH alias 归属同时支持 SQLite 和 MySQL/MariaDB；账号隔离版 Host 使用这些记录迁移已有连接。
 
 权限接口接纳上游的严格字段校验和部分更新规则：省略 SSH、上传、下载、沙盒、Agent preset 或禁用会话字段时保留既有权限，非法类型返回 400。新增上传路由也服从上传权限。依赖采用上游的 `ws ^8.21.0` 与 `qs ^6.16.0`。
 
@@ -446,3 +446,13 @@ Linux 部署由管理员将 `scripts/tenant-terminal-launcher.py` 安装为 root
 本仓库构建依赖以 `file:` 指向同级 Harness 检出，安装使用 `npm ci --legacy-peer-deps`；先在 Harness 构建 Host 类型。此参数仅用于不支持 `workspace:` peer 协议的 npm 源码安装，部署的 Profile 仍逐包钉定经过验证的 Harness tarball。
 
 `principalAccess.assertAuthenticated` 为没有 Session id 的账号数据操作检查当前账号是否有效且未封禁；`modelAllowed` 为插件内的模型目录与设置复用普通账号 Codex GPT 5.6 及以上的准入规则。Mnemon 的按账号部署见 [融合说明](docs/2026-09-10-mnemon-account-integration.md)。
+
+### 每个账号独立使用 SSH
+
+必须同时安装支持账号隔离的 `dsh-ssh`，在其 Cordis 配置启用 `accountIsolation: true`，并在网关与密码插件共用的 `.env` 设置 `TENANT_SSH_ENABLED=true`。此开关默认关闭；不支持账号隔离的旧 Host 不能启用它。网关为 HTTP 和终端 WebSocket 签发真实登录身份，Host 在每次网页操作和模型工具执行时调用 `principalAccess.sshAccess` 校验账号与 SSH 权限。
+
+用户从侧栏 SSH 页面添加自己的连接，可以使用密码或粘贴私钥，并独立编辑、删除、执行命令、打开终端、操作文件和管理隧道。同一 alias 可在不同账号重复使用，主机列表、连接池、跳板引用、批量执行与隧道均限定在当前账号。普通账号不能导入服务器的 `~/.ssh/config`，不能使用服务器私钥路径或 SSH agent；模型的本机路径上传/下载工具对普通账号关闭，文件传输使用网页上传/下载。
+
+启用 `TENANT_SSH_ENABLED=true` 后创建的新账号默认允许 SSH，管理员仍可在账号列表的权限窗口关闭它；旧共享 Host 部署不自动授权新账号。已有账号的显式设置以及部分更新中省略的字段保持原值；缺失权限行时拒绝访问。远程目录列表只要求 SSH 权限；上传还要求上传权限，下载文件还要求下载权限。关闭 SSH、退出、改密、封禁或删除账号会断开其现有网页终端，其他账号连接不受影响。
+
+已有 SSH 配置按归属只迁移到对应账号，未认领连接仅迁移给最早创建的管理员；旧配置文件保留。迁移清单不包含密码或私钥，新账号配置由 `dsh-ssh` 独立持久化。现有 Session、工作区和登录凭据不因此改变。

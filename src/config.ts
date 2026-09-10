@@ -31,6 +31,8 @@ export function resolveConfigPath(value: string, configRoot: string, fallbackNam
 }
 
 export interface PlatformConfig {
+  /** Enable only with a dsh-ssh Host that isolates every operation by authenticated principal. */
+  tenantSsh?: { enabled: boolean };
   /** Enable the authenticated browser editor routes supplied by dsh-vsceditor. */
   tenantEditor?: { enabled: boolean };
   /** Optional Linux sandbox launcher. Empty disables restricted-account terminals. */
@@ -96,6 +98,14 @@ function positiveIntegerEnv(name: string, fallback: number): number {
   const value = Number(readEnv(name, String(fallback)));
   if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${name} must be a positive integer`);
   return value;
+}
+
+/** Parse the deployment opt-in for principal-scoped SSH; reject misspelled values. */
+export function parseTenantSshEnabled(value: string | undefined): boolean {
+  const normalized = (value ?? '').trim().toLowerCase();
+  if (normalized === '' || normalized === 'false') return false;
+  if (normalized === 'true') return true;
+  throw new Error('TENANT_SSH_ENABLED must be true or false');
 }
 
 export function loadConfig(): PlatformConfig {
@@ -228,6 +238,7 @@ export function loadConfig(): PlatformConfig {
       placeholderRoot: localWorkspacePlaceholderRoot,
     },
     managedWorkspaceRoot,
+    tenantSsh: { enabled: parseTenantSshEnabled(process.env.TENANT_SSH_ENABLED) },
     tenantEditor: { enabled: readEnv('MCP_TENANT_EDITOR', 'false') === 'true' },
     tenantTaskBoard: {
       enabled: readEnv('MCP_TENANT_TASK_BOARD', 'false') === 'true',

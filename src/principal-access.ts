@@ -151,6 +151,31 @@ export class DshPasswordsPrincipalAccessProvider {
     return principal.role === 'admin' || customerModelAllowed(provider, model);
   }
 
+  /**
+   * Authorize one account's SSH operation and identify its legacy connections for migration.
+   * @param principal Identity verified by the Host transport or persisted user message.
+   * @returns Owned aliases and the administrator's exclusion list for unclaimed legacy connections.
+   */
+  sshAccess(principal: AuthenticatedPrincipal): {
+    legacyAliases: string[];
+    includeUnownedLegacy: boolean;
+    claimedLegacyAliases: string[];
+  } {
+    this.assertAuthenticated(principal);
+    const userId = Number(principal.id);
+    const permissions = this.db.getPermissions(userId) ?? defaultPermissions(userId);
+    if (principal.role !== 'admin' && !permissions.allow_ssh) throw new Error('SSH access is disabled for this account');
+    const firstAdminId = principal.role === 'admin'
+      ? this.db.listUsers().filter((user) => user.role === 'admin').sort((left, right) => left.id - right.id)[0]?.id
+      : undefined;
+    const includeUnownedLegacy = userId === firstAdminId;
+    return {
+      legacyAliases: this.db.listSshHostAliases(userId),
+      includeUnownedLegacy,
+      claimedLegacyAliases: includeUnownedLegacy ? this.db.listClaimedSshHostAliases() : [],
+    };
+  }
+
   private authenticatedUser(principal: AuthenticatedPrincipal) {
     if (principal.source !== 'dsh-passwords' || !/^[1-9][0-9]*$/u.test(principal.id)) return null;
     const userId = Number(principal.id);

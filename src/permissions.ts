@@ -682,8 +682,6 @@ export function containsSessionReference(value: unknown, depth = 0): boolean {
 
 /**
  * 第三方插件“运维面”端点（仅主用户可访问）：
- *   - dsh-ssh —— SSH 主机清单/隧道/远程文件：含服务器连接信息（host/port/user/auth/keyReady），
- *     泄露即扩大 SSH 凭据面；
  *   - skin-center —— 皮肤中心（未纳入网关权限模型）；
  *   - modlens —— 模型透镜（未纳入网关权限模型）；
  *   - dsh-usage —— 提供商余额、订阅计划和用量总览仅管理员可见；
@@ -694,7 +692,7 @@ export function containsSessionReference(value: unknown, depth = 0): boolean {
  *     （GET /download）仍由 allowGitDownload 门控，保持原权限语义。
  * 这些端点不在白名单/沙盒/配额模型内，对子用户一律 403（deny-list 兜底）。
  */
-/** SSH 插件路由族；子用户只有在 allowSsh 且 alias 归属当前用户时可访问。 */
+/** SSH 插件路由族；权限与账号归属由对应的共享或账号隔离模式执行。 */
 export function isSshPluginEndpoint(pathname: string): boolean {
   return pathname === '/api/dsh-ssh' || pathname.startsWith('/api/dsh-ssh/');
 }
@@ -723,6 +721,20 @@ export function isSshTerminalEndpoint(pathname: string): boolean {
 /** dsh-ssh 客户端只读的静态依赖，不携带 host 凭据或远端资源标识。 */
 export function isSshPublicAssetEndpoint(method: string, pathname: string): boolean {
   return (method === 'GET' || method === 'HEAD') && pathname.startsWith('/api/dsh-ssh/vendor/');
+}
+
+/** Routes whose Host implementation isolates connections and data by signed principal. */
+export function isTenantSshEndpoint(method: string, pathname: string): boolean {
+  if (isSshPublicAssetEndpoint(method, pathname)) return true;
+  if (pathname === '/api/dsh-ssh/hosts') return ['GET', 'POST', 'PATCH', 'DELETE'].includes(method);
+  if (pathname === '/api/dsh-ssh/ls' || pathname === '/api/dsh-ssh/download') {
+    return method === 'GET';
+  }
+  return method === 'POST' && (
+    pathname === '/api/dsh-ssh/test' || pathname === '/api/dsh-ssh/exec' ||
+    pathname === '/api/dsh-ssh/cluster' || pathname === '/api/dsh-ssh/tunnel' ||
+    pathname === '/api/dsh-ssh/upload'
+  );
 }
 
 export function isAdminOnlyPluginEndpoint(method: string, pathname: string): boolean {

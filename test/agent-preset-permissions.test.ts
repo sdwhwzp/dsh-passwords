@@ -50,6 +50,7 @@ test('Issue #22: 正常新增子用户默认 allowed_agent_presets 为空数组�
   try {
     db.init();
     const config: PlatformConfig = {
+      tenantSsh: { enabled: true },
       setupKey: 'test-setup-key', dbPath, dbEncKey: 'test-key',
       gateway: {
         host: '127.0.0.1', port: 0, upstream: 'http://127.0.0.1:3080',
@@ -74,6 +75,14 @@ test('Issue #22: 正常新增子用户默认 allowed_agent_presets 为空数组�
     const perms = db.getPermissions(user.id);
     assert.deepEqual(perms?.allowed_agent_presets, [], '新子用户默认不允许任何 Agent preset');
     assert.equal(perms?.allow_upload, true, 'fork 默认允许子用户使用明确的流式上传端点');
+    assert.equal(perms?.allow_ssh, true, '启用账号隔离 SSH 的部署默认授权新子用户');
+    const legacyAuth = new AuthService({ ...config, tenantSsh: { enabled: false } }, db);
+    await legacyAuth.addSubUser(
+      { userId: admin.id, username: admin.username, role: 'admin' }, 'legacy-user', 'ValidPassword!123',
+    );
+    const legacyUser = db.getUserByUsername('legacy-user');
+    assert.ok(legacyUser);
+    assert.equal(db.getPermissions(legacyUser.id)?.allow_ssh, false, '旧共享 Host 不得自动开启新账号 SSH');
 
     // 历史数据兼容：显式 NULL 仍表示不限制
     db.setPermissions(user.id, {

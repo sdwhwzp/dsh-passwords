@@ -8,6 +8,57 @@ import { Database } from '../src/db.js';
 import { createFieldCrypto } from '../src/encrypt.js';
 import { DshPasswordsPrincipalAccessProvider } from '../src/principal-access.js';
 
+test('SSH access resolves legacy ownership for the active account and observes permission changes', async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), 'dshpw-principal-ssh-'));
+  const db = new Database(path.join(temporary, 'platform.db'), createFieldCrypto('enc', 'setup'));
+  try {
+    db.init();
+    const admin = db.createUser('admin', 'hash', 'admin');
+    const alice = db.createUser('alice', 'hash', 'user');
+    const bob = db.createUser('bob', 'hash', 'user');
+    const otherAdmin = db.createUser('other-admin', 'hash', 'admin');
+    const permissions = {
+      allowedFolders: [], hourlyTokenLimit: null, dailyMinutesLimit: null,
+      allowUpload: true, allowGitDownload: false, banned: false,
+    };
+    db.setPermissions(alice.id, permissions);
+    assert.equal(db.getPermissions(alice.id)?.allow_ssh, false);
+    db.setPermissions(alice.id, { ...permissions, allowSsh: true });
+    db.claimSshHost('alice-host', alice.id);
+    db.claimSshHost('bob-host', bob.id);
+    const ctx = { root: { get: () => undefined } } as unknown as Context;
+    const provider = new DshPasswordsPrincipalAccessProvider(ctx, db);
+    const principal = { source: 'dsh-passwords', id: String(alice.id), username: alice.username, role: 'user' } as const;
+    assert.deepEqual(provider.sshAccess(principal), {
+      legacyAliases: ['alice-host'], includeUnownedLegacy: false, claimedLegacyAliases: [],
+    });
+    assert.throws(() => provider.sshAccess({ ...principal, id: String(bob.id), username: bob.username }), /SSH access is disabled/);
+    db.setPermissions(bob.id, { ...permissions, allowSsh: true });
+    assert.deepEqual(provider.sshAccess({ ...principal, id: String(bob.id), username: bob.username }), {
+      legacyAliases: ['bob-host'], includeUnownedLegacy: false, claimedLegacyAliases: [],
+    });
+    assert.deepEqual(provider.sshAccess({ ...principal, id: String(admin.id), username: admin.username, role: 'admin' }), {
+      legacyAliases: [], includeUnownedLegacy: true, claimedLegacyAliases: ['alice-host', 'bob-host'],
+    });
+    assert.deepEqual(provider.sshAccess({ ...principal, id: String(otherAdmin.id), username: otherAdmin.username, role: 'admin' }), {
+      legacyAliases: [], includeUnownedLegacy: false, claimedLegacyAliases: [],
+    });
+    for (const forged of [
+      { ...principal, username: 'other' }, { ...principal, source: 'browser' },
+      { ...principal, id: '99999' }, { ...principal, role: 'admin' as const },
+    ]) assert.throws(() => provider.sshAccess(forged), /active account required/);
+    db.setPermissions(alice.id, { ...permissions, allowSsh: false });
+    assert.throws(() => provider.sshAccess(principal), /SSH access is disabled/);
+    db.setPermissions(alice.id, permissions);
+    assert.throws(() => provider.sshAccess(principal), /SSH access is disabled/);
+    db.setPermissions(alice.id, { ...permissions, allowSsh: true, banned: true });
+    assert.throws(() => provider.sshAccess(principal), /active account required/);
+  } finally {
+    db.close();
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test('principal access returns only the account-owned resources inside allowed folders', async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), 'dshpw-principal-access-'));
   const ownRoot = path.join(temporary, 'own');

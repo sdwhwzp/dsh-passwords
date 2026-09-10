@@ -1167,6 +1167,11 @@ export class Database {
     return (this.stmt('SELECT alias FROM ssh_host_owners WHERE user_id = ? ORDER BY alias').all(userId) as { alias: string }[]).map((row) => row.alias);
   }
 
+  /** All claimed legacy aliases, excluded from the administrator's unclaimed-host migration. */
+  listClaimedSshHostAliases(): string[] {
+    return (this.stmt('SELECT alias FROM ssh_host_owners ORDER BY alias').all() as { alias: string }[]).map((row) => row.alias);
+  }
+
   claimSshHost(alias: string, userId: number): boolean {
     if (typeof alias !== 'string' || alias.length === 0 || alias.length > 256) return false;
     this.stmt(this.mysql ? 'INSERT IGNORE INTO ssh_host_owners (alias, user_id) VALUES (?, ?)' : 'INSERT OR IGNORE INTO ssh_host_owners (alias, user_id) VALUES (?, ?)').run(alias, userId);

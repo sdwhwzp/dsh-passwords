@@ -57,6 +57,7 @@ import {
   isSshAliasQueryEndpoint,
   isSshAliasBodyEndpoint,
   isSshTerminalEndpoint,
+  isTenantSshEndpoint,
   isSshPublicAssetEndpoint,
   webSocketAccessForPath,
   isAionuiFileWrite,
@@ -4040,10 +4041,14 @@ export function createGatewayServer(
           denyRequest(req, res, lang, t(lang, 'gw.noUpload'));
           return;
         }
-        // 第三方 SSH 插件不是普通的 WebSocket/插件静态资源：它能执行远程命令、
-        // 访问 SFTP 和打开真实 PTY。allowSsh 只打开当前子用户自己创建并认领的
-        // alias 作用域，不能把整个 /api/dsh-ssh/** 变成共享管理员面。
-        if (isSshPluginEndpoint(requestPath)) {
+        // SSH always requires the account permission. A scoped Host checks the
+        // signed principal; older Hosts retain gateway-owned alias filtering.
+        if (isSshPluginEndpoint(requestPath) && config.tenantSsh?.enabled === true) {
+          if (!perms.allow_ssh || !isTenantSshEndpoint(req.method, requestPath)) {
+            denyRequest(req, res, lang, t(lang, 'gw.adminOnly'));
+            return;
+          }
+        } else if (isSshPluginEndpoint(requestPath)) {
           const publicAsset = isSshPublicAssetEndpoint(req.method, requestPath);
           const aliasQuery = parsed.searchParams.get('alias');
           const aliasQueryValid = aliasQuery !== null && isSafeSshAlias(aliasQuery);
@@ -4066,7 +4071,7 @@ export function createGatewayServer(
             return;
           }
         }
-        // F-09/F-12：第三方插件“运维面”端点（dsh-ssh 主机清单/隧道、skin-center、modlens、
+        // F-09/F-12：第三方插件“运维面”端点（skin-center、modlens、
         // dsh-uploads 列表/删除等）不在网关权限模型内，对子用户一律 403（仅主用户可访问）
         if (isAdminOnlyPluginEndpoint(req.method, requestPath)) {
           denyRequest(req, res, lang, t(lang, 'gw.adminOnly'));
@@ -4080,7 +4085,8 @@ export function createGatewayServer(
           denyRequest(req, res, lang, t(lang, 'gw.noUpload'));
           return;
         }
-        if (!perms.allow_git_download && isGitRequest(requestPath)) {
+        if (!perms.allow_git_download && isGitRequest(requestPath) &&
+            !(config.tenantSsh?.enabled === true && requestPath === '/api/dsh-ssh/ls')) {
           denyRequest(req, res, lang, t(lang, 'gw.noGit'));
           return;
         }
@@ -5455,6 +5461,7 @@ export function createGatewayServer(
       return;
     }
     const needsSshPermissionCheck =
+      config.tenantSsh?.enabled !== true &&
       reqAs.dshpwUser !== undefined &&
       reqAs.dshpwIsAdmin !== true &&
       (req.method === 'POST' || req.method === 'PATCH' || req.method === 'PUT') &&
@@ -5572,7 +5579,7 @@ export function createGatewayServer(
         }
 
         // ── dsh-ssh 主机响应：子用户只看到自己认领的 alias ──
-        if (reqAs.dshpwUser !== undefined && reqAs.dshpwIsAdmin !== true &&
+        if (config.tenantSsh?.enabled !== true && reqAs.dshpwUser !== undefined && reqAs.dshpwIsAdmin !== true &&
             ((req.method === 'GET' && proxyPath === '/api/dsh-ssh/hosts') ||
               (req.method === 'POST' && proxyPath === '/api/dsh-ssh/hosts'))) {
           bufferUpstream(upstreamRes, res, (raw) => {
@@ -7521,14 +7528,19 @@ export function createGatewayServer(
       fwdPath = '/api/dsh-passwords/tenant-terminal' + fwdPath.slice(gatePath.length);
     }
     // SSH terminal 是第三方插件提供的真实 RFC 6455 PTY。它不走 Remote mux，
-    // 也不能由通用的 userAllowlist 单独放行：子用户必须显式开启 SSH，且 query
-    // alias 必须是该子用户通过网关创建并认领的主机。
+    // 也不能由通用的 userAllowlist 单独放行。账号隔离模式由 Host 校验 alias；
+    // 旧版 Host 仍要求 query alias 已在网关登记为当前子用户所有。
+    if (isSshTerminalEndpoint(gatePath) &&
+        (req.headers['sec-fetch-site'] === 'cross-site' || !originHostMatches(req as Request))) {
+      rejectUpgrade(socket, 403);
+      return;
+    }
     if (userRole === 'user' && isSshTerminalEndpoint(gatePath)) {
       const terminalUrl = new URL(req.url ?? '/', `http://${req.headers.host || 'localhost'}`);
       const alias = terminalUrl.searchParams.get('alias');
       const perms = authedUserId === null ? null : effectivePermissions(authedUserId);
       if (perms === null || !perms.allow_ssh || alias === null || !isSafeSshAlias(alias) ||
-          db.getSshHostOwner(alias) !== authedUserId) {
+          (config.tenantSsh?.enabled !== true && db.getSshHostOwner(alias) !== authedUserId)) {
         socket.end('HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
         return;
       }
@@ -7542,7 +7554,7 @@ export function createGatewayServer(
       gatePath === '/plugins/events' ||
       gatePath === '/aionui-panel/events' ||
       gatePath.startsWith('/aionui-panel/events/');
-    const wsAccess = userRole === 'user' && isSshTerminalEndpoint(gatePath) ? 'allow' : webSocketAccessForPath(
+    const wsAccess = isSshTerminalEndpoint(gatePath) && (userRole === 'user' || config.tenantSsh?.enabled === true) ? 'allow' : webSocketAccessForPath(
       gatePath,
       userRole === 'admin'
         ? [...adminOnlyWebSocketPaths, ...userGrantableWebSocketPaths]

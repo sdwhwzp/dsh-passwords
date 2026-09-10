@@ -55,6 +55,8 @@ test('SSH alias 认领按用户隔离、互斥并在重启后保留', () => {
     assert.equal(db.claimSshHost('work-host', second.id), false, '同一 alias 不得跨子用户认领');
     assert.equal(db.getSshHostOwner('work-host'), first.id);
     assert.deepEqual(db.listSshHostAliases(first.id), ['work-host']);
+    assert.equal(db.claimSshHost('second-host', second.id), true);
+    assert.deepEqual(db.listClaimedSshHostAliases(), ['second-host', 'work-host']);
     db.releaseSshHost('work-host', second.id);
     assert.equal(db.getSshHostOwner('work-host'), first.id, '非 owner 不得释放 alias');
     db.close();
@@ -63,6 +65,7 @@ test('SSH alias 认领按用户隔离、互斥并在重启后保留', () => {
     try {
       reopened.init();
       assert.equal(reopened.getSshHostOwner('work-host'), first.id, '认领关系必须跨重启持久化');
+      assert.deepEqual(reopened.listClaimedSshHostAliases(), ['second-host', 'work-host']);
       reopened.releaseSshHost('work-host', first.id);
       assert.equal(reopened.getSshHostOwner('work-host'), null);
     } finally {
@@ -173,6 +176,7 @@ test('旧 user_permissions 表会迁移 WebSocket 授权列，并保留现有权
       disabledSessions: [],
     });
     assert.deepEqual(db.getPermissions(7)?.allowed_websocket_paths, ['/plugin/ws/*']);
+    assert.equal(db.getPermissions(7)?.allow_ssh, false, '省略 SSH 权限时保留既有关闭状态');
     assert.deepEqual(db.getPermissions(7)?.allowed_agent_presets, ['system/default']);
     db.setPermissions(7, {
       allowedFolders: ['/srv/project'],
