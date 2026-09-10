@@ -6,7 +6,24 @@ export const TENANT_REMOTE_STREAM_ENDPOINTS: ReadonlySet<string> = new Set([
   'workspace/follow',
   'session/follow',
   'session/control',
+  'workspaceFiles/changes',
 ] as const);
+
+/**
+ * Read the Session identity used by the Host's workspace-file lookup.
+ * @param value - untrusted logical stream payload.
+ * @returns the Session id requiring gateway ownership and folder authorization.
+ */
+export function tenantWorkspaceFileChangesSessionId(value: unknown): string {
+  const payload = record(value);
+  const args = record(payload?.args);
+  if (payload === undefined || !exactKeys(payload, ['args']) ||
+      args === undefined || !exactKeys(args, ['workspaceFileScopeId']) ||
+      !nonEmptyString(args.workspaceFileScopeId)) {
+    throw new Error('invalid workspace file changes scope');
+  }
+  return args.workspaceFileScopeId;
+}
 
 /** One strictly decoded browser-to-Host mux frame. */
 export type TenantRemoteClientFrame =

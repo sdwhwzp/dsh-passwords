@@ -405,13 +405,15 @@ Enable `MCP_TENANT_EDITOR=true` only with the tenant edition of `dsh-vsceditor` 
 
 ## Fork synchronization and deployment adaptation (2026-09-10)
 
-This branch merges `slywalker2006/dsh-passwords` commit `590b2ca` (2.6.11). The deployment build is `2.6.29` and requires the personal Harness 0.1.5-alpha.2 build with native principal support. Official npm Harness packages do not contain those private extensions; deployment overrides must select the matching Harness artifacts throughout.
+This branch merges `slywalker2006/dsh-passwords` commit `590b2ca` (2.6.11). The deployment build is `2.6.30` and requires the personal Harness 0.1.5-alpha.2 build with native principal support. Official npm Harness packages do not contain those private extensions; deployment overrides must select the matching Harness artifacts throughout.
 
 The source SSH switch defaults to disabled. Enabled accounts see and operate only SSH aliases they created and successfully claimed. Global import, cluster, and tunnel operations remain administrator-only. Host responses must contain the expected fields; failed operations or mismatched aliases grant no ownership. SQLite and MySQL/MariaDB persist SSH ownership, and account deletion removes its claims.
 
 The permissions endpoint retains the source field validation and partial-update behavior: omitted SSH, upload, download, sandbox, agent preset, and disabled-session fields preserve their existing values; invalid types return 400. Additional upload routes enforce the upload permission. Dependencies use the source `ws ^8.21.0` and `qs ^6.16.0` updates.
 
 Native Harness principals, immutable session ownership, managed workspaces, and connection revocation continue to isolate accounts. MySQL/MariaDB, monthly budgets, local workspaces, tenant terminals/editors, and the task board remain supported. Legacy 0.1.2/0.1.3 compiled patches, the cookie bridge, proxy-cached session grants, and the legacy Remote mux therefore do not replace those implementations. The extracted `assignable-workspaces` module passes the source blank-session and archived-session regression cases.
+
+Restricted accounts can subscribe to file changes in their own session workspace through `workspaceFiles/changes`. Opening or closing a delivered-file preview preserves history streams on the same connection. The gateway checks session ownership, allowed folders, and disabled status when opening the subscription and before forwarding changes; invalid or foreign session requests are rejected.
 
 Candidate profiles receive their own `.env` without replacing live credentials or data. The SSH table and permission column are additive; no users, Session generations, or workspaces are removed. The deployment record identifies server 30's final release, validation, and rollback locations.
 

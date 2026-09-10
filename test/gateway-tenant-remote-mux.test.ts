@@ -52,12 +52,13 @@ async function setup() {
   const admin = db.createUser('admin', 'hash', 'admin');
   const customer = db.createUser('customer', 'hash', 'user');
   db.setManagedWorkspace(customer.id, ownRoot);
-  db.setPermissions(customer.id, {
+  const permissions: Parameters<Database['setPermissions']>[1] = {
     allowedFolders: [ownRoot], hourlyTokenLimit: null, dailyMinutesLimit: null,
     monthlyBudgetMicros: 0, allowUpload: true, allowGitDownload: false,
     allowedWebSocketPaths: [], allowedAgentPresets: [], allowWorkspaceCreate: false,
     banned: false, sandboxMode: 'workspace-write', disabledSessions: [],
-  });
+  };
+  db.setPermissions(customer.id, permissions);
   db.claimSessionOwner('own-session', customer.id);
   db.claimSessionOwner('other-session', admin.id);
 
@@ -137,8 +138,98 @@ async function setup() {
     db.close();
     await rm(temporary, { recursive: true, force: true });
   };
-  return { connect, cleanup };
+  const disableSession = () => db.setPermissions(customer.id, { ...permissions, disabledSessions: ['own-session'] });
+  return { connect, cleanup, disableSession };
 }
+
+test('opening and cancelling file previews keeps the shared history stream connected', async () => {
+  const env = await setup();
+  const { downstream, upstream } = await env.connect();
+  try {
+    const historyOpen = nextMessage(upstream);
+    downstream.send(JSON.stringify({
+      type: 'open', streamId: 'history', endpoint: 'session/follow',
+      payload: { args: { request: { address: { kind: 'session', sessionId: 'own-session' } } } },
+    }));
+    await historyOpen;
+    const filesOpen = nextMessage(upstream);
+    const payload = { args: { workspaceFileScopeId: 'own-session' } };
+    downstream.send(JSON.stringify({ type: 'open', streamId: 'files', endpoint: 'workspaceFiles/changes', payload }));
+    assert.deepEqual(await filesOpen, { type: 'open', streamId: 'files', endpoint: 'workspaceFiles/changes', payload });
+    const ready = nextMessage(downstream);
+    upstream.send(muxItem('files', { type: 'ready' }));
+    assert.deepEqual(await ready, { type: 'item', streamId: 'files', value: { type: 'ready' } });
+    const cancelled = nextMessage(upstream);
+    downstream.send(JSON.stringify({ type: 'cancel', streamId: 'files' }));
+    await cancelled;
+    const historyItem = nextMessage(downstream);
+    upstream.send(muxItem('files', { type: 'late' }));
+    upstream.send(JSON.stringify({ type: 'end', streamId: 'files' }));
+    upstream.send(muxItem('history', { type: 'snapshot', records: [] }));
+    assert.deepEqual(await historyItem, { type: 'item', streamId: 'history', value: { type: 'snapshot', records: [] } });
+    assert.equal(downstream.readyState, WebSocket.OPEN);
+  } finally {
+    downstream.terminate();
+    await env.cleanup();
+  }
+});
+
+test('file change subscriptions reject foreign, disabled, and forged workspace scopes before forwarding', async () => {
+  const env = await setup();
+  try {
+    for (const payload of [
+      { args: { workspaceFileScopeId: 'other-session' } },
+      { args: { workspaceFileScopeId: 'missing-session' } },
+      { args: { workspaceFileScopeId: 'own-session', workspaceRoot: otherRoot } },
+      { args: { workspaceFileScopeId: { sessionId: 'own-session', workspaceRoot: otherRoot } } },
+      { args: {} },
+    ]) {
+      const { downstream, upstream } = await env.connect();
+      const forwarded: unknown[] = [];
+      upstream.on('message', (data) => forwarded.push(JSON.parse(data.toString())));
+      const closed = nextClose(downstream);
+      const upstreamClosed = nextClose(upstream);
+      downstream.send(JSON.stringify({ type: 'open', streamId: 'files', endpoint: 'workspaceFiles/changes', payload }));
+      assert.equal(await closed, 1008);
+      await upstreamClosed;
+      assert.deepEqual(forwarded, []);
+    }
+    env.disableSession();
+    const { downstream, upstream } = await env.connect();
+    const forwarded: unknown[] = [];
+    upstream.on('message', (data) => forwarded.push(JSON.parse(data.toString())));
+    const closed = nextClose(downstream);
+    const upstreamClosed = nextClose(upstream);
+    downstream.send(JSON.stringify({ type: 'open', streamId: 'files', endpoint: 'workspaceFiles/changes',
+      payload: { args: { workspaceFileScopeId: 'own-session' } } }));
+    assert.equal(await closed, 1008);
+    await upstreamClosed;
+    assert.deepEqual(forwarded, []);
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test('file change items stop after the session permission is revoked', async () => {
+  const env = await setup();
+  const { downstream, upstream } = await env.connect();
+  try {
+    const opened = nextMessage(upstream);
+    downstream.send(JSON.stringify({ type: 'open', streamId: 'files', endpoint: 'workspaceFiles/changes',
+      payload: { args: { workspaceFileScopeId: 'own-session' } } }));
+    await opened;
+    const received: unknown[] = [];
+    downstream.on('message', (data) => received.push(JSON.parse(data.toString())));
+    env.disableSession();
+    const closed = nextClose(downstream);
+    upstream.send(muxItem('files', { type: 'change', path: 'report.md' }));
+    assert.equal(await closed, 1008);
+    assert.deepEqual(received, []);
+  } finally {
+    downstream.terminate();
+    await env.cleanup();
+  }
+});
 
 test('restricted Remote events hide Host-global and cross-tenant frames', async () => {
   const env = await setup();

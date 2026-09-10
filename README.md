@@ -429,13 +429,15 @@ Linux 部署由管理员将 `scripts/tenant-terminal-launcher.py` 安装为 root
 
 ## Fork 同步与部署适配（2026-09-10）
 
-当前分支合入 `slywalker2006/dsh-passwords` 的 `590b2ca`（2.6.11）。本部署构建为 `2.6.29`，配合包含原生 principal 扩展的 Harness 0.1.5-alpha.2 使用；普通 npm 上游 Harness 包不提供这些私有扩展，部署时必须统一指向本次 Harness 构建。
+当前分支合入 `slywalker2006/dsh-passwords` 的 `590b2ca`（2.6.11）。本部署构建为 `2.6.30`，配合包含原生 principal 扩展的 Harness 0.1.5-alpha.2 使用；普通 npm 上游 Harness 包不提供这些私有扩展，部署时必须统一指向本次 Harness 构建。
 
 上游的 SSH 开关默认关闭；开启后，用户只能查看和操作自己创建并成功认领的 SSH alias。批量导入、cluster、tunnel 等全局能力仍只供管理员使用。列表响应必须可解析且符合预期字段；操作失败或响应 alias 不符时不授予归属。SSH alias 归属同时支持 SQLite 和 MySQL/MariaDB，删除用户时清理归属记录。
 
 权限接口接纳上游的严格字段校验和部分更新规则：省略 SSH、上传、下载、沙盒、Agent preset 或禁用会话字段时保留既有权限，非法类型返回 400。新增上传路由也服从上传权限。依赖采用上游的 `ws ^8.21.0` 与 `qs ^6.16.0`。
 
 会话与工作区继续通过 Harness 原生 principal、不可转移的会话 owner、托管工作区及权限变更时断开的用户连接执行隔离；保留 MySQL/MariaDB、月额度、本机工作区、租户终端/编辑器和任务看板。因此旧版 0.1.2/0.1.3 的编译产物 patch、cookie bridge、代理缓存会话授权表和旧 Remote mux 实现不覆盖这些现有实现。工作区列表沿用独立的 `assignable-workspaces` 模块，并运行上游新增的空会话与归档会话回归用例。
+
+普通账号可通过 `workspaceFiles/changes` 订阅本人会话工作区的文件变化，打开或关闭交付文件预览不会中断同一连接上的历史流。网关按会话归属、允许目录和禁用状态校验订阅，并在转发变更时重新校验权限；无效或其他账号的会话请求会被拒绝。
 
 部署沿用现有数据与凭据，在候选 Profile 中单独放置 `.env`。本次 SSH 表与权限列属于增量变更，不删除已有用户、会话日志或工作区。服务器 30 的最终发布、验收与回滚位置由部署记录登记。
 
