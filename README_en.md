@@ -45,8 +45,6 @@
 
 ---
 
-The stock dsh web UI has no login or access control. Exposed to a network, anyone with the address can use it. dsh-passwords runs a gateway in front of dsh: unauthenticated visitors only see the login page, and every authenticated request is subject to per-account permissions and quotas. Listed in [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek-harness#security--governance) (Security & Governance) and [Awesome DSH Plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin#security--permissions) (Security & Permissions).
-
 ## Features
 
 - **Login**: first-run setup creates the owner account; every later visit goes through the login page; sessions last 12 hours
@@ -106,7 +104,7 @@ docker run -d \
   -p 127.0.0.1:3088:3088 \
   -v dsh-home:/data/dsh \
   -v dsh-passwords-state:/data/dsh-passwords \
-  skywalker237234/dsh-passwords:2.6.11
+  skywalker237234/dsh-passwords:2.7.0
 ```
 
 `.env` needs at least `DEEPSEEK_API_KEY`. Set `MCP_GATEWAY_PUBLIC_HOST` to the domain you actually use. The container listens on loopback 3088 only; terminate TLS on nginx or Caddy for public access. Initialization is complete once the log shows `dsh patch applied; starting dsh`.
@@ -318,7 +316,7 @@ The bottleneck is usually the network path to the server.
 
 ## Manual install
 
-> The v2.6.11 compatibility layer covers DSH `0.1.2` and `0.1.3` API and runtime boundaries, with DSH `0.1.2-rc.1` as the host-install and bundled-Docker target. The installers strictly require Node.js `22.19+` or `24+`, register the plugin, detect the dsh installation and apply the compatibility patch. Automatic updates and settings-page patch reload use the same patch path.
+> The v2.7.0 compatibility layer covers the full DSH `0.1.5` line (`alpha.1`, `alpha.2`, `rc.1`) API and runtime boundaries, retaining the `0.1.2` and `0.1.3` interface boundaries; the host installer and bundled Docker ship DSH `0.1.5-rc.1`. The installers strictly require Node.js `22.19+` or `24+`, register the plugin, detect the dsh installation and apply the compatibility patch. Automatic updates and settings-page patch reload use the same patch path.
 
 1. `git clone https://github.com/slywalker2006/dsh-passwords && cd dsh-passwords`
 2. `npm install && npm run build`
@@ -345,7 +343,7 @@ The UI is bilingual zh/en and follows the dsh language setting. The login page h
 
 ## Version compatibility
 
-Current version: 2.6.11. Compatible with DSH `0.1.2` and `0.1.3` API and runtime boundaries; host installation and bundled Docker target DSH `0.1.2-rc.1`. The npm package ships prebuilt dist, TypeScript sources, and all scripts; Docker and npm are built from the same source revision.
+Current version: 2.7.0. Compatible with the full DSH `0.1.5` line (`alpha.1`, `alpha.2`, `rc.1`) API and runtime boundaries, retaining compatibility with the `0.1.2` and `0.1.3` interface boundaries; the host installer and bundled Docker ship DSH `0.1.5-rc.1`. The npm package ships prebuilt dist, TypeScript sources, and all scripts; Docker and npm are built from the same source revision.
 
 ## Contributing
 

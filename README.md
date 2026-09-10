@@ -45,8 +45,6 @@
 
 ---
 
-dsh 自带的网页界面没有登录与权限控制，公网部署后任何拿到地址的人都能直接使用。dsh-passwords 在 dsh 前面运行一个网关：未登录访问只见到登录页，登录后按账号执行权限与配额控制。项目收录于 [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek-harness#security--governance)（Security & Governance）与 [Awesome DSH Plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin#security--permissions)（Security & Permissions）。
-
 ## 功能
 
 - **登录认证**：首次配置创建主用户，之后所有访问先过登录页；会话 12 小时有效
@@ -106,7 +104,7 @@ docker run -d \
   -p 127.0.0.1:3088:3088 \
   -v dsh-home:/data/dsh \
   -v dsh-passwords-state:/data/dsh-passwords \
-  skywalker237234/dsh-passwords:2.6.11
+  skywalker237234/dsh-passwords:2.7.0
 ```
 
 `.env` 至少包含 `DEEPSEEK_API_KEY`。`MCP_GATEWAY_PUBLIC_HOST` 建议填实际访问的域名。容器只在回环地址监听 3088，公网访问由 nginx 或 Caddy 终结 TLS 后转发。初始化完成以日志出现 `dsh patch applied; starting dsh` 为准。
@@ -318,7 +316,7 @@ curl -so /dev/null -w "TLS:%{time_appconnect}s\n" https://地址/gateway/login
 
 ### 手动安装
 
-> v2.6.11 的兼容层覆盖 DSH `0.1.2` 与 `0.1.3` 的接口和运行时结构，宿主机安装器与 bundled Docker 以 DSH `0.1.2-rc.1` 为主目标。安装器会严格检查 Node.js `22.19+` 或 `24+`，并在安装完成后注册插件、探测 dsh 安装目录并应用兼容补丁。自动更新与设置页“重载补丁”沿用同一补丁链路。
+> v2.7.0 的兼容层覆盖 DSH `0.1.5` 全系列（`alpha.1`、`alpha.2`、`rc.1`）的接口和运行时结构，并保留 `0.1.2` 与 `0.1.3` 接口边界；宿主机安装器与 bundled Docker 内置 DSH `0.1.5-rc.1`。安装器会严格检查 Node.js `22.19+` 或 `24+`，并在安装完成后注册插件、探测 dsh 安装目录并应用兼容补丁。自动更新与设置页“重载补丁”沿用同一补丁链路。
 
 1. `git clone https://github.com/slywalker2006/dsh-passwords && cd dsh-passwords`
 2. `npm install && npm run build`
@@ -345,7 +343,7 @@ curl -so /dev/null -w "TLS:%{time_appconnect}s\n" https://地址/gateway/login
 
 ## 版本兼容
 
-当前版本 2.6.11。兼容 DSH `0.1.2` 与 `0.1.3` 的接口和运行时结构；宿主机安装器与 bundled Docker 的主目标为 DSH `0.1.2-rc.1`。npm 包包含预构建 dist、TypeScript 源码与全部脚本，Docker 与 npm 包出自同一源码修订。
+当前版本 2.7.0。兼容 DSH `0.1.5` 全系列（`alpha.1`、`alpha.2`、`rc.1`）的接口和运行时结构，并保留对 `0.1.2` 与 `0.1.3` 接口边界的兼容；宿主机安装器与 bundled Docker 内置 DSH `0.1.5-rc.1`。npm 包包含预构建 dist、TypeScript 源码与全部脚本，Docker 与 npm 包出自同一源码修订。
 
 ## 参与贡献
 

@@ -7,7 +7,7 @@
 | Node.js | 22.19+ or 24+ | Matches the DSH `0.1.5-rc.1` engine contract |
 | DSH source/runtime compatibility | `0.1.2`, `0.1.3`, and `0.1.5` boundaries | RC.1 npm runtime and historical source-workspace patch anchors are locally verified |
 | Bundled Docker runtime | `0.1.5-rc.1` | Main bundled image target; uses the official npm runtime |
-| dsh-passwords | 2.6.11 | Local build, regression suite, official-registry production audit, and package-content checks |
+| dsh-passwords | 2.7.0 | Local build, regression suite, official-registry production audit, and package-content checks |
 
 
 Development dependencies use the published `0.1.5-rc.1` packages so TypeScript resolves the current public plugin APIs. The package does not impose a runtime DSH dependency: DSH owns the profile and loads this package through its plugin link. The compatibility layer retains the verified `0.1.2` and `0.1.3` API and bundle boundaries.
