@@ -2088,8 +2088,28 @@ SSH 使用用户提供的 `wh.gr-iot.cn:6022`，主机密钥与原 `.30` 一致�
 
 浏览器确认本次构建号后，检查会话文件入口、右侧栏和命令菜单：本体 `ui-sidebar-documentpreview`、`ui-deliverables`、`ui-message-feedback`、`command-feedback` 均在最终组合中，没有禁用。
 
-`dsh-better-sidebar` 以 `extension` 优先级认领全部 `dsh-resource://file/**`，高于本体文档预览的 `fallback`；因此点击会话文件进入插件的编辑 / 文件查看器，界面不会显示本体新的 Markdown、代码、HTML、PDF、图片预览工具栏。插件还以优先级 `-1` 接管有产出文件的 turn-tail 区域；VSCode 插件启用默认打开时使用 `-2`。这属于插件组合的行为，不能仅凭主程序版本号认定本体界面已可见。恢复本体预览时需同时保留业务正在使用的 Excel / Office 查看器，不能直接禁用整个侧栏插件。
+`dsh-better-sidebar` 以 `extension` 优先级认领全部 `dsh-resource://file/**`，高于本体文档预览的 `fallback`；因此点击会话文件进入插件的编辑 / 文件查看器，界面不会显示本体新的 Markdown、代码、HTML、PDF、图片预览工具栏。仅修改文件的轮次仍由插件以优先级 `-1` 接管 turn-tail，VSCode 插件启用默认打开时使用 `-2`；含有 `present` 声明的轮次从 §52 的适配版本起交回本体渲染正式交付卡片。这属于插件组合的行为，不能仅凭主程序版本号认定本体界面已可见。恢复本体预览时需同时保留业务正在使用的 Excel / Office 查看器，不能直接禁用整个侧栏插件。
 
 本体显式交付卡片来自 `present` 工具；新版 `standard`、`ptc`、`cordis` 预设均包含该工具。旧会话仅写文件名或通过 Bash 创建文件而没有 `present` 记录，不会自动生成新的显式交付卡片。
 
 `/feedback` 的 Host 描述带 `<text>` 参数提示，命令菜单在消息中间过滤带参数提示的命令；已有草稿、光标在其后的菜单会只显示适合当前位置的条目。在消息开头调用 `/feedback` 才能选择其反馈弹窗入口。浏览器检查未提交反馈，也未发送模型任务。
+
+## 52. 模型显式交付卡片适配（2026-09-10）
+
+30 的模型现在可通过 `present` 在会话中交付文件。两个侧栏插件在当前收尾回复之前存在显式交付声明时，让本体显示文件名、说明、卡片和打开入口；同一轮包含 `write` 也不会遮住卡片。普通文件改动行、现有右侧文件查看器和 Office 支持保留。只有模型实际调用 `present` 的文件才有正式交付卡片，旧回复中写出的路径不会被追认为交付。
+
+本次仅更新 `dsh-better-sidebar` 至 `0.19.0-alpha.1.dsh.20260910.1`（`2b44f58fa58129e4091a161da06a7c5a2eefbe69`）与 `dsh-sidebar-vscode` 至 `0.2.8-dsh.20260910.1`（`c4ae84cb804a988096f1378fecbd5d7009591fa8`）。两仓 7 个本地分支与各自 fork 的远端 SHA 一致，再次拉取源仓库后缺失源提交均为 0。每仓的说明和适配记录随代码提交。此部署继承准备时服务器已安装的 `dsh-context@0.48.0-dsh.20260910.1` 和 `dsh-spend@0.6.21`；它们来自其他更新，本次未重新构建或降级。
+
+### 52.1 验证
+
+Node 22.21.1 下，better-sidebar 的产物选择、槽位接管和原生侧栏测试 25 项通过；VSCode 的产物选择和文件类型路由测试 44 项通过。两个插件构建、better-sidebar 变更文件 ESLint 和 Git 空白检查通过。测试覆盖写入后交付、Bash 交付、仅文件修改以及晚于当前回复的声明。隔离 Profile 使用临时 SQLite 和 38080–38082 端口启动，38.4 秒完成排演，配置组合成功、启动错误数 0。
+
+浏览器在 `http://wh.gr-iot.cn:3081/` 新建“文件交付功能验收测试”会话。真实模型通过两次 `write` 写入测试 Markdown 和 HTML，再通过一次 `present` 交付两文件。只读检查该会话的压缩日志确认 `deliverables/presented` 位于 seq 29，含两条路径和说明。切换前页面只有插件的“本次产出”标签；切换后刷新同一会话显示两张本体交付卡片及说明。点击 Markdown 卡片在右侧读到“模型显式交付验证成功”；HTML 卡片打开对应侧栏页面。测试会话和两个文件保留，未改写已有会话日志。
+
+浏览器开启侧栏期间也观察到 `Remote stream WebSocket closed` 的历史加载提示，刷新后卡片恢复；这个流连接问题未在本次修改中修复。上述证据验证显式交付、卡片持久恢复和 Markdown 读取，不代表所有预览格式或长时间流连接均已验收。30 没有桌面，原生默认应用及文件管理器菜单仍禁用。
+
+### 52.2 发布与回滚
+
+插件 release 为 `20260910-080000-delivery-cards`。08:03:57 切换 Profile 和 `/home/tzwl3/apps/dsh-plugins/current`，Harness 与 Web 的 current 仍指向 `20260910-071200-bf3afe-alpha2`。08:04:32 健康门通过，随后稳定观察 60 秒并保存 PM2，PID `1735970`、重启次数 0。网关健康 200、Host 未认证 401、内部健康未认证 403；认证内部健康确认数据库、工作区和会话就绪。两个线上插件的清单和 client bundle 与部署 tarball 字节一致。
+
+备份 Profile 在 `/home/tzwl3/.dsh/profiles/web-before-20260910-080000-delivery-cards`，部署证据和一致性数据库备份在 `/home/tzwl3/apps/deploy-staging/20260910-080000-delivery-cards`。切换前记录的会话文件均保留且未缩短，模块链接无断链，3 个账号保留。回退时保留新增数据，恢复备份 Profile 和上一个插件 current，使用既有 `dsh-cli-entry.mjs` 启动；不恢复旧数据库覆盖上线后的写入。WeKnora 保留 `0.1.2`，未改动 28。
