@@ -54,3 +54,16 @@ ${code}
 `;
 writeFileSync(OUT_FILE, wrapped);
 console.log('dist/client.js 构建完成');
+
+// The standalone account page owns its React runtime and needs no Harness module loader.
+await build({
+  entryPoints: ['src/client/accounts-entry.tsx'],
+  outfile: path.join(path.dirname(OUT_FILE), 'accounts.js'),
+  bundle: true,
+  format: 'iife',
+  platform: 'browser',
+  target: ['es2020'],
+  jsx: 'automatic',
+  minify: true,
+  define: { 'process.env.NODE_ENV': '"production"' },
+});

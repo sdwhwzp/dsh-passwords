@@ -145,6 +145,27 @@ test('Issue #15: admin can download ordinary files outside subuser allowlists', 
   assert.equal(outside.body.toString(), 'outside subuser allowlist');
 });
 
+test('standalone accounts page requires an administrator and redirects expired sessions to login', async () => {
+  const anonymous = await request('/gateway/accounts');
+  assert.equal(anonymous.status, 302);
+  assert.equal(anonymous.headers.location, '/gateway/login?next=%2Fgateway%2Faccounts');
+  const ordinary = await request('/gateway/accounts', downloadsAllowedCookie);
+  assert.equal(ordinary.status, 403);
+  assert.doesNotMatch(ordinary.body.toString(), /accounts-root/);
+  const admin = await request('/gateway/accounts?lang=en', adminCookie);
+  assert.equal(admin.status, 200);
+  assert.match(admin.body.toString(), /lang="en"/);
+  assert.match(admin.body.toString(), /id="accounts-root"/);
+  assert.match(admin.body.toString(), /src="\/gateway\/accounts.js"/);
+  const nonce = /<script nonce="([^"]+)"/.exec(admin.body.toString())?.[1];
+  assert.ok(nonce);
+  assert.ok(String(admin.headers['content-security-policy']).includes(`script-src 'nonce-${nonce}'`));
+  assert.ok(String(admin.headers['content-security-policy']).includes("connect-src 'self'"));
+  assert.equal(admin.headers['cache-control'], 'no-store');
+  assert.equal((await request('/gateway/accounts.js')).status, 401);
+  assert.equal((await request('/gateway/accounts.js', downloadsAllowedCookie)).status, 403);
+});
+
 test('Issue #15: admin operational access still cannot download sensitive files or symlink escapes', async () => {
   const sensitiveTargets = [path.join(appDir, 'data', 'test.db'), envFile];
   if (escapeLink !== null) sensitiveTargets.push(escapeLink);

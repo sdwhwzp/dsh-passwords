@@ -15,6 +15,7 @@ import { submitLogoutNavigation } from './account-logout';
 import { LocalWorkspacePanel } from './local-workspace';
 import { ManagedFilesPanel } from './managed-files';
 import { api } from './api';
+import { AccountsTable, AccountDialog, type AccountAction } from './accounts-table';
 
 export interface UserInfo {
   id: number;
@@ -91,7 +92,7 @@ export function readPatchState(response: unknown): PatchState | null {
   return status as PatchState;
 }
 
-interface BudgetStatus {
+export interface BudgetStatus {
   userId: number;
   month: string;
   usedMicros: number;
@@ -176,10 +177,13 @@ function errText(error: unknown, tr: (key: string, params?: Record<string, strin
 
 interface DshPasswordsCardProps extends PropsLocale<'dshpw'> {
   loadState(): Promise<StateData>;
+  mode?: 'settings' | 'accounts';
 }
 
 export function DshPasswordsCard(props: DshPasswordsCardProps) {
   const t = props.t;
+  const accounts = props.mode === 'accounts';
+  const [editor, setEditor] = useState<{ action: AccountAction | 'create'; user?: UserInfo } | null>(null);
   // errText 需要接收动态 key（err.<code>），而 dshpw 词典 t 的 key 是受限联合类型：
   // 这里包一层宽松签名适配器（运行时行为不变）
   const trErr: Translate = (key, params) => t(key as never, params);
@@ -229,7 +233,7 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
       .then((d) => {
         setData(d);
         setError('');
-        if (d.me?.role !== 'admin') return undefined;
+        if (d.me?.role !== 'admin' || !accounts) return undefined;
         return api<PermOverview>('/gateway/api/overview')
           .then((o) => {
             setOverview(o);
@@ -277,7 +281,7 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
                 }
               });
           })
-          .catch(() => setOverview(null));
+          .catch((e) => { setOverview(null); setError(errText(e, trErr)); });
       })
       .catch((e) => setError(errText(e, trErr)))
       .finally(() => {
@@ -288,7 +292,7 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
         }
       });
     // patch 状态独立于主链（轻量 + 失败只影响状态展示）
-    api<unknown>('/api/dsh-passwords/patch/status')
+    if (!accounts) api<unknown>('/api/dsh-passwords/patch/status')
       .then((r) => setPatchState(readPatchState(r)))
       .catch(() => setPatchState(null));
   };
@@ -325,6 +329,7 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
         await afterSuccess();
         return;
       }
+      if (accounts) { setEditor(null); clearForm(); }
       refresh();
     } catch (e) {
       setError(errText(e, trErr));
@@ -508,26 +513,6 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
   };
 
 
-  // 管理员的目标用户下拉：列出全部用户（默认自己，即当前账号在列表中的那一项）
-  const targetSelect = (value: string, onChange: (v: string) => void) =>
-    isAdmin
-      ? h(
-          'select',
-          {
-            className: 'dshpw-input',
-            value: value || me,
-            onChange: (e: { target: { value: string } }) => onChange(e.target.value),
-          },
-          ...(data?.users ?? []).map((u) =>
-            h(
-              'option',
-              { key: u.id, value: u.username },
-              `${u.username}（${u.role === 'admin' ? t('owner') : t('subuser')}）`,
-            ),
-          ),
-        )
-      : null;
-
   const patchOk =
     patchState !== null &&
     patchState.settingsHostMode &&
@@ -535,94 +520,24 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
     patchState.workspaceSearch;
   const patchText =
     patchState === null ? t('patchUnknown') : patchOk ? t('patchOk') : t('patchBad');
-  const body = h(
-    'div',
-    { className: 'dshpw-body' },
-    // ── 当前身份（头像 + 账号 + 角色徽章；主用户另附账号总数） ──
-    h(
-      'div',
-      { className: 'dshpw-identity' },
-      h('span', { className: 'dshpw-avatar', 'aria-hidden': 'true' }, initial(me)),
-      h(
-        'span',
-        { className: 'dshpw-identity-copy' },
-        h('span', { className: 'dshpw-identity-cap' }, t('identity')),
-        h(
-          'span',
-          { className: 'dshpw-identity-name' },
-          me || '—',
-          isAdmin
-            ? h('span', { className: 'dshpw-badge admin' }, t('owner'))
-            : h('span', { className: 'dshpw-badge' }, t('subuser')),
-        ),
-      ),
-    ),
-    // 操作结果紧跟身份区展示，长表单下方的按钮点击后无需回到页尾查看
-    error !== '' && h('div', { className: 'dshpw-banner err', role: 'alert' }, error),
-    notice !== '' && h('div', { className: 'dshpw-banner ok', role: 'status' }, notice),
-    // ── 聊天入口：按当前账号跨设备同步的显示偏好 ──
-    h(
-      'div',
-      { className: 'dshpw-section dshpw-preference' },
-      h('div', { className: 'dshpw-section-head' }, h('span', { className: 'dshpw-label' }, t('chatToggle'))),
-      h(
-        'label',
-        { className: 'dshpw-switch' },
-        h(
-          'span',
-          { className: 'dshpw-switch-copy' },
-          h('strong', null, t('chatToggleDesc')),
-          h('small', null, t('chatToggleHint')),
-        ),
-        h(
-          'span',
-          { className: 'dshpw-switch-control' },
-          h('input', {
-            type: 'checkbox',
-            checked: chatEnabled,
-            disabled: busy || data === null,
-            onChange: toggleChatEntry,
-            'aria-label': t('chatToggleDesc'),
-          }),
-          h('span', { className: 'dshpw-switch-track', 'aria-hidden': 'true' }, h('span', { className: 'dshpw-switch-thumb' })),
-        ),
-      ),
-    ),
-    h(LocalWorkspacePanel, {
-      t: trErr,
-      busy,
-      setBusy,
-      setError,
-      setNotice,
-    }),
-    data?.me?.role === 'user' && h(ManagedFilesPanel, {
-      t: trErr,
-      busy,
-      setBusy,
-      setError,
-      setNotice,
-    }),
-    // ── 远程设置：状态 + 重载 ──
-    h(
-      'div',
-      { className: 'dshpw-section' },
-      h(
-        'div',
-        { className: 'dshpw-section-head' },
-        h('span', { className: 'dshpw-label' }, t('patch')),
-        h('span', { className: patchOk ? 'dshpw-ok' : 'dshpw-error' }, patchText),
-      ),
-      h(
-        'div',
-        { className: 'dshpw-action-row' },
-        h('span', { className: 'dshpw-hint dshpw-action-copy' }, t('patchHint1')),
-        // F-02：重载补丁会重启 dsh 网页服务，仅主用户可触发；子用户只读状态
-        isAdmin &&
-          h('button', { className: 'dshpw-btn', disabled: busy, onClick: reloadPatch }, t('reloadPatch')),
-      ),
-      h('div', { className: 'dshpw-hint' }, t('patchHint2')),
-    ),
-
+  const clearForm = () => {
+    setPwCurrent(''); setPwNew(''); setPwConfirm(''); setNameNew(''); setAddName(''); setAddPw('');
+  };
+  const openEditor = (user: UserInfo | undefined, action: AccountAction | 'create') => {
+    clearForm(); setError(''); setNotice('');
+    setPwTarget(user?.username ?? ''); setNameTarget(user?.username ?? '');
+    setEditor({ user, action });
+  };
+  const closeEditor = () => {
+    if (busy) return;
+    const id = editor?.user?.id;
+    const dirty = (id !== undefined && dirtyUsersRef.current.has(id)) || pwCurrent || pwNew || pwConfirm || nameNew || addName || addPw;
+    if (dirty && !window.confirm(t('accountsDiscard'))) return;
+    if (id !== undefined) dirtyUsersRef.current.delete(id);
+    setDirtyUsers([...dirtyUsersRef.current]);
+    setEditor(null); clearForm(); refresh();
+  };
+  const passwordForm =
     // ── 修改密码 ──
     h(
       'div',
@@ -631,7 +546,6 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
       h(
         'div',
         { className: 'dshpw-fields' },
-        isAdmin ? field(t('targetUser'), targetSelect(pwTarget, setPwTarget)) : null,
         // F-06：改自己需先验证当前密码（管理员改他人无需）
         (pwTarget === '' || pwTarget === me)
           ? field(
@@ -677,8 +591,8 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
         { className: 'dshpw-action-row dshpw-form-actions' },
         h('button', { className: 'dshpw-btn', disabled: busy, onClick: changePassword }, t('savePw')),
       ),
-    ),
-
+    );
+  const renameForm =
     // ── 修改用户名 ──
     h(
       'div',
@@ -687,7 +601,6 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
       h(
         'div',
         { className: 'dshpw-fields' },
-        isAdmin ? field(t('targetUser'), targetSelect(nameTarget, setNameTarget)) : null,
         field(
           t('fieldNewName'),
           h('input', {
@@ -706,57 +619,8 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
         h('span', { className: 'dshpw-hint dshpw-action-copy' }, t('nameHint')),
         h('button', { className: 'dshpw-btn', disabled: busy, onClick: rename }, t('saveName')),
       ),
-    ),
-
-    // ── 子用户管理（仅主用户） ──
-    isAdmin &&
-      h(
-        'div',
-        { className: 'dshpw-section' },
-        h(
-          'div',
-          { className: 'dshpw-section-head' },
-          h('span', { className: 'dshpw-label' }, t('subusers')),
-          h('span', { className: 'dshpw-hint' }, t('usersCount', { count: data?.users.length ?? 0 })),
-        ),
-        h(
-          'div',
-          { className: 'dshpw-users' },
-          ...(data?.users ?? []).map((u) =>
-            h(
-              'div',
-              { className: 'dshpw-user', key: u.id },
-              h('span', { className: 'dshpw-avatar sm', 'aria-hidden': 'true' }, initial(u.username)),
-              h(
-                'span',
-                { className: 'dshpw-user-copy' },
-                h(
-                  'span',
-                  { className: 'dshpw-user-name' },
-                  u.username,
-                  u.role === 'admin'
-                    ? h('span', { className: 'dshpw-badge admin' }, t('owner'))
-                    : h('span', { className: 'dshpw-badge' }, t('subuser')),
-                  u.username === me ? h('span', { className: 'dshpw-chip' }, t('selfTag')) : null,
-                ),
-                h(
-                  'span',
-                  { className: 'dshpw-user-meta' },
-                  u.last_login_at ? t('lastLogin', { time: fmtTime(u.last_login_at) }) : t('neverLoggedIn'),
-                ),
-              ),
-              u.username !== me &&
-                h(
-                  'button',
-                  { className: 'dshpw-btn danger sm', disabled: busy, onClick: () => removeUser(u.username) },
-                  t('remove'),
-                ),
-            ),
-          ),
-        ),
-        (data?.users ?? []).every((u) => u.role !== 'user')
-          ? h('div', { className: 'dshpw-empty' }, t('noSubusers'))
-          : null,
+    );
+  const createForm =
         h(
           'div',
           { className: 'dshpw-subpanel' },
@@ -793,9 +657,8 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
             h('span', { className: 'dshpw-hint dshpw-action-copy' }, t('subHint')),
             h('button', { className: 'dshpw-btn', disabled: busy, onClick: addSubUser }, t('addSub')),
           ),
-        ),
-      ),
-
+        );
+  const permissionsForm =
     // ── 子用户权限（仅主用户） ──
     isAdmin &&
       overview !== null &&
@@ -805,7 +668,7 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
         h('span', { className: 'dshpw-label' }, t('perms')),
         h('div', { className: 'dshpw-hint' }, t('permsHint')),
         ...overview.users
-          .filter((u) => u.role === 'user')
+          .filter((u) => u.role === 'user' && u.id === editor?.user?.id)
           .map((u) => {
             const d = permDrafts[u.id];
             if (!d) return null;
@@ -1049,10 +912,112 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
               ),
             );
           }),
+      );
+
+  if (accounts) {
+    const title = editor?.action === 'create' ? t('addSubTitle')
+      : `${editor?.user?.username ?? ''} · ${editor?.action === 'permissions' ? t('perms') : editor?.action === 'password' ? t('chgPw') : t('chgName')}`;
+    return h('div', { className: 'dshpw-accounts-root' },
+      error && editor === null ? h('div', { className: 'dshpw-banner err', role: 'alert' }, error) : null,
+      notice ? h('div', { className: 'dshpw-banner ok', role: 'status' }, notice) : null,
+      data === null ? h('p', { role: 'status' }, t('accountsLoading')) : !isAdmin ? h('p', { role: 'alert' }, t('accountsAdminOnly')) :
+        h(AccountsTable, { t, users: data.users, overview, budgets, me, busy, refresh, create: () => openEditor(undefined, 'create'), edit: openEditor, remove: (user) => removeUser(user.username) }),
+      isAdmin && editor !== null ? h(AccountDialog, { title, closeLabel: t('accountsClose'), close: closeEditor, children: h('div', { className: 'dshpw-dialog-body' },
+        error ? h('div', { className: 'dshpw-banner err', role: 'alert' }, error) : null,
+        editor.action === 'create' ? createForm : editor.action === 'password' ? passwordForm : editor.action === 'rename' ? renameForm : permissionsForm) }) : null);
+  }
+
+  const body = h('div', { className: 'dshpw-body' },
+    // ── 当前身份（头像 + 账号 + 角色徽章；主用户另附账号总数） ──
+    h(
+      'div',
+      { className: 'dshpw-identity' },
+      h('span', { className: 'dshpw-avatar', 'aria-hidden': 'true' }, initial(me)),
+      h(
+        'span',
+        { className: 'dshpw-identity-copy' },
+        h('span', { className: 'dshpw-identity-cap' }, t('identity')),
+        h(
+          'span',
+          { className: 'dshpw-identity-name' },
+          me || '—',
+          isAdmin
+            ? h('span', { className: 'dshpw-badge admin' }, t('owner'))
+            : h('span', { className: 'dshpw-badge' }, t('subuser')),
+        ),
       ),
+    ),
+    // 操作结果紧跟身份区展示，长表单下方的按钮点击后无需回到页尾查看
+    error !== '' && h('div', { className: 'dshpw-banner err', role: 'alert' }, error),
+    notice !== '' && h('div', { className: 'dshpw-banner ok', role: 'status' }, notice),
+    isAdmin ? h('div', { className: 'dshpw-section dshpw-action-row' },
+      h('span', { className: 'dshpw-hint dshpw-action-copy' }, t('accountsDescription')),
+      h('a', { className: 'dshpw-btn', href: '/gateway/accounts', target: '_blank', rel: 'noopener noreferrer' }, t('accountsOpen'))) : null,
+    // ── 聊天入口：按当前账号跨设备同步的显示偏好 ──
+    h(
+      'div',
+      { className: 'dshpw-section dshpw-preference' },
+      h('div', { className: 'dshpw-section-head' }, h('span', { className: 'dshpw-label' }, t('chatToggle'))),
+      h(
+        'label',
+        { className: 'dshpw-switch' },
+        h(
+          'span',
+          { className: 'dshpw-switch-copy' },
+          h('strong', null, t('chatToggleDesc')),
+          h('small', null, t('chatToggleHint')),
+        ),
+        h(
+          'span',
+          { className: 'dshpw-switch-control' },
+          h('input', {
+            type: 'checkbox',
+            checked: chatEnabled,
+            disabled: busy || data === null,
+            onChange: toggleChatEntry,
+            'aria-label': t('chatToggleDesc'),
+          }),
+          h('span', { className: 'dshpw-switch-track', 'aria-hidden': 'true' }, h('span', { className: 'dshpw-switch-thumb' })),
+        ),
+      ),
+    ),
+    h(LocalWorkspacePanel, {
+      t: trErr,
+      busy,
+      setBusy,
+      setError,
+      setNotice,
+    }),
+    data?.me?.role === 'user' && h(ManagedFilesPanel, {
+      t: trErr,
+      busy,
+      setBusy,
+      setError,
+      setNotice,
+    }),
+    // ── 远程设置：状态 + 重载 ──
+    h(
+      'div',
+      { className: 'dshpw-section' },
+      h(
+        'div',
+        { className: 'dshpw-section-head' },
+        h('span', { className: 'dshpw-label' }, t('patch')),
+        h('span', { className: patchOk ? 'dshpw-ok' : 'dshpw-error' }, patchText),
+      ),
+      h(
+        'div',
+        { className: 'dshpw-action-row' },
+        h('span', { className: 'dshpw-hint dshpw-action-copy' }, t('patchHint1')),
+        // F-02：重载补丁会重启 dsh 网页服务，仅主用户可触发；子用户只读状态
+        isAdmin &&
+          h('button', { className: 'dshpw-btn', disabled: busy, onClick: reloadPatch }, t('reloadPatch')),
+      ),
+      h('div', { className: 'dshpw-hint' }, t('patchHint2')),
+    ),
 
-
+    passwordForm,
+    renameForm,
   );
-
   return h('div', { className: 'dshpw-card' }, body);
 }

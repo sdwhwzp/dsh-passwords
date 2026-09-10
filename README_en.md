@@ -12,7 +12,9 @@ Listed in [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek
 
 ## Features
 
-### 1️⃣ Remote access
+#Administrators can open `/gateway/accounts` from the sidebar or password settings. The standalone account table supports username/ID search, role and ban filters, name/recent-login/creation sorting, and 25/50/100-row pages. It displays monthly budgets and spending; create, rename, reset passwords, delete or edit one account at a time. Only the selected permission editor mounts. The page can be bookmarked and requires a current administrator session. Personal settings retain password, username and preference controls.
+
+## 1️⃣ Remote access
 
 - Login page + first-time setup page (on first visit you create the owner account; afterwards everyone goes through the login page)
 - One login lasts 12 hours (cookie session, survives browser restarts)

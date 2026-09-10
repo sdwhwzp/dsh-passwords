@@ -28,7 +28,7 @@ function loginResponse() {
   return response;
 }
 
-async function mountCard(t: TestContext, overrides: Record<string, () => Response> = {}, payloadOverrides: Record<string, unknown> = {}) {
+async function mountCard(t: TestContext, overrides: Record<string, () => Response> = {}, payloadOverrides: Record<string, unknown> = {}, mode: 'settings' | 'accounts' = 'settings') {
   const intervals = new Map<number, { callback: () => void; delay: number }>();
   let nextTimer = 0;
   let renderer: ReactTestRenderer | undefined;
@@ -42,6 +42,7 @@ async function mountCard(t: TestContext, overrides: Record<string, () => Respons
       },
       clearInterval(id: number) { intervals.delete(id); },
       setTimeout,
+      confirm: () => true,
     },
   });
   t.after(async () => {
@@ -65,6 +66,10 @@ async function mountCard(t: TestContext, overrides: Record<string, () => Respons
     '/api/dsh-passwords/budgets': { budgets: [] },
     ...payloadOverrides,
   };
+  if (mode === 'accounts' && !('/api/dsh-passwords/state' in payloadOverrides)) {
+    const overview = payloads['/gateway/api/overview'] as { users: unknown[] };
+    payloads['/api/dsh-passwords/state'] = { me, users: overview.users };
+  }
   const requests: Array<{ input: string; init?: RequestInit }> = [];
   t.mock.method(globalThis, 'fetch', async (input: string, init?: RequestInit) => {
     requests.push({ input, init });
@@ -78,6 +83,7 @@ async function mountCard(t: TestContext, overrides: Record<string, () => Respons
     renderer = create(createElement(CardBoundary, {
       children: createElement(DshPasswordsCard, {
         t: translate,
+        mode,
         loadState: () => api('/api/dsh-passwords/state'),
       }),
     }));
@@ -109,7 +115,7 @@ test('settings card reports workspace inventory failures and recovers on refresh
       error: 'The workspace service is temporarily unavailable; try again later',
     }, { status: 502 }),
   };
-  const card = await mountCard(t, responses);
+  const card = await mountCard(t, responses, {}, 'accounts');
   assert.match(card.text(), /The workspace service is temporarily unavailable/);
   assert.doesNotMatch(card.text(), /card-crashed/);
 
@@ -129,7 +135,7 @@ test('settings card reports degraded remote settings when every patch flag is fa
   assert.doesNotMatch(card.text(), /patchUnknown|card-crashed/);
 });
 
-test('settings card synchronizes the SSH permission beside upload and save API', async (t) => {
+test('account editor synchronizes the SSH permission beside upload and save API', async (t) => {
   const card = await mountCard(t, {
     '/gateway/api/permissions': () => Response.json({ ok: true }),
   }, {
@@ -158,7 +164,8 @@ test('settings card synchronizes the SSH permission beside upload and save API',
         usage: null,
       }],
     },
-  });
+  }, 'accounts');
+  await act(async () => { card.renderer.root.findAllByType('button').find(b => b.props['aria-label'] === 'accountsEdit · subuser')!.props.onClick(); });
   const sshLabel = card.renderer.root.findAllByType('label').find((label) => label.children.some((child) => child === 'permsSsh'));
   assert.ok(sshLabel, 'SSH 权限开关必须出现在上传权限附近');
   const checkbox = sshLabel!.findByType('input');
@@ -172,7 +179,7 @@ test('settings card synchronizes the SSH permission beside upload and save API',
   assert.equal(JSON.parse(String(permissionRequest!.init?.body)).allowSsh, true);
 });
 
-test('settings card synchronizes the large request body permission to the visible checkbox and save API', async (t) => {
+test('account editor synchronizes the large request body permission to the visible checkbox and save API', async (t) => {
   const card = await mountCard(t, {
     '/gateway/api/permissions': () => Response.json({ ok: true }),
   }, {
@@ -201,7 +208,8 @@ test('settings card synchronizes the large request body permission to the visibl
         usage: null,
       }],
     },
-  });
+  }, 'accounts');
+  await act(async () => { card.renderer.root.findAllByType('button').find(b => b.props['aria-label'] === 'accountsEdit · subuser')!.props.onClick(); });
   const uploadLabel = card.renderer.root.findAllByType('label').find((label) => label.children.some((child) => child === 'permsUpload'));
   assert.ok(uploadLabel, '大请求体权限开关必须出现在子用户权限卡片');
   const checkbox = uploadLabel!.findByType('input');
@@ -241,3 +249,36 @@ for (const [label, payload] of [
     assert.match(card.text(), /test-admin/);
   });
 }
+
+
+test('settings link replaces the full directory and does not fetch every account permission', async (t) => {
+  const card = await mountCard(t);
+  assert.equal(card.renderer.root.findAllByType('a').find(a => a.props.href === '/gateway/accounts')?.props.target, '_blank');
+  assert.equal(card.requests.some(r => r.input === '/gateway/api/overview'), false);
+  assert.equal(card.renderer.root.findAllByType('table').length, 0);
+});
+
+test('account directory paginates 205 accounts, searches and opens only the selected editor', async (t) => {
+  const users = Array.from({ length: 205 }, (_, i) => ({ id: i + 2, username: `user-${String(i).padStart(3, '0')}`, role: 'user', created_at: '2026-09-10T00:00:00Z', last_login_at: null }));
+  const permissions = { allowedFolders: [], hourlyTokenLimit: null, dailyMinutesLimit: null, monthlyBudgetMicros: 10000000, allowUpload: false, allowGitDownload: false, allowSsh: false, banned: false, sandboxMode: null, disabledSessions: [] };
+  const card = await mountCard(t, {}, {
+    '/api/dsh-passwords/state': { me: { username: 'test-admin', role: 'admin' }, users },
+    '/gateway/api/overview': { me: { id: 1, username: 'test-admin', role: 'admin' }, users: users.map(u => ({ ...u, permissions: { ...permissions, banned: u.id === 202 }, usage: null })) },
+  }, 'accounts');
+  const rows = () => card.renderer.root.findAllByType('tr').filter(r => r.props['data-account-id']);
+  assert.equal(rows().length, 25);
+  assert.equal(card.renderer.root.findAllByType('dialog').length, 0);
+  const button = (label: string) => card.renderer.root.findAllByType('button').find(b => b.children.includes(label))!;
+  await act(async () => button('accountsNext').props.onClick());
+  assert.equal(rows()[0].props['data-account-id'], 27);
+  const search = card.renderer.root.findByProps({ type: 'search' });
+  await act(async () => search.props.onChange({ target: { value: 'user-200' } }));
+  assert.equal(rows().length, 1);
+  assert.equal(rows()[0].props['data-account-id'], 202);
+  await act(async () => card.renderer.root.findByProps({ 'aria-label': 'accountsEdit · user-200' }).props.onClick());
+  assert.equal(card.renderer.root.findAllByType('dialog').length, 1);
+  assert.equal(card.renderer.root.findAllByProps({ className: 'dshpw-perm' }).length, 1);
+  await act(async () => card.renderer.root.findByProps({ 'aria-label': 'accountsClose' }).props.onClick());
+  assert.equal(card.renderer.root.findAllByType('dialog').length, 0);
+  assert.equal(rows().length, 1);
+});

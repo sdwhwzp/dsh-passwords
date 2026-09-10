@@ -27,7 +27,7 @@ import { createHmac, createHash, randomBytes, timingSafeEqual } from 'node:crypt
 import { type Duplex, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import zlib from 'node:zlib';
-import { URL } from 'node:url';
+import { URL, fileURLToPath } from 'node:url';
 import dns from 'node:dns';
 import express, { type Request, type Response } from 'express';
 import WebSocket, { type RawData, WebSocketServer } from 'ws';
@@ -687,7 +687,7 @@ function themeBootScript(preference: ThemePreference): string {
  *   用 inset 大阴影 + text-fill-color 回压为当前主题输入底色
  * - 动画只动 transform/opacity/box-shadow，并尊重 prefers-reduced-motion
  */
-const PAGE_STYLE = `
+const PAGE_THEME_STYLE = `
 :root{
   --bg:rgb(255,255,255);
   --card:rgba(255,255,255,.94);
@@ -746,6 +746,9 @@ html[data-theme=dark]{
   --shadow-field:0 1px 2px rgba(0,0,0,.3);
   --shadow-btn:0 4px 18px -4px rgba(86,134,254,.5);
 }
+`;
+
+const PAGE_STYLE = PAGE_THEME_STYLE + `
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
 body{background:var(--bg);color:var(--txt);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Helvetica Neue',Helvetica,Arial,sans-serif;display:flex;align-items:center;justify-content:center;overflow:hidden;-webkit-font-smoothing:antialiased}
@@ -2655,6 +2658,26 @@ export function createGatewayServer(
   };
 
   const jsonBody = express.json({ limit: '256kb' });
+
+  // The HTML and its bundle require the same current administrator identity as account APIs.
+  app.get('/gateway/accounts', (req, res) => {
+    if (!authedUser(req)) {
+      res.redirect('/gateway/login?next=%2Fgateway%2Faccounts');
+      return;
+    }
+    if (!apiAuth(req, res, true)) return;
+    const lang = langOf(req);
+    const nonce = randomBytes(18).toString('base64');
+    const themeScript = themeBootScript(readDshThemePreference()).replace('<script>', `<script nonce="${nonce}">`);
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Content-Security-Policy', `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`);
+    res.type('html').send(`<!doctype html><html lang="${lang === 'en' ? 'en' : 'zh-CN'}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${lang === 'en' ? 'Account management' : '账号管理'}</title>${themeScript}<style>${PAGE_THEME_STYLE}</style></head><body><div id="accounts-root"></div><script nonce="${nonce}" defer src="/gateway/accounts.js"></script></body></html>`);
+  });
+  app.get('/gateway/accounts.js', (req, res) => {
+    if (!apiAuth(req, res, true)) return;
+    res.setHeader('Cache-Control', 'no-store');
+    res.sendFile(fileURLToPath(new URL('./accounts.js', import.meta.url)));
+  });
 
   // token 用量上报节流（客户端 15 秒 flush 一次；这里再加 5 秒最小间隔，防高频自刷）。
   // 声明在权限路由之前：permissions 路由改配额时会清理该缓存。
