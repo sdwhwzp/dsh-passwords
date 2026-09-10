@@ -56,6 +56,13 @@ test('principal access returns only the account-owned resources inside allowed f
       source: 'dsh-passwords', id: String(customer.id), username: customer.username, role: 'user',
     } as const;
 
+    assert.doesNotThrow(() => provider.assertAuthenticated(principal));
+    assert.equal(provider.modelAllowed(principal, 'codex', 'gpt-5.5'), false);
+    assert.equal(provider.modelAllowed(principal, 'codex', 'gpt-5.6'), true);
+    assert.equal(provider.modelAllowed(principal, 'codex', 'gpt-6-astra'), true);
+    assert.equal(provider.modelAllowed(principal, 'deepseek', 'deepseek-chat'), true);
+    assert.throws(() => provider.assertAuthenticated({ ...principal, username: 'forged' }), /active account required/);
+    assert.throws(() => provider.assertAuthenticated({ ...principal, id: '999999' }), /active account required/);
     const access = await provider.resolve(principal, {
       sessionIds: ['owned', 'disabled', 'outside', 'other-owned', 'new-blank', 'missing'],
       workspaceIds: ['workspace-own', 'workspace-other', 'workspace-escape', 'missing'],
@@ -93,7 +100,11 @@ test('principal access fails closed for banned accounts and missing Host service
       sandboxMode: null, disabledSessions: [],
     });
     const ctx = { root: { get: () => undefined } } as unknown as Context;
-    const access = await new DshPasswordsPrincipalAccessProvider(ctx, db).resolve({
+    const provider = new DshPasswordsPrincipalAccessProvider(ctx, db);
+    assert.throws(() => provider.assertAuthenticated({
+      source: 'dsh-passwords', id: String(customer.id), username: customer.username, role: 'user',
+    }), /active account required/);
+    const access = await provider.resolve({
       source: 'dsh-passwords', id: String(customer.id), username: customer.username, role: 'user',
     }, { sessionIds: ['session'], workspaceIds: ['workspace'] });
     assert.equal(access.readableSessionIds.size, 0);

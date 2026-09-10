@@ -11,6 +11,7 @@ import { realpath } from 'node:fs/promises';
 import path from 'node:path';
 import type { Database, UserPermissionsRow } from './db.js';
 import type { AuthenticatedPrincipal } from './principal.js';
+import { customerModelAllowed } from './model-policy.js';
 
 interface WorkspaceRecord {
   readonly id: string;
@@ -125,6 +126,29 @@ export class DshPasswordsPrincipalAccessProvider {
     }
     signal?.throwIfAborted();
     return { readableSessionIds, readableWorkspaceIds };
+  }
+
+  /**
+   * Reject stale or disabled identities before accessing account data without a Session id.
+   * @param principal Identity already verified by the Host transport or message log.
+   */
+  assertAuthenticated(principal: AuthenticatedPrincipal): void {
+    const user = this.authenticatedUser(principal);
+    if (user === null || this.db.getPermissions(user.id)?.banned) {
+      throw new Error('authenticated active account required');
+    }
+  }
+
+  /**
+   * Apply the same model policy to plugin-owned model selectors and settings.
+   * @param principal Host-authenticated account requesting the model.
+   * @param provider Provider route id.
+   * @param model Model id within the provider.
+   * @returns whether this active account may select the route.
+   */
+  modelAllowed(principal: AuthenticatedPrincipal, provider: string, model: string): boolean {
+    this.assertAuthenticated(principal);
+    return principal.role === 'admin' || customerModelAllowed(provider, model);
   }
 
   private authenticatedUser(principal: AuthenticatedPrincipal) {
