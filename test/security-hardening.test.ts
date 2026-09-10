@@ -160,7 +160,7 @@ before(async () => {
     jwtSecret: 'test-secret',
     internalSecret: 'test-internal-secret',
     patch: { dshRoot: '', restartService: '' },
-    webSocket: { adminAllowlist: [], userAllowlist: [] },
+    webSocket: { sshEndpoints: [] },
   };
 
   const auth = new AuthService(config, db);

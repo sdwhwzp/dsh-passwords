@@ -68,6 +68,22 @@ const ALPHA_CONNECTION_OLD_PATCHED = [
   '}',
 ].join('\n');
 
+function makeDshRootWithProfileSettings(
+  dshSettingsContent: string,
+  profileSettingsContent: string,
+): { root: string; profile: string; cleanup: () => void } {
+  const root = mkdtempSync(path.join(tmpdir(), 'dshpw-duplicate-patch-'));
+  const profile = path.join(root, 'profile');
+  const dshSettingsDir = path.join(root, 'dsh', 'node_modules', '@deepseek-ai', 'dsh-client-ui-settings', 'lib');
+  const profileSettingsDir = path.join(profile, 'node_modules', '@deepseek-ai', 'dsh-client-ui-settings', 'lib');
+  mkdirSync(dshSettingsDir, { recursive: true });
+  mkdirSync(profileSettingsDir, { recursive: true });
+  writeFileSync(path.join(dshSettingsDir, 'client.js'), dshSettingsContent);
+  writeFileSync(path.join(profileSettingsDir, 'client.js'), profileSettingsContent);
+  return { root: path.join(root, 'dsh'), profile, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+}
+
+
 /** 与真实 dsh-client-ui-workspace client.js 相同的 click-outside 粘滞搜索块（制表符缩进） */
 const WORKSPACE_STICKY = [
   '\t\t\t(0, react.useEffect)(() => {',
@@ -98,6 +114,24 @@ const WORKSPACE_STICKY = [
 
 
 
+test('补丁：DSH 根与 web profile 存在重复 settings 副本时全部修复并纳入状态', () => {
+  const duplicate = makeDshRootWithProfileSettings(RC7_SETTINGS_UNPATCHED, ALPHA3_SETTINGS_UNPATCHED);
+  try {
+    assert.equal(patchStatus(duplicate.root, duplicate.profile).settingsHostMode, false);
+    assert.equal(applyRemotePatch(duplicate.root, duplicate.profile), 'applied');
+    assert.equal(patchStatus(duplicate.root, duplicate.profile).settingsHostMode, true);
+    assert.equal(
+      readFileSync(path.join(duplicate.root, 'node_modules', '@deepseek-ai', 'dsh-client-ui-settings', 'lib', 'client.js'), 'utf8'),
+      RC7_SETTINGS_PATCHED + '\n',
+    );
+    assert.equal(
+      readFileSync(path.join(duplicate.profile, 'node_modules', '@deepseek-ai', 'dsh-client-ui-settings', 'lib', 'client.js'), 'utf8'),
+      ALPHA3_SETTINGS_PATCHED,
+    );
+  } finally {
+    duplicate.cleanup();
+  }
+});
 test('补丁：当前支持范围内 settings 未打 host 模式时会被打进', () => {
   const { root, cleanup } = makeDshRoot(RC7_SETTINGS_UNPATCHED);
   try {
@@ -126,16 +160,15 @@ test('补丁：alpha.3 settings 使用 remote.$host.isLoopback 时强制 host pe
 test('补丁：当前 rc.1 npm artifacts 应应用 settings 与 Cookie bridge 并保持语法有效', () => {
   const { root, cleanup } = makeDshRoot(RC7_SETTINGS_PATCHED);
   try {
-    const packages = [
-      ['dsh-client-ui-settings', 'client.js'],
-      ['dsh-client-connection', 'index.js'],
-    ] as const;
-    for (const [packageName, fileName] of packages) {
-      const target = path.join(root, 'node_modules', '@deepseek-ai', packageName, 'lib', fileName);
-      const source = path.join(process.cwd(), 'node_modules', '@deepseek-ai', packageName, 'lib', fileName);
-      mkdirSync(path.dirname(target), { recursive: true });
-      copyFileSync(source, target);
-    }
+    const settingsSource = path.join(process.cwd(), 'node_modules', '@deepseek-ai', 'dsh-client-ui-settings', 'lib', 'client.js');
+    const settingsTarget = path.join(root, 'node_modules', '@deepseek-ai', 'dsh-client-ui-settings', 'lib', 'client.js');
+    mkdirSync(path.dirname(settingsTarget), { recursive: true });
+    const source = readFileSync(settingsSource, 'utf8');
+    const unpatchedSettings = source.replace('const persistence = "host";', 'const persistence = ctx.remote.$host.isLoopback ? "host" : "memory";');
+    writeFileSync(settingsTarget, unpatchedSettings);
+    const connectionTarget = path.join(root, 'node_modules', '@deepseek-ai', 'dsh-client-connection', 'lib', 'index.js');
+    mkdirSync(path.dirname(connectionTarget), { recursive: true });
+    writeFileSync(connectionTarget, ALPHA_CONNECTION_UNPATCHED);
     // npm ci installs the official unmodified RC.1 artifacts. Both the
     // browser-side host persistence and the private Host Cookie bridge must
     // be patched before the public gateway is allowed to start.

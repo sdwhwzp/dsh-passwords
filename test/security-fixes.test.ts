@@ -102,7 +102,7 @@ test('F-A2：sanitizeText 消息净化同步剥离隐藏 Unicode', () => {
 });
 
 test('SSRF：公网地址放行', () => {
-  for (const h of ['8.8.8.8', '1.1.1.1', '193.134.209.238', 'example.com', 'github.com', 'ssh.example.com:22', '127.0.0.1.nip.io']) {
+  for (const h of ['8.8.8.8', '1.1.1.1', '203.0.113.10', 'example.com', 'github.com', 'ssh.example.com:22', '127.0.0.1.nip.io']) {
     assert.equal(isPrivateHost(h), false, `${h} 应放行（域名在网关层做 DNS 判定）`);
   }
 });

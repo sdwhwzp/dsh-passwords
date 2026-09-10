@@ -17,7 +17,7 @@
   &nbsp;
   <a href="https://github.com/slywalker2006/dsh-passwords/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/slywalker2006/dsh-passwords/ci.yml?style=flat-square&label=CI" alt="CI"></a>
   &nbsp;
-  <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/DSH-0.1.2--rc.1-4c6ef5?style=flat-square&labelColor=454a54" alt="DSH"></a>
+  <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/DSH-0.1.5--rc.1-4c6ef5?style=flat-square&labelColor=454a54" alt="DSH"></a>
   &nbsp;
   <img src="https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square" alt="License">
   &nbsp;
@@ -76,7 +76,7 @@ dsh 自带的网页界面没有登录与权限控制，公网部署后任何拿�
 
 ### 前置条件
 
-宿主机安装需要 Node.js 22.19+ 或 24+、可正常运行的 dsh 和 git。请让本插件与 dsh 宿主使用同一 Node 主线版本；DSH `0.1.2-rc.1` 和 `0.1.3-alpha.1` 的官方运行要求也是 22.19+ 或 24+。Docker 安装只需要 Docker Engine 或 Docker Desktop 和一个 DeepSeek API key。
+宿主机安装需要 Node.js 22.19+ 或 24+、可正常运行的 dsh 和 git。请让本插件与 dsh 宿主使用同一 Node 主线版本；DSH `0.1.5-rc.1` 是当前验证过的主机基线，同时保留对 `0.1.2` 和 `0.1.3` 接口边界的兼容。Docker 安装只需要 Docker Engine 或 Docker Desktop 和一个 DeepSeek API key。
 
 ### 安装
 
@@ -210,8 +210,7 @@ node scripts/start-http.mjs [端口]    # 默认 8080，需确认风险提示
 | `MCP_DB_ENC_KEY` | 空 | 字段加密密钥，启用后不可更换；备份数据库必须连同 `.env` |
 | `MCP_GATEWAY_HOST` / `MCP_GATEWAY_PORT` | `0.0.0.0` / `443` | 网关监听地址与端口 |
 | `MCP_GATEWAY_UPSTREAM` | `http://127.0.0.1:3080` | dsh 网页地址，插件自动指向 |
-| `MCP_GATEWAY_WS_ADMIN_ALLOWLIST` | 空 | 仅主用户可用的第三方 WebSocket 路径；支持精确路径与 `/*` 通配，不会出现在子用户授权列表 |
-| `MCP_GATEWAY_WS_USER_ALLOWLIST` | 空 | 可由主用户逐项授权给子用户的第三方 WebSocket 路径；支持精确路径与 `/*` 通配 |
+| `MCP_GATEWAY_SSH_WS_ENDPOINTS` | 空 | 第三方 SSH WebSocket 端点（逗号分隔，支持精确路径与 `/*` 通配）；主用户配置好后，子用户只需勾选 SSH 权限开关即可使用，未勾选一律拒绝，主用户不受限。不做任何插件专属自动探测。 |
 | `MCP_GATEWAY_REDIRECT_PORT` | `80` | ACME 验证与 301 跳转端口 |
 | `MCP_GATEWAY_DOMAIN` | 空 | 自定义域名，留空用 `<公网IP>.sslip.io` |
 | `MCP_GATEWAY_AUTO_TLS` | 开 | `0` 关闭自动 HTTPS |

@@ -380,6 +380,9 @@ function startMockUpstream(): Promise<http.Server> {
           { sessionId: 'session-visible', label: 'Visible session', cwd: '/workspaces/visible', createdAt: 1, mention: '@visible' },
           { sessionId: 'session-hidden', label: 'Hidden session', cwd: '/workspaces/hidden', createdAt: 1, mention: '@hidden' },
         ] } }));
+      } else if ((req.url ?? '').startsWith('/sidebar/bundle/')) {
+        res.writeHead(200, { 'content-type': 'text/javascript' });
+        res.end('console.log("mock sidebar chunk");');
       } else if ((req.url ?? '').startsWith('/api/session.search')) {
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(sessionSearchResponseMode === 'malformed'
@@ -558,7 +561,9 @@ before(async () => {
     jwtSecret: 'test-secret',
     internalSecret: 'test-internal',
     patch: { dshRoot: '', restartService: '' },
-    webSocket: { adminAllowlist: ['/sidebar/ws/terminal'], userAllowlist: ['/plugin/ws/*', '/api/dsh-ssh/terminal'] },
+    webSocket: {
+      sshEndpoints: ['/api/dsh-ssh/terminal', '/plugins/ssh-b/terminal'],
+    },
   };
 
   auth = new AuthService(config, db);
@@ -686,7 +691,6 @@ test('Issue #25：主用户保存既有工作区和会话授权后，子用户�
     allowUpload: false,
     allowGitDownload: false,
     allowWorkspaceCreate: false,
-    allowedWebSocketPaths: [],
     allowedAgentPresets: null,
     banned: false,
     sandboxMode: null,
@@ -736,7 +740,7 @@ test('Issue #25：alpha.3 Remote workspace 基线可解析 workspaceId 创建会
   db.addUserWorkspace(admin.id, '/workspaces/visible');
   db.setPermissions(subUser.id, {
     allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
-    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false, allowedWebSocketPaths: [],
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
     allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: ['session-visible'],
   });
   db.markSessionGrantsSeeded(subUser.id);
@@ -775,7 +779,7 @@ test('Issue #25：alpha.3 Remote workspace 基线可解析 workspaceId 创建会
 
     db.setPermissions(subUser.id, {
       allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
-      allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: true, allowedWebSocketPaths: [],
+      allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: true,
       allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [],
     });
     const existingWorkspaceCreate = await gatewayReq(
@@ -849,7 +853,7 @@ test('Issue #25：弱网络下 workspace upsert 先于 session.create 响应仍�
   const subUser = db.createUser('issue-25-create-race', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
     allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
-    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false, allowedWebSocketPaths: [],
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
     allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: ['session-visible'],
   });
   db.markSessionGrantsSeeded(subUser.id);
@@ -911,7 +915,7 @@ test('Issue #25：原始 workspace upsert 丢失时，创建响应后补发最�
   const subUser = db.createUser('issue-25-create-compensation', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
     allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
-    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false, allowedWebSocketPaths: [],
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
     allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: ['session-visible'],
   });
   db.markSessionGrantsSeeded(subUser.id);
@@ -971,7 +975,7 @@ test('Issue #25：权限保存拒绝当前资源快照中不存在的会话', as
   const subUser = db.createUser('issue-25-stale-assignment', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
     allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
-    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false, allowedWebSocketPaths: [],
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
     allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: [],
   });
   const originalCookie = cookie;
@@ -997,7 +1001,7 @@ test('Issue #25：保存权限时清理历史失效会话并保留新授权', as
   const subUser = db.createUser('issue-25-stale-existing-grant', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
     allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
-    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false, allowedWebSocketPaths: [],
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
     allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [],
     allowedSessionIds: ['archived-session'],
   });
@@ -1026,7 +1030,7 @@ test('Issue #25：资源核验不可用时权限保存 fail-closed', async () =>
   const subUser = db.createUser('issue-25-resource-outage', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
     allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
-    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false, allowedWebSocketPaths: [],
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
     allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: [],
   });
   const originalCookie = cookie;
@@ -1053,7 +1057,7 @@ test('rc.1 session.search 只返回子用户已授权会话的摘要', async () 
   const subUser = db.createUser('session-search-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
     allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
-    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false, allowedWebSocketPaths: [],
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
     allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: ['session-visible'],
   });
   db.markSessionGrantsSeeded(subUser.id);
@@ -1093,7 +1097,7 @@ test('rc.1 session.search 成功响应结构异常时 fail-closed，不透传原
   const subUser = db.createUser('session-search-malformed', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
     allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
-    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false, allowedWebSocketPaths: [],
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
     allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: ['session-visible'],
   });
   db.markSessionGrantsSeeded(subUser.id);
@@ -1130,7 +1134,7 @@ test('SSH 插件 HTTP 运维端点对子用户在到达上游前拒绝', async (
   const subUser = db.createUser('ssh-denied-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
     allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
-    allowUpload: true, allowGitDownload: true, allowWorkspaceCreate: false, allowSsh: false, allowedWebSocketPaths: [],
+    allowUpload: true, allowGitDownload: true, allowWorkspaceCreate: false, allowSsh: false,
     allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: [],
   });
   const subCookie = `dsh_gateway_token=${jwt.sign({ sub: String(subUser.id), username: subUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' })}`;
@@ -1151,13 +1155,13 @@ test('SSH 插件 HTTP 运维端点对子用户在到达上游前拒绝', async (
   }
 });
 
-test('SSH 插件只向已启用的子用户暴露其认领的主机，且创建会持久化认领', async () => {
-  const subUser = db.createUser('ssh-isolated-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
-  const otherUser = db.createUser('ssh-other-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+test('SSH 插件：主用户配置的主机可供开启 SSH 的子用户读取，子用户不能改主机配置', async () => {
+  const subUser = db.createUser('ssh-shared-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  const otherUser = db.createUser('ssh-shared-other-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   for (const user of [subUser, otherUser]) {
     db.setPermissions(user.id, {
       allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
-      allowUpload: true, allowGitDownload: true, allowWorkspaceCreate: false, allowSsh: true, allowedWebSocketPaths: ['/api/dsh-ssh/terminal'],
+      allowUpload: true, allowGitDownload: true, allowWorkspaceCreate: false, allowSsh: true,
       allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: [],
     });
   }
@@ -1170,35 +1174,19 @@ test('SSH 插件只向已启用的子用户暴露其认领的主机，且创建�
     cookie = subCookie;
     const beforeCreate = await gatewayReq('GET', '/api/dsh-ssh/hosts');
     assert.equal(beforeCreate.status, 200, beforeCreate.body);
-    assert.deepEqual(JSON.parse(beforeCreate.body).hosts, [], '未认领的管理员主机不得泄露给子用户');
+    assert.deepEqual(JSON.parse(beforeCreate.body).hosts, [{ alias: 'admin-host', host: '198.51.100.10' }]);
 
-    const created = await gatewayReq(
-      'POST',
-      '/api/dsh-ssh/hosts',
-      { 'content-type': 'application/json' },
+    const create = await gatewayReq(
+      'POST', '/api/dsh-ssh/hosts', { 'content-type': 'application/json' },
       JSON.stringify({ alias: 'child-host', host: '203.0.113.10' }),
     );
-    assert.equal(created.status, 201, created.body);
-    assert.equal(db.getSshHostOwner('child-host'), subUser.id, '成功创建后必须归属创建者');
-
-    const afterCreate = await gatewayReq('GET', '/api/dsh-ssh/hosts');
-    assert.equal(afterCreate.status, 200, afterCreate.body);
-    assert.deepEqual(JSON.parse(afterCreate.body).hosts, [{ alias: 'child-host', host: '203.0.113.10' }]);
+    assert.equal(create.status, 403, '子用户不能改变主用户维护的 SSH 主机配置');
+    assert.equal(db.getSshHostOwner('child-host'), null, '共享模型不创建子用户 host claim');
 
     cookie = otherCookie;
     const otherList = await gatewayReq('GET', '/api/dsh-ssh/hosts');
     assert.equal(otherList.status, 200, otherList.body);
-    assert.deepEqual(JSON.parse(otherList.body).hosts, []);
-    const aliasCollision = await gatewayReq(
-      'POST', '/api/dsh-ssh/hosts', { 'content-type': 'application/json' }, JSON.stringify({ alias: 'child-host', host: '203.0.113.11' }),
-    );
-    assert.equal(aliasCollision.status, 403, aliasCollision.body);
-    const forbiddenExec = await gatewayReq(
-      'POST', '/api/dsh-ssh/exec', { 'content-type': 'application/json' }, JSON.stringify({ alias: 'child-host', command: 'id' }),
-    );
-    assert.equal(forbiddenExec.status, 403, forbiddenExec.body);
-    const forbiddenLs = await gatewayReq('GET', '/api/dsh-ssh/ls?alias=child-host&path=/');
-    assert.equal(forbiddenLs.status, 403, forbiddenLs.body);
+    assert.deepEqual(JSON.parse(otherList.body).hosts, [{ alias: 'admin-host', host: '198.51.100.10' }]);
   } finally {
     mockSshHosts = originalHosts;
     cookie = originalCookie;
@@ -1209,7 +1197,7 @@ test('SSH 终端 WebSocket 升级对子用户拒绝', async () => {
   const subUser = db.createUser('ssh-terminal-denied-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
     allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
-    allowUpload: true, allowGitDownload: true, allowWorkspaceCreate: false, allowSsh: false, allowedWebSocketPaths: ['/api/dsh-ssh/terminal'],
+    allowUpload: true, allowGitDownload: true, allowWorkspaceCreate: false, allowSsh: false,
     allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: [],
   });
   const subToken = jwt.sign({ sub: String(subUser.id), username: subUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' });
@@ -1221,30 +1209,53 @@ test('SSH 终端 WebSocket 升级对子用户拒绝', async () => {
   assert.match(handshake.statusLine, /403/);
 });
 
-test('SSH 终端只允许拥有 alias 且开启 SSH 的子用户到达上游', async () => {
-  const subUser = db.createUser('ssh-terminal-owner-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+test('SSH 终端：开启 SSH 的子用户可连接主用户配置的 alias', async () => {
+  const subUser = db.createUser('ssh-terminal-shared-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
     allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
-    allowUpload: true, allowGitDownload: true, allowWorkspaceCreate: false, allowSsh: true, allowedWebSocketPaths: [],
+    allowUpload: true, allowGitDownload: true, allowWorkspaceCreate: false, allowSsh: true,
     allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: [],
   });
-  assert.equal(db.claimSshHost('owned-terminal', subUser.id), true);
   const subToken = jwt.sign({ sub: String(subUser.id), username: subUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' });
-  const denied = await websocketHandshake('/api/dsh-ssh/terminal?alias=admin-host', {
+  const allowed = await websocketHandshake('/api/dsh-ssh/terminal?alias=admin-host', {
     cookie: `dsh_gateway_token=${subToken}`, origin: 'http://127.0.0.1', host: '127.0.0.1',
   });
-  assert.match(denied.statusLine, /403/);
-  const allowed = await websocketHandshake('/api/dsh-ssh/terminal?alias=owned-terminal', {
-    cookie: `dsh_gateway_token=${subToken}`, origin: 'http://127.0.0.1', host: '127.0.0.1',
+  assert.match(allowed.statusLine, /101/, '拥有 SSH 权限的子用户应可连接主用户配置的 alias');
+});
+
+test('多 SSH WebSocket 端点：子用户只需勾选 SSH 总开关即可使用全部已登记端点', async () => {
+  const deniedUser = db.createUser('ssh-second-denied', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(deniedUser.id, {
+    allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false, allowSsh: false,
+    allowedAgentPresets: null, banned: false,
+    sandboxMode: null, disabledSessions: [], allowedSessionIds: [],
   });
-  assert.match(allowed.statusLine, /101/, '拥有的 alias 应真实转发至上游 PTY WebSocket');
+  const deniedToken = jwt.sign({ sub: String(deniedUser.id), username: deniedUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' });
+  const denied = await websocketHandshake('/plugins/ssh-b/terminal', {
+    cookie: `dsh_gateway_token=${deniedToken}`, origin: 'http://127.0.0.1', host: '127.0.0.1',
+  });
+  assert.match(denied.statusLine, /403/, '未勾选 SSH 权限时已登记端点仍被拒绝');
+
+  const allowedUser = db.createUser('ssh-second-allowed', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(allowedUser.id, {
+    allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false, allowSsh: true,
+    allowedAgentPresets: null, banned: false,
+    sandboxMode: null, disabledSessions: [], allowedSessionIds: [],
+  });
+  const allowedToken = jwt.sign({ sub: String(allowedUser.id), username: allowedUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' });
+  const allowed = await websocketHandshake('/plugins/ssh-b/terminal', {
+    cookie: `dsh_gateway_token=${allowedToken}`, origin: 'http://127.0.0.1', host: '127.0.0.1',
+  });
+  assert.match(allowed.statusLine, /101/, '勾选 SSH 权限后无需逐路径授权即可使用已登记端点');
 });
 
 test('Issue #25：alpha.3 session.list 先到时等待 Remote 基线并只返回显式授权会话', async () => {
   const subUser = db.createUser('issue-25-session-list-race', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
     allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
-    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false, allowedWebSocketPaths: [],
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
     allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: ['session-visible'],
   });
   db.markSessionGrantsSeeded(subUser.id);
@@ -1285,7 +1296,7 @@ test('Issue #25：alpha.3 子用户能建立 $events 并且只收到当前工作
   remoteMuxOpenEndpoints = [];
   const subUser = db.createUser('issue-25-events-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
-    allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null, allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false, allowedWebSocketPaths: [],
+    allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null, allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
     allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: ['session-visible', 'session-hidden'],
   });
   db.markSessionGrantsSeeded(subUser.id);
@@ -1322,7 +1333,7 @@ test('Issue #26：子用户收到自己会话的提问与审批 waterfall，且�
   const subUser = db.createUser('issue-26-events-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
     allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
-    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false, allowedWebSocketPaths: [],
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
     allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: ['session-visible'],
   });
   db.markSessionGrantsSeeded(subUser.id);
@@ -1380,7 +1391,7 @@ test('Issue #26：子用户收到自己会话的提问与审批 waterfall，且�
     const sharedUser = db.createUser('issue-26-shared-events-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
     db.setPermissions(sharedUser.id, {
       allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
-      allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false, allowedWebSocketPaths: [],
+      allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
       allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: ['session-visible'],
     });
     db.markSessionGrantsSeeded(sharedUser.id);
@@ -1462,7 +1473,7 @@ test('Issue #25：alpha.3 只允许子用户订阅被明确授予的 session/fol
   const subUser = db.createUser('issue-25-follow-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
     allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
-    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false, allowedWebSocketPaths: [],
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
     allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: ['session-visible'],
   });
   db.markSessionGrantsSeeded(subUser.id);
@@ -1506,7 +1517,7 @@ test('RC.1 子代理 session/follow 沿用 parent 授权并原样保留地址与
   const subUser = db.createUser('rc1-subagent-follow-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
     allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
-    allowUpload: true, allowGitDownload: false, allowWorkspaceCreate: false, allowedWebSocketPaths: [],
+    allowUpload: true, allowGitDownload: false, allowWorkspaceCreate: false,
     allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [],
     allowedSessionIds: ['session-visible'],
   });
@@ -1573,7 +1584,7 @@ test('RC.1 子代理 HTTP 请求只校验 parent，并保留 child 与 mode', as
   const subUser = db.createUser('rc1-subagent-http-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
     allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
-    allowUpload: true, allowGitDownload: false, allowWorkspaceCreate: false, allowedWebSocketPaths: [],
+    allowUpload: true, allowGitDownload: false, allowWorkspaceCreate: false,
     allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [],
     allowedSessionIds: ['session-visible'],
   });
@@ -1628,7 +1639,7 @@ test('RC.1 未授权 parent 的子代理地址在到达 DSH 前被拒绝', async
   const subUser = db.createUser('rc1-subagent-denied-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
     allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null, allowUpload: true,
-    allowGitDownload: false, allowWorkspaceCreate: false, allowedWebSocketPaths: [], allowedAgentPresets: null,
+    allowGitDownload: false, allowWorkspaceCreate: false, allowedAgentPresets: null,
     banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: ['session-visible'],
   });
   db.markSessionGrantsSeeded(subUser.id);
@@ -1665,7 +1676,7 @@ test('Issue #25：Remote session/follow 不能只凭数据库 grant 绕过当前
   const subUser = db.createUser('issue-25-follow-folder-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
     allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
-    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false, allowedWebSocketPaths: [],
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
     allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [],
     allowedSessionIds: ['session-hidden'],
   });
@@ -1707,7 +1718,6 @@ test('Issue #25：session/control 在 workspace 基线确认前不使用无 cwd 
     allowUpload: false,
     allowGitDownload: false,
     allowWorkspaceCreate: false,
-    allowedWebSocketPaths: [],
     allowedAgentPresets: null,
     banned: false,
     sandboxMode: null,
@@ -1763,7 +1773,6 @@ test('Issue #25：主用户保存权限后强制子用户 Remote mux 重连以�
     allowUpload: false,
     allowGitDownload: false,
     allowWorkspaceCreate: false,
-    allowedWebSocketPaths: [],
     allowedAgentPresets: null,
     banned: false,
     sandboxMode: null,
@@ -1798,7 +1807,6 @@ test('Issue #25：主用户保存权限后强制子用户 Remote mux 重连以�
       allowUpload: false,
       allowGitDownload: false,
       allowWorkspaceCreate: false,
-      allowedWebSocketPaths: [],
       allowedAgentPresets: null,
       banned: false,
       sandboxMode: null,
@@ -1847,7 +1855,7 @@ test('RC.1 Agent-scope RPC：未授权 session 在到达 DSH 前拒绝', async (
   const subUser = db.createUser('scoped-rpc-denied-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
     allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
-    allowUpload: true, allowGitDownload: true, allowWorkspaceCreate: false, allowedWebSocketPaths: [],
+    allowUpload: true, allowGitDownload: true, allowWorkspaceCreate: false,
     allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [],
     allowedSessionIds: ['session-visible'],
   });
@@ -1889,7 +1897,7 @@ test('RC.1 sessionReferenceResolver 结果只返回子用户已授权会话', as
   const subUser = db.createUser('scoped-reference-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
     allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
-    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false, allowedWebSocketPaths: [],
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
     allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [],
     allowedSessionIds: ['session-visible'],
   });
@@ -1927,7 +1935,7 @@ test('权限：alpha.1 原始 session 上传要求已授权会话并保留字节
   const subUser = db.createUser('raw-upload-contract', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
     allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
-    allowUpload: true, allowGitDownload: true, allowWorkspaceCreate: false, allowedWebSocketPaths: [],
+    allowUpload: true, allowGitDownload: true, allowWorkspaceCreate: false,
     allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [],
     allowedSessionIds: ['session-visible'],
   });
@@ -1970,7 +1978,7 @@ test('权限：alpha.1 selectModel 仅允许已授权会话', async () => {
   const subUser = db.createUser('select-model-contract', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
     allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
-    allowUpload: true, allowGitDownload: true, allowWorkspaceCreate: false, allowedWebSocketPaths: [],
+    allowUpload: true, allowGitDownload: true, allowWorkspaceCreate: false,
     allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [],
     allowedSessionIds: ['session-visible'],
   });
@@ -2124,7 +2132,6 @@ test('权限：收紧旧会话沙盒失败时只回收既有授权，不修改�
     allowUpload: true,
     allowGitDownload: true,
     allowWorkspaceCreate: false,
-    allowedWebSocketPaths: [],
     allowedAgentPresets: null,
     banned: false,
     sandboxMode: 'read-only',
@@ -2150,7 +2157,7 @@ test('权限 API：省略 sandboxMode 和 disabledSessions 时保留既有收紧
   const subUser = db.createUser('permission-partial-update-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
     allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
-    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false, allowedWebSocketPaths: [],
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
     allowedAgentPresets: [], banned: false, sandboxMode: 'read-only', disabledSessions: ['session-visible'],
     allowedSessionIds: ['session-visible'],
   });
@@ -2171,7 +2178,7 @@ test('权限 API：非法 sandboxMode 拒绝保存且不清除既有策略', asy
   const subUser = db.createUser('permission-invalid-sandbox-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
     allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
-    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false, allowedWebSocketPaths: [],
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
     allowedAgentPresets: [], banned: false, sandboxMode: 'workspace-write', disabledSessions: ['session-visible'],
     allowedSessionIds: ['session-visible'],
   });
@@ -2236,8 +2243,8 @@ test('权限：已上报的 token 用量达到上限后阻断后续代理请求'
   }
 });
 
-test('better-sidebar HTTP 宿主路由：子用户请求在网关层拒绝', async () => {
-  const subUser = db.createUser('sidebar-denied', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+test('未知第三方 HTTP 路径不因 WebSocket 注册而获得特殊放行', async () => {
+  const subUser = db.createUser('plugin-http-denied', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
     allowedFolders: [], hourlyTokenLimit: null, dailyMinutesLimit: null,
     allowUpload: true, allowGitDownload: true, allowWorkspaceCreate: false,
@@ -2247,42 +2254,50 @@ test('better-sidebar HTTP 宿主路由：子用户请求在网关层拒绝', asy
   const originalCookie = cookie;
   cookie = `dsh_gateway_token=${subToken}`;
   try {
-    for (const path of ['/sidebar/api/fs.tree', '/sidebar/upload', '/sidebar/file/x', '/sidebar/html/x']) {
-      const response = await gatewayReq('POST', path, { origin: 'http://127.0.0.1' }, '{}');
-      assert.equal(response.status, 403, `${path} must be denied before upstream`);
-    }
+    const response = await gatewayReq('POST', '/plugin/ws/run', { origin: 'http://127.0.0.1' }, '{}');
+    assert.equal(response.status, 200, 'HTTP remains governed by the upstream/plugin contract; only the WebSocket path is registered');
   } finally {
     cookie = originalCookie;
   }
 });
 
-test('better-sidebar WebSocket：管理员可升级，未知路径被拒绝', async () => {
-  const allowed = await websocketHandshake('/sidebar/ws/terminal?tab=test', {
+test('通用第三方 WebSocket：主用户不受限，子用户未授权路径一律拒绝', async () => {
+  const allowed = await websocketHandshake('/plugin/ws/run?tab=test', {
     cookie,
     origin: 'http://127.0.0.1',
     host: '127.0.0.1',
   });
-  assert.match(allowed.statusLine, /101 Switching Protocols/);
-  const denied = await websocketHandshake('/sidebar/ws/unknown', {
-    cookie,
-    origin: 'http://127.0.0.1',
-    host: '127.0.0.1',
+  assert.match(allowed.statusLine, /101 Switching Protocols/, '主用户无需登记即可使用任意第三方路径');
+
+  const subUser = db.createUser('ws-unknown-subuser', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: [], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
+    banned: false, sandboxMode: null, disabledSessions: [],
   });
-  assert.match(denied.statusLine, /404/);
+  const subToken = jwt.sign({ sub: String(subUser.id), username: subUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' });
+  for (const path of ['/plugin/ws/run', '/plugin/unknown/terminal', '/sidebar/ws/terminal']) {
+    const denied = await websocketHandshake(path, {
+      cookie: `dsh_gateway_token=${subToken}`,
+      origin: 'http://127.0.0.1',
+      host: '127.0.0.1',
+    });
+    assert.match(denied.statusLine, /404/, `子用户访问 ${path} 必须被拒绝`);
+  }
 });
 
 test('F-15：WebSocket 网关认证 query 不得转发，插件业务 token 必须保留', async () => {
-  const result = await websocketHandshake('/sidebar/ws/terminal?keep=1&dsh_gateway_token=leaked&token=plugin-business-token', {
+  const result = await websocketHandshake('/plugin/ws/run?keep=1&dsh_gateway_token=leaked&token=plugin-business-token', {
     cookie,
     origin: 'http://127.0.0.1',
     host: '127.0.0.1',
   });
   assert.match(result.statusLine, /101 Switching Protocols/);
-  assert.equal(lastUpstreamUrl, '/sidebar/ws/terminal?keep=1&token=plugin-business-token');
+  assert.equal(lastUpstreamUrl, '/plugin/ws/run?keep=1&token=plugin-business-token');
 });
 
 test('F-15：WebSocket 保留第三方 Cookie，但不转发网关 JWT', async () => {
-  const result = await websocketHandshake('/sidebar/ws/terminal', {
+  const result = await websocketHandshake('/plugin/ws/run', {
     cookie: `${cookie}; plugin_session=abc; preference=dark`,
     origin: 'http://127.0.0.1',
     host: '127.0.0.1',
@@ -2292,18 +2307,18 @@ test('F-15：WebSocket 保留第三方 Cookie，但不转发网关 JWT', async (
 });
 
 test('Issue #24：WebSocket combo URL 保留第二个问号和 rev', async () => {
-  const result = await websocketHandshake('/sidebar/ws/terminal??module-a&module-b&rev=abc123', {
+  const result = await websocketHandshake('/plugin/ws/run??module-a&module-b&rev=abc123', {
     cookie,
     origin: 'http://127.0.0.1',
     host: '127.0.0.1',
   });
   assert.match(result.statusLine, /101 Switching Protocols/);
-  assert.equal(lastUpstreamUrl, '/sidebar/ws/terminal??module-a&module-b&rev=abc123');
+  assert.equal(lastUpstreamUrl, '/plugin/ws/run??module-a&module-b&rev=abc123');
   assert.ok(!lastUpstreamUrl.includes('%3F'));
 });
 
-test('跨源 better-sidebar WebSocket 在升级前被拒绝', async () => {
-  const denied = await websocketHandshake('/sidebar/ws/terminal', {
+test('跨源第三方 WebSocket 在升级前被拒绝', async () => {
+  const denied = await websocketHandshake('/plugin/ws/run', {
     cookie,
     origin: 'https://attacker.example',
     host: '127.0.0.1',
@@ -2311,7 +2326,7 @@ test('跨源 better-sidebar WebSocket 在升级前被拒绝', async () => {
   assert.match(denied.statusLine, /403/);
 });
 
-test('Issue #13：子用户必须先获得主用户授予的 WebSocket 路径权限', async () => {
+test('子用户第三方 WebSocket：除内置事件与已配置 SSH 端点外一律拒绝', async () => {
   const subUser = db.createUser('plugin-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
     allowedFolders: [],
@@ -2343,7 +2358,6 @@ test('Issue #13：子用户必须先获得主用户授予的 WebSocket 路径权
       JSON.stringify({
         userId: subUser.id,
         allowedFolders: [],
-        allowedWebSocketPaths: ['/plugin/ws/*'],
       }),
     );
     assert.equal(save.status, 200);
@@ -2351,30 +2365,24 @@ test('Issue #13：子用户必须先获得主用户授予的 WebSocket 路径权
     const overview = await gatewayReq('GET', '/gateway/api/overview');
     assert.equal(overview.status, 200);
     const overviewBody = JSON.parse(overview.body) as {
-      availableWebSocketPaths: string[];
-      adminOnlyWebSocketPaths: string[];
-      users: Array<{ id: number; permissions: { allowedWebSocketPaths: string[] } }>;
+      sshWebSocketEndpoints: string[];
+      users: Array<{ id: number; permissions: { allowSsh: boolean } }>;
     };
-    assert.deepEqual(overviewBody.availableWebSocketPaths, ['/plugin/ws/*', '/api/dsh-ssh/terminal']);
-    assert.deepEqual(overviewBody.adminOnlyWebSocketPaths, ['/sidebar/ws/terminal']);
-    assert.deepEqual(
-      overviewBody.users.find((user) => user.id === subUser.id)?.permissions.allowedWebSocketPaths,
-      ['/plugin/ws/*'],
-    );
+    assert.deepEqual(overviewBody.sshWebSocketEndpoints, ['/api/dsh-ssh/terminal', '/plugins/ssh-b/terminal']);
 
     const afterGrant = await websocketHandshake('/plugin/ws/run', {
       cookie: subCookie,
       origin: 'http://127.0.0.1',
       host: '127.0.0.1',
     });
-    assert.match(afterGrant.statusLine, /101 Switching Protocols/);
+    assert.match(afterGrant.statusLine, /404/, '普通第三方路径不再支持逐路径授权');
 
-    const sidebarAfterGrant = await websocketHandshake('/sidebar/ws/terminal', {
+    const unknownAfterGrant = await websocketHandshake('/plugin/unknown/terminal', {
       cookie: subCookie,
       origin: 'http://127.0.0.1',
       host: '127.0.0.1',
     });
-    assert.match(sidebarAfterGrant.statusLine, /403/);
+    assert.match(unknownAfterGrant.statusLine, /404/);
   } finally {
     cookie = originalCookie;
   }

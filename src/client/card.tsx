@@ -83,7 +83,7 @@ export interface UpdateInfo {
 
 export interface PermOverview {
   me: { id: number; username: string; role: 'admin' | 'user' };
-  availableWebSocketPaths: string[];
+  sshWebSocketEndpoints?: string[];
   users: Array<{
     id: number;
     username: string;
@@ -96,7 +96,6 @@ export interface PermOverview {
       allowGitDownload: boolean;
       allowWorkspaceCreate: boolean;
       allowSsh?: boolean;
-      allowedWebSocketPaths: string[];
       allowedAgentPresets: string[] | null;
       banned: boolean;
       sandboxMode: string | null;
@@ -125,7 +124,6 @@ interface PermDraft {
   sandbox: string;
   disabledSessions: string[];
   allowedSessionIds: string[];
-  webSocketPaths: string[];
   agentPresets: string[] | null;
 }
 
@@ -231,6 +229,9 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
   // 权限管理（仅主用户）
   const [overview, setOverview] = useState<PermOverview | null>(null);
   const [permDrafts, setPermDrafts] = useState<Record<number, PermDraft>>({});
+  // 权限保存成功的确认文案：按子用户分别存放，直接显示在对应子用户
+  // 权限块内「保存权限」按钮旁（而非页面底部或整个权限区顶部）。
+  const [permsNotice, setPermsNotice] = useState<Record<number, string>>({});
   const [agentPresets, setAgentPresets] = useState<AgentPresetInfo[]>([]);
   const [agentPresetStatus, setAgentPresetStatus] = useState<'loading' | 'ready' | 'unavailable'>('loading');
 
@@ -276,7 +277,6 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
                   workspaceCreate: u.permissions.allowWorkspaceCreate,
                   ssh: u.permissions.allowSsh === true,
                   banned: u.permissions.banned,
-                  webSocketPaths: [...(u.permissions.allowedWebSocketPaths ?? [])],
                   agentPresets: u.permissions.allowedAgentPresets === null ? null : [...u.permissions.allowedAgentPresets],
                   sandbox: u.permissions.sandboxMode ?? '',
                   disabledSessions: [...(u.permissions.disabledSessions ?? [])],
@@ -350,10 +350,12 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
 
   // 后台自动下载不经过“立即检查/立即安装”按钮，下载进度也必须在设置页
   // 实时可见；只轮询轻量 update/status，不重复拉取用户、权限和工作区数据。
+  // 只在真实进行中的状态（检查/下载/安装/重启）快速轮询进度：不为
+  // 「发现新版本但尚未开始下载」的 idle 状态无限轮询，否则下载迟迟不启动
+  // 时会形成每 700ms 一次的空转循环；idle 态的空闲倒计时由 30 秒主刷新覆盖。
   useEffect(() => {
     const phase = updateInfo?.phase;
-    const active = updateInfo?.checking || phase === 'downloading' || phase === 'installing' || phase === 'restarting'
-      || (updateInfo?.autoUpdateEnabled === true && updateInfo.updateAvailable && phase === 'idle');
+    const active = updateInfo?.checking || phase === 'downloading' || phase === 'installing' || phase === 'restarting';
     if (!active) return undefined;
     const poll = () => {
       api<{ ok?: boolean; status?: UpdateInfo }>('/api/dsh-passwords/update/status')
@@ -365,7 +367,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
     poll();
     const timer = window.setInterval(poll, 700);
     return () => window.clearInterval(timer);
-  }, [updateInfo?.checking, updateInfo?.phase, updateInfo?.autoUpdateEnabled, updateInfo?.updateAvailable]);
+  }, [updateInfo?.checking, updateInfo?.phase]);
 
   const isAdmin = data?.me?.role === 'admin';
   const me = data?.me?.username ?? '';
@@ -375,6 +377,9 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
     fn: () => Promise<unknown>,
     okMessage: string,
     afterSuccess?: () => Promise<void>,
+    // 成功文案投递目标：不传则进页面底部全局提示栏；传了则只投递到指定 sink
+    // （如权限块内的就地确认条），不再重复刷全局提示。
+    noticeSink?: (message: string) => void,
   ) => {
     setBusy(true);
     setError('');
@@ -385,7 +390,8 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
         result !== null && typeof result === 'object' && 'notice' in result && typeof result.notice === 'string'
           ? result.notice
           : null;
-      setNotice(customNotice ?? okMessage);
+      if (noticeSink !== undefined) noticeSink(customNotice ?? okMessage);
+      else setNotice(customNotice ?? okMessage);
       if (afterSuccess) {
         await afterSuccess();
         return;
@@ -636,6 +642,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
       setError(t('err.INVALID'));
       return;
     }
+    setPermsNotice((prev) => ({ ...prev, [userId]: '' }));
     void run(
       () =>
         api<{
@@ -651,7 +658,6 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
           allowGitDownload: d.git,
           allowWorkspaceCreate: d.workspaceCreate,
           allowSsh: d.ssh,
-          allowedWebSocketPaths: d.webSocketPaths,
           allowedAgentPresets: d.agentPresets,
           banned: d.banned,
           sandboxMode: d.sandbox === '' ? null : d.sandbox,
@@ -675,6 +681,8 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
           dirtyUsersRef.current.delete(userId);
         }),
       t('permsSaved'),
+      undefined,
+      (message) => setPermsNotice((prev) => ({ ...prev, [userId]: message })),
     );
   };
 
@@ -743,7 +751,6 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
           className: 'dshpw-btn danger dshpw-signout',
           disabled: signOutBusy || data === null,
           onClick: signOut,
-          title: t('logoutHint'),
         },
         signOutBusy ? t('loggingOut') : t('logout'),
       ),
@@ -760,7 +767,6 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
           'span',
           { className: 'dshpw-switch-copy' },
           h('strong', null, t('chatToggleDesc')),
-          h('small', null, t('chatToggleHint')),
         ),
         h(
           'span',
@@ -960,7 +966,6 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
         { className: 'dshpw-action-row dshpw-form-actions' },
         h('button', { className: 'dshpw-btn', disabled: busy, onClick: rename }, t('saveName')),
       ),
-      h('div', { className: 'dshpw-hint' }, t('nameHint')),
     ),
 
     // ── 子用户管理（仅主用户） ──
@@ -969,23 +974,6 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
         'div',
         { className: 'dshpw-section' },
         h(SectionHeader, { label: t('subusers') }),
-        ...(data?.users ?? []).map((u) =>
-          h(
-            'div',
-            { className: 'dshpw-user', key: u.id },
-            h(
-              'span',
-              null,
-              u.username,
-              u.role === 'admin'
-                ? h('span', { className: 'dshpw-badge admin' }, t('owner'))
-                : h('span', { className: 'dshpw-badge' }, t('subuser')),
-              u.last_login_at ? h('span', { className: 'dshpw-hint' }, t('lastLogin', { time: fmtTime(u.last_login_at) })) : null,
-            ),
-            u.username !== me &&
-              h('button', { className: 'dshpw-btn danger', disabled: busy, onClick: () => removeUser(u.username) }, t('remove')),
-          ),
-        ),
         h('input', {
           className: 'dshpw-input',
           autoComplete: 'off',
@@ -1007,7 +995,23 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
           { className: 'dshpw-action-row dshpw-form-actions' },
           h('button', { className: 'dshpw-btn', disabled: busy, onClick: addSubUser }, t('addSub')),
         ),
-        h('div', { className: 'dshpw-hint' }, t('subHint')),
+        ...(data?.users ?? []).map((u) =>
+          h(
+            'div',
+            { className: 'dshpw-user', key: u.id },
+            h(
+              'span',
+              null,
+              u.username,
+              u.role === 'admin'
+                ? h('span', { className: 'dshpw-badge admin' }, t('owner'))
+                : h('span', { className: 'dshpw-badge' }, t('subuser')),
+              u.last_login_at ? h('span', { className: 'dshpw-hint' }, t('lastLogin', { time: fmtTime(u.last_login_at) })) : null,
+            ),
+            u.username !== me &&
+              h('button', { className: 'dshpw-btn danger', disabled: busy, onClick: () => removeUser(u.username) }, t('remove')),
+          ),
+        ),
       ),
 
 
@@ -1155,31 +1159,6 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
                         )),
                   )
                 : null,
-              overview.availableWebSocketPaths.length > 0
-                ? h(
-                    'div',
-                    { className: 'dshpw-row' },
-                    h('div', { className: 'dshpw-label' }, t('permsWebSockets')),
-                    ...overview.availableWebSocketPaths.map((rule) =>
-                      h(
-                        'label',
-                        { className: 'dshpw-check', key: rule },
-                        h('input', {
-                          type: 'checkbox',
-                          checked: d.webSocketPaths.includes(rule),
-                          disabled: busy,
-                          onChange: (e: { target: { checked: boolean } }) => {
-                            const next = new Set(d.webSocketPaths);
-                            if (e.target.checked) next.add(rule);
-                            else next.delete(rule);
-                            setDraft(u.id, { webSocketPaths: [...next] });
-                          },
-                        }),
-                        rule,
-                      ),
-                    ),
-                  )
-                : null,
               h(
                 'select',
                 {
@@ -1277,6 +1256,9 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
               h(
                 'div',
                 { className: 'dshpw-action-row dshpw-form-actions' },
+                permsNotice[u.id]
+                  ? h('span', { className: 'dshpw-ok', role: 'status' }, permsNotice[u.id])
+                  : null,
                 h(
                   'button',
                   { className: 'dshpw-btn', disabled: busy, onClick: () => savePermissions(u.id) },

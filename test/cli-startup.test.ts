@@ -100,6 +100,19 @@ test('rc.1 gateway refuses startup when the Cookie bridge is unavailable', () =>
   }
 });
 
+test('0.1.5 rc.1 gateway refuses startup when the Cookie bridge is unavailable', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'dshpw-cli-rc15-cookie-'));
+  const settings = 'const persistence = ctx.remote.$host.isLoopback ? "host" : "memory";\n';
+  const dshRoot = makeAlpha3Root(root, settings, 'export class Connection {}\n', '0.1.5-rc.1');
+  try {
+    const result = startGateway(writeConfig(root, dshRoot));
+    assert.equal(result.status, 33, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stderr, /Cookie bridge/i);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('gateway refuses startup when patch inspection throws', () => {
   const root = mkdtempSync(path.join(tmpdir(), 'dshpw-cli-patch-error-'));
   const dshRoot = makeAlpha3Root(root, null, 'export class Connection {}\n');

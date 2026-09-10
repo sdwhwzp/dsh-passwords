@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.7.0 - 2026-09-10
+
+### 中文
+
+更新公告：
+
+1. 兼容 DSH `0.1.5` 全系列（alpha.1 / alpha.2 / rc.1）：会话、Remote mux、Cookie 桥与设置补丁全部按 `0.1.5` 边界验证，bundled Docker 内置 DSH `0.1.5-rc.1`。
+2. 网关通用化：SSH 端点完全由 `MCP_GATEWAY_SSH_WS_ENDPOINTS` 显式配置，不再探测任何特定插件；非 SSH 第三方 WebSocket 对子用户一律 fail-closed，移除插件专属放行。
+3. 退役逐路径 WebSocket 授权（`allowed_websocket_paths`）死代码与废弃环境变量，数据层保留旧列兼容既有数据库。
+4. 设置页优化：权限保存确认就地显示在子用户权限块内；添加子用户表单置顶；SSH 权限仅显示开关名称；移除多条静默提示；修复更新状态轮询在「发现新版本但未开始下载」时的空转循环。
+5. 清理发布物与文档：安装器、Docker、README、兼容性矩阵与示例配置全部与当前通用模型对齐，移除历史插件残留引用。
+6. 本次审计使用模型 deepseek-V4.1-flash。
+
+验证：277/277 本地回归测试、TypeScript 构建、Git 差异检查通过；本地以 DSH `0.1.5-rc.1` 实际部署验证前后端基础功能。
+
+### English
+
+Release notes:
+
+1. Compatible with the whole DSH `0.1.5` line (alpha.1 / alpha.2 / rc.1): sessions, Remote mux, the Cookie bridge and the settings patch are all verified against the `0.1.5` boundaries; the bundled Docker image ships DSH `0.1.5-rc.1`.
+2. Gateway generalization: SSH endpoints are configured exclusively through `MCP_GATEWAY_SSH_WS_ENDPOINTS` with no plugin-specific probing; all other third-party WebSocket paths stay fail-closed for subusers.
+3. Retires the per-path WebSocket grant dead code (`allowed_websocket_paths`) and deprecated environment variables; the database column is kept for compatibility with existing databases.
+4. Settings UI polish: the save confirmation now appears inside the subuser permissions block, the add-subuser form moves to the top, the SSH toggle shows only its label, several passive hints are removed, and the update-status polling no longer spins while a new version is discovered but not yet downloading.
+5. Release hygiene: installers, Docker, README, the compatibility matrix and the example configuration are all aligned with the current generic model, with historical plugin-specific references removed.
+6. This audit used model deepseek-V4.1-flash.
+
+Validation: 277/277 local regression tests, the TypeScript build, and Git whitespace checks passed; frontend and backend basics were verified against a locally deployed DSH `0.1.5-rc.1`.
+
 ## 2.6.11 - 2026-09-05
 
 ### 中文
@@ -9,7 +37,8 @@
 1. 兼容 DSH `0.1.2` 与 `0.1.3` 的接口和运行时结构，bundled Docker 继续以内置 DSH `0.1.2-rc.1` 为主目标。
 2. 修复 Issue #29 相关的 Remote mux 历史加载可靠性：浏览器连接增加 heartbeat，支持 DSH `0.1.2`/`0.1.3` 的大历史快照，并校验 `session/follow` 快照身份后再转发。
 3. 补齐新会话 API 的子用户资源授权：文件上传与引用、Skill、消息反馈、目标、动态 Cordis runner、模型选择和会话引用检索均在到达 DSH 前按当前会话授权过滤。
-4. 优化多用户资源分配：保存权限时清理已失效的历史会话授权，但仍拒绝从未验证过的会话 ID，避免陈旧授权阻塞有效分配。
+4. 清理过期会话授权：保存权限时移除已失效的历史会话，但仍拒绝从未验证过的会话 ID，避免陈旧授权阻塞有效分配。
+5. 简化子用户 SSH：主用户配置的主机摘要可供开启 SSH 且勾选 SSH 端点的子用户使用；子用户不能新增、导入、修改主机或使用 cluster/tunnel，主机密码与私钥仍不会返回浏览器。
 
 验证：275/275 本地回归测试、TypeScript 构建、npm 官方 registry 生产依赖审计、发布包内容和 Git 差异检查通过。Docker 镜像发布前以 DSH `0.1.2-rc.1` 构建并核验。
 
@@ -21,6 +50,7 @@ Release notes:
 2. Fixes Remote mux history-loading reliability related to Issue #29: browser connections now send heartbeats, large DSH `0.1.2`/`0.1.3` history snapshots are supported, and `session/follow` snapshot identity is verified before forwarding.
 3. Completes subuser resource authorization for newer session APIs. File uploads and references, Skills, message feedback, goals, dynamic Cordis runner calls, model selection, and session-reference lookup are filtered against the current session grant before reaching DSH.
 4. Improves multi-user assignment saves: stale historical session grants are removed while never-validated session IDs remain rejected, so obsolete grants no longer block valid assignments.
+5. Simplifies subuser SSH access: an owner-configured host summary can be used by a subuser only when SSH and the SSH endpoint are enabled; subusers cannot add, import, modify hosts, or use cluster/tunnel operations, and passwords/private keys never reach the browser.
 
 Validation: 275/275 local regression tests, the TypeScript build, the official-registry production dependency audit, package-content checks, and Git whitespace checks passed. The Docker image is built with DSH `0.1.2-rc.1` and verified before publication.
 

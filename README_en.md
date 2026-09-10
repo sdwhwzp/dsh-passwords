@@ -17,7 +17,7 @@
   &nbsp;
   <a href="https://github.com/slywalker2006/dsh-passwords/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/slywalker2006/dsh-passwords/ci.yml?style=flat-square&label=CI" alt="CI"></a>
   &nbsp;
-  <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/DSH-0.1.2--rc.1-4c6ef5?style=flat-square&labelColor=454a54" alt="DSH"></a>
+  <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/DSH-0.1.5--rc.1-4c6ef5?style=flat-square&labelColor=454a54" alt="DSH"></a>
   &nbsp;
   <img src="https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square" alt="License">
   &nbsp;
@@ -76,7 +76,7 @@ The stock dsh web UI has no login or access control. Exposed to a network, anyon
 
 ### Prerequisites
 
-Host installs need Node.js 22.19+ or 24+, a working dsh installation, and git. Keep this plugin on the same Node major line as the dsh host; DSH `0.1.2-rc.1` and `0.1.3-alpha.1` have the same official Node requirement. Docker installs only need Docker Engine or Docker Desktop and a DeepSeek API key.
+Host installs need Node.js 22.19+ or 24+, a working dsh installation, and git. Keep this plugin on the same Node major line as the dsh host; DSH `0.1.5-rc.1` is the currently verified host baseline, while the compatibility layer retains the tested `0.1.2` and `0.1.3` API boundaries. Docker installs only need Docker Engine or Docker Desktop and a DeepSeek API key.
 
 ### Install
 
@@ -210,8 +210,7 @@ Passwords require at least 12 characters with upper, lower, digit and symbol.
 | `MCP_DB_ENC_KEY` | empty | Field encryption key; cannot be changed once set. Back up the database together with `.env` |
 | `MCP_GATEWAY_HOST` / `MCP_GATEWAY_PORT` | `0.0.0.0` / `443` | Gateway listen address and port |
 | `MCP_GATEWAY_UPSTREAM` | `http://127.0.0.1:3080` | dsh web address, pointed automatically |
-| `MCP_GATEWAY_WS_ADMIN_ALLOWLIST` | empty | Third-party WebSocket paths restricted to the owner; exact paths and `/*` wildcards; never shown as subuser grants |
-| `MCP_GATEWAY_WS_USER_ALLOWLIST` | empty | Third-party WebSocket paths the owner may grant per subuser; exact paths and `/*` wildcards |
+| `MCP_GATEWAY_SSH_WS_ENDPOINTS` | empty | Third-party SSH WebSocket endpoints (comma-separated, exact paths and `/*` wildcards). Once the owner configures them, subusers only need the SSH permission toggle; unchecked requests are rejected and the owner is unrestricted. No plugin-specific auto-detection is performed. |
 | `MCP_GATEWAY_REDIRECT_PORT` | `80` | ACME validation and 301 redirect port |
 | `MCP_GATEWAY_DOMAIN` | empty | Custom domain; empty uses `<public IP>.sslip.io` |
 | `MCP_GATEWAY_AUTO_TLS` | on | `0` disables automatic HTTPS |

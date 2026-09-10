@@ -136,7 +136,6 @@ test('旧 user_permissions 表会迁移 WebSocket 授权列，并保留现有权
       allow_git_download: true,
       allow_workspace_create: false,
       allow_ssh: false,
-      allowed_websocket_paths: [],
       allowed_agent_presets: null,
       banned: false,
       sandbox_mode: 'workspace-write',
@@ -151,7 +150,6 @@ test('旧 user_permissions 表会迁移 WebSocket 授权列，并保留现有权
       allowUpload: true,
       allowGitDownload: true,
       allowWorkspaceCreate: false,
-      allowedWebSocketPaths: ['/plugin/ws/*'],
       allowedAgentPresets: ['system/default'],
       banned: false,
       sandboxMode: 'workspace-write',
@@ -168,7 +166,6 @@ test('旧 user_permissions 表会迁移 WebSocket 授权列，并保留现有权
       sandboxMode: 'workspace-write',
       disabledSessions: [],
     });
-    assert.deepEqual(db.getPermissions(7)?.allowed_websocket_paths, ['/plugin/ws/*']);
     assert.deepEqual(db.getPermissions(7)?.allowed_agent_presets, ['system/default']);
     db.setPermissions(7, {
       allowedFolders: ['/srv/project'],

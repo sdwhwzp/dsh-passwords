@@ -9,6 +9,7 @@
 // 因此不提供开关：网关每次启动自动应用（幂等），dsh 升级覆盖文件后重启
 // 网关自动重打，或在设置页点"重载补丁"。
 import { readFileSync, writeFileSync, existsSync, unlinkSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
@@ -120,7 +121,37 @@ function migrateLegacyBackup(
 }
 
 /**
- * 查找 dsh 运行时实际会解析到的 bundle 文件。
+ * 查找 dsh 运行时和当前 web profile 可能解析到的 bundle 文件。
+ *
+ * 全局 DSH 安装通常把依赖嵌套在 `dsh/node_modules`，而 profile 的插件依赖
+ * 可能把同名客户端包提升到 `~/.dsh/profiles/web/node_modules`。两份文件都
+ * 可能参与最终客户端模块表；只补其中一份会造成 patch status 假绿。
+ */
+function findDshBundleFiles(
+  dshRoot: string,
+  packageName: string,
+  relativePath: string,
+  explicitProfileDir = '',
+): string[] {
+  const candidates = new Set<string>();
+  const roots = [
+    dshRoot,
+    explicitProfileDir.trim(),
+    process.env.DSH_PROFILE_DIR?.trim() || '',
+    ...(existsSync(path.join(dshRoot, 'package.json'))
+      ? [path.join(process.env.DSH_HOME?.trim() || path.join(homedir(), '.dsh'), 'profiles', process.env.DSH_PROFILE?.trim() || 'web')]
+      : []),
+  ];
+  for (const root of roots) {
+    if (root === '') continue;
+    const file = findDshBundleFile(root, packageName, relativePath);
+    if (file !== null) candidates.add(path.resolve(file));
+  }
+  return [...candidates];
+}
+
+/**
+ * 查找 dsh 运行时实际会解析到的一个 bundle 文件。
  *
  * 常规全局安装把依赖嵌套在 `dsh/node_modules`；`npm install --prefix` 则可能把
  * 它们提升到 prefix 的 `node_modules`。补丁必须跟随 Node 从 dsh 包目录逐级向上
@@ -321,6 +352,7 @@ export function findDshRoot(explicit: string): string | null {
 /** 补丁当前状态（用于 status 展示） */
 export function patchStatus(
   dshRoot: string,
+  profileDir = '',
 ): {
   settingsHostMode: boolean;
 
@@ -328,45 +360,50 @@ export function patchStatus(
   bindAll: boolean;
   connectionCookieBridge: 'patched' | 'native' | 'missing' | 'unsupported';
 } {
-  const settingsFile = findDshBundleFile(dshRoot, SETTINGS_PACKAGE, SETTINGS_FILE);
-  const wsFile = findDshBundleFile(dshRoot, WORKSPACE_PACKAGE, WORKSPACE_FILE);
+  const settingsFiles = findDshBundleFiles(dshRoot, SETTINGS_PACKAGE, SETTINGS_FILE, profileDir);
+  const wsFiles = findDshBundleFiles(dshRoot, WORKSPACE_PACKAGE, WORKSPACE_FILE, profileDir);
   let settingsHostMode = false;
   let workspaceSearch = false;
   let connectionCookieBridge: 'patched' | 'native' | 'missing' | 'unsupported' = 'missing';
   try {
-    if (settingsFile === null) throw new Error('settings bundle not found');
-    const s = readFileSync(settingsFile, 'utf8');
-    settingsHostMode =
-      !s.includes(SETTINGS_FROM) &&
-      !s.includes(SETTINGS_ALPHA_FROM) &&
-      s.includes(SETTINGS_TO);
+    if (settingsFiles.length === 0) throw new Error('settings bundle not found');
+    settingsHostMode = settingsFiles.every((settingsFile) => {
+      const s = readFileSync(settingsFile, 'utf8');
+      return !s.includes(SETTINGS_FROM) && !s.includes(SETTINGS_ALPHA_FROM) && s.includes(SETTINGS_TO);
+    });
   } catch { /* 文件缺失按未打处理 */ }
 
   try {
-    if (wsFile === null) throw new Error('workspace bundle not found');
-    const ws = readFileSync(wsFile, 'utf8');
-    // 打过 = 不再含旧行为串 + 含子补丁标记（文件缺失按未打处理）
-    // 括号显式分组：自动填充「已打 v2 标记」与「不适用（RE 无匹配）」必须
-    // 先于粘滞态子补丁成立——否则 (A&&B&&C)||D 在 D 恒真时会把
-    // 未打粘滞态的文件误报为已打。
-    workspaceSearch =
-      !ws.includes('if (normalizedQuery !== "") return;') &&
-      ws.includes('remoteSearch.status !== "loading"') &&
-      SEARCH_DEPS_PATCHED_RE.test(ws) &&
-      // 搜索框自动填充加固：v2 标记存在才算完成；旧 v1（仅 off+name）会自动升级
-      (ws.includes(SEARCH_AUTOFILL_HARDEN_MARK) || !SEARCH_AUTOFILL_RE.test(ws));
+    if (wsFiles.length === 0) throw new Error('workspace bundle not found');
+    workspaceSearch = wsFiles.every((wsFile) => {
+      const ws = readFileSync(wsFile, 'utf8');
+      // 打过 = 不再含旧行为串 + 含子补丁标记（文件缺失按未打处理）
+      // 括号显式分组：自动填充「已打 v2 标记」与「不适用（RE 无匹配）」必须
+      // 先于粘滞态子补丁成立——否则 (A&&B&&C)||D 在 D 恒真时会把
+      // 未打粘滞态的文件误报为已打。
+      return (
+        !ws.includes('if (normalizedQuery !== "") return;') &&
+        ws.includes('remoteSearch.status !== "loading"') &&
+        SEARCH_DEPS_PATCHED_RE.test(ws) &&
+        // 搜索框自动填充加固：v2 标记存在才算完成；旧 v1（仅 off+name）会自动升级
+        (ws.includes(SEARCH_AUTOFILL_HARDEN_MARK) || !SEARCH_AUTOFILL_RE.test(ws))
+      );
+    });
   } catch { /* 同上 */ }
-  const connectionFile = findDshBundleFile(dshRoot, CONNECTION_PACKAGE, CONNECTION_FILE);
-  if (connectionFile !== null) {
+  const connectionFiles = findDshBundleFiles(dshRoot, CONNECTION_PACKAGE, CONNECTION_FILE, profileDir);
+  if (connectionFiles.length > 0) {
     try {
-      const connection = readFileSync(connectionFile, 'utf8');
-      if (connection.includes(AUTH_COOKIE_PATCH_HARDEN_MARK)) {
-        connectionCookieBridge = 'patched';
-      } else if (connection.includes('authenticatedCookie(baseUrl)')) {
-        connectionCookieBridge = 'native';
-      } else if (connection.includes('authenticatedUrl(baseUrl)')) {
-        connectionCookieBridge = 'unsupported';
-      }
+      const states = connectionFiles.map((connectionFile) => {
+        const connection = readFileSync(connectionFile, 'utf8');
+        if (connection.includes(AUTH_COOKIE_PATCH_HARDEN_MARK)) return 'patched' as const;
+        if (connection.includes('authenticatedCookie(baseUrl)')) return 'native' as const;
+        if (connection.includes('authenticatedUrl(baseUrl)')) return 'unsupported' as const;
+        return 'missing' as const;
+      });
+      if (states.includes('unsupported')) connectionCookieBridge = 'unsupported';
+      else if (states.includes('missing')) connectionCookieBridge = 'missing';
+      else if (states.includes('patched')) connectionCookieBridge = 'patched';
+      else connectionCookieBridge = 'native';
     } catch {
       connectionCookieBridge = 'missing';
     }
@@ -374,12 +411,12 @@ export function patchStatus(
   let bindAll = true;
   try {
     if (bindAllEnabled()) {
-      const stFile = findDshBundleFile(dshRoot, STARTUP_PACKAGE, STARTUP_FILE);
-      // fail-closed：已打（标记存在）或上游原生移除拒绑闸才算满足；精确串
-      // 失配 + 无标记（上游改了报错文案）必须报未打，否则 Docker 校验会
-      // 静默放行实际未打补丁的容器。
-      const st = stFile === null ? null : readFileSync(stFile, 'utf8');
-      bindAll = st !== null && (st.includes(BIND_ALL_MARK) || !BIND_ALL_GUARD_RE.test(st));
+      const startupFiles = findDshBundleFiles(dshRoot, STARTUP_PACKAGE, STARTUP_FILE, profileDir);
+      const st = startupFiles.length === 0 ? null : startupFiles.every((startupFile) => {
+        const content = readFileSync(startupFile, 'utf8');
+        return content.includes(BIND_ALL_MARK) || !BIND_ALL_GUARD_RE.test(content);
+      });
+      bindAll = st === true;
     }
   } catch {
     bindAll = false;
@@ -388,16 +425,19 @@ export function patchStatus(
 }
 
 /** 应用补丁（幂等）：返回 'applied'（本次有改动）或 'unchanged' 或 'missing'（目标文件不在） */
-export function applyRemotePatch(dshRoot: string): 'applied' | 'unchanged' | 'missing' {
-  const settingsFile = findDshBundleFile(dshRoot, SETTINGS_PACKAGE, SETTINGS_FILE);
-  const connectionFile = findDshBundleFile(dshRoot, CONNECTION_PACKAGE, CONNECTION_FILE);
-  if (settingsFile === null) return 'missing';
+export function applyRemotePatch(
+  dshRoot: string,
+  profileDir = '',
+): 'applied' | 'unchanged' | 'missing' {
+  const settingsFiles = findDshBundleFiles(dshRoot, SETTINGS_PACKAGE, SETTINGS_FILE, profileDir);
+  const connectionFiles = findDshBundleFiles(dshRoot, CONNECTION_PACKAGE, CONNECTION_FILE, profileDir);
+  if (settingsFiles.length === 0) return 'missing';
   let changed = false;
 
   // alpha.1 connection：为 dsh-passwords 的同进程 Host 插件提供受信任的
   // authority-bound Cookie 派生入口。首次启动后会在磁盘上完成补丁；后续
   // dsh 重启加载已打补丁的 HostConnectionService，插件即可无网络地刷新 Cookie。
-  if (connectionFile !== null) {
+  for (const connectionFile of connectionFiles) {
     const c = readFileSync(connectionFile, 'utf8');
     migrateLegacyBackup(connectionFile, c, patchConnectionAuthCookie);
     const patched = patchConnectionAuthCookie(c);
@@ -413,27 +453,29 @@ export function applyRemotePatch(dshRoot: string): 'applied' | 'unchanged' | 'mi
   // String.replace(string, string) 只替换第一处，首轮补丁会让 DescribeMirror 漏打，
   // 远程浏览器设置页报 "settings are unavailable in this browser"（Issue #8）。
   // split/join 全量替换，一轮打完。
-  const s = readFileSync(settingsFile, 'utf8');
-  migrateLegacyBackup(settingsFile, s, (original) => {
-    const patched = original
-      .split(SETTINGS_FROM).join(SETTINGS_TO)
-      .split(SETTINGS_ALPHA_FROM).join(SETTINGS_TO);
-    return patched === original ? null : patched;
-  });
-  if (s.includes(SETTINGS_FROM) || s.includes(SETTINGS_ALPHA_FROM)) {
-    const patched = s
-      .split(SETTINGS_FROM).join(SETTINGS_TO)
-      .split(SETTINGS_ALPHA_FROM).join(SETTINGS_TO);
-    ensureOriginalBackup(settingsFile, s, patched);
-    writeFileSync(settingsFile, patched);
-    changed = true;
+  for (const settingsFile of settingsFiles) {
+    const s = readFileSync(settingsFile, 'utf8');
+    migrateLegacyBackup(settingsFile, s, (original) => {
+      const patched = original
+        .split(SETTINGS_FROM).join(SETTINGS_TO)
+        .split(SETTINGS_ALPHA_FROM).join(SETTINGS_TO);
+      return patched === original ? null : patched;
+    });
+    if (s.includes(SETTINGS_FROM) || s.includes(SETTINGS_ALPHA_FROM)) {
+      const patched = s
+        .split(SETTINGS_FROM).join(SETTINGS_TO)
+        .split(SETTINGS_ALPHA_FROM).join(SETTINGS_TO);
+      ensureOriginalBackup(settingsFile, s, patched);
+      writeFileSync(settingsFile, patched);
+      changed = true;
+    }
   }
 
   // 2) 工作区侧栏搜索两个子补丁（可选：目标文件不存在则跳过，不影响 1/2）
   //    ① 无结果搜索点击别处自动收起并清空（消除「无匹配会话」死状态滞留）
   //    ② 搜索框 autocomplete="off" + 中性 name（阻断密码管理器把搜索框当用户名框自动填充）
-  const wsFile = findDshBundleFile(dshRoot, WORKSPACE_PACKAGE, WORKSPACE_FILE);
-  if (wsFile !== null) {
+  const wsFiles = findDshBundleFiles(dshRoot, WORKSPACE_PACKAGE, WORKSPACE_FILE, profileDir);
+  for (const wsFile of wsFiles) {
     const ws = readFileSync(wsFile, 'utf8');
     migrateLegacyBackup(wsFile, ws, (original) => {
       let next = original;
@@ -491,8 +533,8 @@ export function applyRemotePatch(dshRoot: string): 'applied' | 'unchanged' | 'mi
   //    分容器拓扑需要网关容器跨容器访问 dsh web）。目标文件缺失则跳过，不影响 1-3。
   //    开关关闭时反向自愈：恢复曾打过的 startup.js（见下）。
   if (bindAllEnabled()) {
-    const stFile = findDshBundleFile(dshRoot, STARTUP_PACKAGE, STARTUP_FILE);
-    if (stFile !== null) {
+    const stFiles = findDshBundleFiles(dshRoot, STARTUP_PACKAGE, STARTUP_FILE, profileDir);
+    for (const stFile of stFiles) {
       const st = readFileSync(stFile, 'utf8');
       migrateLegacyBackup(stFile, st, (original) =>
         original.includes(BIND_ALL_FROM) ? original.replace(BIND_ALL_FROM, BIND_ALL_TO) : null,
@@ -505,13 +547,15 @@ export function applyRemotePatch(dshRoot: string): 'applied' | 'unchanged' | 'mi
       }
     }
   } else {
-    // 开关关闭时自愈：曾开启过的部署（共享卷/复用状态卷）会残留已移除闸的
-    // startup.js，静默保留等于关闭开关后安全闸仍未恢复。仅在当前内容与备份
-    // 元数据完全吻合时恢复（与 rollbackPatch 同口径，防跨版本污染）。
-    const stFile = findDshBundleFile(dshRoot, STARTUP_PACKAGE, STARTUP_FILE);
-    if (stFile !== null && currentMatchesPatchedBackup(stFile)) {
-      writeFileSync(stFile, readFileSync(stFile + BAK_SUFFIX));
-      changed = true;
+    const stFiles = findDshBundleFiles(dshRoot, STARTUP_PACKAGE, STARTUP_FILE, profileDir);
+    for (const stFile of stFiles) {
+      // 开关关闭时自愈：曾开启过的部署（共享卷/复用状态卷）会残留已移除闸的
+      // startup.js，静默保留等于关闭开关后安全闸仍未恢复。仅在当前内容与备份
+      // 元数据完全吻合时恢复（与 rollbackPatch 同口径，防跨版本污染）。
+      if (currentMatchesPatchedBackup(stFile)) {
+        writeFileSync(stFile, readFileSync(stFile + BAK_SUFFIX));
+        changed = true;
+      }
     }
   }
 
@@ -522,13 +566,16 @@ export function applyRemotePatch(dshRoot: string): 'applied' | 'unchanged' | 'mi
  * 回滚补丁：从 .bak-dshpw 备份恢复目标文件。
  * 备份不存在（从未打过补丁）时返回 'no-backup'。
  */
-export function rollbackPatch(dshRoot: string): 'rolled-back' | 'no-backup' | 'missing' | 'modified' {
-  const settingsFile = findDshBundleFile(dshRoot, SETTINGS_PACKAGE, SETTINGS_FILE);
-  if (settingsFile === null) return 'missing';
-  const wsFile = findDshBundleFile(dshRoot, WORKSPACE_PACKAGE, WORKSPACE_FILE);
-  const stFile = findDshBundleFile(dshRoot, STARTUP_PACKAGE, STARTUP_FILE);
-  const connectionFile = findDshBundleFile(dshRoot, CONNECTION_PACKAGE, CONNECTION_FILE);
-  const targets = [settingsFile, wsFile, stFile, connectionFile].filter((target): target is string => target !== null);
+export function rollbackPatch(
+  dshRoot: string,
+  profileDir = '',
+): 'rolled-back' | 'no-backup' | 'missing' | 'modified' {
+  const settingsFiles = findDshBundleFiles(dshRoot, SETTINGS_PACKAGE, SETTINGS_FILE, profileDir);
+  if (settingsFiles.length === 0) return 'missing';
+  const wsFiles = findDshBundleFiles(dshRoot, WORKSPACE_PACKAGE, WORKSPACE_FILE, profileDir);
+  const stFiles = findDshBundleFiles(dshRoot, STARTUP_PACKAGE, STARTUP_FILE, profileDir);
+  const connectionFiles = findDshBundleFiles(dshRoot, CONNECTION_PACKAGE, CONNECTION_FILE, profileDir);
+  const targets = [...new Set([...settingsFiles, ...wsFiles, ...stFiles, ...connectionFiles])];
 
   // Preflight every target before writing any file. A partial rollback would leave
   // DSH in an undocumented mixed state when another tool has changed one bundle.

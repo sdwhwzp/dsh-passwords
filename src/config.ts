@@ -69,10 +69,14 @@ export interface PlatformConfig {
     /** 补丁应用后要重启的 dsh systemd 服务名；留空则不自动重启 */
     restartService: string;
   };
-  /** WebSocket 路径授权：内置事件默认开放，第三方路径必须显式配置。 */
+  /**
+   * 第三方 SSH WebSocket 端点：主用户在 .env 用 MCP_GATEWAY_SSH_WS_ENDPOINTS
+   * 配置（精确路径或末尾 /* 通配）。不做任何插件专属自动探测——网关保持通用。
+   * 子用户勾选 SSH 权限开关后即可使用全部已配置端点；未勾选一律 403。
+   * 主用户不受限。非 SSH 的第三方 WebSocket 不提供逐路径授权，一律 fail-closed。
+   */
   webSocket: {
-    adminAllowlist: string[];
-    userAllowlist: string[];
+    sshEndpoints: string[];
   };
 }
 
@@ -183,8 +187,12 @@ export function loadConfig(): PlatformConfig {
       restartService,
     },
     webSocket: {
-      adminAllowlist: parseWebSocketAllowlist(process.env.MCP_GATEWAY_WS_ADMIN_ALLOWLIST, 'MCP_GATEWAY_WS_ADMIN_ALLOWLIST'),
-      userAllowlist: parseWebSocketAllowlist(process.env.MCP_GATEWAY_WS_USER_ALLOWLIST, 'MCP_GATEWAY_WS_USER_ALLOWLIST'),
+      // SSH 端点完全由主用户显式配置：不做插件包探测，避免网关行为绑定
+      // 特定第三方插件的存在与否（通用性优先；安装/卸载插件不影响鉴权面）。
+      sshEndpoints: parseWebSocketAllowlist(
+        process.env.MCP_GATEWAY_SSH_WS_ENDPOINTS,
+        'MCP_GATEWAY_SSH_WS_ENDPOINTS',
+      ),
     },
   };
 }

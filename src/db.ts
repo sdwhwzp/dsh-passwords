@@ -59,7 +59,6 @@ export interface UserPermissionsRow {
   allow_git_download: boolean;
   allow_workspace_create: boolean;
   allow_ssh: boolean;
-  allowed_websocket_paths: string[];
   /** NULL = unrestricted; [] = no agent preset is allowed. */
   allowed_agent_presets: string[] | null;
   banned: boolean;
@@ -141,7 +140,7 @@ CREATE TABLE IF NOT EXISTS user_permissions (
   allow_git_download INTEGER NOT NULL DEFAULT 0,
   allow_workspace_create INTEGER NOT NULL DEFAULT 0,
   allow_ssh          INTEGER NOT NULL DEFAULT 0,       -- 子用户 SSH 开关；具体 alias 另按归属控制
-  allowed_websocket_paths TEXT NOT NULL DEFAULT '[]', -- 第三方 WebSocket 子用户授权路径
+  allowed_websocket_paths TEXT NOT NULL DEFAULT '[]', -- 已退役（旧逐路径 WS 授权）；保留列维持老库兼容，恒为 '[]'
   allowed_agent_presets TEXT,                         -- NULL = unrestricted；JSON agent preset ID 白名单
   banned             INTEGER NOT NULL DEFAULT 0,
   sandbox_mode       TEXT,                          -- NULL = 不更改；read-only/workspace-write/danger-full-access
@@ -830,7 +829,7 @@ export class Database {
   // ── 子用户权限（网关强制执行） ────────────────────────────
   getPermissions(userId: number): UserPermissionsRow | null {
     const row = this.stmt(
-      'SELECT user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, allow_upload, allow_git_download, allow_workspace_create, allow_ssh, allowed_websocket_paths, allowed_agent_presets, banned, sandbox_mode, disabled_sessions, updated_at FROM user_permissions WHERE user_id = ?',
+      'SELECT user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, allow_upload, allow_git_download, allow_workspace_create, allow_ssh, allowed_agent_presets, banned, sandbox_mode, disabled_sessions, updated_at FROM user_permissions WHERE user_id = ?',
     ).get(userId) as
       | {
           user_id: number;
@@ -841,7 +840,6 @@ export class Database {
           allow_git_download: number;
           allow_workspace_create: number;
           allow_ssh: number;
-          allowed_websocket_paths: string | null;
           allowed_agent_presets: string | null;
           banned: number;
           sandbox_mode: string | null;
@@ -859,7 +857,6 @@ export class Database {
       allow_git_download: row.allow_git_download === 1,
       allow_workspace_create: row.allow_workspace_create === 1,
       allow_ssh: row.allow_ssh === 1,
-      allowed_websocket_paths: parseJsonArray(row.allowed_websocket_paths),
       allowed_agent_presets: row.allowed_agent_presets === null ? null : parseJsonArray(row.allowed_agent_presets),
       banned: row.banned === 1,
       sandbox_mode: row.sandbox_mode,
@@ -878,7 +875,6 @@ export class Database {
       allowGitDownload: boolean;
       allowWorkspaceCreate: boolean;
       allowSsh?: boolean;
-      allowedWebSocketPaths?: string[];
       allowedAgentPresets?: string[] | null;
       banned: boolean;
       sandboxMode?: string | null;
@@ -895,10 +891,7 @@ export class Database {
         .filter((id) => typeof id === 'string' && id.length > 0 && id.length <= 200),
     )].slice(0, 2000);
     const sandboxMode = perms.sandboxMode === undefined ? current?.sandbox_mode ?? null : perms.sandboxMode;
-    const allowedWebSocketPaths = [...new Set(
-      (perms.allowedWebSocketPaths ?? current?.allowed_websocket_paths ?? [])
-        .filter((path) => typeof path === 'string' && path.length > 0 && path.length <= 256),
-    )].slice(0, 64);
+    // allowed_websocket_paths 列已退役：恒写 '[]'，不再保留任何逐路径授权。
     const allowedSessionIds = [...new Set(
       (perms.allowedSessionIds ?? []).filter((id) => typeof id === 'string' && id.length > 0 && id.length <= 200),
     )].slice(0, 2000);
@@ -936,7 +929,7 @@ export class Database {
       perms.allowGitDownload ? 1 : 0,
       perms.allowWorkspaceCreate ? 1 : 0,
       allowSsh ? 1 : 0,
-      JSON.stringify(allowedWebSocketPaths),
+      '[]',
       allowedAgentPresets === null ? null : JSON.stringify(allowedAgentPresets),
       perms.banned ? 1 : 0,
       sandboxMode,
@@ -1033,11 +1026,11 @@ export class Database {
     const canonical = normalizePath(workspacePath);
     const current = this.getPermissions(userId);
     if (!current || current.allowed_folders.includes('__deny__')) {
-      if (current) this.setPermissions(userId, { allowedFolders: [canonical], hourlyTokenLimit: current.hourly_token_limit, dailyMinutesLimit: current.daily_minutes_limit, allowUpload: current.allow_upload, allowGitDownload: current.allow_git_download, allowWorkspaceCreate: current.allow_workspace_create, allowedWebSocketPaths: current.allowed_websocket_paths, banned: current.banned, sandboxMode: current.sandbox_mode, disabledSessions: current.disabled_sessions });
+      if (current) this.setPermissions(userId, { allowedFolders: [canonical], hourlyTokenLimit: current.hourly_token_limit, dailyMinutesLimit: current.daily_minutes_limit, allowUpload: current.allow_upload, allowGitDownload: current.allow_git_download, allowWorkspaceCreate: current.allow_workspace_create, banned: current.banned, sandboxMode: current.sandbox_mode, disabledSessions: current.disabled_sessions });
       return;
     }
     if (!current.allowed_folders.some((entry) => normalizePath(entry) === canonical)) {
-      this.setPermissions(userId, { allowedFolders: [...current.allowed_folders, canonical], hourlyTokenLimit: current.hourly_token_limit, dailyMinutesLimit: current.daily_minutes_limit, allowUpload: current.allow_upload, allowGitDownload: current.allow_git_download, allowWorkspaceCreate: current.allow_workspace_create, allowedWebSocketPaths: current.allowed_websocket_paths, banned: current.banned, sandboxMode: current.sandbox_mode, disabledSessions: current.disabled_sessions });
+      this.setPermissions(userId, { allowedFolders: [...current.allowed_folders, canonical], hourlyTokenLimit: current.hourly_token_limit, dailyMinutesLimit: current.daily_minutes_limit, allowUpload: current.allow_upload, allowGitDownload: current.allow_git_download, allowWorkspaceCreate: current.allow_workspace_create, banned: current.banned, sandboxMode: current.sandbox_mode, disabledSessions: current.disabled_sessions });
     }
   }
 

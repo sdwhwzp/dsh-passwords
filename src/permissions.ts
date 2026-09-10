@@ -8,7 +8,7 @@
 //   - allowUpload            是否使用大请求体/大文件上传档位（false = 64 MiB，true = 300 MiB）
 //   - allowGitDownload       是否允许 git 下载（clone/pull 等）
 //   - allowWorkspaceCreate   是否允许创建/删除/重命名工作区
-//   - allowedWebSocketPaths  授权可访问的 WebSocket 路径（子用户仅能用勾选的子路径）
+//   - allowSsh               是否允许使用主用户配置的 SSH WebSocket 端点
 //   - allowedSessionIds      显式会话授权（未初始化前自动种子化可见会话；保存后新会话不再自动加入）
 //   - disabledSessions       已授权工作区内逐会话关闭的会话 ID（兼容旧行为）
 //   - sandboxMode            沙盒级别（read-only / workspace-write / danger-full-access）
@@ -32,8 +32,6 @@ export function normalizePath(p: string): string {
   if (n.length >= 2 && n[1] === ':') n = n[0].toLowerCase() + n.slice(1);
   return n;
 }
-
-export type WebSocketAccess = 'deny' | 'authenticated';
 
 /**
  * 解析逗号分隔的 WebSocket 路径白名单。规则刻意保持最小：精确路径或尾部
@@ -71,31 +69,6 @@ export function parseWebSocketAllowlist(raw: string | undefined, envName: string
     if (rules.size > 64) throw new Error(`${envName}: at most 64 rules are supported`);
   }
   return [...rules];
-}
-
-export function matchesWebSocketRule(pathname: string, rule: string): boolean {
-  if (rule.endsWith('/*')) {
-    const prefix = rule.slice(0, -2);
-    return pathname.startsWith(`${prefix}/`);
-  }
-  return pathname === rule;
-}
-
-export function webSocketAccessForPath(
-  pathname: string,
-  configuredRules: readonly string[],
-  grantedRules: readonly string[],
-  userRole: 'admin' | 'user',
-  builtin: boolean,
-): WebSocketAccess {
-  // dsh 内置事件通道对所有已认证用户开放
-  if (builtin) return 'authenticated';
-  if (!configuredRules.some((rule) => matchesWebSocketRule(pathname, rule))) return 'deny';
-  // 主用户可用全部已配置路径；子用户只能用主用户在设置卡片中显式勾选的路径
-  if (userRole === 'admin' || grantedRules.some((rule) => matchesWebSocketRule(pathname, rule))) {
-    return 'authenticated';
-  }
-  return 'deny';
 }
 
 /**
@@ -684,12 +657,7 @@ export function isGitRequest(pathname: string): boolean {
   );
 }
 
- /** better-sidebar 的宿主侧文件、Git、上传、预览和终端管理面（仅主用户可访问）。 */
- export function isAdminOnlySidebarEndpoint(pathname: string): boolean {
-   return pathname === '/sidebar' || pathname.startsWith('/sidebar/');
- }
-
-/** SSH 插件路由族；子用户只有在 allowSsh 且 alias 归属当前用户时可访问。 */
+/** SSH 插件路由族；子用户开启 allowSsh 后可使用主用户配置的安全 alias。 */
 export function isSshPluginEndpoint(pathname: string): boolean {
   return pathname === '/api/dsh-ssh' || pathname.startsWith('/api/dsh-ssh/');
 }
@@ -700,12 +668,12 @@ export function isUnscopedSshEndpoint(pathname: string): boolean {
     pathname === '/api/dsh-ssh/cluster' || pathname === '/api/dsh-ssh/tunnel';
 }
 
-/** 使用 query alias 的 SSH 操作；调用方必须在转发前检查归属。 */
+/** 使用 query alias 的 SSH 操作；调用方必须在转发前检查 alias 格式。 */
 export function isSshAliasQueryEndpoint(pathname: string): boolean {
   return pathname === '/api/dsh-ssh/ls' || pathname === '/api/dsh-ssh/download' || pathname === '/api/dsh-ssh/upload';
 }
 
-/** 使用 JSON body alias 的 SSH 操作；调用方必须在转发前检查归属。 */
+/** 使用 JSON body alias 的 SSH 操作；调用方必须在转发前检查 alias 格式。 */
 export function isSshAliasBodyEndpoint(pathname: string): boolean {
   return pathname === '/api/dsh-ssh/test' || pathname === '/api/dsh-ssh/exec';
 }

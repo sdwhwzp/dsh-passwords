@@ -153,7 +153,7 @@ before(async () => {
     },
     jwtSecret: 'test-secret', internalSecret: 'test-internal',
     patch: { dshRoot: '', restartService: '' },
-    webSocket: { adminAllowlist: [], userAllowlist: [] },
+    webSocket: { sshEndpoints: [] },
   };
   adminCookie = `dsh_gateway_token=${jwt.sign({ sub: String(admin.id), username: admin.username, cv: 0 }, config.jwtSecret, { expiresIn: '12h' })}`;
   userCookie = `dsh_gateway_token=${jwt.sign({ sub: String(user.id), username: user.username, cv: 0 }, config.jwtSecret, { expiresIn: '12h' })}`;

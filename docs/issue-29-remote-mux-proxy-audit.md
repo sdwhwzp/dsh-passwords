@@ -373,7 +373,7 @@ RC.1 的 `seq` 错误来自历史控制器的另一条业务错误路径，不�
 
 ## D. 服务器复现（Issue #29 症状实机复现）
 
-**方法：** 在测试服务器（193.134.209.238）上以隔离配置（独立 `.env`/SQLite/127.0.0.1:18080/干净子进程环境）进程内加载**生产部署目录的 dist**（`/opt/dsh-passwords/dist` 的 `loadConfig/createGatewayServer/AuthService`），mock DSH 上游（127.0.0.1:3081）模拟 `/api/remote.mux`。不触碰生产进程与数据；结束后自动清理（已验证 `/tmp/dshpw-repro` 删除、无残留进程）。
+**方法：** 在测试服务器（<test-server>）上以隔离配置（独立 `.env`/SQLite/127.0.0.1:18080/干净子进程环境）进程内加载**生产部署目录的 dist**（`/opt/dsh-passwords/dist` 的 `loadConfig/createGatewayServer/AuthService`），mock DSH 上游（127.0.0.1:3081）模拟 `/api/remote.mux`。不触碰生产进程与数据；结束后自动清理（已验证 `/tmp/dshpw-repro` 删除、无残留进程）。
 
 > 附带发现：CLI `serve-gateway` 模式强制要求真实 DSH root（补丁前置检查失败即拒绝启动，设计使然），因此复现走进程内 `createGatewayServer`，测试对象仍为部署 dist 的真实网关代码。另：**服务器生产为 2.6.9**（dsh-web.service 内嵌网关，pid 19173 监听 443/80），本地源码为 2.6.10——版本待同步，但 remote.mux 桥接逻辑两版本一致（grep 证实）。
 

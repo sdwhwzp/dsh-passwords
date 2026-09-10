@@ -118,15 +118,15 @@ const EXIT_DSH_ROOT_UNAVAILABLE = 34;
 const EXIT_ALPHA3_SETTINGS_UNAVAILABLE = 35;
 const EXIT_PATCH_VERIFICATION_FAILED = 36;
 const DSH_REMOTE_COOKIE_BRIDGE_RE =
-  /^0\.1\.2-(?:alpha\.(?:[3-9]|[1-9][0-9]+)|rc\.(?:[1-9][0-9]*))$/;
+  /^0\.1\.(?:2-(?:alpha\.(?:[3-9]|[1-9][0-9]+)|rc\.[1-9][0-9]*)|5-(?:alpha\.[1-2]|rc\.1))$/;
 
 function requiresCookieBridge(dshRoot: string): boolean {
   try {
     const packageJson = JSON.parse(readFileSync(path.join(dshRoot, 'package.json'), 'utf8')) as { version?: unknown };
-    // alpha.3 and the 0.1.2 rc releases changed the client module/connection
-    // contract. Their public Host API still has no cookie export, so a missing
-    // private bridge must fail closed. Keep this range bounded to the known
-    // 0.1.2 layouts instead of forcing an unverified future DSH through it.
+    // DSH 0.1.2 alpha/rc and the verified 0.1.5 alpha/rc releases use the
+    // public Host API without an authenticatedCookie method. A missing private
+    // bridge must fail closed; do not silently fall back to the one-time launch
+    // token when a known release is running.
     return typeof packageJson.version === 'string' && DSH_REMOTE_COOKIE_BRIDGE_RE.test(packageJson.version);
   } catch {
     return false;
