@@ -10,4 +10,6 @@ Mnemon 使用 Host 验证的账号 id 将 Runtime、Documents、Native 数据库
 
 部署必须保留交接文档 `~/macproject/deploy-artifacts/20260910-plugin-pinning-handoff.md` 中的三个插件版本、构件校验和及 `fastTier: false`。使用当前线上 profile 制作候选；文件或 current 链接变化时重新准备，不能用旧快照覆盖其他发布。WeKnora 保持原版本。
 
-部署与验证结果记录在 `~/macproject/deploy-artifacts/20260910-mnemon-accounts/`。本说明的版本是待发布构件版本，线上状态以该目录的最终验证结果为准。
+部署与验证结果记录在 `~/macproject/deploy-artifacts/20260910-mnemon-accounts/`。2026-09-10 已通过隔离账号验证并部署到服务器 30，发布标识为 `20260910-103500-mnemon-accounts`；完整结果见该目录的 `REPORT.md`。
+
+正式构件：Mnemon `1da7ba6`、密码插件 `6b3e1cb`、Harness Connection `18d56eaec7`。配套 Connection 通过 `ctx.get` 解析可选 Web 服务器，修复插件 RPC 注册的提供者上下文问题。线上 22 个构件逐文件匹配，两个已有账号使用不同记忆目录，文件交付预览与会话连接回归通过；197 个会话文件保留。
