@@ -32,7 +32,11 @@ export function resolveConfigPath(value: string, configRoot: string, fallbackNam
 
 export interface PlatformConfig {
   /** Enable only with a dsh-ssh Host that isolates every operation by authenticated principal. */
-  tenantSsh?: { enabled: boolean };
+  tenantSsh?: {
+    enabled: boolean;
+    /** Exact deployment-trusted DNS names; preserve names for private or proxy DNS routing. */
+    trustedHosts?: string[];
+  };
   /** Enable the authenticated browser editor routes supplied by dsh-vsceditor. */
   tenantEditor?: { enabled: boolean };
   /** Optional Linux sandbox launcher. Empty disables restricted-account terminals. */
@@ -106,6 +110,17 @@ export function parseTenantSshEnabled(value: string | undefined): boolean {
   if (normalized === '' || normalized === 'false') return false;
   if (normalized === 'true') return true;
   throw new Error('TENANT_SSH_ENABLED must be true or false');
+}
+
+/** Parse exact trusted DNS names; reject wildcards, IP literals, URLs, and ports. */
+export function parseTenantSshTrustedHosts(value: string | undefined): string[] {
+  if (value === undefined || value.trim() === '') return [];
+  const hosts = value.split(',').map((host) => host.trim().toLowerCase().replace(/\.$/, ''));
+  const hostname = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+  if (hosts.some((host) => !hostname.test(host))) {
+    throw new Error('TENANT_SSH_TRUSTED_HOSTS must contain comma-separated exact DNS names without wildcards, IP addresses, URLs, or ports');
+  }
+  return [...new Set(hosts)];
 }
 
 export function loadConfig(): PlatformConfig {
@@ -238,7 +253,10 @@ export function loadConfig(): PlatformConfig {
       placeholderRoot: localWorkspacePlaceholderRoot,
     },
     managedWorkspaceRoot,
-    tenantSsh: { enabled: parseTenantSshEnabled(process.env.TENANT_SSH_ENABLED) },
+    tenantSsh: {
+      enabled: parseTenantSshEnabled(process.env.TENANT_SSH_ENABLED),
+      trustedHosts: parseTenantSshTrustedHosts(process.env.TENANT_SSH_TRUSTED_HOSTS),
+    },
     tenantEditor: { enabled: readEnv('MCP_TENANT_EDITOR', 'false') === 'true' },
     tenantTaskBoard: {
       enabled: readEnv('MCP_TENANT_TASK_BOARD', 'false') === 'true',

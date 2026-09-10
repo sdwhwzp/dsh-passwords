@@ -1046,6 +1046,7 @@ function sanitizeHiddenUnicodeJson(value: unknown, depth = 0): unknown {
 
 /**
  * dsh-ssh host SSRF 判定（F-28/F-29，异步版）：
+ *   - 部署明确授权的完整域名保留名称，允许其私有 DNS 或代理虚拟地址路由。
  *   - IP 字面量（含八进制/十六进制/简写段/映射形态）→ isPrivateHost 立即判
  *   - hostname（如 127.0.0.1.nip.io、sslip.io 通配）→ DNS 全量解析后逐地址判定，
  *     任一解析结果命中私网/回环 → 拦截；全部公网 → 返回首个解析 IP 供请求体改写，
@@ -1055,8 +1056,11 @@ function sanitizeHiddenUnicodeJson(value: unknown, depth = 0): unknown {
  *     无法验证的目标不允许经网关连接，绝不"解析失败即放行"。
  * 返回：'private' = 拦截；IP 字符串 = 校验通过、按它改写 host；null = 解析失败拦截。
  */
-function resolveSshHostSafe(host: string): Promise<'private' | string | null> {
-  const h = host.trim().toLowerCase();
+function resolveSshHostSafe(host: string, trustedHosts: readonly string[]): Promise<'private' | string | null> {
+  const h = host.trim().toLowerCase().replace(/\.$/, '');
+  // Deployment owners authorize these exact DNS names, including their private
+  // routing. Preserve the name because proxy-assigned virtual IPs can change.
+  if (trustedHosts.includes(h)) return Promise.resolve(h);
   if (isPrivateHost(h)) return Promise.resolve('private');
   const lookup = dns.promises
     .lookup(h, { all: true, verbatim: false })
@@ -6313,9 +6317,8 @@ export function createGatewayServer(
       denyRequest(req, res, langOf(req), t(langOf(req), 'gw.folderDenied'));
       return;
     }
-    // ── 第三方插件纵深防御：dsh-ssh 创建/修改/测试主机时，host 为私网/回环地址
-    // 一律拒绝（SSRF 封堵——插件源码不在我们控制内，网关拦一层；
-    // 所有登录用户含主用户都拦，管理员同样可能被诱导连接内网）
+    // SSH targets require public-address validation unless the deployment has
+    // explicitly trusted the exact DNS name in account-isolated mode.
     // F-27：PATCH（修改主机）/PUT 同样要拦——之前只拦 POST，PATCH 可直接把
     // 已有主机的 host 改成 127.0.0.1 等私网地址（实测可修改成功）
     const needsSshHostCheck =
@@ -6464,16 +6467,19 @@ export function createGatewayServer(
           if (needsSshHostCheck && bodyObj !== null && typeof bodyObj === 'object') {
             const host = (bodyObj as Record<string, unknown>).host;
             if (typeof host === 'string') {
-              const verdict = await resolveSshHostSafe(host);
+              const verdict = await resolveSshHostSafe(
+                host,
+                config.tenantSsh?.enabled === true ? config.tenantSsh.trustedHosts ?? [] : [],
+              );
               if (!responseWritable()) {
                 upstreamReq.destroy();
                 return;
               }
               if (verdict === 'private' || verdict === null) {
-              upstreamReq.destroy();
-              denyRequest(req, res, lang, t(lang, 'gw.folderDenied'));
-              return;
-            }
+                upstreamReq.destroy();
+                denyRequest(req, res, lang, t(lang, verdict === null ? 'gw.sshHostUnresolved' : 'gw.sshHostDenied'));
+                return;
+              }
             (bodyObj as Record<string, unknown>).host = verdict;
             forwardBody = Buffer.from(JSON.stringify(bodyObj), 'utf8');
             // 重写 body 必须同步更新 content-length，否则上游按旧长度读流会挂起/错位

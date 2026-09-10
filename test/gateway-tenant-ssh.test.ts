@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import dns from 'node:dns';
 import { once } from 'node:events';
 import http from 'node:http';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -29,6 +30,7 @@ test('scoped SSH forwards signed account identity for CRUD, transfers, cluster a
   const secret = 'ssh-test-internal';
   const hosts = new Map<string, Map<string, { alias: string; description: string }>>();
   const forwarded: Array<{ userId: string; route: string; method: string }> = [];
+  const hostTargets: string[] = [];
   const sockets = new WebSocketServer({ noServer: true });
   const upstream = http.createServer(async (req, res) => {
     const principal = verifyPrincipalHeaders(req.headers, secret);
@@ -48,6 +50,7 @@ test('scoped SSH forwards signed account identity for CRUD, transfers, cluster a
         res.end(JSON.stringify({ hosts: [...accountHosts.values()], capabilities: { accountScoped: true, serverCredentials: false } })); return;
       }
       if (req.method === 'POST') {
+        hostTargets.push(String(body.host));
         const host = { alias: String(body.alias), description: principal.username };
         accountHosts.set(host.alias, host);
         res.writeHead(201); res.end(JSON.stringify({ host })); return;
@@ -70,7 +73,7 @@ test('scoped SSH forwards signed account identity for CRUD, transfers, cluster a
   });
   await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
   const config: PlatformConfig = {
-    tenantSsh: { enabled: true }, setupKey: 'setup', dbPath: path.join(temporary, 'platform.db'), dbEncKey: 'enc',
+    tenantSsh: { enabled: true, trustedHosts: ['ssh.trusted.test'] }, setupKey: 'setup', dbPath: path.join(temporary, 'platform.db'), dbEncKey: 'enc',
     database: { driver: 'sqlite', path: path.join(temporary, 'platform.db') },
     gateway: {
       host: '127.0.0.1', port: 0, upstream: `http://127.0.0.1:${(upstream.address() as { port: number }).port}`,
@@ -134,11 +137,41 @@ test('scoped SSH forwards signed account identity for CRUD, transfers, cluster a
   assert.equal((await request(alice, '/api/dsh-ssh/hosts?alias=shared', 'DELETE')).status, 200);
   assert.deepEqual(JSON.parse((await request(bob, '/api/dsh-ssh/hosts')).body).hosts, [{ alias: 'shared', description: 'bob' }]);
   for (const [route, method, body] of [
-    ['/api/dsh-ssh/ls?alias=shared', 'GET', undefined],
-    ['/api/dsh-ssh/download?alias=shared', 'GET', undefined], ['/api/dsh-ssh/upload?alias=shared', 'POST', {}],
+    ['/api/dsh-ssh/ls?alias=shared&path=/home/remote', 'GET', undefined],
+    ['/api/dsh-ssh/download?alias=shared&remotePath=/home/remote/file', 'GET', undefined], ['/api/dsh-ssh/upload?alias=shared&remotePath=/home/remote/file', 'POST', {}],
     ['/api/dsh-ssh/test', 'POST', { alias: 'shared' }], ['/api/dsh-ssh/exec', 'POST', { alias: 'shared', command: 'id' }],
     ['/api/dsh-ssh/cluster', 'POST', { tags: ['work'], command: 'id' }], ['/api/dsh-ssh/tunnel', 'POST', { action: 'list' }],
   ] as const) assert.equal((await request(bob, route, method, body)).status, 200, route);
+
+  const lookups: string[] = [];
+  const originalLookup = dns.promises.lookup;
+  const lookup = t.mock.method(dns.promises, 'lookup', async (host: string, options: object) => {
+    lookups.push(host);
+    if (host === 'public.test') return [{ address: '8.8.8.8', family: 4 }];
+    if (host.endsWith('.test')) return [{ address: '198.18.0.11', family: 4 }];
+    if (host === 'missing.invalid') throw Object.assign(new Error('DNS name unavailable'), { code: 'ENOTFOUND' });
+    return originalLookup(host, options);
+  });
+  for (const user of [alice, bob]) {
+    assert.equal((await request(user, '/api/dsh-ssh/hosts', 'POST', { alias: 'proxy-host', host: ' SSH.Trusted.Test. ', port: 12022 })).status, 201);
+    assert.equal(hostTargets.at(-1), 'ssh.trusted.test', 'keep the trusted DNS name instead of persisting a proxy virtual IP');
+  }
+  assert.deepEqual(lookups, [], 'trusted routing belongs to deployment DNS');
+  assert.equal((await request(bob, '/api/dsh-ssh/hosts', 'POST', { alias: 'public', host: 'public.test' })).status, 201);
+  assert.equal(hostTargets.at(-1), '8.8.8.8', 'untrusted public names retain validated-IP pinning');
+  for (const host of ['untrusted.test', 'other.ssh.trusted.test', 'ssh.trusted.test.evil.test', '198.18.0.11']) {
+    const response = await request(bob, '/api/dsh-ssh/hosts', 'POST', { alias: 'denied', host });
+    assert.equal(response.status, 403);
+    assert.match(response.body, /SSH 地址被网络策略拒绝/);
+    assert.doesNotMatch(response.body, /文件夹/);
+  }
+  const unresolved = await request(bob, '/api/dsh-ssh/hosts', 'POST', { alias: 'unresolved', host: 'missing.invalid' });
+  assert.equal(unresolved.status, 403);
+  assert.match(unresolved.body, /无法解析 SSH 主机地址/);
+  config.tenantSsh!.enabled = false;
+  assert.equal((await request(admin, '/api/dsh-ssh/hosts', 'POST', { alias: 'legacy', host: 'ssh.trusted.test' })).status, 403, 'legacy shared mode must not enable trusted routing');
+  config.tenantSsh!.enabled = true;
+  lookup.mock.restore();
 
   const beforeRejected = forwarded.length;
   assert.equal((await request(bob, '/api/dsh-ssh/hosts/import-ssh-config', 'POST', {})).status, 403);

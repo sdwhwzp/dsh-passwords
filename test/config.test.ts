@@ -4,12 +4,21 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { isPublicIp, parseTenantSshEnabled, resolveEnvRelativePath } from '../src/config.js';
+import { isPublicIp, parseTenantSshEnabled, parseTenantSshTrustedHosts, resolveEnvRelativePath } from '../src/config.js';
 
 test('principal-scoped SSH requires an explicit valid deployment opt-in', () => {
   for (const value of [undefined, '', 'false', ' FALSE ']) assert.equal(parseTenantSshEnabled(value), false);
   for (const value of ['true', ' TRUE ']) assert.equal(parseTenantSshEnabled(value), true);
   for (const value of ['yes', '1', 'falsee']) assert.throws(() => parseTenantSshEnabled(value), /TENANT_SSH_ENABLED/);
+});
+
+test('trusted SSH configuration accepts only exact DNS names', () => {
+  assert.deepEqual(parseTenantSshTrustedHosts(undefined), []);
+  assert.deepEqual(parseTenantSshTrustedHosts(' '), []);
+  assert.deepEqual(parseTenantSshTrustedHosts(' SSH.Example.com., ssh.example.com, second.example.com '), ['ssh.example.com', 'second.example.com']);
+  for (const value of ['*', '*.example.com', 'localhost', '127.0.0.1', '198.18.0.11', '::1', 'https://ssh.example.com', 'ssh.example.com:22', 'ssh.example.com/path', 'user@ssh.example.com', 'ssh.example.com,', '-ssh.example.com', 'ssh..example.com']) {
+    assert.throws(() => parseTenantSshTrustedHosts(value), /TENANT_SSH_TRUSTED_HOSTS/);
+  }
 });
 
 test('MCP_DB_PATH 相对 .env 解析，不受进程工作目录影响', () => {
