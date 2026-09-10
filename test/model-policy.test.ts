@@ -21,6 +21,7 @@ const response = {
             { id: 'gpt-5.6-sol', name: 'GPT-5.6-Sol' },
             { id: 'gpt-5.6-terra', name: 'GPT-5.6-Terra' },
             { id: 'gpt-5.6-luna', name: 'GPT-5.6-Luna' },
+            { id: 'gpt-6-astra', name: 'GPT-6-Astra' },
             { id: 'gpt-5.5', name: 'GPT-5.5' },
           ],
         },
@@ -31,11 +32,16 @@ const response = {
   },
 };
 
-test('customer model policy restricts Codex to three GPT-5.6 routes and allows other providers', () => {
+test('customer model policy allows GPT-5.6 and newer Codex routes and allows other providers', () => {
   assert.equal(customerModelAllowed('codex', 'gpt-5.6-sol'), true);
   assert.equal(customerModelAllowed('codex', 'gpt-5.6-terra'), true);
   assert.equal(customerModelAllowed('codex', 'gpt-5.6-luna'), true);
-  assert.equal(customerModelAllowed('codex', 'gpt-5.5'), false);
+  for (const model of ['gpt-5.6', 'gpt-5.10', 'gpt-6', 'gpt-6-astra', 'gpt-6.1-test']) {
+    assert.equal(customerModelAllowed('codex', model), true, model);
+  }
+  for (const model of ['gpt-5.5', 'gpt-5.3-codex-spark', 'gpt-5', 'gpt-4.99', 'o3', 'gpt-5.6bad', 'gpt-six-astra']) {
+    assert.equal(customerModelAllowed('codex', model), false, model);
+  }
   assert.equal(customerModelAllowed('deepseek-official', 'deepseek-v4'), true);
 });
 
@@ -48,7 +54,7 @@ test('customer catalog filters Codex while retaining other providers and their f
       models: group.models.map(model => model.id),
     })),
     [
-      { id: 'codex', models: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'] },
+      { id: 'codex', models: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-6-astra'] },
       { id: 'deepseek-official', models: ['deepseek-v4'] },
     ],
   );

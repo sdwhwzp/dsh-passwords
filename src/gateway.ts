@@ -5518,7 +5518,7 @@ export function createGatewayServer(
         }
 
         // In customer model selectors, the Codex provider exposes only the
-        // three supported GPT-5.6 routes. Other providers remain untouched.
+        // GPT-5.6 and newer routes. Other providers remain untouched.
         // Both catalogs are filtered; malformed successes fail closed.
         if (
           reqAs.dshpwPerms !== undefined &&

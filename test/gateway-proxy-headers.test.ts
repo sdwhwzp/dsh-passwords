@@ -65,11 +65,18 @@ const REQUEST_STREAM_CHUNK = Buffer.alloc(32 * 1024, 0x78);
 const LARGE_HISTORY_BYTES = 20 * 1024 * 1024;
 const OVERSIZE_HISTORY_BYTES = 32 * 1024 * 1024 + 1;
 const WORKSPACES_JSON = JSON.stringify({
-  ok: true,
-  data: [
-    { id: 'ws-1', workspaceId: 'ws-1', path: '/workspaces/a', sessionIds: ['s-owned'] },
-    { id: 'ws-2', workspaceId: 'ws-2', path: '/workspaces/b', sessionIds: ['s-other'] },
-  ],
+  type: 'server-response',
+  rpcId: 'workspace-list',
+  result: {
+    ok: true,
+    value: {
+      items: [
+        { workspaceId: 'ws-1', path: '/workspaces/a', sessionIds: ['s-owned'] },
+        { workspaceId: 'ws-2', path: '/workspaces/b', sessionIds: ['s-other'] },
+      ],
+      archivedSessionIds: [],
+    },
+  },
 });
 const ARCHIVED_WORKSPACES_JSON = JSON.stringify({
   type: 'server-response',
@@ -113,6 +120,7 @@ const MODELS_RESPONSE = {
             { id: 'gpt-5.6-sol', name: 'GPT-5.6-Sol' },
             { id: 'gpt-5.6-terra', name: 'GPT-5.6-Terra' },
             { id: 'gpt-5.6-luna', name: 'GPT-5.6-Luna' },
+            { id: 'gpt-6-astra', name: 'GPT-6-Astra' },
             { id: 'gpt-5.5', name: 'GPT-5.5' },
           ],
         },
@@ -361,29 +369,33 @@ function startMockUpstream(): Promise<http.Server> {
               : WORKSPACES_JSON,
         );
         res.end();
-      } else if ((req.url ?? '').startsWith('/api/session.list')) {
+      } else if (/^\/api\/session[./]list(?:$|\?)/.test(req.url ?? '')) {
         sessionListRequestsSeen += 1;
         if (failSessionList) {
           setTimeout(() => req.socket.destroy(), 25);
           return;
         }
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({
-          ok: true,
-          type: 'server-response',
-          rpcId: 'session-list',
-          result: {
-            ok: true,
-            value: {
-              items: [
-                { sessionId: 's-owned', cwd: '/workspaces/a' },
-                { sessionId: 's-sidebar-owned', cwd: sidebarWorkspace },
-                { sessionId: 's-other', cwd: '/workspaces/b' },
-                { sessionId: 's-legacy-admin', cwd: '/workspaces/a' },
-              ],
+        const chunks: Buffer[] = [];
+        req.on('data', (chunk: Buffer) => chunks.push(chunk));
+        req.on('end', () => {
+          const request = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as { rpcId?: string };
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({
+            type: 'server-response',
+            rpcId: request.rpcId ?? 'session-list',
+            result: {
+              ok: true,
+              value: {
+                items: [
+                  { sessionId: 's-owned', cwd: '/workspaces/a' },
+                  { sessionId: 's-sidebar-owned', cwd: sidebarWorkspace },
+                  { sessionId: 's-other', cwd: '/workspaces/b' },
+                  { sessionId: 's-legacy-admin', cwd: '/workspaces/a' },
+                ].map(item => ({ ...item, updatedAt: 0, running: false, blank: false })),
+              },
             },
-          },
-        }));
+          }));
+        });
       } else if ((req.url ?? '').startsWith('/api/session.create')) {
         sessionCreateCallCount += 1;
         const chunks: Buffer[] = [];
@@ -915,8 +927,7 @@ test('workspace.list JSON 改写路径：只有 content-length，无 transfer-en
   assert.ok(names.includes('content-length'), '改写路径必须带 content-length');
   assert.ok(!names.includes('transfer-encoding'), '改写路径不得带 transfer-encoding');
   const parsed = JSON.parse(r.body);
-  assert.deepEqual(parsed.data[0], {
-    id: 'ws-1',
+  assert.deepEqual(parsed.result.value.items[0], {
     workspaceId: 'ws-1',
     path: '/workspaces/a',
     sessionIds: ['s-owned'],
@@ -1726,6 +1737,9 @@ test('alpha.1 model selection and native path opening enforce customer policy an
     sessionId: 's-owned', provider: 'codex', model: 'gpt-5.6-sol',
   })).status, 200);
   assert.equal((await request('session/selectModel', {
+    sessionId: 's-owned', provider: 'codex', model: 'gpt-6-astra',
+  })).status, 200);
+  assert.equal((await request('session/selectModel', {
     sessionId: 's-owned', provider: 'codex', model: 'gpt-5.5',
   })).status, 403);
   assert.equal((await request('session/selectModel', {
@@ -1973,7 +1987,7 @@ test('管理员模型目录保持完整，子用户只过滤 Codex 的旧模型'
     })), [
       {
         id: 'codex',
-        models: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
+        models: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-6-astra'],
       },
       {
         id: 'deepseek-official',

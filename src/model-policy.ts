@@ -1,16 +1,19 @@
 /** Provider route exposed to customer subaccounts. */
 export const CUSTOMER_MODEL_PROVIDER = 'codex';
 
-/** Models exposed to customer subaccounts, in provider catalog order. */
-export const CUSTOMER_MODEL_IDS = new Set([
-  'gpt-5.6-sol',
-  'gpt-5.6-terra',
-  'gpt-5.6-luna',
-]);
-
-/** Whether a model route is available to a customer subaccount. */
+/**
+ * Whether a model route is available to a customer subaccount.
+ * @param provider - provider route from the catalog or model request.
+ * @param model - model id; Codex requires a GPT version of at least 5.6.
+ * @returns whether the route meets the customer model policy.
+ */
 export function customerModelAllowed(provider: string, model: string): boolean {
-  return provider !== CUSTOMER_MODEL_PROVIDER || CUSTOMER_MODEL_IDS.has(model);
+  if (provider !== CUSTOMER_MODEL_PROVIDER) return true;
+  const version = /^gpt-(\d+)(?:\.(\d+))?(?:-[a-z0-9]+(?:-[a-z0-9]+)*)?$/.exec(model);
+  if (version === null) return false;
+  const major = Number(version[1]);
+  const minor = Number(version[2] ?? '0');
+  return major > 5 || (major === 5 && minor >= 6);
 }
 
 function recordOf(value: unknown): Record<string, unknown> | null {
@@ -40,7 +43,7 @@ export function filterCustomerModelCatalogResponse(response: unknown): unknown |
     if (group.id !== CUSTOMER_MODEL_PROVIDER) return [group];
     const models = group.models.filter((candidateModel) => {
       const model = recordOf(candidateModel);
-      return model !== null && typeof model.id === 'string' && CUSTOMER_MODEL_IDS.has(model.id);
+      return model !== null && typeof model.id === 'string' && customerModelAllowed(CUSTOMER_MODEL_PROVIDER, model.id);
     });
     return models.length === 0 ? [] : [{ ...group, models }];
   });

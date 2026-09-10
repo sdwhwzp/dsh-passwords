@@ -42,7 +42,7 @@ The owner can configure, per subuser, from the settings page:
 - **DM-by-default messages**: subuser messages go to the owner by default; broadcasting is owner-only and must be explicitly chosen
 - **Hourly token limit** and **daily usage-time limit**: requests are rejected once the cap is hit
 - **Monthly model-spend allowance**: stored as integer CNY micros with ¥0.01 admin precision; shows used, remaining and an 80% warning, and rejects the next model step at 100%
-- **Customer model scope**: under the ChatGPT (Codex) provider, subuser selectors show only GPT-5.6-Sol, GPT-5.6-Terra, and GPT-5.6-Luna; models from other providers remain available, while the server rejects other Codex models for subusers and leaves the owner unrestricted
+- **Customer model scope**: under the ChatGPT (Codex) provider, subuser selectors show GPT-5.6 and newer versions, including GPT-6 Astra; models from other providers remain available, while the server rejects Codex models below GPT-5.6 or with unrecognized versions for subusers and leaves the owner unrestricted
 - **Session model persistence**: each session keeps its model selection independently, including a selection made before the first prompt and followed by a dsh restart; selecting a model never changes the shared deployment default, which the owner changes explicitly in the `agent-default-model` Settings section
 - **Sandbox level**: read-only / workspace-write / full access; when a subuser's AI tries to escalate beyond its level, the gateway forces the approval to "reject"
 - **Upload toggle** (including private-folder uploads), **git-download toggle**, and **ban subusers**
@@ -405,7 +405,7 @@ Enable `MCP_TENANT_EDITOR=true` only with the tenant edition of `dsh-vsceditor` 
 
 ## Fork synchronization and deployment adaptation (2026-09-10)
 
-This branch merges `slywalker2006/dsh-passwords` commit `590b2ca` (2.6.11). The deployment build is `2.6.30` and requires the personal Harness 0.1.5-alpha.2 build with native principal support. Official npm Harness packages do not contain those private extensions; deployment overrides must select the matching Harness artifacts throughout.
+This branch merges `slywalker2006/dsh-passwords` commit `590b2ca` (2.6.11). The deployment build is `2.6.31` and requires the personal Harness 0.1.5-alpha.2 build with native principal support. Official npm Harness packages do not contain those private extensions; deployment overrides must select the matching Harness artifacts throughout.
 
 The source SSH switch defaults to disabled. Enabled accounts see and operate only SSH aliases they created and successfully claimed. Global import, cluster, and tunnel operations remain administrator-only. Host responses must contain the expected fields; failed operations or mismatched aliases grant no ownership. SQLite and MySQL/MariaDB persist SSH ownership, and account deletion removes its claims.
 
