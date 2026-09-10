@@ -21,8 +21,6 @@ import {
   extractWorkspaceRenamePaths,
   normalizePath,
   parseWebSocketAllowlist,
-  webSocketAccessForPath,
-  isAdminOnlySidebarEndpoint,
 } from '../src/permissions.js';
 
 // ── 1) args 伪包裹跳过 ─────────────────────────────────────────────
@@ -32,25 +30,9 @@ test('WebSocket 白名单只支持精确路径和显式子路径', () => {
     '/sidebar/ws/terminal',
     '/plugin/ws/*',
   ]);
-  assert.equal(webSocketAccessForPath('/plugin/ws/run', ['/plugin/ws/*'], [], 'admin', false), 'authenticated');
-  assert.equal(webSocketAccessForPath('/plugin/ws', ['/plugin/ws/*'], [], 'admin', false), 'deny');
-  assert.equal(webSocketAccessForPath('/plugin/ws/run', ['/plugin/ws/*'], [], 'user', false), 'deny');
-  assert.equal(webSocketAccessForPath('/plugin/ws/run', ['/plugin/ws/*'], ['/plugin/ws/*'], 'user', false), 'authenticated');
-  assert.equal(webSocketAccessForPath('/plugin/ws/run', ['/plugin/ws/*'], [], 'admin', false), 'authenticated');
-  assert.equal(webSocketAccessForPath('/api/events.mux', [], [], 'user', true), 'authenticated');
-  assert.equal(webSocketAccessForPath('/unknown', [], [], 'admin', false), 'deny');
   for (const value of ['/gateway/x', '/api/dsh-passwords/internal/x', '/*', '/x/../y', '/x%2fy', '/x?y=1']) {
     assert.throws(() => parseWebSocketAllowlist(value, 'TEST'));
   }
-});
-
-test('better-sidebar 宿主侧路由只允许主用户', () => {
-  assert.equal(isAdminOnlySidebarEndpoint('/sidebar/api/fs.tree'), true);
-  assert.equal(isAdminOnlySidebarEndpoint('/sidebar/upload'), true);
-  assert.equal(isAdminOnlySidebarEndpoint('/sidebar/ws/terminal'), true);
-  assert.equal(isAdminOnlySidebarEndpoint('/sidebar'), true);
-  assert.equal(isAdminOnlySidebarEndpoint('/api/events.mux'), false);
-  assert.equal(isAdminOnlySidebarEndpoint('/api/dsh-passwords/state'), false);
 });
 
 test('R-A：extractPathFromBody 跳过 args 伪包裹（防 fail-open 越权）', () => {

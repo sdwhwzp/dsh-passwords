@@ -1,45 +1,31 @@
-# DSH Compatibility Matrix
+# Fork compatibility and deployment
 
-## Supported baseline
+This fork integrates `slywalker2006/dsh-passwords` commit `59968d34a62a2c3b1d805da15bafb7a79d4b830f` on `dev`. Its deployment version is `2.7.0-dsh.20260911.1`; the owned push repository is `git@github.com:sdwhwzp/dsh-passwords.git`.
 
-| Component | Supported version | Validation status |
-|---|---|---|
-| Node.js | 22.19+ or 24+ | Matches the DSH alpha.4 engine contract |
-| DSH source runtime | 0.1.2-alpha.1 through alpha.4 | Alpha.4 public APIs and patch structure are build- and regression-tested; browser/profile E2E remains required before a production deployment claim |
-| DSH npm runtime | 0.1.2-alpha.2 through alpha.4 | Alpha.4 packed settings and connection artifacts are patch-tested; alpha.1 was never published to npm |
-| dsh-passwords | 2.6.17 | Local build and regression suite |
+## Runtime requirements
 
-Development dependencies use the top-level alpha.4 DSH package so TypeScript resolves the current public plugin APIs. The package does not impose a runtime DSH dependency: DSH owns the profile and loads this package through its plugin link. Alpha.1 support is therefore a source-runtime compatibility target, not an npm version range.
+| Component | Required baseline | Evidence |
+| --- | --- | --- |
+| Node.js | 22.19+ or 24+ | Local checks use 22.21.1 |
+| Harness | Personal fork 0.1.5-rc.2 | Compiler links, runtime peers and native-principal regression tests agree |
+| dsh-passwords | 2.7.0-dsh.20260911.1 | Build and gateway/account regression tests |
+| dsh-ssh account mode | `accountIsolation: true` with `TENANT_SSH_ENABLED=true` | Separate account stores, credentials, pools and terminal authorization |
+| Official npm Harness or bundled Docker | Insufficient for this fork's tenant deployment | Native principal extensions must come from the matching personal Harness build |
 
-## Plugin surfaces
+The source release's legacy bundle patcher does not replace the personal Harness's native principal and settings interfaces. Startup requires the authenticated Host connection and its gateway configuration; no compiled Harness files are rewritten. Native acceptance covers the 0.1.5 alpha.1, alpha.2, rc.1 and rc.2 version labels, while the current compiler and deployment target is rc.2. A recognized version alone does not supply the fork's private extensions.
 
-| Surface | Status | Requirement |
-|---|---|---|
-| HTTP UI/API plugins | Code-level compatible | The gateway removes only its own authentication cookie and preserves plugin cookies; validate each third-party plugin in a real alpha.4 profile. |
-| Plugin combo URLs | Regression-tested | `/plugins/??...` query bytes, including the second `?`, remain unchanged; a real alpha.4 boot-manifest batch test remains pending. |
-| Plugin business `token` query | Regression-tested | Only the alpha index launch-token context strips bare `token`; plugin paths retain it. |
-| Third-party WebSocket, administrator | Conditional | Configure `MCP_GATEWAY_WS_ADMIN_ALLOWLIST`. |
-| Third-party WebSocket, subuser | Conditional | Configure `MCP_GATEWAY_WS_USER_ALLOWLIST` and grant the path to that user. |
-| Unknown WebSocket paths | Not supported | Rejected by default. |
-| Alpha Remote mux, subuser `workspace/follow` and `session/control` | Code-level compatible | Gateway applies the existing resource filters; validate actual alpha.4 frames before production enablement. |
-| Alpha Remote mux, subuser `session/follow` and `$events` | Not supported | Requires complete resource ownership and correlation filtering. |
-| Directory picker | Native alpha.1+ | dsh-passwords does not insert duplicate official picker loaders. |
-| Connection Cookie bridge | Packed-artifact tested | `patch status` must show `patched` or `native`; alpha.4 npm artifact injection includes a Node syntax check. The alpha.4 gateway refuses startup when the bridge is unavailable. Real browser Cookie exchange/broker health remains an E2E gate. |
+## Account and WebSocket authorization
 
-## Lifecycle contract
+Session ownership, managed workspaces, monthly budgets, MySQL/MariaDB storage, local workspaces, tenant terminals/editors and the independent account management page remain part of this fork. Workspace and Session responses and event streams are filtered before reaching an ordinary account. Credential changes, logout and permission revocation close that account's live connections.
 
-For supported DSH `0.1.2` and `0.1.3` builds, gateway startup is fail-closed: the settings host-mode patch and the authenticated Cookie bridge must both be present. Missing settings exits with code `35`; a missing or unsupported bridge exits with code `33`.
+`MCP_GATEWAY_SSH_WS_ENDPOINTS` lists third-party SSH WebSocket paths, separated by commas, with exact paths or a trailing `/*`. Ordinary accounts require the SSH permission for configured endpoints. Other third-party paths remain unavailable to ordinary accounts; administrators may access them. Native event channels retain resource authorization. The account-isolated dsh-ssh terminal is a separate built-in route controlled by `TENANT_SSH_ENABLED` and the authenticated account.
 
-Run `dsh-passwords uninstall` before removing the package directory or running `npm uninstall`. It removes only the `dsh-passwords` link and bundle item from the selected web profile, then rolls back only matching hash-protected patches. It leaves `.env`, `data/`, databases, certificates, and unrelated plugins unchanged. If profile dependency reconciliation or patch rollback fails, it restores the original `package.json`, `pnpm-lock.yaml`, and `node_modules` materialized state. The no-DSH case uses stable exit code `34`, independent of `LANG`; the alpha.4 success path has been exercised by the compatibility test, while automated failure-path coverage for a real alpha.4 profile remains pending.
+The old per-user WebSocket grants and `MCP_GATEWAY_WS_ADMIN_ALLOWLIST` / `MCP_GATEWAY_WS_USER_ALLOWLIST` settings do not authorize routes. Existing database columns remain for persisted-data compatibility; permission writes clear their obsolete values. Transfer any required third-party SSH paths into the new deployment setting.
 
-## Fork 同步与部署适配（2026-09-10）
+With account isolation enabled, users manage their own SSH aliases, credentials and transfers. Without it, the gateway retains legacy ownership checks: only successfully claimed aliases belong to an ordinary account, and shared import, cluster and tunnel administration remain restricted. SQLite and MySQL/MariaDB retain the ownership records used for migration. Upload and download permissions remain independent of directory browsing. Exact DNS exceptions in `TENANT_SSH_TRUSTED_HOSTS` apply only in account-isolated mode.
 
-当前分支合入 `slywalker2006/dsh-passwords` 的 `590b2ca`（2.6.11）。本部署构建为 `2.6.29`，配合包含原生 principal 扩展的 Harness 0.1.5-alpha.2 使用；普通 npm 上游 Harness 包不提供这些私有扩展，部署时必须统一指向本次 Harness 构建。
+## Update and deployment policy
 
-上游的 SSH 开关默认关闭；开启后，用户只能查看和操作自己创建并成功认领的 SSH alias。批量导入、cluster、tunnel 等全局能力仍只供管理员使用。列表响应必须可解析且符合预期字段；操作失败或响应 alias 不符时不授予归属。SSH alias 归属同时支持 SQLite 和 MySQL/MariaDB，删除用户时清理归属记录。
+The fork's `dsh.YYYYMMDD.N` versions are intentionally excluded from the official stable-version automatic updater, which cannot preserve the tenant adaptations. Synchronize the source into the active branch, build and test, upload all local branches to the owned fork, then deploy matching Harness and plugin artifacts together.
 
-权限接口接纳上游的严格字段校验和部分更新规则：省略 SSH、上传、下载、沙盒、Agent preset 或禁用会话字段时保留既有权限，非法类型返回 400。新增上传路由也服从上传权限。依赖采用上游的 `ws ^8.21.0` 与 `qs ^6.16.0`。
-
-会话与工作区继续通过 Harness 原生 principal、不可转移的会话 owner、托管工作区及权限变更时断开的用户连接执行隔离；保留 MySQL/MariaDB、月额度、本机工作区、租户终端/编辑器和任务看板。因此旧版 0.1.2/0.1.3 的编译产物 patch、cookie bridge、代理缓存会话授权表和旧 Remote mux 实现不覆盖这些现有实现。工作区列表沿用独立的 `assignable-workspaces` 模块，并运行上游新增的空会话与归档会话回归用例。
-
-部署沿用现有数据与凭据，在候选 Profile 中单独放置 `.env`。本次 SSH 表与权限列属于增量变更，不删除已有用户、会话日志或工作区。服务器 30 的最终发布、验收与回滚位置由部署记录登记。
+Candidate profiles preserve live credentials and data and use their own `.env`. Keep the latest production plugin pins and a rollback copy before switching. Verify production health and account behavior before deleting this deployment's local temporary profiles, databases, credentials, logs and redundant packages. Record deployed commits, artifact hashes, checks and cleanup status separately; a local build does not establish production deployment.

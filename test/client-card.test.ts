@@ -154,7 +154,6 @@ test('account editor synchronizes the SSH permission beside upload and save API'
           allowGitDownload: false,
           allowWorkspaceCreate: false,
           allowSsh: false,
-          allowedWebSocketPaths: [],
           allowedAgentPresets: [],
           banned: false,
           sandboxMode: null,
@@ -177,6 +176,11 @@ test('account editor synchronizes the SSH permission beside upload and save API'
   const permissionRequest = card.requests.find((request) => request.input === '/gateway/api/permissions');
   assert.ok(permissionRequest);
   assert.equal(JSON.parse(String(permissionRequest!.init?.body)).allowSsh, true);
+  const saved = card.renderer.root.findAll((node) => node.props.role === 'status' && node.children.includes('permsSaved'));
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0]!.parent?.props.className, 'dshpw-perm-foot');
+  await act(async () => { checkbox.props.onChange({ target: { checked: false } }); });
+  assert.equal(card.renderer.root.findAll((node) => node.props.role === 'status' && node.children.includes('permsSaved')).length, 0);
 });
 
 test('account editor synchronizes the large request body permission to the visible checkbox and save API', async (t) => {
@@ -198,7 +202,6 @@ test('account editor synchronizes the large request body permission to the visib
           allowGitDownload: false,
           allowWorkspaceCreate: false,
           allowSsh: false,
-          allowedWebSocketPaths: [],
           allowedAgentPresets: [],
           banned: false,
           sandboxMode: null,

@@ -138,7 +138,7 @@ before(async () => {
       acmeEmail: '', acmeStaging: false,
     },
     jwtSecret: 'test-secret', internalSecret: 'test-internal',
-    patch: { dshRoot: '', restartService: '' }, webSocket: { adminAllowlist: [], userAllowlist: [] },
+    patch: { dshRoot: '', restartService: '' }, webSocket: { sshEndpoints: [] },
   };
   cookie = `dsh_gateway_token=${jwt.sign({ sub: String(user.id), username: user.username, cv: 0 }, config.jwtSecret, { expiresIn: '12h' })}`;
   restrictedCookie = `dsh_gateway_token=${jwt.sign({ sub: String(restricted.id), username: restricted.username, cv: 0 }, config.jwtSecret, { expiresIn: '12h' })}`;

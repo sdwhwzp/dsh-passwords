@@ -143,7 +143,6 @@ test('旧 user_permissions 表会迁移 WebSocket 授权列，并保留现有权
       allow_git_download: true,
       allow_workspace_create: false,
       allow_ssh: false,
-      allowed_websocket_paths: [],
       allowed_agent_presets: null,
       banned: false,
       sandbox_mode: 'workspace-write',
@@ -158,7 +157,6 @@ test('旧 user_permissions 表会迁移 WebSocket 授权列，并保留现有权
       allowUpload: true,
       allowGitDownload: true,
       allowWorkspaceCreate: false,
-      allowedWebSocketPaths: ['/plugin/ws/*'],
       allowedAgentPresets: ['system/default'],
       banned: false,
       sandboxMode: 'workspace-write',
@@ -175,7 +173,6 @@ test('旧 user_permissions 表会迁移 WebSocket 授权列，并保留现有权
       sandboxMode: 'workspace-write',
       disabledSessions: [],
     });
-    assert.deepEqual(db.getPermissions(7)?.allowed_websocket_paths, ['/plugin/ws/*']);
     assert.equal(db.getPermissions(7)?.allow_ssh, false, '省略 SSH 权限时保留既有关闭状态');
     assert.deepEqual(db.getPermissions(7)?.allowed_agent_presets, ['system/default']);
     db.setPermissions(7, {

@@ -111,7 +111,7 @@ before(async () => {
     },
     jwtSecret: 'test-secret', internalSecret: 'test-internal',
     patch: { dshRoot: '', restartService: '' },
-    webSocket: { adminAllowlist: [], userAllowlist: [] },
+    webSocket: { sshEndpoints: [] },
   };
   const tokenFor = (user: { id: number; username: string }) =>
     `dsh_gateway_token=${jwt.sign({ sub: String(user.id), username: user.username, cv: 0 }, config.jwtSecret, { expiresIn: '12h' })}`;

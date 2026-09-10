@@ -256,6 +256,7 @@ After logging in to dsh, open **Settings → Plugins** to find the "dsh-password
 | `MCP_GATEWAY_HOST` | `0.0.0.0` | Gateway listen address |
 | `MCP_GATEWAY_PORT` | `443` on first installer setup; `8080` when unset | Gateway port |
 | `MCP_GATEWAY_UPSTREAM` | `http://127.0.0.1:3080` | dsh web address (the plugin points it at dsh's actual port automatically — usually leave as-is) |
+| `MCP_GATEWAY_SSH_WS_ENDPOINTS` | Empty | Comma-separated third-party SSH WebSocket paths, exact or trailing `/*`; ordinary accounts require SSH permission. The built-in dsh-ssh terminal retains account authorization when tenant isolation is enabled. |
 | `MCP_GATEWAY_REDIRECT_PORT` | `80` | Port 80: ACME challenge answers + 301 redirect to 443 |
 | `MCP_GATEWAY_DOMAIN` | empty | Your own domain; when empty, `<public-IP>.sslip.io` is used |
 | `MCP_GATEWAY_AUTO_TLS` | on | Empty = auto; `0` disables it (plaintext HTTP, dangerous) |
@@ -405,9 +406,9 @@ Enable `MCP_TENANT_TASK_BOARD=true` only with the aggregate's global `web-ui-tas
 
 Enable `MCP_TENANT_EDITOR=true` only with the tenant edition of `dsh-vsceditor` and its isolated server launcher installed. Restricted accounts require file-write permission. The Host validates session ownership and the managed root; same-origin WebSockets participate in logout, ban and credential-change revocation. Routes remain disabled otherwise.
 
-## Fork synchronization and deployment adaptation (2026-09-10)
+## Fork synchronization and deployment adaptation
 
-This branch merges `slywalker2006/dsh-passwords` commit `590b2ca` (2.6.11). The deployment build is `2.6.31` and requires the personal Harness 0.1.5-alpha.2 build with native principal support. Official npm Harness packages do not contain those private extensions; deployment overrides must select the matching Harness artifacts throughout.
+This branch merges `slywalker2006/dsh-passwords` commit `59968d3` (2.7.0). The deployment build is `2.7.0-dsh.20260911.1` and requires the personal Harness 0.1.5-rc.2 build with native principal support. Official npm Harness packages do not contain those private extensions; deployment overrides must select the matching Harness artifacts throughout.
 
 Without `TENANT_SSH_ENABLED=true`, the gateway retains legacy SSH alias ownership checks: restricted accounts may use only their claimed connections; import, cluster, and tunnel operations remain administrator-only. SQLite and MySQL/MariaDB persist alias ownership, which the account-isolated Host uses to migrate existing connections.
 
@@ -432,3 +433,5 @@ Accounts created with `TENANT_SSH_ENABLED=true` have SSH enabled by default, and
 Existing connections migrate only to their recorded owner; unclaimed connections migrate only to the earliest-created administrator. The original configuration file remains intact. Migration lists contain no passwords or private keys; `dsh-ssh` persists account configurations separately. Sessions, workspaces, and login credentials remain intact.
 
 The gateway rejects private, loopback, and proxy-assigned virtual IP addresses by default. Deployments using Fake-IP DNS or specific private DNS targets can set `TENANT_SSH_TRUSTED_HOSTS=ssh.example.com,second.example.com` in the private `.env` and restart the service. This setting applies only in account SSH mode and accepts exact DNS names, without wildcards, IP literals, URLs, or ports; every account with SSH permission can use the listed names. Trusted names remain unchanged for deployment DNS routing and SSH server authentication, so administrators must trust those names and their DNS results. Other targets retain DNS validation and public-IP pinning. Network-policy rejection and DNS lookup failure display distinct SSH errors.
+
+See the [compatibility matrix](docs/compatibility-matrix.md) for native interfaces, SSH endpoint configuration and fork update restrictions.

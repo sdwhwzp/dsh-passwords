@@ -22,7 +22,7 @@ function config(dbPath: string, restartService = 'dsh-web'): PlatformConfig {
   return {
     setupKey: 'test-setup-key', dbPath, dbEncKey: '', jwtSecret: 'test-jwt-secret', internalSecret: 'test-internal-secret',
     gateway: { host: '127.0.0.1', port: 9443, upstream: 'http://127.0.0.1:3080', tls: null, redirectPort: null, publicHost: '', domain: 'localhost', autoTls: false, acmeEmail: '', acmeStaging: false },
-    patch: { dshRoot: '', restartService }, webSocket: { adminAllowlist: [], userAllowlist: [] },
+    patch: { dshRoot: '', restartService }, webSocket: { sshEndpoints: [] },
   };
 }
 
@@ -151,13 +151,11 @@ function setup(root: string, autoEnabled: boolean, nowRef: { value: number }, re
   return { engine, db, ops, calls, restarts: () => restarts, setRestartAllowed: (allowed: boolean) => { restartAllowed = allowed; } };
 }
 
-test('the package version stays ahead of the 2.6.19 update baseline', () => {
-  // Pinning the exact version made this assert a moment rather than a
-  // behavior: it went red on 2.6.21 and stayed red through every release
-  // since, 2.6.24 in production included. The ordering is what the update
-  // flow actually depends on.
+test('the fork advances the source baseline without admitting official automatic updates', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
-  assert.equal(compareVersions(pkg.version, '2.6.19'), 1);
+  assert.match(pkg.version, /^\d+\.\d+\.\d+-dsh\.\d{8}\.\d+$/);
+  assert.equal(compareVersions(pkg.version.split('-')[0]!, '2.6.19'), 1);
+  assert.equal(compareVersions(pkg.version, '2.7.0'), null);
 });
 
 test('Harness compiler links resolve the same native build declared by runtime peers', () => {

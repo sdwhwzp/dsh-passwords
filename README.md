@@ -23,7 +23,7 @@ dsh 的网页界面默认面向本机使用。服务器地址一旦暴露，拿�
 ### 2️⃣ 多用户
 
 - 一个**主用户**（首次配置创建）+ 任意多个**子用户**，各自独立账号密码登录
-- 所有账号管理都在 dsh 设置页的卡片里完成，不用 SSH：改密码、改用户名、创建/删除子用户
+- 账号管理从设置卡片打开独立列表页：搜索、分页、改密码、改用户名、创建/删除子用户
 - 新增子用户时自动在宿主机创建并注册一个专属工作区（默认 `~/dsh-user-workspaces/u<用户ID>`），初始沙盒为“可写工作区”；旧子用户会在升级后首次启动时自动补建
 - 向独立存储插件提供经过登录身份复核的专属目录解析服务；WebDAV 等插件可把每个账号自己的远端目录分别挂载到该目录内，不能借此指定或访问其他账号目录
 - 子用户可从左侧栏 Workspace 上方的“文件夹管理”打开独立管理页，浏览自己的托管目录、下载或删除文件、递归删除文件夹，并把本机文件或整个文件夹上传到当前目录；文件夹层级会保留（浏览器不提供空目录，因此不会单独创建空目录），路径不会暴露或越出其他账号及宿主机目录
@@ -259,6 +259,7 @@ node scripts/start-http.mjs [端口]    # 默认 8080，会弹 y/N 确认
 | `MCP_GATEWAY_HOST` | `0.0.0.0` | 网关监听地址 |
 | `MCP_GATEWAY_PORT` | 安装器首次安装为 `443`；未设置时为 `8080` | 网关端口 |
 | `MCP_GATEWAY_UPSTREAM` | `http://127.0.0.1:3080` | dsh 网页地址（插件自动指向 dsh 实际端口，一般不用改） |
+| `MCP_GATEWAY_SSH_WS_ENDPOINTS` | 空 | 第三方 SSH WebSocket 端点，逗号分隔，支持精确路径或末尾 `/*`；普通账号须开启 SSH 权限。启用账号隔离时内置 dsh-ssh 终端仍受账号权限控制。 |
 | `MCP_GATEWAY_REDIRECT_PORT` | `80` | 80 端口：ACME 证书验证 + 301 跳转 443 |
 | `MCP_GATEWAY_DOMAIN` | 空 | 自己的域名；留空自动用 `<公网IP>.sslip.io` |
 | `MCP_GATEWAY_AUTO_TLS` | 开 | 留空=自动；`0` 关闭（明文 HTTP，危险） |
@@ -429,9 +430,9 @@ Linux 部署由管理员将 `scripts/tenant-terminal-launcher.py` 安装为 root
 
 配合 `dsh-vsceditor` 的租户版本和服务器隔离启动器，设置 `MCP_TENANT_EDITOR=true` 可启用网页编辑器代理。普通账号必须允许文件写入，Host 按本人会话与托管目录验证访问；WebSocket 使用同源校验并参与退出、禁用及凭据变更后的连接撤销。未启用时入口关闭。
 
-## Fork 同步与部署适配（2026-09-10）
+## Fork 同步与部署适配
 
-当前分支合入 `slywalker2006/dsh-passwords` 的 `590b2ca`（2.6.11）。本部署构建为 `2.6.32`，配合包含原生 principal 扩展的 Harness 0.1.5-alpha.2 使用；普通 npm 上游 Harness 包不提供这些私有扩展，部署时必须统一指向本次 Harness 构建。
+当前分支合入 `slywalker2006/dsh-passwords` 的 `59968d3`（2.7.0）。本部署构建为 `2.7.0-dsh.20260911.1`，配合包含原生 principal 扩展的 Harness 0.1.5-rc.2 使用；普通 npm 上游 Harness 包不提供这些私有扩展，部署时必须统一指向本次 Harness 构建。
 
 未设置 `TENANT_SSH_ENABLED=true` 时，网关保留旧版 SSH alias 归属检查：普通账号只能使用本人已认领的连接，导入、cluster 和 tunnel 仍仅供管理员。SSH alias 归属同时支持 SQLite 和 MySQL/MariaDB；账号隔离版 Host 使用这些记录迁移已有连接。
 
@@ -458,3 +459,5 @@ Linux 部署由管理员将 `scripts/tenant-terminal-launcher.py` 安装为 root
 已有 SSH 配置按归属只迁移到对应账号，未认领连接仅迁移给最早创建的管理员；旧配置文件保留。迁移清单不包含密码或私钥，新账号配置由 `dsh-ssh` 独立持久化。现有 Session、工作区和登录凭据不因此改变。
 
 网关默认拒绝内网、回环及代理虚拟 IP 地址。部署使用 Fake-IP DNS 或需要连接指定内网域名时，管理员可在私有 `.env` 设置 `TENANT_SSH_TRUSTED_HOSTS=ssh.example.com,second.example.com`，重启服务后生效。此配置仅在账号 SSH 模式启用时有效，只接受完整域名，不接受通配符、IP、URL 或端口；所有获得 SSH 权限的账号均可使用所列域名。可信域名保留原名称，由部署 DNS 和 SSH 服务器认证决定连接，管理员需要信任这些域名及其解析结果；其他地址继续解析校验并固定到通过检查的公网 IP。地址被网络策略拒绝与 DNS 解析失败分别显示对应 SSH 错误。
+
+本 fork 的原生接口、SSH 端点配置与更新限制见[兼容性说明](docs/compatibility-matrix.md)。

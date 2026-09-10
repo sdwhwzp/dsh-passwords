@@ -210,6 +210,7 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
   // 权限管理（仅主用户）
   const [overview, setOverview] = useState<PermOverview | null>(null);
   const [permDrafts, setPermDrafts] = useState<Record<number, PermDraft>>({});
+  const [permsNotice, setPermsNotice] = useState<Record<number, string>>({});
   const [budgets, setBudgets] = useState<Record<number, BudgetStatus>>({});
   const [workspaces, setWorkspaces] = useState<WorkspaceInfo[]>([]);
   // 正在编辑中的子用户草稿：dirty 时 30s 自动刷新不覆盖本地未保存的修改
@@ -314,6 +315,9 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
     fn: () => Promise<unknown>,
     okMessage: string,
     afterSuccess?: () => Promise<void>,
+    // 成功文案投递目标：不传则进页面底部全局提示栏；传了则只投递到指定 sink
+    // （如权限块内的就地确认条），不再重复刷全局提示。
+    noticeSink?: (message: string) => void,
   ) => {
     setBusy(true);
     setError('');
@@ -324,7 +328,8 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
         result !== null && typeof result === 'object' && 'notice' in result && typeof result.notice === 'string'
           ? result.notice
           : null;
-      setNotice(customNotice ?? okMessage);
+      if (noticeSink !== undefined) noticeSink(customNotice ?? okMessage);
+      else setNotice(customNotice ?? okMessage);
       if (afterSuccess) {
         await afterSuccess();
         return;
@@ -432,6 +437,7 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
 
   // 权限草稿更新 + 保存（仅主用户）
   const setDraft = (userId: number, patch: Partial<PermDraft>) => {
+    setPermsNotice((prev) => ({ ...prev, [userId]: '' }));
     dirtyUsersRef.current.add(userId);
     setDirtyUsers([...dirtyUsersRef.current]);
     setPermDrafts((prev) => ({ ...prev, [userId]: { ...prev[userId], ...patch } }));
@@ -489,6 +495,7 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
         .filter((workspace) => enabledFolders.has(workspace.path))
         .flatMap((workspace) => workspace.sessions.map((session) => session.id)),
     );
+    setPermsNotice((prev) => ({ ...prev, [userId]: '' }));
     void run(
       () =>
         api('/gateway/api/permissions', {
@@ -509,6 +516,8 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
           setDirtyUsers([...dirtyUsersRef.current]);
         }),
       t('permsSaved'),
+      async () => { refresh(); },
+      (message) => setPermsNotice((prev) => ({ ...prev, [userId]: message })),
     );
   };
 
@@ -616,7 +625,6 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
       h(
         'div',
         { className: 'dshpw-action-row dshpw-form-actions' },
-        h('span', { className: 'dshpw-hint dshpw-action-copy' }, t('nameHint')),
         h('button', { className: 'dshpw-btn', disabled: busy, onClick: rename }, t('saveName')),
       ),
     );
@@ -903,6 +911,7 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
               h(
                 'div',
                 { className: 'dshpw-perm-foot' },
+                permsNotice[u.id] ? h('span', { className: 'dshpw-ok', role: 'status' }, permsNotice[u.id]) : null,
                 dirtyUsers.includes(u.id) ? h('span', { className: 'dshpw-chip warn' }, t('unsaved')) : null,
                 h(
                   'button',
@@ -965,7 +974,6 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
           'span',
           { className: 'dshpw-switch-copy' },
           h('strong', null, t('chatToggleDesc')),
-          h('small', null, t('chatToggleHint')),
         ),
         h(
           'span',

@@ -65,7 +65,6 @@ export interface UserPermissionsRow {
   allow_git_download: boolean;
   allow_workspace_create: boolean;
   allow_ssh: boolean;
-  allowed_websocket_paths: string[];
   /** Null preserves unrestricted legacy accounts; an empty array denies every preset. */
   allowed_agent_presets: string[] | null;
   banned: boolean;
@@ -1048,7 +1047,7 @@ export class Database {
   // ── 子用户权限（网关强制执行） ────────────────────────────
   getPermissions(userId: number): UserPermissionsRow | null {
     const row = this.stmt(
-      'SELECT user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, monthly_budget_micros, allow_upload, allow_git_download, allow_workspace_create, allow_ssh, allowed_websocket_paths, allowed_agent_presets, banned, sandbox_mode, disabled_sessions, updated_at FROM user_permissions WHERE user_id = ?',
+      'SELECT user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, monthly_budget_micros, allow_upload, allow_git_download, allow_workspace_create, allow_ssh, allowed_agent_presets, banned, sandbox_mode, disabled_sessions, updated_at FROM user_permissions WHERE user_id = ?',
     ).get(userId) as
       | {
           user_id: number;
@@ -1060,7 +1059,6 @@ export class Database {
           allow_git_download: number;
           allow_workspace_create: number;
       allow_ssh: number;
-          allowed_websocket_paths: string | null;
           allowed_agent_presets: string | null;
           banned: number;
           sandbox_mode: string | null;
@@ -1079,7 +1077,6 @@ export class Database {
       allow_git_download: row.allow_git_download === 1,
       allow_workspace_create: row.allow_workspace_create === 1,
       allow_ssh: row.allow_ssh === 1,
-      allowed_websocket_paths: parseJsonArray(row.allowed_websocket_paths),
       allowed_agent_presets: row.allowed_agent_presets === null ? null : parseJsonArray(row.allowed_agent_presets),
       banned: row.banned === 1,
       sandbox_mode: row.sandbox_mode,
@@ -1099,7 +1096,6 @@ export class Database {
       allowGitDownload: boolean;
       allowWorkspaceCreate?: boolean;
       allowSsh?: boolean;
-      allowedWebSocketPaths?: string[];
       allowedAgentPresets?: string[] | null;
       banned: boolean;
       sandboxMode?: string | null;
@@ -1112,9 +1108,6 @@ export class Database {
     const existing = this.getPermissions(userId);
     const disabledSessions = [...new Set((perms.disabledSessions ?? existing?.disabled_sessions ?? []).filter((id) => typeof id === 'string' && id.length > 0 && id.length <= 200))].slice(0, 2000);
     const allowWorkspaceCreate = perms.allowWorkspaceCreate ?? existing?.allow_workspace_create ?? false;
-    const allowedWebSocketPaths = perms.allowedWebSocketPaths === undefined
-      ? existing?.allowed_websocket_paths ?? []
-      : [...new Set(perms.allowedWebSocketPaths.filter((entry) => typeof entry === 'string' && entry.length > 0 && entry.length <= 512))];
     const allowedAgentPresets = perms.allowedAgentPresets === undefined
       ? existing?.allowed_agent_presets ?? null
       : perms.allowedAgentPresets === null
@@ -1148,7 +1141,7 @@ export class Database {
       perms.allowGitDownload ? 1 : 0,
       allowWorkspaceCreate ? 1 : 0,
       (perms.allowSsh ?? existing?.allow_ssh ?? false) ? 1 : 0,
-      JSON.stringify(allowedWebSocketPaths),
+      '[]',
       allowedAgentPresets === null ? null : JSON.stringify(allowedAgentPresets),
       perms.banned ? 1 : 0,
       perms.sandboxMode === undefined ? existing?.sandbox_mode ?? null : perms.sandboxMode,

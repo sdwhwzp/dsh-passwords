@@ -45,6 +45,18 @@ test('pre-alpha installations fail closed instead of rewriting removed packages'
   }
 });
 
+for (const version of ['0.1.5-alpha.2', '0.1.5-rc.1', '0.1.5-rc.2']) {
+  test(`native ${version} requires no installed-bundle rewrite`, () => {
+    const root = nativeRoot(version);
+    try {
+      assert.equal(applyRemotePatch(root), 'unchanged');
+      assert.equal(patchStatus(root).whitelist, true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
 test('profile configuration resolves the package owning the running dsh CLI', () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'dshpw-split-runtime-'));
   const profile = path.join(root, 'profile');

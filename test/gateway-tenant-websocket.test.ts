@@ -57,8 +57,7 @@ test('restricted event downlinks filter other tenants and survive an upstream re
   const customer = db.createUser('customer', 'hash', 'user');
   db.setPermissions(customer.id, {
     allowedFolders: [ownRoot], hourlyTokenLimit: null, dailyMinutesLimit: null,
-    monthlyBudgetMicros: 0, allowUpload: true, allowGitDownload: false, banned: false,
-    allowedWebSocketPaths: ['/plugin/ws/*'],
+    monthlyBudgetMicros: 0, allowUpload: true, allowGitDownload: false, allowSsh: true, banned: false,
     sandboxMode: 'workspace-write', disabledSessions: [],
   });
   for (const sessionId of [
@@ -163,7 +162,7 @@ test('restricted event downlinks filter other tenants and survive an upstream re
     localWorkspace: { host: '127.0.0.1', port: 0, publicUrl: '', placeholderRoot: path.join(temporary, 'local') },
     managedWorkspaceRoot: path.join(temporary, 'managed'),
     patch: { dshRoot: '', restartService: '' },
-    webSocket: { adminAllowlist: [], userAllowlist: ['/plugin/ws/*'] },
+    webSocket: { sshEndpoints: ['/plugin/ws/*'] },
   };
   const gateway = createGatewayServer(config, new AuthService(config, db), db, {
     upstreamBrowserCookie: HOST_BROWSER_COOKIE,
@@ -302,8 +301,7 @@ test('restricted event downlinks stop after credential change, invalidation, or 
   const customer = db.createUser('customer', 'hash', 'user');
   db.setPermissions(customer.id, {
     allowedFolders: [ownRoot], hourlyTokenLimit: null, dailyMinutesLimit: null,
-    monthlyBudgetMicros: 0, allowUpload: true, allowGitDownload: false, banned: false,
-    allowedWebSocketPaths: ['/plugin/ws/*'],
+    monthlyBudgetMicros: 0, allowUpload: true, allowGitDownload: false, allowSsh: true, banned: false,
     sandboxMode: 'workspace-write', disabledSessions: [],
   });
   db.claimSessionOwner('user-live', customer.id);
@@ -342,7 +340,7 @@ test('restricted event downlinks stop after credential change, invalidation, or 
     localWorkspace: { host: '127.0.0.1', port: 0, publicUrl: '', placeholderRoot: path.join(temporary, 'local') },
     managedWorkspaceRoot: path.join(temporary, 'managed'),
     patch: { dshRoot: '', restartService: '' },
-    webSocket: { adminAllowlist: [], userAllowlist: ['/plugin/ws/*'] },
+    webSocket: { sshEndpoints: ['/plugin/ws/*'] },
   };
   const gateway = createGatewayServer(config, new AuthService(config, db), db);
   await new Promise<void>((resolve) => gateway.listen(0, '127.0.0.1', resolve));

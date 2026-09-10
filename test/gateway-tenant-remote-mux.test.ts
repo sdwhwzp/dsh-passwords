@@ -54,8 +54,7 @@ async function setup() {
   db.setManagedWorkspace(customer.id, ownRoot);
   const permissions: Parameters<Database['setPermissions']>[1] = {
     allowedFolders: [ownRoot], hourlyTokenLimit: null, dailyMinutesLimit: null,
-    monthlyBudgetMicros: 0, allowUpload: true, allowGitDownload: false,
-    allowedWebSocketPaths: [], allowedAgentPresets: [], allowWorkspaceCreate: false,
+    monthlyBudgetMicros: 0, allowUpload: true, allowGitDownload: false, allowedAgentPresets: [], allowWorkspaceCreate: false,
     banned: false, sandboxMode: 'workspace-write', disabledSessions: [],
   };
   db.setPermissions(customer.id, permissions);
@@ -108,7 +107,7 @@ async function setup() {
     localWorkspace: { host: '127.0.0.1', port: 0, publicUrl: '', placeholderRoot: path.join(temporary, 'local') },
     managedWorkspaceRoot: path.join(temporary, 'managed'),
     patch: { dshRoot: '', restartService: '' },
-    webSocket: { adminAllowlist: [], userAllowlist: [] },
+    webSocket: { sshEndpoints: [] },
   };
   const gateway = createGatewayServer(config, new AuthService(config, db), db, {
     upstreamBrowserCookie: hostCookie,

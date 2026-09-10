@@ -27,8 +27,6 @@ export function normalizePath(p: string): string {
   return n;
 }
 
-export type WebSocketAccess = 'deny' | 'authenticated';
-
 /** Parse exact or trailing-wildcard WebSocket path grants. */
 export function parseWebSocketAllowlist(raw: string | undefined, envName: string): string[] {
   if (raw === undefined || raw.trim() === '') return [];
@@ -66,21 +64,6 @@ export function parseWebSocketAllowlist(raw: string | undefined, envName: string
 /** Match one WebSocket pathname against an exact or trailing-wildcard rule. */
 export function matchesWebSocketRule(pathname: string, rule: string): boolean {
   return rule.endsWith('/*') ? pathname.startsWith(`${rule.slice(0, -2)}/`) : pathname === rule;
-}
-
-/** Resolve an authenticated account's access to one WebSocket route. */
-export function webSocketAccessForPath(
-  pathname: string,
-  configuredRules: readonly string[],
-  grantedRules: readonly string[],
-  userRole: 'admin' | 'user',
-  builtin: boolean,
-): WebSocketAccess {
-  if (builtin) return 'authenticated';
-  if (!configuredRules.some((rule) => matchesWebSocketRule(pathname, rule))) return 'deny';
-  return userRole === 'admin' || grantedRules.some((rule) => matchesWebSocketRule(pathname, rule))
-    ? 'authenticated'
-    : 'deny';
 }
 
 /**
@@ -703,12 +686,12 @@ export function isUnscopedSshEndpoint(pathname: string): boolean {
     pathname === '/api/dsh-ssh/cluster' || pathname === '/api/dsh-ssh/tunnel';
 }
 
-/** 使用 query alias 的 SSH 操作；调用方必须在转发前检查归属。 */
+/** 使用 query alias 的 SSH 操作；调用方必须在转发前检查 alias 格式。 */
 export function isSshAliasQueryEndpoint(pathname: string): boolean {
   return pathname === '/api/dsh-ssh/ls' || pathname === '/api/dsh-ssh/download' || pathname === '/api/dsh-ssh/upload';
 }
 
-/** 使用 JSON body alias 的 SSH 操作；调用方必须在转发前检查归属。 */
+/** 使用 JSON body alias 的 SSH 操作；调用方必须在转发前检查 alias 格式。 */
 export function isSshAliasBodyEndpoint(pathname: string): boolean {
   return pathname === '/api/dsh-ssh/test' || pathname === '/api/dsh-ssh/exec';
 }

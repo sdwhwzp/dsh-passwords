@@ -59,7 +59,7 @@ import {
   isSshTerminalEndpoint,
   isTenantSshEndpoint,
   isSshPublicAssetEndpoint,
-  webSocketAccessForPath,
+  matchesWebSocketRule,
   isAionuiFileWrite,
   isAionuiPanel,
   aionuiRootFrom,
@@ -1104,8 +1104,7 @@ export function createGatewayServer(
     options.managedFileUploadMaxBytes,
     MANAGED_FILE_UPLOAD_MAX_BYTES,
   );
-  const adminOnlyWebSocketPaths = [...new Set(config.webSocket?.adminAllowlist ?? [])];
-  const userGrantableWebSocketPaths = [...new Set(config.webSocket?.userAllowlist ?? [])];
+  const sshWebSocketEndpoints = new Set(config.webSocket?.sshEndpoints ?? []);
   // 不泄露框架信息
   app.disable('x-powered-by');
 
@@ -2072,7 +2071,6 @@ export function createGatewayServer(
         allow_git_download: false,
         allow_workspace_create: false,
         allow_ssh: false,
-        allowed_websocket_paths: [],
         allowed_agent_presets: [],
         banned: false,
         sandbox_mode: null,
@@ -2693,11 +2691,8 @@ export function createGatewayServer(
     const me = apiAuth(req, res, true);
     if (!me) return;
     const day = todayLocal();
-    const registeredUserWebSocketPaths = new Set(userGrantableWebSocketPaths);
     const users = db.listUsers().map((u) => {
       const perms = effectivePermissions(u.id);
-      const allowedWebSocketPaths = perms.allowed_websocket_paths
-        .filter((rule) => registeredUserWebSocketPaths.has(rule));
       const usage = db.getUsage(u.id, day);
       return {
         id: u.id,
@@ -2712,7 +2707,6 @@ export function createGatewayServer(
           allowGitDownload: perms.allow_git_download,
           allowWorkspaceCreate: perms.allow_workspace_create,
           allowSsh: perms.allow_ssh,
-          allowedWebSocketPaths,
           allowedAgentPresets: perms.allowed_agent_presets,
           banned: perms.banned,
           sandboxMode: perms.sandbox_mode,
@@ -2732,8 +2726,7 @@ export function createGatewayServer(
     res.json({
       ok: true,
       me: { id: me.userId, username: me.username, role: me.role },
-      availableWebSocketPaths: userGrantableWebSocketPaths,
-      adminOnlyWebSocketPaths,
+      sshWebSocketEndpoints: [...sshWebSocketEndpoints],
       users,
     });
   });
@@ -3591,24 +3584,6 @@ export function createGatewayServer(
       : submittedAgentPresets === null
         ? null
         : [...new Set(submittedAgentPresets as string[])];
-    const submittedWebSocketPaths = body.allowedWebSocketPaths;
-    if (submittedWebSocketPaths !== undefined && !Array.isArray(submittedWebSocketPaths)) {
-      res.status(400).json({ ok: false, code: 'INVALID', error: 'WebSocket 权限必须是路径数组' });
-      return;
-    }
-    if (
-      submittedWebSocketPaths !== undefined &&
-      (submittedWebSocketPaths.length > 64 || submittedWebSocketPaths.some((value) => typeof value !== 'string'))
-    ) {
-      res.status(400).json({ ok: false, code: 'INVALID', error: 'WebSocket 权限列表无效' });
-      return;
-    }
-    const registeredWebSocketPaths = new Set(userGrantableWebSocketPaths);
-    const existingWebSocketPaths = currentPermissions.allowed_websocket_paths
-      .filter((rule) => registeredWebSocketPaths.has(rule));
-    const allowedWebSocketPaths = submittedWebSocketPaths === undefined
-      ? existingWebSocketPaths
-      : [...new Set(submittedWebSocketPaths as string[])];
     let disabledSessions: string[];
     if (body.disabledSessions === undefined) {
       // 同样遵循部分更新语义。省略 disabledSessions 不得恢复此前被主用户
@@ -3623,10 +3598,6 @@ export function createGatewayServer(
       return;
     } else {
       disabledSessions = [...new Set(body.disabledSessions as string[])];
-    }
-    if (allowedWebSocketPaths.some((rule) => !registeredWebSocketPaths.has(rule))) {
-      res.status(400).json({ ok: false, code: 'INVALID', error: 'WebSocket 权限列表无效' });
-      return;
     }
     // 配额语义："改配额 = 重新给额度"——当 token/时长上限发生变化时
     // 重置该子用户已累计的用量（不同子用户每时段用量不同，改上限应重新计）。
@@ -3643,7 +3614,6 @@ export function createGatewayServer(
       allowGitDownload,
       allowWorkspaceCreate,
       allowSsh,
-      ...(allowedWebSocketPaths === undefined ? {} : { allowedWebSocketPaths }),
       ...(allowedAgentPresets === undefined ? {} : { allowedAgentPresets }),
       banned,
       sandboxMode,
@@ -3670,7 +3640,6 @@ export function createGatewayServer(
         allowGitDownload,
         allowWorkspaceCreate,
       allowSsh,
-        ...(allowedWebSocketPaths === undefined ? {} : { allowedWebSocketPaths }),
         ...(allowedAgentPresets === undefined ? {} : { allowedAgentPresets }),
         banned,
         sandboxMode,
@@ -7487,7 +7456,6 @@ export function createGatewayServer(
     let authedUserId: number | null = null;
     let authedToken: string | null = null;
     let authedCredentialVersion: number | null = null;
-    let userWebSocketGrants: string[] = [];
     if (token && !isTokenRevoked(token)) {
       try {
         const user = auth.verifyToken(token);
@@ -7500,9 +7468,6 @@ export function createGatewayServer(
             authedUserId = row.id;
             authedToken = token;
             authedCredentialVersion = user.cv;
-            const registeredUserPaths = new Set(userGrantableWebSocketPaths);
-            userWebSocketGrants = perms.allowed_websocket_paths
-              .filter((rule) => registeredUserPaths.has(rule));
           }
         }
       } catch {
@@ -7534,9 +7499,15 @@ export function createGatewayServer(
       fwdPath = '/api/dsh-passwords/tenant-terminal' + fwdPath.slice(gatePath.length);
     }
     // SSH terminal 是第三方插件提供的真实 RFC 6455 PTY。它不走 Remote mux，
-    // 也不能由通用的 userAllowlist 单独放行。账号隔离模式由 Host 校验 alias；
+    // 账号隔离模式由 Host 校验 alias；
     // 旧版 Host 仍要求 query alias 已在网关登记为当前子用户所有。
-    if (isSshTerminalEndpoint(gatePath) &&
+    const configuredSshPath = [...sshWebSocketEndpoints].some((rule) => matchesWebSocketRule(gatePath, rule));
+    if (userRole === 'user' && configuredSshPath &&
+        (authedUserId === null || !effectivePermissions(authedUserId).allow_ssh)) {
+      rejectUpgrade(socket, 403);
+      return;
+    }
+    if ((isSshTerminalEndpoint(gatePath) || configuredSshPath) &&
         (req.headers['sec-fetch-site'] === 'cross-site' || !originHostMatches(req as Request))) {
       rejectUpgrade(socket, 403);
       return;
@@ -7557,19 +7528,9 @@ export function createGatewayServer(
       gatePath === '/api/remote.mux' ||
       gatePath === '/api/events.mux' ||
       gatePath === '/api/events.host' ||
-      gatePath === '/plugins/events' ||
-      gatePath === '/aionui-panel/events' ||
-      gatePath.startsWith('/aionui-panel/events/');
-    const wsAccess = isSshTerminalEndpoint(gatePath) && (userRole === 'user' || config.tenantSsh?.enabled === true) ? 'allow' : webSocketAccessForPath(
-      gatePath,
-      userRole === 'admin'
-        ? [...adminOnlyWebSocketPaths, ...userGrantableWebSocketPaths]
-        : userGrantableWebSocketPaths,
-      userWebSocketGrants,
-      userRole === 'admin' ? 'admin' : 'user',
-      builtinWsPath,
-    );
-    if (wsAccess === 'deny') {
+      gatePath === '/plugins/events';
+    const accountSshPath = isSshTerminalEndpoint(gatePath) && config.tenantSsh?.enabled === true;
+    if (userRole !== 'admin' && !builtinWsPath && !configuredSshPath && !accountSshPath) {
       rejectUpgrade(socket, 404);
       return;
     }

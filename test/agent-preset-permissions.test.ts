@@ -59,7 +59,7 @@ test('Issue #22: 正常新增子用户默认 allowed_agent_presets 为空数组�
       },
       jwtSecret: 'test-secret', internalSecret: 'test-internal',
       patch: { dshRoot: '', restartService: '' },
-      webSocket: { adminAllowlist: [], userAllowlist: [] },
+      webSocket: { sshEndpoints: [] },
     };
     const auth = new AuthService(config, db);
     const admin = db.createUser('admin', '$2a$10$dummyhashdummyhashdummyhashdu', 'admin');

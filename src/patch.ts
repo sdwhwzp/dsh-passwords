@@ -99,13 +99,13 @@ function nativeHarnessAvailable(dshRoot: string): boolean {
   if (!existsSync(packageFile)) return false;
   try {
     const metadata = JSON.parse(readFileSync(packageFile, 'utf8')) as DshPackageMetadata;
-    return typeof metadata.version === 'string' && /^0\.1\.2-alpha\./u.test(metadata.version);
+    return typeof metadata.version === 'string' && /^0\.1\.(?:2-alpha\.[0-9]+|5-(?:alpha\.[12]|rc\.[12]))(?:$|[-+])/u.test(metadata.version);
   } catch {
     return false;
   }
 }
 
-/** Native alpha.1 exposes Settings and model selection without bundle rewriting. */
+/** The native Harness exposes Settings and model selection without bundle rewriting. */
 export function patchStatus(
   dshRoot: string,
 ): { settingsHostMode: boolean; whitelist: boolean; workspaceSearch: boolean } {

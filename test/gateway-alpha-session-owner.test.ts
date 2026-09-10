@@ -113,7 +113,6 @@ test('Alpha.4 session/page adopts only complete oldest-prefix ownership evidence
     allowUpload: false,
     allowGitDownload: false,
     allowWorkspaceCreate: false,
-    allowedWebSocketPaths: [],
     allowedAgentPresets: null,
     banned: false,
     sandboxMode: 'workspace-write',

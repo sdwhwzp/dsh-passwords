@@ -91,10 +91,9 @@ export interface PlatformConfig {
     /** 补丁应用后要重启的 dsh systemd 服务名；留空则不自动重启 */
     restartService: string;
   };
-  /** Optional third-party WebSocket routes; built-in alpha transports stay explicit in the gateway. */
+  /** Owner-configured SSH WebSocket routes, gated by each account's SSH permission. */
   webSocket?: {
-    adminAllowlist: string[];
-    userAllowlist: string[];
+    sshEndpoints: string[];
   };
 }
 
@@ -273,13 +272,9 @@ export function loadConfig(): PlatformConfig {
       restartService,
     },
     webSocket: {
-      adminAllowlist: parseWebSocketAllowlist(
-        process.env.MCP_GATEWAY_WS_ADMIN_ALLOWLIST,
-        'MCP_GATEWAY_WS_ADMIN_ALLOWLIST',
-      ),
-      userAllowlist: parseWebSocketAllowlist(
-        process.env.MCP_GATEWAY_WS_USER_ALLOWLIST,
-        'MCP_GATEWAY_WS_USER_ALLOWLIST',
+      sshEndpoints: parseWebSocketAllowlist(
+        process.env.MCP_GATEWAY_SSH_WS_ENDPOINTS,
+        'MCP_GATEWAY_SSH_WS_ENDPOINTS',
       ),
     },
   };

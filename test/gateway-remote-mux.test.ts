@@ -19,7 +19,7 @@ function closeServer(server: http.Server): Promise<void> {
   return new Promise((resolve) => server.close(() => resolve()));
 }
 
-test('remote mux and granted plugin sockets receive signed principals and close on invalidation', async () => {
+test('remote mux and configured SSH sockets receive signed principals and close on invalidation', async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), 'dshpw-remote-mux-'));
   const dbPath = path.join(temporary, 'platform.db');
   const db = new Database(dbPath, createFieldCrypto('enc', 'setup'));
@@ -30,8 +30,7 @@ test('remote mux and granted plugin sockets receive signed principals and close 
   db.setManagedWorkspace(customer.id, '/managed/u2');
   db.setPermissions(customer.id, {
     allowedFolders: [], hourlyTokenLimit: null, dailyMinutesLimit: null,
-    allowUpload: true, allowGitDownload: false, allowWorkspaceCreate: false,
-    allowedWebSocketPaths: ['/plugin/ws/*'], allowedAgentPresets: [],
+    allowUpload: true, allowGitDownload: false, allowSsh: true, allowWorkspaceCreate: false, allowedAgentPresets: [],
     banned: false, sandboxMode: null, disabledSessions: [],
   });
 
@@ -72,7 +71,7 @@ test('remote mux and granted plugin sockets receive signed principals and close 
     localWorkspace: { host: '127.0.0.1', port: 0, publicUrl: '', placeholderRoot: path.join(temporary, 'local') },
     managedWorkspaceRoot: path.join(temporary, 'managed'),
     patch: { dshRoot: '', restartService: '' },
-    webSocket: { adminAllowlist: [], userAllowlist: ['/plugin/ws/*'] },
+    webSocket: { sshEndpoints: ['/plugin/ws/*'] },
   };
   const gateway = createGatewayServer(config, new AuthService(config, db), db, {
     upstreamBrowserCookie: HOST_BROWSER_COOKIE,
@@ -140,7 +139,7 @@ test('remote mux and granted plugin sockets receive signed principals and close 
       });
       deniedSocket.once('error', reject);
     });
-    assert.equal(deniedStatus, 404);
+    assert.equal(deniedStatus, 403);
     deniedSocket.terminate();
 
     const closed = new Promise<number>((resolve, reject) => {

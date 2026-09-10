@@ -113,7 +113,8 @@ test('通过选择模式旁的新会话控制行注册且 launch 响应经过校
   assert.match(indexSource, /ctx\.slots\.inject\('conversation\.input\.bootstrap'/);
   assert.match(indexSource, /name: 'conversation\.input\.bootstrap'/);
   assert.match(indexSource, /id: 'dsh-passwords-local-workspace-launcher'/);
-  assert.match(indexSource, /dshpw-local-launcher-seat\{position:relative;display:inline-flex/);
+  const stylesSource = readFileSync(path.join(root, 'src/client/styles.ts'), 'utf8');
+  assert.match(stylesSource, /dshpw-local-launcher-seat\{position:relative;display:inline-flex/);
   assert.doesNotMatch(indexSource, /id: 'dsh-passwords-local-workspace-sidebar'/);
   assert.match(indexSource, /ctx\.uiWorkspace\.connectWorkspace\(workspace\.workspaceId\)/);
   assert.match(indexSource, /ctx\.sessions\.open\(sessionId\)/);
