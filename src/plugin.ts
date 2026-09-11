@@ -42,6 +42,7 @@ import { registerPrincipalAccess } from './principal-access.js';
 import { registerBotBridge } from './bot-bridge.js';
 import { DshPasswordsRemote } from './remote.js';
 import { backupSqliteBeforeMigration } from './db-backup.js';
+import { registerLocalWorkspaceFileRoutes } from './local-workspace-file-routes.js';
 import { createMonthlyBudgetResolver } from './spend-budget.js';
 import {
   dailyTimeQuotaError,
@@ -436,6 +437,7 @@ export function apply(ctx: Context): void {
     console.error('[dsh-passwords] 本机助手服务启动失败:', error);
   });
   if (localWorkspaceHub !== null) {
+    registerLocalWorkspaceFileRoutes(ctx, db!, localWorkspaceHub, cfg);
     ctx.effect(
       () => async () => {
         await localWorkspaceReady.catch(() => undefined);

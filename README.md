@@ -485,3 +485,11 @@ Linux 部署由管理员将 `scripts/tenant-terminal-launcher.py` 安装为 root
 目录内的 `manifest.json` 包含 `version`、源码 `commit`（40 位 SHA）和 `files`；每项包含 `file`、`platform`（`windows-x64` 或 `mac-arm64`）、`bytes`、`sha256`，以及可选的 `signing`（`unsigned` 或仅适用于 Mac 的 `apple-notarized`；省略时显示未签名）。只有签名、公证和安装验证通过的 Mac 构件才能标记为 `apple-notarized`。仅发布简单文件名的 `.exe`、`.dmg` 和 `.zip`，不开放目录列表或清单外文件。上传后核对 SHA-256，再切换配置并重启网关；已发布目录保持只读，不原位替换文件。下载支持 HEAD 和 Range；配置留空时不注册公开下载路由。
 
 远程桌面端服务器地址默认为空，使用者填写管理员提供的地址。列表逐个显示安装包的签名状态；Mac 版本仅支持 Apple Silicon。网站 HTTPS 与应用签名分别管理。
+
+## 本机文件浏览（2026-09-12）
+
+配对目录的 `@` 索引、工作区文件预览与右侧文件面板通过已登录账号的本机助手读取文件，服务器占位目录只用于登记工作区。需要支持 `files` 操作的桌面端 0.1.2 或新版命令行助手，关闭 Shell 不影响读取。客户端离线、目录撤销或账号不匹配时明确报错。普通服务器工作区仍使用原有文件接口。
+
+`MCP_LOCAL_WORKSPACE_MAX_ENTRIES` 控制每次索引或目录列表的条数（默认 5000，最多 20000）；`MCP_LOCAL_WORKSPACE_MAX_FILE_BYTES` 控制单个完整预览的大小（默认 32 MiB）；`MCP_LOCAL_WORKSPACE_IGNORE_DIRS` 为递归索引跳过的目录名，以逗号分隔。@ 同时应用插件设置中的文件名过滤。列表不跟随符号链接，所有读取重新验证授权目录；大文件按 1 MiB 分块传输，文件改变时拒绝拼接不同版本。
+
+`localWorkspaceFiles.sidebar` 是右侧栏的可选 Host 适配接口，支持目录、搜索、文本与二进制预览；当前不支持从面板上传、重命名、删除或保存本机文件，写入操作请使用 Agent 文件工具。回归使用分离的本机目录与空服务器占位目录，验证两账号隔离、离线与撤销、中文路径、空目录、分块读取和路径越界。

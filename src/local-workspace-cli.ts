@@ -19,6 +19,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import WebSocket from 'ws';
+import { browseLocalWorkspace } from './local-workspace-browser.js';
 import {
   LOCAL_WORKSPACE_MAX_MESSAGE_BYTES,
   LOCAL_WORKSPACE_PROTOCOL_VERSION,
@@ -675,6 +676,8 @@ async function executeOperation(
   signal: AbortSignal,
 ): Promise<unknown> {
   switch (operation) {
+    case 'files':
+      return await browseLocalWorkspace(config.root, args, signal);
     case 'read':
       return await readTextWindow(config.root, args, signal);
     case 'write':
@@ -1352,7 +1355,7 @@ function scrubEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 
 function parseRequest(value: Record<string, unknown>): LocalWorkspaceRequest {
   const operation = value.operation;
-  if (operation !== 'read' && operation !== 'write' && operation !== 'edit' && operation !== 'glob' && operation !== 'grep' && operation !== 'bash' && operation !== 'office') {
+  if (operation !== 'read' && operation !== 'write' && operation !== 'edit' && operation !== 'glob' && operation !== 'grep' && operation !== 'bash' && operation !== 'office' && operation !== 'files') {
     throw new Error('unsupported operation');
   }
   if (value.args === null || typeof value.args !== 'object' || Array.isArray(value.args)) throw new Error('request args must be an object');

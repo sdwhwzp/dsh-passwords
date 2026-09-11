@@ -1,0 +1,11 @@
+{
+  "files": [
+    { "relative": "image.pdf", "kind": "file" },
+    { "relative": "src", "kind": "dir" },
+    { "relative": "空目录", "kind": "dir" },
+    { "relative": "src/中文 文件.md", "kind": "file" }
+  ],
+  "listing": { "path": "src", "entries": [{ "name": "中文 文件.md", "type": "file" }], "truncated": false },
+  "preview": { "text": "第二行", "lines": 1, "eof": true },
+  "emptyDirectory": { "path": "空目录", "entries": [], "truncated": false }
+}

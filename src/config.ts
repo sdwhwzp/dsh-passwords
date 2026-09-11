@@ -93,6 +93,10 @@ export interface PlatformConfig {
     publicUrl: string;
     /** Stable host directory used for companion workspace registrations. */
     placeholderRoot: string;
+    /** Read-only UI indexing and preview limits for paired folders. */
+    browserMaxEntries: number;
+    browserMaxFileBytes: number;
+    browserIgnoreDirs: string[];
   };
   /** 宿主机上为子用户自动创建的专属工作区根目录。 */
   managedWorkspaceRoot: string;
@@ -277,6 +281,9 @@ export function loadConfig(): PlatformConfig {
       port: localWorkspacePort,
       publicUrl: readEnv('MCP_LOCAL_WORKSPACE_PUBLIC_URL', ''),
       placeholderRoot: localWorkspacePlaceholderRoot,
+      browserMaxEntries: positiveIntegerEnv('MCP_LOCAL_WORKSPACE_MAX_ENTRIES', 5000),
+      browserMaxFileBytes: positiveIntegerEnv('MCP_LOCAL_WORKSPACE_MAX_FILE_BYTES', 32 * 1024 * 1024),
+      browserIgnoreDirs: readEnv('MCP_LOCAL_WORKSPACE_IGNORE_DIRS', '.git,node_modules,Pods,vendor,dist,build,.cache,.venv').split(',').filter(Boolean),
     },
     managedWorkspaceRoot,
     tenantSsh: {

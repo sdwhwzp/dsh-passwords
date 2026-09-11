@@ -3,7 +3,7 @@
 export const LOCAL_WORKSPACE_PROTOCOL_VERSION = 2;
 export const LOCAL_WORKSPACE_MAX_MESSAGE_BYTES = 3 * 1024 * 1024;
 
-export type LocalWorkspaceOperation = 'read' | 'write' | 'edit' | 'glob' | 'grep' | 'bash' | 'office';
+export type LocalWorkspaceOperation = 'read' | 'write' | 'edit' | 'glob' | 'grep' | 'bash' | 'office' | 'files';
 
 export interface LocalWorkspaceHelloFields {
   protocol: typeof LOCAL_WORKSPACE_PROTOCOL_VERSION;

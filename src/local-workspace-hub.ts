@@ -383,6 +383,20 @@ export class LocalWorkspaceHub {
     }));
   }
 
+  /** Find an active paired folder by its Host-owned Session workspace path. */
+  browserWorkspace(cwd: string): LocalWorkspaceRow | null {
+    return this.workspaceForPlaceholder(cwd);
+  }
+
+  /** Dispatch a read-only browser operation after rechecking the current grant and account. */
+  browse(workspaceId: string, principal: AuthenticatedPrincipal, args: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
+    const workspace = this.db.getLocalWorkspace(workspaceId);
+    if (workspace === null || workspace.revoked_at !== null || !localWorkspacePrincipalAllowed(principal, workspace.user_id)) {
+      throw new RemoteOperationError('当前账号无权访问此本机工作区', 'FORBIDDEN');
+    }
+    return this.request(workspace.id, 'files', args, signal);
+  }
+
   /** Revoke a caller-owned device token and stop its active connection. */
   revoke(userId: number, id: string): Promise<boolean> {
     return this.enqueueWorkspaceMutation(async () => {
