@@ -26,6 +26,7 @@ test('browser entrypoint can read a sibling-provided Remote service through Cord
       ctx.provide('sessions', {});
       ctx.provide('workspaces', {});
       ctx.provide('uiWorkspace', {});
+      ctx.provide('layout', { selectPanel: () => {} });
     },
   });
 
@@ -35,6 +36,9 @@ test('browser entrypoint can read a sibling-provided Remote service through Cord
     async apply(ctx) {
       const injectedRemote = (ctx as unknown as { remote: typeof remote }).remote;
       await injectedRemote.$mount('dsh-passwords');
+      const layout = (ctx as unknown as { layout: { selectPanel(id: string | null): void } }).layout;
+      layout.selectPanel('dsh-passwords-services');
+      layout.selectPanel(null);
     },
   });
 
@@ -83,6 +87,7 @@ test('mounted password namespace is retained through an exact nested inject', as
       ctx.provide('sessions', {});
       ctx.provide('workspaces', {});
       ctx.provide('uiWorkspace', {});
+      ctx.provide('layout', { selectPanel: () => {} });
     },
   });
 

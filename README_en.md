@@ -410,7 +410,7 @@ Enable `MCP_TENANT_EDITOR=true` only with the tenant edition of `dsh-vsceditor` 
 
 ## Fork synchronization and deployment adaptation
 
-This branch merges `slywalker2006/dsh-passwords` commit `59968d3` (2.7.0). The deployment build is `2.7.0-dsh.20260911.6` and requires the personal Harness 0.1.5-rc.2 build with native principal support. Official npm Harness packages do not contain those private extensions; deployment overrides must select the matching Harness artifacts throughout.
+This branch merges `slywalker2006/dsh-passwords` commit `59968d3` (2.7.0). The deployment build is `2.7.0-dsh.20260911.7` and requires the personal Harness 0.1.5-rc.2 build with native principal support. Official npm Harness packages do not contain those private extensions; deployment overrides must select the matching Harness artifacts throughout.
 
 Without `TENANT_SSH_ENABLED=true`, the gateway retains legacy SSH alias ownership checks: restricted accounts may use only their claimed connections; import, cluster, and tunnel operations remain administrator-only. SQLite and MySQL/MariaDB persist alias ownership, which the account-isolated Host uses to migrate existing connections.
 
