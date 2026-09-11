@@ -420,9 +420,11 @@ keyed slot "settings.plugin.item" requires options.key
 
 ### 普通账号终端与任务看板
 
-普通账号的侧栏终端使用部署端安装的隔离启动器，只挂载该账号的托管工作区到 `/workspace`。连接必须携带本人会话，服务器按持久化的会话目录校验请求；其他账号会话、越界目录、符号链接逃逸及代理到原始终端均被拒绝。Shell 不继承服务密钥，使用独立的 PID、网络及挂载命名空间，以服务普通用户身份运行，不能访问宿主机接口或外网。断线在配置的宽限期后结束进程；管理员保留原有终端。普通账号不支持挂接共享的 agent PTY UUID。
+普通账号的侧栏终端使用部署端安装的隔离启动器，只挂载该账号的托管工作区到 `/workspace`。连接必须携带本人会话，服务器按持久化的会话目录校验请求；其他账号会话、越界目录、符号链接逃逸及代理到原始终端均被拒绝。Shell 不继承服务密钥，使用独立的 PID 和挂载命名空间，以服务普通用户身份及 `dsh-sandbox` 组运行；现有防火墙按该组限制网络，并允许开发依赖下载。断线在配置的宽限期后结束进程；管理员保留原有终端。普通账号不支持挂接共享的 agent PTY UUID。
 
 Linux 部署由管理员将 `scripts/tenant-terminal-launcher.py` 安装为 root 所有且不可被普通用户修改的 `/usr/local/libexec/dsh-tenant-terminal`，并配置只允许执行这个启动器的 sudoers 规则。启动器中的服务账号和托管根目录必须匹配部署；不得授权任意 `sudo bwrap`。设置 `MCP_TENANT_TERMINAL_LAUNCHER` 后启用，默认每账号最多 8 个终端、断线宽限期 30 秒，可用 `MCP_TENANT_TERMINAL_LIMIT` 和 `MCP_TENANT_TERMINAL_GRACE_MS` 调整。
+
+启用 `MCP_TENANT_AGENT_SHELL=true` 后，Agent 和子代理可在当前服务器个人项目中使用 `bash` 执行命令，结果以终端卡片返回。每次调用重新核对账号和写入权限，当前项目及个人 HOME 可写，其他账号不可访问。HOME 与网页终端和编辑器共用，可安装用户级 Node、pnpm；命令取消或超时会结束进程。发布时必须同时更新启动器及 sudoers 摘要，配置和验证约束见[个人工作区命令执行](docs/plans/2026-09-11-tenant-agent-shell.md)。
 
 设置 `MCP_TENANT_TASK_BOARD=true` 启用按账号分开的任务看板，同时必须关闭聚合插件的全局 `web-ui-task-board` Host，保留客户端。账本保存在 `MCP_TENANT_TASK_BOARD_DIR`，重载后恢复定时任务；执行与历史读取经过 `MCP_TENANT_TASK_BOARD_GATEWAY` 指定的本机网关，沿用当前账号的工作区、模型、沙盒和额度检查。账号删除、禁用或身份不匹配会拒绝执行。旧全局账本不会自动合并进个人账本。
 

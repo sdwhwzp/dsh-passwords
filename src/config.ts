@@ -41,6 +41,8 @@ export interface PlatformConfig {
   tenantEditor?: { enabled: boolean };
   /** Optional Linux sandbox launcher. Empty disables restricted-account terminals. */
   tenantTerminal?: { launcher: string; maxPerUser: number; reconnectGraceMs: number };
+  /** Agent commands use the same confined launcher; disabled until the launcher supports command mode. */
+  tenantAgentShell?: { enabled: boolean; timeoutMs: number; maxTimeoutMs: number; maxOutputBytes: number };
   /** Isolated replacement for the global task-board Host; enable only with the global Host disabled. */
   tenantTaskBoard?: { enabled: boolean; directory: string; gatewayOrigin: string };
   setupKey: string;
@@ -267,6 +269,14 @@ export function loadConfig(): PlatformConfig {
       maxPerUser: positiveIntegerEnv('MCP_TENANT_TERMINAL_LIMIT', 8),
       reconnectGraceMs: positiveIntegerEnv('MCP_TENANT_TERMINAL_GRACE_MS', 30_000),
     },
+    tenantAgentShell: (() => {
+      const value = readEnv('MCP_TENANT_AGENT_SHELL', 'false');
+      if (value !== 'true' && value !== 'false') throw new Error('MCP_TENANT_AGENT_SHELL must be true or false');
+      const timeoutMs = positiveIntegerEnv('MCP_TENANT_AGENT_SHELL_TIMEOUT_MS', 120_000);
+      const maxTimeoutMs = positiveIntegerEnv('MCP_TENANT_AGENT_SHELL_MAX_TIMEOUT_MS', 600_000);
+      if (timeoutMs > maxTimeoutMs) throw new Error('MCP_TENANT_AGENT_SHELL_TIMEOUT_MS exceeds the maximum');
+      return { enabled: value === 'true', timeoutMs, maxTimeoutMs, maxOutputBytes: positiveIntegerEnv('MCP_TENANT_AGENT_SHELL_OUTPUT_BYTES', 256 * 1024) };
+    })(),
     patch: {
       dshRoot: readEnv('MCP_DSH_ROOT', ''),
       restartService,

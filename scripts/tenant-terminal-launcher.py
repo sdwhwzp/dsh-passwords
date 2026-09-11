@@ -97,7 +97,8 @@ def sandbox_home(owner, account, identity):
 
 
 def main():
-    if os.geteuid() != 0 or not 3 <= len(sys.argv) <= 4 or not re.fullmatch(r'[1-9][0-9]{0,15}', sys.argv[1]):
+    command_mode = len(sys.argv) == 5 and sys.argv[4] == '--command'
+    if os.geteuid() != 0 or not (3 <= len(sys.argv) <= 4 or command_mode) or not re.fullmatch(r'[1-9][0-9]{0,15}', sys.argv[1]):
         raise ValueError('invalid terminal invocation')
     tenant = ROOT / ('u' + sys.argv[1])
     if ROOT.resolve(strict=True) != ROOT or tenant.resolve(strict=True) != tenant:
@@ -113,6 +114,10 @@ def main():
     for path in NETWORK_FILES:
         if pathlib.Path(path).exists():
             network += ['--ro-bind', path, path]
+    workspace = ['--bind', str(tenant), '/workspace']
+    if command_mode:
+        workspace = ['--ro-bind', str(tenant), '/workspace',
+                     '--bind', str(cwd), str(pathlib.Path('/workspace') / relative)]
     args = unconfined(['/usr/bin/bwrap', '--unshare-ipc', '--unshare-pid', '--unshare-uts', '--unshare-cgroup-try', '--die-with-parent', '--clearenv',
             '--ro-bind', '/usr', '/usr', '--symlink', 'usr/bin', '/bin',
             '--symlink', 'usr/sbin', '/sbin', '--symlink', 'usr/lib', '/lib',
@@ -122,12 +127,12 @@ def main():
             # dropped uid cannot traverse; the home mount needs it walkable.
             '--perms', '0755', '--dir', '/home',
             '--ro-bind', '/etc/ssl', '/etc/ssl', *network,
-            '--bind', str(tenant), '/workspace', '--bind', str(home), '/home/dsh',
+            *workspace, '--bind', str(home), '/home/dsh',
             '--chdir', str(pathlib.Path('/workspace') / relative),
-            '--setenv', 'HOME', '/home/dsh', '--setenv', 'PATH', '/usr/bin:/bin',
+            '--setenv', 'HOME', '/home/dsh', '--setenv', 'PATH', '/home/dsh/.local/bin:/home/dsh/.local/share/pnpm:/usr/bin:/bin',
             '--setenv', 'TERM', 'xterm-256color', '--setenv', 'LANG', 'C.UTF-8',
             '--setenv', 'TMPDIR', '/tmp', '--setenv', 'PS1', r'sandbox:\w\$ ',
-            '--', '/usr/bin/setpriv', '--reuid', str(account.pw_uid), '--regid', str(sandbox.gr_gid), '--clear-groups', '--no-new-privs', '--bounding-set=-all', '/bin/bash', '--noprofile', '--norc', '-i'])
+            '--', '/usr/bin/setpriv', '--reuid', str(account.pw_uid), '--regid', str(sandbox.gr_gid), '--clear-groups', '--no-new-privs', '--bounding-set=-all', '/bin/bash', '--noprofile', '--norc', '-s' if command_mode else '-i'])
     os.execve(args[0], args, {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'})
 
 

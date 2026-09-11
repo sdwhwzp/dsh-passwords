@@ -1,0 +1,5 @@
+{
+  "tool": "bash",
+  "output": [{ "type": "text", "text": "v22.21.1\n10.15.1\n\n[exit code: 0]" }],
+  "presentation": { "card": "terminal", "output": "v22.21.1\n10.15.1\n\n[exit code: 0]" }
+}
