@@ -723,7 +723,10 @@ export class LocalWorkspaceHub {
     if (signal.aborted) return Promise.reject(new RemoteOperationError('operation aborted', 'ABORTED'));
     const connection = this.connections.get(workspaceId);
     if (connection === undefined || connection.socket.readyState !== WebSocket.OPEN) {
-      return Promise.reject(new RemoteOperationError('本机助手离线；请在用户电脑上运行 dsh-local-workspace', 'OFFLINE'));
+      return Promise.reject(new RemoteOperationError('本机目录离线；请打开桌面端或本机助手并连接该目录', 'OFFLINE'));
+    }
+    if (operation === 'bash' && !connection.workspace.shell_enabled) {
+      return Promise.reject(new RemoteOperationError('当前本机连接未启用 Shell；请在桌面端重新连接目录，命令行助手需添加 --allow-shell', 'SHELL_DISABLED'));
     }
     const id = randomUUID();
     const request: LocalWorkspaceRequest = { type: 'request', id, operation, args };
@@ -752,8 +755,26 @@ export class LocalWorkspaceHub {
     agent.ctx.systemPrompt.section({
       name: 'remote-local-workspace',
       order: 95,
-      text: `This session workspace is on the user’s paired computer. read, write, edit, glob, grep, and bash operate there through the local companion.${workspace.platform === 'win32' ? ' word_native_read and word_native_edit use the installed Microsoft Word or WPS Writer on that computer.' : ''} Paths are relative to the selected local folder. If the companion is offline, stop and ask the user to start dsh-local-workspace.`,
+      text: `This session workspace is on the user’s paired computer. read, write, edit, glob, grep, and bash operate there through the local companion.${workspace.platform === 'win32' ? ' word_native_read and word_native_edit use the installed Microsoft Word or WPS Writer on that computer.' : ''} Paths are relative to the selected local folder. Use the current local-workspace-capabilities context for connection and Shell permission; earlier refusals do not describe the current connection. When Shell is enabled, use bash for requested terminal operations, including Git branch inspection and switching, and inspect its result before reporting a failure. Do not edit Git internals to substitute for Git commands.`,
     });
+    agent.ctx.systemPrompt.context({
+      name: 'local-workspace-capabilities',
+      order: 116,
+      text: () => this.capabilityContext(workspace.id),
+    });
+  }
+
+  /** Resolve the active handshake for each model request, including existing agents after reconnect. */
+  private capabilityContext(workspaceId: string): string {
+    const connection = this.connections.get(workspaceId);
+    if (connection === undefined || connection.socket.readyState !== WebSocket.OPEN) {
+      return 'Local workspace connection: offline. File and terminal operations are unavailable until the user reconnects this folder in the desktop app or local companion.';
+    }
+    if (!connection.workspace.shell_enabled) {
+      return 'Local workspace connection: online. Shell permission: disabled. File tools remain available. To run commands, the user must reconnect with Shell enabled; the command-line companion requires --allow-shell.';
+    }
+    const shell = connection.workspace.platform === 'win32' ? 'PowerShell on Windows' : 'Bash';
+    return `Local workspace connection: online. Shell permission: enabled. The bash tool runs ${shell} in the selected local folder as the current operating-system user. Terminal operations are already authorized; no --allow-shell startup step is needed for this connection. Each call starts a fresh shell. Operating-system permissions still apply; this does not grant administrator or root privileges.`;
   }
 
   private workspaceForPlaceholder(cwd: string): LocalWorkspaceRow | null {
@@ -1204,7 +1225,7 @@ function remoteToolDefinitions(workspace: LocalWorkspaceRow, request: RemoteRequ
   };
   const bash: ToolDefinition = {
     name: 'bash',
-    description: 'Execute a command on the user’s paired computer. The local companion must be running with --allow-shell. Each call uses a fresh shell.',
+    description: 'Execute a command on the user’s paired computer in the selected local folder and return stdout, stderr and exit status. Check the current local-workspace-capabilities context for Shell permission. Each call uses a fresh shell.',
     parameters: objectSchema(['command', 'description'], {
       command: { type: 'string' },
       description: { type: 'string' },

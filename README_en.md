@@ -60,6 +60,7 @@ The owner can configure, per subuser, from the settings page:
 - Every signed-in user can pair one or more folders from their own computer as independent workspaces without uploading those files to the dsh server
 - dsh `read`, `write`, `edit`, `glob`, and `grep` operations act on the original authorized folder through the local companion
 - The Windows EXE enables `--allow-shell` automatically, including restored workspaces; non-Windows-EXE command-line mode keeps Shell off until the user adds it explicitly
+- Desktop connections report their current Shell permission. Every model request refreshes the connection state through the replayable `local-workspace-capabilities` context, including existing sessions after reconnect. When enabled, the Agent uses `bash` for Git and builds; offline or disabled connections report their state, with checks retained in both the server and companion.
 - Windows workspaces register `word_native_status`, `word_native_read`, and `word_native_edit`: they prefer Microsoft Word installed on the customer computer and fall back to WPS Writer without any `@univerjs-pro/*` dependency
 
 ## Identity and spend synchronization

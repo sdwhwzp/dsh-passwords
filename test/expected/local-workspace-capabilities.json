@@ -1,0 +1,11 @@
+{
+  "description": "Execute a command on the user’s paired computer in the selected local folder and return stdout, stderr and exit status. Check the current local-workspace-capabilities context for Shell permission. Each call uses a fresh shell.",
+  "contexts": {
+    "offline": "Local workspace connection: offline. File and terminal operations are unavailable until the user reconnects this folder in the desktop app or local companion.",
+    "disabled": "Local workspace connection: online. Shell permission: disabled. File tools remain available. To run commands, the user must reconnect with Shell enabled; the command-line companion requires --allow-shell.",
+    "enabled": "Local workspace connection: online. Shell permission: enabled. The bash tool runs Bash in the selected local folder as the current operating-system user. Terminal operations are already authorized; no --allow-shell startup step is needed for this connection. Each call starts a fresh shell. Operating-system permissions still apply; this does not grant administrator or root privileges.",
+    "windows": "Local workspace connection: online. Shell permission: enabled. The bash tool runs PowerShell on Windows in the selected local folder as the current operating-system user. Terminal operations are already authorized; no --allow-shell startup step is needed for this connection. Each call starts a fresh shell. Operating-system permissions still apply; this does not grant administrator or root privileges.",
+    "disabledAfterReconnect": "Local workspace connection: online. Shell permission: disabled. File tools remain available. To run commands, the user must reconnect with Shell enabled; the command-line companion requires --allow-shell.",
+    "revoked": "Local workspace connection: offline. File and terminal operations are unavailable until the user reconnects this folder in the desktop app or local companion."
+  }
+}

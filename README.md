@@ -59,6 +59,7 @@ dsh 的网页界面默认面向本机使用。服务器地址一旦暴露，拿�
 - 每个登录用户可把自己电脑上的一个或多个目录配对为独立工作区，无需把文件上传到 dsh 服务器
 - dsh 的 `read`、`write`、`edit`、`glob`、`grep` 会通过本机助手直接操作授权目录中的原文件
 - Windows EXE 自动启用 `--allow-shell`，包括恢复已有工作区；非 Windows EXE 命令行模式默认关闭，显式添加后 Shell 才会在该用户电脑上执行
+- 桌面端接入目录后会报告当前 Shell 权限。每次模型请求都会重新读取连接状态，并通过 `local-workspace-capabilities` 写入可回放的上下文；原会话在重连后也会使用新状态。启用时直接调用 `bash` 执行 Git、构建等命令；离线或未启用时明确提示，服务端和本机助手均保留检查。
 - Windows 工作区自动注册 `word_native_status`、`word_native_read`、`word_native_edit`：优先调用客户电脑已经安装的 Microsoft Word，不可用时回退 WPS 文字，不依赖 `@univerjs-pro/*`
 
 ## 身份与消费额度同步
