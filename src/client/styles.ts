@@ -118,6 +118,7 @@ select.dshpw-input{height:auto;min-height:36px}
 .dshpw-managed-files-form{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .dshpw-managed-files-form>.dshpw-input{flex:1;min-width:180px;width:auto}
 .dshpw-managed-files-form>.dshpw-managed-files-git-folder{flex:0 1 220px;min-width:140px}
+.dshpw-managed-files-credential{display:flex;flex:1;flex-direction:column;gap:6px;min-width:180px;font-size:13px}
 .dshpw-managed-files-git{display:flex;flex-direction:column;gap:8px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-2)}
 .dshpw-managed-files-git-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .dshpw-managed-files-git-actions{display:flex;align-items:center;gap:8px;margin-left:auto}

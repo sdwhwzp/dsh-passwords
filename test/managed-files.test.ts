@@ -519,7 +519,7 @@ test('managed listing reports the repository branch of the current directory', a
   });
 });
 
-test('managed git clones over http into the private host folder and pulls again', async (t) => {
+for (const privateRepository of [false, true]) test(`managed git clone and pull with ${privateRepository ? 'temporary credentials' : 'anonymous access'}`, async (t) => {
   try {
     execFileSync('git', ['--version'], { stdio: 'ignore' });
   } catch {
@@ -527,6 +527,14 @@ test('managed git clones over http into the private host folder and pulls again'
     return;
   }
   const originDir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-git-origin-'));
+  let fixtureServer: http.Server | undefined;
+  t.after(async () => {
+    try { if (fixtureServer?.listening) await close(fixtureServer); }
+    finally { rmSync(originDir, { recursive: true, force: true }); }
+  });
+  const credentials = { username: 'fixture-user', password: 'fixture-secret:@ token' };
+  const authorization = `Basic ${Buffer.from(`${credentials.username}:${credentials.password}`).toString('base64')}`;
+  let redirectedRequests = 0;
   const workTree = path.join(originDir, 'work');
   mkdirSync(workTree, { recursive: true });
   const git = (args: readonly string[], cwd: string) => execFileSync('git', [
@@ -546,6 +554,15 @@ test('managed git clones over http into the private host folder and pulls again'
 
   // 哑 HTTP 服务：静态返回裸仓库文件，git 在智能协议探测失败后回退到 dumb http
   const originServer = http.createServer((req, res) => {
+    if (req.url?.startsWith('/redirect.git')) {
+      res.writeHead(302, { location: `http://localhost:${originPort}/leak.git/info/refs` }).end();
+      return;
+    }
+    if (req.url?.startsWith('/leak.git')) { redirectedRequests++; res.writeHead(500).end(); return; }
+    if (privateRepository && req.headers.authorization !== authorization) {
+      res.writeHead(401, { 'www-authenticate': 'Basic realm=fixture' }).end('authentication required');
+      return;
+    }
     const requested = path.join(originDir, path.normalize(decodeURIComponent((req.url ?? '/').split('?')[0])));
     if (!requested.startsWith(originDir) || !existsSync(requested) || !statSync(requested).isFile()) {
       res.writeHead(404).end('missing');
@@ -554,10 +571,10 @@ test('managed git clones over http into the private host folder and pulls again'
     res.writeHead(200, { 'content-type': 'text/plain' });
     createReadStream(requested).pipe(res);
   });
+  fixtureServer = originServer;
   const originPort = await listen(originServer);
 
-  try {
-    await withManagedFiles(async ({ root, db, userId, requestJson }) => {
+  await withManagedFiles(async ({ root, db, userId, requestJson }) => {
       db.setPermissions(userId, {
         allowedFolders: [],
         hourlyTokenLimit: null,
@@ -569,7 +586,16 @@ test('managed git clones over http into the private host folder and pulls again'
         sandboxMode: 'workspace-write',
         disabledSessions: [],
       });
+      const url = `http://127.0.0.1:${String(originPort)}/origin.git`;
+      if (privateRepository) {
+        const denied = await requestJson('POST', '/gateway/api/managed-files/git/clone', { url, directory: 'denied' });
+        assert.equal(denied.status, 502);
+        assert.equal(existsSync(path.join(root, 'denied')), false);
+        const malformed = await requestJson('POST', '/gateway/api/managed-files/git/clone', { url, username: 'user' });
+        assert.equal(malformed.status, 400);
+      }
       const cloned = await requestJson('POST', '/gateway/api/managed-files/git/clone', {
+        ...(privateRepository ? credentials : {}),
         path: 'nested',
         url: `http://127.0.0.1:${String(originPort)}/origin.git`,
       });
@@ -580,11 +606,32 @@ test('managed git clones over http into the private host folder and pulls again'
       const listed = await requestJson('GET', '/gateway/api/managed-files?path=nested/origin', {});
       assert.equal(listed.json<{ git: { repository: boolean } }>().git.repository, true);
 
-      const pulled = await requestJson('POST', '/gateway/api/managed-files/git/pull', { path: 'nested/origin' });
+      const clonePath = path.join(root, 'nested', 'origin');
+      assert.equal(execFileSync('git', ['config', '--get', 'remote.origin.url'], { cwd: clonePath, encoding: 'utf8' }).trim(), url);
+      const configBefore = readFileSync(path.join(clonePath, '.git', 'config'), 'utf8');
+      assert.doesNotMatch(configBefore, /fixture-secret|extraHeader|Authorization/);
+      git(['remote', 'rename', 'origin', 'team'], clonePath);
+      writeFileSync(path.join(workTree, 'README.md'), 'updated\n');
+      git(['commit', '-am', 'update'], workTree);
+      git(['push', path.join(originDir, 'origin.git'), 'main'], workTree);
+      git(['update-server-info'], path.join(originDir, 'origin.git'));
+      if (privateRepository) {
+        assert.equal((await requestJson('POST', '/gateway/api/managed-files/git/pull', { path: 'nested/origin' })).status, 502);
+        assert.equal((await requestJson('POST', '/gateway/api/managed-files/git/pull', { path: 'nested/origin', ...credentials, password: 'wrong' })).status, 502);
+      }
+      const pulled = await requestJson('POST', '/gateway/api/managed-files/git/pull', { path: 'nested/origin', ...(privateRepository ? credentials : {}) });
       assert.equal(pulled.status, 200, pulled.body.toString('utf8'));
-    });
-  } finally {
-    await close(originServer);
-    rmSync(originDir, { recursive: true, force: true });
-  }
+      assert.equal(readFileSync(path.join(clonePath, 'README.md'), 'utf8'), 'updated\n');
+      if (privateRepository) {
+        const embedded = new URL(url); embedded.username = credentials.username; embedded.password = credentials.password;
+        const legacy = await requestJson('POST', '/gateway/api/managed-files/git/clone', { url: embedded.toString(), directory: 'legacy' });
+        assert.equal(legacy.status, 201, legacy.body.toString());
+        assert.equal(execFileSync('git', ['config', '--get', 'remote.origin.url'], { cwd: path.join(root, 'legacy'), encoding: 'utf8' }).trim(), url);
+        const redirect = await requestJson('POST', '/gateway/api/managed-files/git/clone', { url: url.replace('/origin.git', '/redirect.git'), ...credentials });
+        assert.equal(redirect.status, 502); assert.equal(redirectedRequests, 0);
+        assert.equal((await requestJson('POST', '/gateway/api/managed-files/git/pull', { path: 'nested/origin' })).status, 502);
+        const serialized = JSON.stringify(db.listAuditLogs(100)) + cloned.body.toString() + pulled.body.toString();
+        for (const secret of [credentials.password, encodeURIComponent(credentials.password), authorization.slice(6)]) assert.equal(serialized.includes(secret), false);
+      }
+  });
 });

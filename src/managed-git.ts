@@ -18,10 +18,36 @@ export const MANAGED_GIT_OUTPUT_MAX_BYTES = 8_192;
 
 /** A repository URL accepted by the managed-folder git routes. */
 export interface ManagedGitUrl {
-  /** URL handed to git, credentials included. */
+  /** URL handed to git and persisted as origin, without userinfo. */
   url: string;
-  /** Same URL with any userinfo replaced, safe for audit records and messages. */
+  /** Credential-free URL for audit records and messages. */
   display: string;
+  /** Credentials extracted from legacy URL input, used only for this operation. */
+  credentials?: ManagedGitCredentials;
+}
+
+/** HTTP Basic credentials held only for one child process. */
+export interface ManagedGitCredentials {
+  username: string;
+  password: string;
+}
+
+/**
+ * Validate optional browser credentials without trimming passwords.
+ * @param username - Username from the request body.
+ * @param password - Password or personal access token from the request body.
+ * @returns Undefined for anonymous access, null for invalid input, or credentials.
+ */
+export function parseManagedGitCredentials(username: unknown, password: unknown): ManagedGitCredentials | null | undefined {
+  if (username === undefined) username = '';
+  if (password === undefined) password = '';
+  if (typeof username !== 'string' || typeof password !== 'string') return null;
+  if (username === '' && password === '') return undefined;
+  if (username === '' || password === '' || username.length > 256 || password.length > 4096
+    || /[:\u0000-\u001f\u007f]/.test(username) || /[\u0000-\u001f\u007f]/.test(password)) return null;
+  try { encodeURIComponent(username); encodeURIComponent(password); }
+  catch { return null; } // JSON can contain lone UTF-16 surrogates, which cannot encode credentials.
+  return { username, password };
 }
 
 /**
@@ -30,7 +56,7 @@ export interface ManagedGitUrl {
  * `ssh://`, `git://`, `file://` and git's `ext::` transport are rejected: they
  * either need host credentials or, for `ext::`, run an arbitrary command.
  * @param raw - Repository URL as typed in the browser.
- * @returns The URL for git and its redacted form, or null when the URL is not usable.
+ * @returns A credential-free URL with optional temporary credentials, or null for unsupported URLs or invalid userinfo.
  */
 export function parseManagedGitUrl(raw: string): ManagedGitUrl | null {
   const trimmed = raw.trim();
@@ -44,12 +70,17 @@ export function parseManagedGitUrl(raw: string): ManagedGitUrl | null {
   }
   if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
   if (parsed.hostname === '') return null;
-  const redacted = new URL(trimmed);
-  if (redacted.username !== '' || redacted.password !== '') {
-    redacted.username = '***';
-    redacted.password = '';
+  if (parsed.search !== '' || parsed.hash !== '') return null;
+  let credentials;
+  try {
+    credentials = parseManagedGitCredentials(decodeURIComponent(parsed.username), decodeURIComponent(parsed.password));
+  } catch {
+    return null; // Malformed percent-encoding in browser URL userinfo.
   }
-  return { url: parsed.toString(), display: redacted.toString() };
+  if (credentials === null) return null;
+  parsed.username = '';
+  parsed.password = '';
+  return { url: parsed.toString(), display: parsed.toString(), credentials };
 }
 
 /** Directory names git may create in the managed folder. */
@@ -84,6 +115,8 @@ const HARDENED_CONFIG = [
   '-c', 'core.askPass=',
   '-c', 'core.symlinks=false',
   '-c', 'core.fsmonitor=false',
+  '-c', `core.hooksPath=${os.devNull}`,
+  '-c', 'fetch.recurseSubmodules=false',
 ];
 
 /**
@@ -104,6 +137,14 @@ export function managedGitPullArgs(): string[] {
   return [...HARDENED_CONFIG, 'pull', '--ff-only'];
 }
 
+/**
+ * Resolve the current branch's effective fetch URL without contacting a remote.
+ * @returns Arguments for a local Git URL lookup, including insteadOf expansion.
+ */
+export function managedGitRemoteArgs(): string[] {
+  return [...HARDENED_CONFIG, 'ls-remote', '--get-url'];
+}
+
 /** Environment variables inherited by git; everything else is dropped. */
 const INHERITED_ENV = ['PATH', 'LANG', 'LC_ALL', 'SystemRoot', 'COMSPEC', 'TEMP', 'TMP', 'TMPDIR'];
 
@@ -115,11 +156,13 @@ const INHERITED_ENV = ['PATH', 'LANG', 'LC_ALL', 'SystemRoot', 'COMSPEC', 'TEMP'
  * prompts are disabled so an unauthorized clone fails instead of hanging.
  * @param base - Environment of the gateway process.
  * @param home - Directory used as `HOME`, normally the caller's managed root.
+ * @param auth - Optional credentials scoped to the effective repository URL.
  * @returns The environment passed to the child process.
  */
 export function managedGitEnv(
   base: NodeJS.ProcessEnv,
   home: string,
+  auth?: { url: ManagedGitUrl; credentials: ManagedGitCredentials },
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const name of INHERITED_ENV) {
@@ -134,18 +177,40 @@ export function managedGitEnv(
   env.GIT_CONFIG_GLOBAL = os.devNull;
   env.GIT_LFS_SKIP_SMUDGE = '1';
   env.GCM_INTERACTIVE = 'never';
+  if (auth !== undefined) {
+    // Runtime Git config avoids argv, credential stores and persisted origin URLs.
+    // Disallow redirects because extraHeader authenticates the original URL only.
+    const scope = `http.${auth.url.url}`;
+    const config = [
+      [`${scope}.extraHeader`, ''],
+      [`${scope}.extraHeader`, `Authorization: Basic ${Buffer.from(`${auth.credentials.username}:${auth.credentials.password}`).toString('base64')}`],
+      [`${scope}.followRedirects`, 'false'],
+    ];
+    env.GIT_CONFIG_COUNT = String(config.length);
+    config.forEach(([key, value], index) => {
+      env[`GIT_CONFIG_KEY_${index}`] = key;
+      env[`GIT_CONFIG_VALUE_${index}`] = value;
+    });
+  }
   return env;
 }
 
 /**
  * Remove credentials from git output before it reaches the browser or the audit log.
  * @param text - Captured stdout or stderr.
- * @param url - Accepted repository URL whose userinfo must not leak.
+ * @param url - Accepted repository URL whose legacy userinfo must not leak.
+ * @param credentials - Separate credentials supplied for this operation.
  * @returns The text with `user:secret@` occurrences replaced.
  */
-export function redactManagedGitOutput(text: string, url: ManagedGitUrl): string {
-  const withoutUserinfo = text.replace(/\/\/[^/@\s]*@/g, '//***@');
-  return url.url === url.display ? withoutUserinfo : withoutUserinfo.split(url.url).join(url.display);
+export function redactManagedGitOutput(text: string, url?: ManagedGitUrl, credentials?: ManagedGitCredentials): string {
+  let output = text.replace(/\/\/[^/@\s]*@/g, '//***@');
+  for (const value of [url?.credentials, credentials]) {
+    if (value === undefined) continue;
+    for (const secret of [value.password, encodeURIComponent(value.password), Buffer.from(`${value.username}:${value.password}`).toString('base64')]) {
+      output = output.split(secret).join('***');
+    }
+  }
+  return output;
 }
 
 /**

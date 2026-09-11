@@ -77,6 +77,7 @@ export function ManagedFilesPanel(props: Props) {
   const [folderName, setFolderName] = useState<string | null>(null);
   const [clipboard, setClipboard] = useState<ManagedClipboard | null>(null);
   const [cloneForm, setCloneForm] = useState<{ url: string; directory: string } | null>(null);
+  const [gitCredentials, setGitCredentials] = useState({ username: '', password: '' });
   const [gitOutput, setGitOutput] = useState('');
   const dragged = useRef<ManagedFileEntry | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
@@ -84,6 +85,7 @@ export function ManagedFilesPanel(props: Props) {
   const folderInputRef = useRef<HTMLInputElement | null>(null);
 
   const load = (relativePath: string, clearError = true) => {
+    setGitCredentials({ username: '', password: '' });
     setLoading(true);
     void fetch(`/gateway/api/managed-files?path=${encodeURIComponent(relativePath)}`, {
       cache: 'no-store',
@@ -249,10 +251,12 @@ export function ManagedFilesPanel(props: Props) {
   const cloneRepository = () => {
     const form = cloneForm;
     if (form === null || form.url.trim() === '') return;
+    const credentials = gitCredentials;
+    setGitCredentials({ username: '', password: '' });
     run(async () => {
       const result = await postJson<{ directory: { name: string }; output?: string }>(
         '/gateway/api/managed-files/git/clone',
-        { path: currentDirectory, url: form.url.trim(), directory: form.directory.trim() },
+        { path: currentDirectory, url: form.url.trim(), directory: form.directory.trim(), ...credentials },
       );
       setGitOutput(result.output ?? '');
       setCloneForm(null);
@@ -261,10 +265,12 @@ export function ManagedFilesPanel(props: Props) {
   };
 
   const pullRepository = () => {
+    const credentials = gitCredentials;
+    setGitCredentials({ username: '', password: '' });
     run(async () => {
       const result = await postJson<{ output?: string }>(
         '/gateway/api/managed-files/git/pull',
-        { path: currentDirectory },
+        { path: currentDirectory, ...credentials },
       );
       setGitOutput(result.output ?? '');
       return t('managedFilesGitPulled');
@@ -273,6 +279,7 @@ export function ManagedFilesPanel(props: Props) {
 
   const currentPath = listing?.path === '' || listing === null ? '/' : `/${listing.path}`;
   const repository = listing?.git?.repository === true;
+  const incompleteCredentials = (gitCredentials.username === '') !== (gitCredentials.password === '');
   const branch = listing?.git?.branch ?? null;
   return h(
     'div',
@@ -381,7 +388,7 @@ export function ManagedFilesPanel(props: Props) {
             ? h('button', {
                 type: 'button',
                 className: 'dshpw-btn',
-                disabled: busy || loading,
+                disabled: busy || loading || incompleteCredentials,
                 onClick: pullRepository,
               }, t('managedFilesGitPull'))
             : null,
@@ -389,13 +396,30 @@ export function ManagedFilesPanel(props: Props) {
             type: 'button',
             className: 'dshpw-btn ghost',
             disabled: busy || loading,
-            onClick: () => setCloneForm(cloneForm === null ? { url: '', directory: '' } : null),
+            onClick: () => {
+              setCloneForm(cloneForm === null ? { url: '', directory: '' } : null);
+              if (cloneForm !== null) setGitCredentials({ username: '', password: '' });
+            },
           }, t('managedFilesGitClone')),
         ),
       ),
-      cloneForm === null
-        ? h('span', { className: 'dshpw-hint' }, t('managedFilesGitHint'))
-        : h(
+      h('span', { className: 'dshpw-hint' }, t('managedFilesGitHint')),
+      h('div', { className: 'dshpw-managed-files-form' },
+        h('label', { className: 'dshpw-managed-files-credential' }, t('managedFilesGitUsername'),
+          h('input', {
+            className: 'dshpw-input', type: 'text', autoComplete: 'off', autoCapitalize: 'none', spellCheck: false,
+            maxLength: 256, value: gitCredentials.username, disabled: busy || loading,
+            onChange: (event: { target: { value: string } }) => setGitCredentials({ ...gitCredentials, username: event.target.value }),
+          })),
+        h('label', { className: 'dshpw-managed-files-credential' }, t('managedFilesGitPassword'),
+          h('input', {
+            className: 'dshpw-input', type: 'password', autoComplete: 'new-password',
+            maxLength: 4096, value: gitCredentials.password, disabled: busy || loading,
+            onChange: (event: { target: { value: string } }) => setGitCredentials({ ...gitCredentials, password: event.target.value }),
+          })),
+      ),
+      h('span', { className: 'dshpw-hint' }, t('managedFilesGitCredentialsHint')),
+      cloneForm === null ? null : h(
             'div',
             { className: 'dshpw-managed-files-form' },
             h('input', {
@@ -420,14 +444,14 @@ export function ManagedFilesPanel(props: Props) {
             h('button', {
               type: 'button',
               className: 'dshpw-btn',
-              disabled: busy || cloneForm.url.trim() === '',
+              disabled: busy || cloneForm.url.trim() === '' || incompleteCredentials,
               onClick: cloneRepository,
             }, busy ? t('managedFilesGitCloning') : t('managedFilesGitStart')),
             h('button', {
               type: 'button',
               className: 'dshpw-btn ghost',
               disabled: busy,
-              onClick: () => setCloneForm(null),
+              onClick: () => { setCloneForm(null); setGitCredentials({ username: '', password: '' }); },
             }, t('managedFilesCancel')),
           ),
     ),

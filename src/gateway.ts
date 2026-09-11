@@ -40,6 +40,8 @@ import {
   managedGitDirectoryName,
   managedGitEnv,
   managedGitPullArgs,
+  managedGitRemoteArgs,
+  parseManagedGitCredentials,
   parseManagedGitUrl,
   redactManagedGitOutput,
 } from './managed-git.js';
@@ -3211,11 +3213,12 @@ export function createGatewayServer(
     args: readonly string[],
     cwd: string,
     home: string,
+    auth?: Parameters<typeof managedGitEnv>[2],
   ): Promise<{ code: number | null; signal: NodeJS.Signals | null; output: string }> =>
     new Promise((resolve) => {
       const child = spawn('git', [...args], {
         cwd,
-        env: managedGitEnv(process.env, home),
+        env: managedGitEnv(process.env, home, auth),
         stdio: ['ignore', 'pipe', 'pipe'],
         timeout: MANAGED_GIT_TIMEOUT_MS,
         killSignal: 'SIGKILL',
@@ -3250,12 +3253,18 @@ export function createGatewayServer(
       res.status(403).json({ ok: false, code: 'NO_GIT', error: '当前账号没有 git 权限' });
       return;
     }
-    const body = req.body as { path?: unknown; url?: unknown; directory?: unknown };
+    const body = req.body as { path?: unknown; url?: unknown; directory?: unknown; username?: unknown; password?: unknown };
+    const suppliedCredentials = parseManagedGitCredentials(body.username, body.password);
+    if (suppliedCredentials === null) {
+      res.status(400).json({ ok: false, code: 'INVALID_GIT_CREDENTIALS', error: '请同时填写有效的用户名和密码／Token，公开仓库可全部留空' });
+      return;
+    }
     const url = parseManagedGitUrl(typeof body.url === 'string' ? body.url : '');
     if (url === null) {
       res.status(400).json({ ok: false, code: 'INVALID_GIT_URL', error: '仓库地址无效：只支持 http/https' });
       return;
     }
+    const credentials = suppliedCredentials ?? url.credentials;
     const directoryName = managedGitDirectoryName(url, typeof body.directory === 'string' ? body.directory : '');
     if (directoryName === null) {
       res.status(400).json({ ok: false, code: 'INVALID', error: '目标文件夹名无效' });
@@ -3281,11 +3290,12 @@ export function createGatewayServer(
         managedGitCloneArgs(url, destination.name),
         path.dirname(destination.resolved.target),
         destination.resolved.root,
+        credentials === undefined ? undefined : { url, credentials },
       );
     } finally {
       managedGitRunning.delete(access.me.userId);
     }
-    const output = redactManagedGitOutput(result.output, url);
+    const output = redactManagedGitOutput(result.output, url, credentials);
     if (result.code !== 0) {
       // git 失败时可能已经建出半个仓库目录：克隆前该路径确认不存在，删除它是安全的。
       await rm(destination.resolved.target, { recursive: true, force: true }).catch(() => undefined);
@@ -3314,7 +3324,12 @@ export function createGatewayServer(
       res.status(403).json({ ok: false, code: 'NO_GIT', error: '当前账号没有 git 权限' });
       return;
     }
-    const body = req.body as { path?: unknown };
+    const body = req.body as { path?: unknown; username?: unknown; password?: unknown };
+    const credentials = parseManagedGitCredentials(body.username, body.password);
+    if (credentials === null) {
+      res.status(400).json({ ok: false, code: 'INVALID_GIT_CREDENTIALS', error: '请同时填写有效的用户名和密码／Token，公开仓库可全部留空' });
+      return;
+    }
     const directory = managedFilePathFor(access.me.userId, typeof body.path === 'string' ? body.path : '');
     if (directory === null) {
       managedPathError(res, 'FORBIDDEN');
@@ -3332,12 +3347,20 @@ export function createGatewayServer(
     }
     managedGitRunning.add(access.me.userId);
     let result;
+    let url;
     try {
-      result = await runManagedGit(managedGitPullArgs(), directory.target, directory.root);
+      const remote = await runManagedGit(managedGitRemoteArgs(), directory.target, directory.root);
+      url = remote.code === 0 ? parseManagedGitUrl(remote.output.trim()) : null;
+      if (url === null) {
+        res.status(400).json({ ok: false, code: 'INVALID_GIT_URL', error: '当前分支未配置有效的 http/https 远程仓库' });
+        return;
+      }
+      result = await runManagedGit(managedGitPullArgs(), directory.target, directory.root,
+        credentials === undefined ? undefined : { url, credentials });
     } finally {
       managedGitRunning.delete(access.me.userId);
     }
-    const output = result.output.replace(/\/\/[^/@\s]*@/g, '//***@');
+    const output = redactManagedGitOutput(result.output, url, credentials);
     if (result.code !== 0) {
       res.status(502).json({ ok: false, code: 'GIT_FAILED', error: '拉取失败', output });
       return;
