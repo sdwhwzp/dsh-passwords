@@ -4196,8 +4196,8 @@ export function createGatewayServer(
           }
         }
         // better-sidebar previews and downloads use this route. Its cwd query is
-        // caller-controlled, so the gateway binds it to a trusted, owned Session and reads
-        // the authorized descriptor itself instead of making the shared Host reopen a path.
+        // caller-controlled, so the gateway binds it to a trusted, owned Session.
+        // Paired files are opened on the computer; server files use a pinned descriptor.
         if (SIDEBAR_FILE_RE.test(requestPath)) {
           if (rejectSidebarRequestBody(req, res, lang)) return;
           if (
@@ -4239,17 +4239,19 @@ export function createGatewayServer(
             denyRequest(req, res, lang, t(lang, 'gw.folderDenied'));
             return;
           }
-          serveSubuserSidebarFile(
-            req,
-            res,
-            canonicalCwd,
-            requestedPath,
-            {
+          const pairedOwner = db.localWorkspaceOwnerForPath(trustedCwd!);
+          if (pairedOwner !== null) {
+            if (pairedOwner !== user.userId || !pathWithin(trustedCwd!, requestedPath)) {
+              denyRequest(req, res, lang, t(lang, 'gw.folderDenied'));
+              return;
+            }
+          } else {
+            serveSubuserSidebarFile(req, res, canonicalCwd, requestedPath, {
               download: parsed.searchParams.get('download') === '1',
               htmlPreview: false,
-            },
-          );
-          return;
+            });
+            return;
+          }
         }
         // HTML previews encode the Session and absolute file path in the URL so relative
         // assets retain the same scope. Decode that vocabulary locally, then apply the same
@@ -4283,11 +4285,19 @@ export function createGatewayServer(
             denyRequest(req, res, lang, t(lang, 'gw.folderDenied'));
             return;
           }
-          serveSubuserSidebarFile(req, res, trustedCwd, decoded.filePath, {
-            download: false,
-            htmlPreview: true,
-          });
-          return;
+          const pairedOwner = db.localWorkspaceOwnerForPath(trustedCwd);
+          if (pairedOwner !== null) {
+            if (pairedOwner !== user.userId || !pathWithin(trustedCwd, decoded.filePath)) {
+              denyRequest(req, res, lang, t(lang, 'gw.folderDenied'));
+              return;
+            }
+          } else {
+            serveSubuserSidebarFile(req, res, trustedCwd, decoded.filePath, {
+              download: false,
+              htmlPreview: true,
+            });
+            return;
+          }
         }
         if (!isStaticAsset(requestPath) && !isPollingRequest(requestPath)) {
           // 配额计时从子用户“说第一句话”（发消息锚点）才开始：
@@ -5594,7 +5604,7 @@ export function createGatewayServer(
           (
             contentType.includes('text/html') ||
             PRINCIPAL_SCOPED_RESPONSE_RE.test(proxyPath) ||
-            SIDEBAR_FILE_RE.test(proxyPath)
+            SIDEBAR_FILE_RE.test(proxyPath) || SIDEBAR_HTML_RE.test(proxyPath)
           )
         ) {
           isolatePrincipalResponse(upstreamRes.headers);
@@ -5700,7 +5710,7 @@ export function createGatewayServer(
         }
 
         // ── HTML 响应：缓冲 + 注入兼容脚本（crypto.randomUUID polyfill 等） ──
-        if (contentType.includes('text/html') && !isSidebarHtmlAttachment) {
+        if (contentType.includes('text/html') && !isSidebarHtmlAttachment && !SIDEBAR_HTML_RE.test(proxyPath)) {
           bufferUpstream(upstreamRes, res, (raw) => {
             try {
               let body = raw;

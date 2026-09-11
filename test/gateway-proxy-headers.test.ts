@@ -16,7 +16,7 @@ import { spawn } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import jwt from 'jsonwebtoken';
 import { createRequire } from 'node:module';
 
@@ -515,6 +515,9 @@ function startMockUpstream(): Promise<http.Server> {
           'content-disposition': 'attachment; filename="admin-page.html"',
         });
         res.end('<!doctype html><html><head><title>admin file</title></head><body>unchanged</body></html>');
+      } else if ((req.url ?? '').startsWith('/sidebar/html/')) {
+        res.writeHead(200, { 'content-type': 'text/html', 'content-security-policy': 'sandbox' });
+        res.end(HTML_BODY);
       } else if ((req.url ?? '').startsWith('/api/dsh-ssh/upload')) {
         uploadRequestsSeen += 1;
         let bytes = 0;
@@ -726,7 +729,7 @@ function chunkedGatewayRequest(
 }
 
 before(async () => {
-  tempDir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-test-'));
+  tempDir = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'dshpw-test-')));
   sidebarWorkspace = path.join(tempDir, 'sidebar-workspace');
   mkdirSync(path.join(sidebarWorkspace, 'reports'), { recursive: true });
   writeFileSync(path.join(sidebarWorkspace, 'reports', 'result.xlsx'), 'spreadsheet bytes');
@@ -1070,6 +1073,35 @@ test('better-sidebar 文件下载绑定到子用户自己的 Session 工作区',
       { cookie: customerCookie },
     );
     assert.equal(ownedPrefix.status, 403, `${route} must not alias the exact media route`);
+  }
+});
+
+test('better-sidebar 本机媒体由所属账号的配对读取，HTML 保持原文', async () => {
+  const pairing = db.createLocalWorkspace({
+    id: 'sidebar-paired-files', userId: customerId, token: 'sidebar-file-token-01234567890123456789',
+    deviceName: 'computer', workspaceName: 'project', remoteRoot: '/local/project',
+    placeholderPath: sidebarWorkspace, platform: process.platform, shellEnabled: false,
+  });
+  try {
+    const remoteOnly = path.join(sidebarWorkspace, 'remote-only.png');
+    const file = await gatewayReq('GET', sidebarFileUrl('s-sidebar-owned', remoteOnly), { cookie: customerCookie });
+    assert.equal(file.status, 200);
+    assert.equal(JSON.parse(file.body).ok, true);
+    assert.match(rawHeader(file.rawHeaders, 'cache-control'), /no-store/);
+    const html = await gatewayReq('GET', sidebarHtmlUrl('s-sidebar-owned', path.join(sidebarWorkspace, 'remote-only.html')), { cookie: customerCookie });
+    assert.equal(html.status, 200);
+    assert.equal(html.body, HTML_BODY);
+    assert.equal(rawHeader(html.rawHeaders, 'content-security-policy'), 'sandbox');
+    assert.match(rawHeader(html.rawHeaders, 'cache-control'), /no-store/);
+    for (const url of [sidebarFileUrl('s-sidebar-owned', remoteOnly), sidebarHtmlUrl('s-sidebar-owned', remoteOnly)]) {
+      assert.equal((await gatewayReq('GET', url, { cookie: secondCustomerCookie })).status, 403);
+    }
+    const outside = path.join(sidebarWorkspace, '..', 'other-account', 'secret.png');
+    for (const url of [sidebarFileUrl('s-sidebar-owned', outside), sidebarHtmlUrl('s-sidebar-owned', outside)]) {
+      assert.equal((await gatewayReq('GET', url, { cookie: customerCookie })).status, 403);
+    }
+  } finally {
+    db.revokeLocalWorkspace(customerId, pairing.id);
   }
 });
 
