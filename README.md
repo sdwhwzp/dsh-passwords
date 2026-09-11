@@ -479,6 +479,6 @@ Linux 部署由管理员将 `scripts/tenant-terminal-launcher.py` 安装为 root
 
 设置 `MCP_DESKTOP_DOWNLOADS_DIR` 为独立、只读的安装包发布目录，可在登录页和网页侧栏打开“下载桌面端”。登录后的列表使用现有主面板，返回时保留会话。安装包及清单公开下载，不需要业务账号；业务数据和原有文件下载权限保持原有授权检查。Windows 一键助手仍使用原入口，配对时读取服务器提供的连接地址。
 
-目录内的 `manifest.json` 包含 `version`、源码 `commit`（40 位 SHA）和 `files`；每项包含 `file`、`platform`（`windows-x64` 或 `mac-arm64`）、`bytes`、`sha256`。仅发布简单文件名的 `.exe`、`.dmg` 和 `.zip`，不开放目录列表或清单外文件。上传后核对 SHA-256，再切换配置并重启网关；已发布目录保持只读，不原位替换文件。下载支持 HEAD 和 Range；配置留空时不注册公开下载路由。
+目录内的 `manifest.json` 包含 `version`、源码 `commit`（40 位 SHA）和 `files`；每项包含 `file`、`platform`（`windows-x64` 或 `mac-arm64`）、`bytes`、`sha256`，以及可选的 `signing`（`unsigned` 或仅适用于 Mac 的 `apple-notarized`；省略时显示未签名）。只有签名、公证和安装验证通过的 Mac 构件才能标记为 `apple-notarized`。仅发布简单文件名的 `.exe`、`.dmg` 和 `.zip`，不开放目录列表或清单外文件。上传后核对 SHA-256，再切换配置并重启网关；已发布目录保持只读，不原位替换文件。下载支持 HEAD 和 Range；配置留空时不注册公开下载路由。
 
-远程桌面端服务器地址默认为空，使用者填写管理员提供的地址。当前构建未签名；Mac 版本仅支持 Apple Silicon。网站 HTTPS 与应用签名分别管理。
+远程桌面端服务器地址默认为空，使用者填写管理员提供的地址。列表逐个显示安装包的签名状态；Mac 版本仅支持 Apple Silicon。网站 HTTPS 与应用签名分别管理。

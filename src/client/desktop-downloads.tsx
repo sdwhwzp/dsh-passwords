@@ -2,7 +2,7 @@
 import { createElement as h, useEffect, useState } from 'react';
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots';
 
-interface Catalog { version: string; commit: string; files: { file: string; platform: string; bytes: number; sha256: string }[] }
+interface Catalog { version: string; commit: string; files: { file: string; platform: string; bytes: number; sha256: string; signing?: 'unsigned' | 'apple-notarized' }[] }
 
 export function DesktopDownloadsLauncher({ t, wide, onOpen }: PropsLocale<'dshpw'> & { wide: boolean; onOpen(): void }) {
   return h('button', { type: 'button', onClick: onOpen, className: `dshpw-sidebar-workspace-action${wide ? '' : ' compact'}`, title: t('desktopTitle'), 'aria-label': t('desktopTitle') },
@@ -31,6 +31,7 @@ export function DesktopDownloadsPanel({ t, onBack }: PropsLocale<'dshpw'> & { on
           ...catalog.files.map(entry => h('section', { key: entry.file, style: { padding: 24, margin: '16px 0', border: '1px solid #d7dce5', borderRadius: 16 } },
             h('a', { href: `/gateway/desktop/files/${encodeURIComponent(entry.file)}`, download: entry.file, style: { fontWeight: 600 } }, `${entry.platform === 'windows-x64' ? 'Windows x64' : 'Mac Apple Silicon'} · ${entry.file.split('.').pop()?.toUpperCase()}`),
             h('span', { style: { marginLeft: 16 } }, `${(entry.bytes / 1048576).toFixed(1)} MB`),
+            h('p', null, t(entry.signing === 'apple-notarized' ? 'desktopNotarized' : 'desktopUnsigned')),
             h('small', { style: { display: 'block', marginTop: 12, overflowWrap: 'anywhere' } }, `SHA-256: ${entry.sha256}`)))),
-      h('p', null, t('desktopUnsigned'))));
+      h('p', null, t('desktopCompatibility'))));
 }

@@ -10,8 +10,12 @@ test('published installers support public catalog, download, HEAD and resumed do
   const root = mkdtempSync(path.join(os.tmpdir(), 'dsh-desktop-downloads-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const file = 'desktop-windows-x64.exe';
-  const manifest = { version: '20260911', commit: 'a'.repeat(40), files: [{ file, platform: 'windows-x64', bytes: 10, sha256: 'b'.repeat(64) }] };
+  const manifest = { version: '20260911', commit: 'a'.repeat(40), files: [
+    { file, platform: 'windows-x64', bytes: 10, sha256: 'b'.repeat(64) },
+    { file: 'desktop-mac-arm64.zip', platform: 'mac-arm64', bytes: 10, sha256: 'c'.repeat(64), signing: 'apple-notarized' },
+  ] };
   writeFileSync(path.join(root, file), '0123456789');
+  writeFileSync(path.join(root, 'desktop-mac-arm64.zip'), '9876543210');
   writeFileSync(path.join(root, '.env'), 'private');
   writeFileSync(path.join(root, 'manifest.json'), JSON.stringify(manifest));
   const app = express();
@@ -24,6 +28,8 @@ test('published installers support public catalog, download, HEAD and resumed do
   const page = await (await fetch(`${origin}/gateway/desktop`)).text();
   assert.match(page, /服务器地址默认为空/);
   assert.match(page, /Windows x64/);
+  assert.match(page, /未签名/);
+  assert.match(page, /已签名 · 已通过 Apple 公证/);
   assert.doesNotMatch(page, /gr-iot|192\.168\./);
   const url = `${origin}/gateway/desktop/files/${file}`;
   const download = await fetch(url);
@@ -54,6 +60,10 @@ test('an absent release directory does not register public routes; invalid or es
     assert.throws(() => registerDesktopDownloads(app, root, () => 'en'), /file mismatch/);
     put([entry, entry]);
     assert.throws(() => registerDesktopDownloads(app, root, () => 'en'), /Invalid desktop installer entry/);
+    for (const signing of ['apple-notarized', 'unverified', true]) {
+      put([{ ...entry, signing }]);
+      assert.throws(() => registerDesktopDownloads(app, root, () => 'en'), /Invalid desktop installer entry/);
+    }
     symlinkSync(path.join(root, 'installer.exe'), path.join(root, 'linked.exe'));
     put([{ ...entry, file: 'linked.exe' }]);
     assert.throws(() => registerDesktopDownloads(app, root, () => 'en'), /file mismatch/);
