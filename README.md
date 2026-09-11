@@ -93,9 +93,7 @@ MySQL 模式会在空闲超时、服务重启或短暂网络断开后自动替�
 
 ### 0. 前置条件（三样）
 
-1. **Node.js 22.19+ 或 24+**：`node -v` 查看（Linux：`curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs`；Windows：nodejs.org 下载安装包）
-2. **dsh 已装好**：`npm install -g @deepseek-ai/dsh@0.1.3-alpha.1`，并已能正常对话（dsh 自身的模型连接配置好即可；本插件不需要任何额外配置）
-3. **git**：Linux 没装就 `apt-get install -y git`；Windows 去 git-scm.com 下载（pnpm 缺了脚本会自动装）
+宿主机安装需要 Node.js 22.19+ 或 24+、可正常运行的 dsh 和 git。请让本插件与 dsh 宿主使用同一 Node 主线版本；DSH `0.1.5` 全版本（alpha.1 / alpha.2 / rc.1 / rc.2）均已验证，其中 `0.1.5-rc.2` 是当前验证过的主机基线，同时保留对 `0.1.2` 和 `0.1.3` 接口边界的兼容。Docker 安装只需要 Docker Engine 或 Docker Desktop 和一个 DeepSeek API key。
 
 ### 1. 安装（按平台）
 

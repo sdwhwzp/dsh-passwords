@@ -94,9 +94,7 @@ External file services and their accounts, passwords and databases are managed b
 
 ### 0. Prerequisites (three things)
 
-1. **Node.js 22.19+ or 24+**: check with `node -v` (Linux: `curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs`; Windows: download from nodejs.org)
-2. **dsh installed**: `npm install -g @deepseek-ai/dsh@0.1.3-alpha.1`, with your model connection working (dsh's own model config is enough; this plugin needs no extra configuration)
-3. **git**: Linux: `apt-get install -y git`; Windows: download from git-scm.com (pnpm is auto-installed by the script when missing)
+Host installs need Node.js 22.19+ or 24+, a working dsh installation, and git. Keep this plugin on the same Node major line as the dsh host; every DSH `0.1.5` release (alpha.1 / alpha.2 / rc.1 / rc.2) is verified, with `0.1.5-rc.2` as the current host baseline, while the compatibility layer retains the tested `0.1.2` and `0.1.3` API boundaries. Docker installs only need Docker Engine or Docker Desktop and a DeepSeek API key.
 
 ### 1. Install (by platform)
 

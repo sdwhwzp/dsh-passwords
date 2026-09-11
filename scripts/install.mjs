@@ -109,7 +109,7 @@ say(`Node.js v${process.versions.node} ✓`);
 // ── 2. dsh（DeepSeek Harness）──
 if (run('dsh', ['--version'], { quiet: true }) !== 0) {
   err('未找到 dsh。请先安装 DeepSeek Harness：');
-  err('  npm install -g @deepseek-ai/dsh@0.1.3-alpha.1');
+  err('  npm install -g @deepseek-ai/dsh@0.1.5-rc.2');
   err('  然后用 DEEPSEEK_API_KEY=sk-你的key dsh web 先跑一次确认能用');
   process.exit(1);
 }

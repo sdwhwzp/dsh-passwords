@@ -85,6 +85,23 @@ export interface UpdateStatus {
   restartPendingVersion: string | null;
 }
 
+/**
+ * 将更新引擎的业务结果映射为插件 HTTP 状态码。
+ * 进行中是可轮询的受理状态；未就绪/不支持是可操作的业务错误，不能冒充冲突。
+ */
+export function updateApplyHttpStatus(body: { ok?: unknown; code?: unknown; message?: unknown; error?: unknown }): number {
+  const code = typeof body.code === 'string' ? body.code : '';
+  if (
+    code === 'DOWNLOAD_STARTED' ||
+    code === 'DOWNLOAD_IN_PROGRESS' ||
+    code === 'INSTALL_STARTED' ||
+    code === 'INSTALL_IN_PROGRESS'
+  ) return 202;
+  if (code === 'RATE_LIMITED') return 429;
+  if (code === 'NOT_READY') return 422;
+  return body.ok === false ? 422 : 200;
+}
+
 interface ReleaseInfo {
   version: string;
 }
@@ -477,7 +494,7 @@ export class UpdateEngine {
   }
 
   start(): void {
-    if (this.disposed) return;
+    if (this.disposed || this.tickTimer !== null) return;
     // 空闲窗检查 + 24h 自动重检的推进刻度：每 15 秒一跳
     this.tickTimer = setInterval(() => this.tick(), 15_000);
     this.tickTimer.unref();
@@ -487,7 +504,10 @@ export class UpdateEngine {
 
   dispose(): void {
     this.disposed = true;
-    if (this.tickTimer !== null) clearInterval(this.tickTimer);
+    if (this.tickTimer !== null) {
+      clearInterval(this.tickTimer);
+      this.tickTimer = null;
+    }
   }
 
   /**

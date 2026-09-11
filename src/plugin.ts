@@ -55,6 +55,7 @@ import {
   UPSTREAM_BROWSER_AUTH_REQUEST,
   UPSTREAM_BROWSER_AUTH_RESPONSE,
 } from './upstream-browser-auth.js';
+import { updateApplyHttpStatus } from './update.js';
 
 interface SpendAccounting {
   reconcile(): Promise<void>;

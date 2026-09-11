@@ -11,6 +11,7 @@ import {
   detectRuntime,
   parseNpmPackageInfo,
   parseReleaseInfo,
+  updateApplyHttpStatus,
   type UpdateEngineOps,
   type UpdateStore,
   UpdateEngine,
@@ -150,6 +151,15 @@ function setup(root: string, autoEnabled: boolean, nowRef: { value: number }, re
   const engine = new UpdateEngine(config(path.join(root, 'platform.db'), restartService), db, ops, { installRoot: root, env: { DSH_PASSWORDS_RUNTIME: 'git', DSH_HOME: dshHome, DSH_PASSWORDS_ENV_FILE: envFile } });
   return { engine, db, ops, calls, restarts: () => restarts, setRestartAllowed: (allowed: boolean) => { restartAllowed = allowed; } };
 }
+
+test('update apply maps NOT_READY to an actionable 422 instead of HTTP 409', () => {
+  assert.equal(updateApplyHttpStatus({ ok: false, code: 'NOT_READY', message: 'download pending' }), 422);
+  assert.equal(updateApplyHttpStatus({ ok: false, code: 'RATE_LIMITED', message: 'try later' }), 429);
+  assert.equal(updateApplyHttpStatus({ ok: false, code: 'DOWNLOAD_IN_PROGRESS' }), 202);
+  assert.equal(updateApplyHttpStatus({ ok: false, code: 'INSTALL_IN_PROGRESS' }), 202);
+  assert.equal(updateApplyHttpStatus({ ok: false, code: 'INSTALL_STARTED' }), 202);
+  assert.equal(updateApplyHttpStatus({ ok: true, code: 'NO_UPDATE' }), 200);
+});
 
 test('the fork advances the source baseline without admitting official automatic updates', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
@@ -523,5 +533,29 @@ test('integrity mismatch discards the artifact and never installs', async () => 
     assert.match(engine.status().lastError ?? '', /sha512/);
     assert.equal(restarts(), 0);
     assert.equal(existsSync(path.join(root, 'update', 'dsh-passwords-2.6.3.tgz')), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('update engine start is idempotent and dispose keeps it stopped', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'dshpw-update-'));
+  const originalSetInterval = globalThis.setInterval;
+  let created = 0;
+  try {
+    const now = { value: 1_000_000 };
+    const { engine } = setup(root, false, now);
+    globalThis.setInterval = ((handler: (...args: unknown[]) => void, timeout?: number) => {
+      created += 1;
+      return originalSetInterval(handler as (...args: unknown[]) => void, timeout);
+    }) as unknown as typeof globalThis.setInterval;
+    try {
+      engine.start();
+      engine.start();
+      assert.equal(created, 1, '重复 start() 不得叠加轮询器');
+      engine.dispose();
+      engine.start();
+      assert.equal(created, 1, 'dispose() 后 start() 必须保持停止');
+    } finally {
+      globalThis.setInterval = originalSetInterval;
+    }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

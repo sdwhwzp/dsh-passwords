@@ -67,6 +67,25 @@ export function matchesWebSocketRule(pathname: string, rule: string): boolean {
 }
 
 /**
+ * Match a normalized WebSocket pathname against the owner-configured rules.
+ * A trailing /* rule grants exactly one child path, never the base path or a
+ * deeper descendant. Query strings must be removed by the caller first.
+ */
+export function webSocketPathAllowed(pathname: string, rules: readonly string[]): boolean {
+  for (const rule of rules) {
+    if (!rule.endsWith('/*')) {
+      if (rule === pathname) return true;
+      continue;
+    }
+    const base = rule.slice(0, -2);
+    if (!pathname.startsWith(`${base}/`)) continue;
+    const child = pathname.slice(base.length + 1);
+    if (child !== '' && !child.includes('/')) return true;
+  }
+  return false;
+}
+
+/**
  * 工作区白名单的"禁止所有"哨兵值：主用户选择"禁止工作区"时存入白名单，
  * 与空数组（=全部允许）区分开（空数组还是"未限制"语义，兼容默认子用户）。
  */

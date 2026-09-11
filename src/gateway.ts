@@ -63,7 +63,7 @@ import {
   isSshTerminalEndpoint,
   isTenantSshEndpoint,
   isSshPublicAssetEndpoint,
-  matchesWebSocketRule,
+  webSocketPathAllowed,
   isAionuiFileWrite,
   isAionuiPanel,
   aionuiRootFrom,
@@ -796,6 +796,9 @@ button:disabled{opacity:.7;cursor:default}
 .lang-switch a{color:var(--caption);text-decoration:none;transition:color .15s}
 .lang-switch a:hover{color:var(--sub)}
 .lang-switch a.on{color:var(--brand);font-weight:600}
+/* 按钮提交中的加载 spinner：用 currentColor 继承按钮文字色 */
+.btn-spin{display:inline-block;width:13px;height:13px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:btnSpin .7s linear infinite;vertical-align:-2px;margin-right:7px}
+@keyframes btnSpin{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 `;
 
@@ -861,7 +864,8 @@ function renderLoginPage(params: { lang: Lang; next: string; error?: string; dbH
   if (err) { setTimeout(() => { err.style.display = 'block'; }, 50); }
   document.getElementById('login-form').addEventListener('submit', () => {
     const btn = document.getElementById('submit-btn');
-    btn.textContent = ${JSON.stringify(tr('gw.loggingIn'))};
+    // 提交中：文字前加 spinner（不影响布局，防重复点击已有 disabled 兜底）
+    btn.innerHTML = '<span class="btn-spin" aria-hidden="true"></span>' + ${JSON.stringify(tr('gw.loggingIn'))};
     btn.disabled = true;
   });
 </script>`,
@@ -946,7 +950,7 @@ function renderSetupPage(params: { lang: Lang; error?: string; csrf: string }): 
       return;
     }
     const btn = document.getElementById('submit-btn');
-    btn.textContent = ${JSON.stringify(tr('gw.initializing'))};
+    btn.innerHTML = '<span class="btn-spin" aria-hidden="true"></span>' + ${JSON.stringify(tr('gw.initializing'))};
     btn.disabled = true;
   });
 </script>`,
@@ -7546,7 +7550,7 @@ export function createGatewayServer(
     // SSH terminal 是第三方插件提供的真实 RFC 6455 PTY。它不走 Remote mux，
     // 账号隔离模式由 Host 校验 alias；
     // 旧版 Host 仍要求 query alias 已在网关登记为当前子用户所有。
-    const configuredSshPath = [...sshWebSocketEndpoints].some((rule) => matchesWebSocketRule(gatePath, rule));
+    const configuredSshPath = webSocketPathAllowed(gatePath, [...sshWebSocketEndpoints]);
     if (userRole === 'user' && configuredSshPath &&
         (authedUserId === null || !effectivePermissions(authedUserId).allow_ssh)) {
       rejectUpgrade(socket, 403);

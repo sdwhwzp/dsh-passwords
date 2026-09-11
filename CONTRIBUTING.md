@@ -43,7 +43,7 @@ Do not paste `.env`, `setup-key.txt`, JWTs, cookies, API keys, SSH passwords, pr
 Supported development baseline:
 
 - Node.js `22.19+` or `24+`
-- DSH `0.1.5-rc.1` is the current verified host baseline; the compatibility layer retains the tested `0.1.2` and `0.1.3` API boundaries.
+- DSH `0.1.5` (all releases; `0.1.5-rc.2` is the current verified host baseline); the compatibility layer retains the tested `0.1.2` and `0.1.3` API boundaries.
 - npm and git
 
 Clone and install:
