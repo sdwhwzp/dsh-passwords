@@ -31,6 +31,14 @@ export function resolveConfigPath(value: string, configRoot: string, fallbackNam
 }
 
 export interface PlatformConfig {
+  /** HTTPS-only mobile login; disabled until the deployment opts in. */
+  mobileAuth?: {
+    enabled: boolean;
+    accessTtlSeconds: number;
+    idleTtlSeconds: number;
+    absoluteTtlSeconds: number;
+    maxSessionsPerUser: number;
+  };
   /** Operator-owned immutable installer directory; empty disables public downloads. */
   desktopDownloadsDirectory?: string;
   /** Enable only with a dsh-ssh Host that isolates every operation by authenticated principal. */
@@ -105,6 +113,20 @@ function positiveIntegerEnv(name: string, fallback: number): number {
   const value = Number(readEnv(name, String(fallback)));
   if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${name} must be a positive integer`);
   return value;
+}
+
+/** Validate bounded mobile lifetimes; active use never extends the absolute login age. */
+export function loadMobileAuthConfig(): NonNullable<PlatformConfig['mobileAuth']> {
+  const enabled = (process.env.MCP_MOBILE_AUTH_ENABLED ?? 'false').trim().toLowerCase();
+  if (enabled !== 'true' && enabled !== 'false') throw new Error('MCP_MOBILE_AUTH_ENABLED must be true or false');
+  const accessTtlSeconds = positiveIntegerEnv('MCP_MOBILE_ACCESS_TTL_SECONDS', 900);
+  const idleTtlSeconds = positiveIntegerEnv('MCP_MOBILE_IDLE_TTL_SECONDS', 2592000);
+  const absoluteTtlSeconds = positiveIntegerEnv('MCP_MOBILE_ABSOLUTE_TTL_SECONDS', 7776000);
+  const maxSessionsPerUser = positiveIntegerEnv('MCP_MOBILE_MAX_SESSIONS_PER_USER', 20);
+  if (accessTtlSeconds > 3600 || accessTtlSeconds > idleTtlSeconds || idleTtlSeconds > absoluteTtlSeconds || absoluteTtlSeconds > 31536000 || maxSessionsPerUser > 100) {
+    throw new Error('Mobile auth requires access <= 3600, access <= idle <= absolute <= 31536000 seconds and at most 100 devices');
+  }
+  return { enabled: enabled === 'true', accessTtlSeconds, idleTtlSeconds, absoluteTtlSeconds, maxSessionsPerUser };
 }
 
 /** Parse the deployment opt-in for principal-scoped SSH; reject misspelled values. */
@@ -262,6 +284,7 @@ export function loadConfig(): PlatformConfig {
       trustedHosts: parseTenantSshTrustedHosts(process.env.TENANT_SSH_TRUSTED_HOSTS),
     },
     tenantEditor: { enabled: readEnv('MCP_TENANT_EDITOR', 'false') === 'true' },
+    mobileAuth: loadMobileAuthConfig(),
     tenantTaskBoard: {
       enabled: readEnv('MCP_TENANT_TASK_BOARD', 'false') === 'true',
       directory: resolveEnvRelativePath(readEnv('MCP_TENANT_TASK_BOARD_DIR', ''), envFilePath(), path.join(homedir(), '.dsh', 'tenant-task-boards')),

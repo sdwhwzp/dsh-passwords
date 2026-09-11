@@ -30,6 +30,7 @@ import zlib from 'node:zlib';
 import { URL, fileURLToPath } from 'node:url';
 import dns from 'node:dns';
 import express, { type Request, type Response } from 'express';
+import { MobileAuth, isMobileRequest, mobileRequestToken } from './mobile-auth.js';
 import { registerDesktopDownloads } from './desktop-downloads.js';
 import { registerTenantServiceRoutes } from './tenant-service-routes.js';
 import WebSocket, { type RawData, WebSocketServer } from 'ws';
@@ -1985,22 +1986,59 @@ export function createGatewayServer(
   const tenantConnectionsByUserId = new Map<number, Set<TenantConnectionCloser>>();
   const tenantConnectionsByToken = new Map<string, Set<TenantConnectionCloser>>();
 
+  const mobileAuth = new MobileAuth(config, auth, db, (id) => {
+    closeTenantConnections(tenantConnectionsByToken.get(`mobile:${id}`), 'session revoked');
+  });
+  mobileAuth.register(app, true);
+
+  function verifyGatewayToken(token: string) {
+    return token.startsWith('dshm.') ? mobileAuth.verifyAccess(token) : auth.verifyToken(token);
+  }
+
+  /** Explicit mobile identity never falls back to a browser session or crosses accounts. */
+  function gatewayRequestToken(req: Pick<Request, 'headers' | 'socket'>): string | null {
+    if (!isMobileRequest(req)) {
+      const cookie = readCookie(req.headers.cookie, COOKIE_NAME);
+      return cookie?.startsWith('dshm.') ? null : cookie;
+    }
+    if (!(req.socket as import('node:tls').TLSSocket).encrypted) return null;
+    const token = mobileRequestToken(req);
+    if (token === null) return null;
+    try {
+      const webCookie = readCookie(req.headers.cookie, COOKIE_NAME);
+      if (webCookie !== null) {
+        const user = mobileAuth.verifyAccess(token);
+        let webUser: ReturnType<AuthService['verifyToken']> | null = null;
+        try { webUser = auth.verifyToken(webCookie); } catch { /* Expired browser cookies are not an identity. */ }
+        if (webUser !== null && !isTokenRevoked(webCookie) && db.getUserById(webUser.userId)?.credential_version === webUser.cv && webUser.userId !== user.userId) return null;
+      }
+      return token;
+    } catch { return null; }
+  }
+
   function registerTenantConnection(
     userId: number,
     token: string,
     close: TenantConnectionCloser,
   ): () => void {
+    let key: string;
+    try { key = mobileAuth.connectionKey(token); } catch { close('session expired'); return () => {}; }
+    const mobileTimer = token.startsWith('dshm.') ? setInterval(() => {
+      try { mobileAuth.verifyAccess(token); } catch { close('session invalidated'); }
+    }, 1000) : null;
+    mobileTimer?.unref();
     const byUser = tenantConnectionsByUserId.get(userId) ?? new Set<TenantConnectionCloser>();
-    const byToken = tenantConnectionsByToken.get(token) ?? new Set<TenantConnectionCloser>();
+    const byToken = tenantConnectionsByToken.get(key) ?? new Set<TenantConnectionCloser>();
     byUser.add(close);
     byToken.add(close);
     tenantConnectionsByUserId.set(userId, byUser);
-    tenantConnectionsByToken.set(token, byToken);
+    tenantConnectionsByToken.set(key, byToken);
     return () => {
+      if (mobileTimer !== null) clearInterval(mobileTimer);
       byUser.delete(close);
       byToken.delete(close);
       if (byUser.size === 0) tenantConnectionsByUserId.delete(userId);
-      if (byToken.size === 0) tenantConnectionsByToken.delete(token);
+      if (byToken.size === 0) tenantConnectionsByToken.delete(key);
     };
   }
 
@@ -2037,7 +2075,10 @@ export function createGatewayServer(
   }
 
   function sessionOf(req: Request): { userId: number; username: string } | null {
-    const token = readCookie(req.headers.cookie, COOKIE_NAME);
+    const token = gatewayRequestToken(req);
+    if (token?.startsWith('dshm.')) {
+      try { return mobileAuth.verifyAccess(token); } catch { return null; }
+    }
     if (!token) return null;
     const now = Date.now();
     const hit = sessionCache.get(token);
@@ -5370,6 +5411,8 @@ export function createGatewayServer(
       return;
     }
     const headers: Record<string, string | string[] | undefined> = { ...req.headers };
+    if (isMobileRequest(req)) { delete headers.authorization; delete headers['x-dsh-mobile']; }
+    delete headers['x-dsh-csrf'];
     // 改写 Host 为上游地址（过 dsh 的 browser-trust fence 第 1 道：Host 检查）
     headers.host = `${upstreamHost}:${upstreamPort}`;
     // 改写 Origin 为上游地址（过第 3 道：Origin 必须与 Host 同 host——
@@ -5403,7 +5446,7 @@ export function createGatewayServer(
       new URL(req.originalUrl, `http://${req.headers.host ?? 'localhost'}`).pathname,
     ).startsWith('/api/dsh-passwords/');
     const trustedCookies: string[] = [];
-    if (ownPluginRoute) {
+    if (ownPluginRoute && !isMobileRequest(req)) {
       const gatewayToken = readCookie(req.headers.cookie, COOKIE_NAME);
       if (gatewayToken !== null) trustedCookies.push(`${COOKIE_NAME}=${encodeURIComponent(gatewayToken)}`);
     }
@@ -7002,7 +7045,7 @@ export function createGatewayServer(
       const tenantCredentialIsCurrent = () => {
         if (isTokenRevoked(token)) return false;
         try {
-          const verified = auth.verifyToken(token);
+          const verified = verifyGatewayToken(token);
           const currentUser = db.getUserById(userId);
           return verified.userId === userId &&
             verified.cv === credentialVersion &&
@@ -7220,7 +7263,7 @@ export function createGatewayServer(
       const tenantCredentialIsCurrent = () => {
         if (isTokenRevoked(token)) return false;
         try {
-          const verified = auth.verifyToken(token);
+          const verified = verifyGatewayToken(token);
           const currentUser = db.getUserById(userId);
           return verified.userId === userId &&
             verified.cv === credentialVersion &&
@@ -7480,6 +7523,11 @@ export function createGatewayServer(
   }, 10 * 60_000);
   sweep.unref();
   server.on('close', () => clearInterval(sweep));
+  server.on('close', () => {
+    for (const [key, connections] of tenantConnectionsByToken) {
+      if (key.startsWith('mobile:')) closeTenantConnections(connections, 'gateway closed');
+    }
+  });
 
   // ── WebSocket 升级代理（dsh 前端依赖 WS 通信） ──────────────
   server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
@@ -7499,7 +7547,7 @@ export function createGatewayServer(
     const queryIndex = (req.url ?? '').indexOf('?');
     let fwdPath = gatePath + (queryIndex >= 0 ? stripGatewayAuthQuery(req.url ?? '/', gatePath) : '');
     // 认证检查（复用 Cookie；与 HTTP 侧一致：校验 cv + banned + 登出吊销）
-    const token = readCookie(req.headers.cookie, COOKIE_NAME);
+    const token = gatewayRequestToken(req);
     let authed = false;
     let userRole: string | null = null;
     let authedUserId: number | null = null;
@@ -7507,7 +7555,7 @@ export function createGatewayServer(
     let authedCredentialVersion: number | null = null;
     if (token && !isTokenRevoked(token)) {
       try {
-        const user = auth.verifyToken(token);
+        const user = verifyGatewayToken(token);
         const row = db.getUserByUsername(user.username);
         if (row !== null && user.cv === row.credential_version) {
           const perms = effectivePermissions(row.id);
@@ -7693,7 +7741,7 @@ export function createGatewayServer(
       for (const [key, value] of Object.entries(req.headers)) {
         const lower = key.toLowerCase();
         // F-15：与 HTTP 代理同口径——不把网关会话 Cookie 转发给上游
-        if (lower === 'cookie') continue;
+        if (lower === 'cookie' || lower === 'x-dsh-csrf' || lower === 'x-dsh-mobile' || (lower === 'authorization' && isMobileRequest(req))) continue;
         // 浏览器不能自行断言 Host principal；只转发网关新签发的短期身份。
         if (lower === 'x-dsh-principal' || lower === 'x-dsh-principal-signature') continue;
         if (lower === 'host') {

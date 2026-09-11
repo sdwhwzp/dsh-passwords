@@ -134,7 +134,29 @@ export interface SessionModelSelectionRow {
 }
 
 
+/** Persistent mobile login; only the refresh secret digest is stored. */
+export interface MobileSessionRow {
+  id: string;
+  user_id: number;
+  token_hash: string;
+  credential_version: number;
+  created_at_ms: number;
+  active_until_ms: number;
+  expires_at_ms: number;
+}
+
 const SCHEMA = `
+CREATE TABLE IF NOT EXISTS mobile_sessions (
+  id TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  credential_version INTEGER NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  active_until_ms INTEGER NOT NULL,
+  expires_at_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mobile_sessions_user ON mobile_sessions(user_id);
+
 CREATE TABLE IF NOT EXISTS users (
   id                 INTEGER PRIMARY KEY AUTOINCREMENT,
   username           TEXT    NOT NULL,
@@ -260,6 +282,17 @@ CREATE TABLE IF NOT EXISTS session_model_selections (
  * 因此同一份代码在两种服务端上通用。
  */
 const MYSQL_SCHEMA = `
+CREATE TABLE IF NOT EXISTS mobile_sessions (
+  id VARCHAR(64) NOT NULL PRIMARY KEY,
+  user_id INT UNSIGNED NOT NULL,
+  token_hash CHAR(64) NOT NULL UNIQUE,
+  credential_version INT NOT NULL,
+  created_at_ms BIGINT NOT NULL,
+  active_until_ms BIGINT NOT NULL,
+  expires_at_ms BIGINT NOT NULL,
+  KEY idx_mobile_sessions_user (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS users (
   id                 INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   username           TEXT NOT NULL,
@@ -849,6 +882,7 @@ export class Database {
       this.stmt('DELETE FROM user_usage WHERE user_id = ?').run(id);
       this.stmt('DELETE FROM messages WHERE sender_id = ? OR recipient_id = ?').run(id, id);
       this.stmt('DELETE FROM local_workspaces WHERE user_id = ?').run(id);
+      this.stmt('DELETE FROM mobile_sessions WHERE user_id = ?').run(id);
       this.stmt('DELETE FROM managed_workspaces WHERE user_id = ?').run(id);
       this.stmt('DELETE FROM users WHERE id = ?').run(id);
       this.db.exec('COMMIT');
@@ -867,6 +901,50 @@ export class Database {
     this.stmt('DELETE FROM login_attempts WHERE username_hash = ?').run(
       this.crypto.lookupHash(username),
     );
+  }
+
+  /** Insert an authenticated device session without persisting the refresh secret. */
+  createMobileSession(row: MobileSessionRow, maximum: number, now: number, replaceId?: string): boolean {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      if (this.mysql) this.stmt('SELECT id FROM users WHERE id = ? FOR UPDATE').get(row.user_id);
+      if (replaceId !== undefined) this.stmt('DELETE FROM mobile_sessions WHERE id = ? AND user_id = ?').run(replaceId, row.user_id);
+      this.stmt('DELETE FROM mobile_sessions WHERE user_id = ? AND (active_until_ms <= ? OR expires_at_ms <= ?)').run(row.user_id, now, now);
+      this.stmt('DELETE FROM mobile_sessions WHERE user_id = ? AND credential_version <> ?').run(row.user_id, row.credential_version);
+      const count = this.stmt('SELECT COUNT(*) AS count FROM mobile_sessions WHERE user_id = ?').get(row.user_id) as { count: number };
+      if (Number(count.count) >= maximum) {
+        this.db.exec('ROLLBACK');
+        return false;
+      }
+      this.stmt(`INSERT INTO mobile_sessions
+        (id, user_id, token_hash, credential_version, created_at_ms, active_until_ms, expires_at_ms)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`).run(row.id, row.user_id, row.token_hash, row.credential_version, row.created_at_ms, row.active_until_ms, row.expires_at_ms);
+      this.db.exec('COMMIT');
+      return true;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  /** Read one device session; callers enforce its account and expiration. */
+  getMobileSession(id: string): MobileSessionRow | null {
+    const row = this.stmt('SELECT * FROM mobile_sessions WHERE id = ?').get(id) as MobileSessionRow | undefined;
+    return row ? { ...row, user_id: Number(row.user_id), credential_version: Number(row.credential_version), created_at_ms: Number(row.created_at_ms), active_until_ms: Number(row.active_until_ms), expires_at_ms: Number(row.expires_at_ms) } : null;
+  }
+
+  /** Extend only a still-valid device session; concurrent logout cannot recreate it. */
+  touchMobileSession(id: string, now: number, activeUntil: number): boolean {
+    const result = this.stmt(`UPDATE mobile_sessions SET active_until_ms = CASE WHEN active_until_ms > ? THEN active_until_ms ELSE ? END
+      WHERE id = ? AND active_until_ms > ? AND expires_at_ms > ?`).run(activeUntil, activeUntil, id, now, now);
+    if (Number(result.changes) === 1) return true;
+    const row = this.getMobileSession(id);
+    return row !== null && row.active_until_ms > now && row.expires_at_ms > now;
+  }
+
+  /** Revoke a device login permanently, including its issued access tokens. */
+  deleteMobileSession(id: string): void {
+    this.stmt('DELETE FROM mobile_sessions WHERE id = ?').run(id);
   }
 
   getSetting(key: string): string | null {
@@ -1147,6 +1225,7 @@ export class Database {
       perms.sandboxMode === undefined ? existing?.sandbox_mode ?? null : perms.sandboxMode,
       JSON.stringify(disabledSessions),
     );
+    if (perms.banned) this.stmt('DELETE FROM mobile_sessions WHERE user_id = ?').run(userId);
   }
 
   // ── SSH host alias 归属 ─────────────────────────

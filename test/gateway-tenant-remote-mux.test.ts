@@ -5,6 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import jwt from 'jsonwebtoken';
+import bcrypt from 'bcryptjs';
+import { fileURLToPath } from 'node:url';
+import { MobileAuth } from '../src/mobile-auth.js';
 import WebSocket, { WebSocketServer } from 'ws';
 import { AuthService } from '../src/auth.js';
 import type { PlatformConfig } from '../src/config.js';
@@ -44,13 +47,13 @@ function muxItem(streamId: string, value: unknown): string {
   return JSON.stringify({ type: 'item', streamId, value });
 }
 
-async function setup() {
+async function setup(mobile = false) {
   const temporary = await mkdtemp(path.join(os.tmpdir(), 'dshpw-tenant-remote-'));
   const dbPath = path.join(temporary, 'platform.db');
   const db = new Database(dbPath, createFieldCrypto('enc', 'setup'));
   db.init();
   const admin = db.createUser('admin', 'hash', 'admin');
-  const customer = db.createUser('customer', 'hash', 'user');
+  const customer = db.createUser('customer', mobile ? await bcrypt.hash('MobileTestPassword1!', 4) : 'hash', 'user');
   db.setManagedWorkspace(customer.id, ownRoot);
   const permissions: Parameters<Database['setPermissions']>[1] = {
     allowedFolders: [ownRoot], hourlyTokenLimit: null, dailyMinutesLimit: null,
@@ -100,10 +103,11 @@ async function setup() {
     setupKey: 'setup', dbPath, dbEncKey: 'enc', database: { driver: 'sqlite', path: dbPath },
     gateway: {
       host: '127.0.0.1', port: 0, upstream: `http://127.0.0.1:${String(upstreamPort)}`,
-      tls: null, redirectPort: null, publicHost: '', domain: '', autoTls: false,
+      tls: mobile ? { cert: fileURLToPath(new URL('./fixtures/mobile-auth/localhost.crt', import.meta.url)), key: fileURLToPath(new URL('./fixtures/mobile-auth/localhost.key', import.meta.url)) } : null, redirectPort: null, publicHost: '', domain: '', autoTls: false,
       acmeEmail: '', acmeStaging: false,
     },
     jwtSecret: 'jwt-secret', internalSecret: 'internal-secret',
+    mobileAuth: { enabled: true, accessTtlSeconds: 900, idleTtlSeconds: 2592000, absoluteTtlSeconds: 7776000, maxSessionsPerUser: 20 },
     localWorkspace: { host: '127.0.0.1', port: 0, publicUrl: '', placeholderRoot: path.join(temporary, 'local') },
     managedWorkspaceRoot: path.join(temporary, 'managed'),
     patch: { dshRoot: '', restartService: '' },
@@ -118,10 +122,12 @@ async function setup() {
     sub: String(customer.id), username: customer.username, cv: customer.credential_version,
   }, config.jwtSecret, { expiresIn: '1h' });
   const cookie = `dsh_gateway_token=${token}`;
+  const mobileToken = mobile ? (await new MobileAuth(config, new AuthService(config, db), db, () => {}).login('customer', 'MobileTestPassword1!', {})).accessToken : null;
   const connect = async () => {
     const upstreamAccepted = new Promise<WebSocket>((resolve) => waiters.push(resolve));
-    const downstream = new WebSocket(`ws://127.0.0.1:${String(gatewayPort)}/api/remote.mux`, {
-      headers: { cookie },
+    const downstream = new WebSocket(`${mobile ? 'wss' : 'ws'}://127.0.0.1:${String(gatewayPort)}/api/remote.mux`, {
+      rejectUnauthorized: !mobile,
+      headers: mobile ? { authorization: `Bearer ${mobileToken}`, 'x-dsh-mobile': '1' } : { cookie },
     });
     await new Promise<void>((resolve, reject) => {
       downstream.once('open', resolve);
@@ -141,8 +147,12 @@ async function setup() {
   return { connect, cleanup, disableSession };
 }
 
-test('opening and cancelling file previews keeps the shared history stream connected', async () => {
-  const env = await setup();
+function tenantTest(name: string, run: (mobile: boolean) => Promise<void>) {
+  for (const mobile of [false, true]) test(`${mobile ? 'mobile bearer' : 'web cookie'}: ${name}`, { timeout: 15000 }, () => run(mobile));
+}
+
+tenantTest('opening and cancelling file previews keeps the shared history stream connected', async mobile => {
+  const env = await setup(mobile);
   const { downstream, upstream } = await env.connect();
   try {
     const historyOpen = nextMessage(upstream);
@@ -173,8 +183,8 @@ test('opening and cancelling file previews keeps the shared history stream conne
   }
 });
 
-test('file change subscriptions reject foreign, disabled, and forged workspace scopes before forwarding', async () => {
-  const env = await setup();
+tenantTest('file change subscriptions reject foreign, disabled, and forged workspace scopes before forwarding', async mobile => {
+  const env = await setup(mobile);
   try {
     for (const payload of [
       { args: { workspaceFileScopeId: 'other-session' } },
@@ -209,8 +219,8 @@ test('file change subscriptions reject foreign, disabled, and forged workspace s
   }
 });
 
-test('file change items stop after the session permission is revoked', async () => {
-  const env = await setup();
+tenantTest('file change items stop after the session permission is revoked', async mobile => {
+  const env = await setup(mobile);
   const { downstream, upstream } = await env.connect();
   try {
     const opened = nextMessage(upstream);
@@ -230,8 +240,8 @@ test('file change items stop after the session permission is revoked', async () 
   }
 });
 
-test('restricted Remote events hide Host-global and cross-tenant frames', async () => {
-  const env = await setup();
+tenantTest('restricted Remote events hide Host-global and cross-tenant frames', async mobile => {
+  const env = await setup(mobile);
   const { downstream, upstream } = await env.connect();
   try {
     const open = nextMessage(upstream);
@@ -289,8 +299,8 @@ test('restricted Remote events hide Host-global and cross-tenant frames', async 
   }
 });
 
-test('restricted Remote mux rejects unknown endpoints and malformed frames', async () => {
-  const env = await setup();
+tenantTest('restricted Remote mux rejects unknown endpoints and malformed frames', async mobile => {
+  const env = await setup(mobile);
   try {
     const unknown = await env.connect();
     const unknownClosed = nextClose(unknown.downstream);
@@ -322,8 +332,8 @@ test('restricted Remote mux rejects unknown endpoints and malformed frames', asy
   }
 });
 
-test('restricted Remote mux relays ordinary items and logical cancellation both ways', async () => {
-  const env = await setup();
+tenantTest('restricted Remote mux relays ordinary items and logical cancellation both ways', async mobile => {
+  const env = await setup(mobile);
   const { downstream, upstream } = await env.connect();
   try {
     const opened = nextMessage(upstream);
