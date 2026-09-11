@@ -8,6 +8,8 @@ dsh 的网页界面默认面向本机使用。服务器地址一旦暴露，拿�
 
 纯本机使用 dsh 不需要安装它；需要远程访问、多人共用或管理子账号时再使用即可。
 
+本轮功能、使用入口与部署验收见 [2026-09-11 更新总结](docs/2026-09-11-changes-overview.md)。
+
 收录于 [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek-harness)（Infrastructure & Development）和 [Awesome DSH Plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)（Development & Runtime）。
 
 ## 功能一览

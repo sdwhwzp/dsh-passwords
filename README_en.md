@@ -8,6 +8,8 @@ dsh's web UI is designed for local use by default. Once a server address is shar
 
 You do not need it for a local-only dsh setup. Install it when you need remote access, shared use, or managed subuser accounts.
 
+See the [2026-09-11 update summary (Chinese)](docs/2026-09-11-changes-overview.md) for feature entry points and deployment verification.
+
 Listed in [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek-harness) (Infrastructure & Development) and [Awesome DSH Plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) (Development & Runtime).
 
 ## Features
