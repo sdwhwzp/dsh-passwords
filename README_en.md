@@ -441,3 +441,5 @@ See the [compatibility matrix](docs/compatibility-matrix.md) for native interfac
 Session exports can include unclaimed Host subagents through their persisted parent lineage. Every traversed Session must remain inside the account’s allowed directories and must not be disabled. Explicit ownership by another account, ordinary forks, missing ancestors and cyclic lineage do not inherit access.
 
 With `MCP_TENANT_SERVICE_LAUNCHER` configured, Agents use `dev_server` to start, inspect, read logs and stop persistent development services in the current project. Services survive conversations, Harness restarts and host reboots. Agents stop them only at the user’s request; background jobs in ordinary `bash` calls remain temporary. See the [deployment and network guide](docs/plans/2026-09-11-persistent-development-services.md).
+
+Administrators can list and stop child-account services with `dev_server_admin`. A stop is audited and disables the service’s automatic startup.

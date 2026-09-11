@@ -467,3 +467,5 @@ Linux 部署由管理员将 `scripts/tenant-terminal-launcher.py` 安装为 root
 导出包含子代理的会话时，未单独认领的 Host 子代理沿持久化父会话关系继承读取权限。祖先及子代理都必须处于当前账号允许的目录且未被禁用；显式其他账号归属、普通 fork、缺失祖先和循环关系不会继承权限。
 
 配置 `MCP_TENANT_SERVICE_LAUNCHER` 后，Agent 用 `dev_server` 启动、查询、查看日志和停止当前项目的持久测试环境。服务跨会话、Harness 重启及主机重启保留，只有用户要求停止时才由 Agent 停止；普通 `bash` 的后台进程仍随调用结束清理。安装与网络配置见[持续运行测试环境](docs/plans/2026-09-11-persistent-development-services.md)。
+
+管理员可使用 `dev_server_admin` 列出并停止子账号服务，停止操作会写入审计记录，并取消该服务的自启动。

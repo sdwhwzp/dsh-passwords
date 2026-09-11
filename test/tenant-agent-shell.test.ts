@@ -11,6 +11,7 @@ import { Database } from '../src/db.js';
 import { createFieldCrypto } from '../src/encrypt.js';
 import { TenantAgentShell, registerTenantAgentShell } from '../src/tenant-agent-shell.js';
 import type { TenantCommandRequest, TenantCommandResult } from '../src/tenant-command.js';
+import { tenantServiceAdminTool } from '../src/tenant-service-admin.js';
 
 const success: TenantCommandResult = { stdout: 'v22.21.1\n10.15.1\n', stderr: '', exitCode: 0, signal: null, truncated: false, timedOut: false, aborted: false };
 
@@ -159,4 +160,23 @@ test('persistent service commands retain account authorization and do not stop s
   const next = h.createAgent();
   await next.tools.find(item => item.name === 'dev_server')!.execute({ action: 'list' }, next.exec);
   assert.deepEqual(JSON.parse(h.calls[2]!.command), { action: 'list' });
+});
+
+test('only an active administrator can stop another account service and the action is audited', async (t) => {
+  const h = await harness(t); const a = h.createAgent();
+  h.config.tenantAgentShell!.serviceLauncher = '/usr/local/libexec/dsh-tenant-service';
+  const admin = h.db.createUser('administrator', 'hash', 'admin');
+  const calls: TenantCommandRequest[] = [];
+  const tool = tenantServiceAdminTool({} as Context, a.agent, h.db, h.config, async request => { calls.push(request); return { ...success, stdout: '{"enabled":false}' }; });
+  const args = { action: 'stop', accountId: String(h.owner.id), name: 'vite-front' };
+  await assert.rejects(tool.execute(args, a.exec), /administrator/);
+  const principal = { source: 'dsh-passwords', id: String(admin.id), username: admin.username, role: 'admin' as const };
+  await assert.rejects(tool.execute(args, { ...a.exec, principal: { ...principal, id: String(h.owner.id) } }), /active account/);
+  assert.equal(calls.length, 0);
+  assert.equal(await tool.execute(args, { ...a.exec, principal }), '{"enabled":false}');
+  assert.deepEqual(calls[0]!.args, ['-n', '--', h.config.tenantAgentShell!.serviceLauncher, '--admin']);
+  assert.deepEqual(JSON.parse(calls[0]!.command), args);
+  h.db.setPermissions(admin.id, { ...h.permissions, banned: true });
+  await assert.rejects(tool.execute(args, { ...a.exec, principal }), /active account/);
+  assert.equal(calls.length, 1);
 });

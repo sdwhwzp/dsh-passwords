@@ -53,7 +53,12 @@ class ServicesTest(unittest.TestCase):
                     services.manage(config, '3', '/managed/u3/project', 'other', request)
                 with self.assertRaisesRegex(ValueError, 'limit'):
                     services.manage(config, '2', cwd, 'owner', dict(request, name='two', port=7112))
-                result = services.manage(config, '2', cwd, 'owner', {'action': 'stop', 'name': 'web'})
+                inventory = services.administer(config, {'action': 'list'})['services']
+                self.assertEqual(inventory[0]['accountId'], '2')
+                self.assertNotIn('command', inventory[0])
+                with self.assertRaises(ValueError):
+                    services.administer(config, {'action': 'logs', 'accountId': '2', 'name': 'web'})
+                result = services.administer(config, {'action': 'stop', 'accountId': '2', 'name': 'web'})
                 self.assertFalse(result['enabled'])
                 self.assertNotIn('7111', (root / 'ports.nft').read_text())
                 self.assertTrue(any(args[:3] == ['/usr/bin/systemctl', 'disable', '--now'] for args, _ in calls))

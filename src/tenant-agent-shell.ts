@@ -9,6 +9,7 @@ import { DshPasswordsPrincipalAccessProvider } from './principal-access.js';
 import { tenantDirectory } from './tenant-terminal.js';
 import { runTenantCommand, type TenantCommandRequest, type TenantCommandResult } from './tenant-command.js';
 import { tenantServiceTool, type TenantServiceRequest } from './tenant-service-tool.js';
+import { registerTenantServiceAdministration } from './tenant-service-admin.js';
 
 /** The shared Harness policy service is resolved at execution, after profile composition. */
 interface SandboxPolicy {
@@ -153,6 +154,7 @@ export function registerTenantAgentShell(ctx: Context, db: Database, config: Pla
     throw new Error('tenant agent shell requires a Linux tenant terminal launcher');
   }
   const shell = new TenantAgentShell(ctx, db, config);
+  registerTenantServiceAdministration(ctx, db, config);
   ctx.on('agent/created', ({ agent }) => shell.install(agent));
   ctx.effect(() => () => shell.dispose(), 'dsh-passwords: tenant agent shell');
 }

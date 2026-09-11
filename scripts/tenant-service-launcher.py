@@ -85,7 +85,7 @@ def publish_ports(config, state):
 
 
 def describe(record):
-    unit = unit_name(record['owner'], record['name'])
+    unit = record['unit']
     values = invoke(['/usr/bin/systemctl', 'show', unit, '--property=ActiveState,SubState,MainPID,NRestarts']).splitlines()
     status = dict(line.split('=', 1) for line in values if '=' in line)
     listening = False
@@ -121,7 +121,7 @@ def manage(config, owner, cwd, username, request):
         record = json.loads(record_path.read_text()) if record_path.exists() else None
         if record is not None and (record['cwd'] != cwd or record['owner'] != owner):
             raise ValueError('service belongs to another project')
-        unit = unit_name(owner, name)
+        unit = unit_name(owner, name) if record is None else record['unit']
         unit_path = trusted(pathlib.Path(config['unitDir'])) / unit
         if action == 'start':
             if record is None and unit_path.exists():
@@ -146,7 +146,7 @@ def manage(config, owner, cwd, username, request):
             directory.mkdir(parents=True, mode=0o700, exist_ok=True)
             script = directory / 'command.sh'
             atomic(script, command.rstrip() + '\n')
-            record = {'owner': owner, 'cwd': cwd, 'name': name, 'port': port, 'expose': expose, 'enabled': True}
+            record = {'owner': owner, 'cwd': cwd, 'name': name, 'unit': unit, 'port': port, 'expose': expose, 'enabled': True}
             atomic(record_path, json.dumps(record) + '\n')
             atomic(unit_path, unit_text(config, owner, cwd, username, name, script), 0o644)
             invoke(['/usr/bin/systemctl', 'daemon-reload'])
@@ -165,14 +165,39 @@ def manage(config, owner, cwd, username, request):
         return describe(record)
 
 
+def administer(config, request):
+    """The authenticated administrator may inspect ownership and disable an existing service."""
+    state = trusted(pathlib.Path(config['stateDir']))
+    action = request.get('action')
+    if action == 'list':
+        with (state / 'manager.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            return {'services': [describe(record) | {'accountId': record['owner'], 'workspace': record['cwd']} for _, record in records(state)]}
+    owner, name = request.get('accountId'), request.get('name')
+    if action not in ['status', 'stop'] or not isinstance(owner, str) or not re.fullmatch(r'[1-9][0-9]{0,15}', owner) or not isinstance(name, str) or not re.fullmatch(r'[a-z][a-z0-9-]{0,47}', name):
+        raise ValueError('invalid administrator service request')
+    record = json.loads((state / ('u' + owner) / name / 'record.json').read_text())
+    return manage(config, owner, record['cwd'], 'u' + owner, {'action': action, 'name': name})
+
+
 def main():
-    if os.geteuid() != 0 or len(sys.argv) != 4 or not re.fullmatch(r'[1-9][0-9]{0,15}', sys.argv[1]):
+    admin = len(sys.argv) == 2 and sys.argv[1] == '--admin'
+    if os.geteuid() != 0 or not (admin or len(sys.argv) == 4 and re.fullmatch(r'[1-9][0-9]{0,15}', sys.argv[1])):
         raise ValueError('invalid service invocation')
+    config = json.loads(trusted(CONFIG).read_text())
+    trusted(pathlib.Path(config['launcher']))
+    body = sys.stdin.buffer.read(65537)
+    if len(body) > 65536:
+        raise ValueError('service request too large')
+    request = json.loads(body)
+    if not isinstance(request, dict):
+        raise ValueError('invalid service request')
+    if admin:
+        print(json.dumps(administer(config, request), ensure_ascii=False))
+        return
     owner, requested, username = sys.argv[1:]
     if not re.fullmatch(r'[A-Za-z0-9._-]{1,64}', username):
         username = 'u' + owner
-    config = json.loads(trusted(CONFIG).read_text())
-    trusted(pathlib.Path(config['launcher']))
     root = pathlib.Path(config['workspaceRoot'])
     tenant = root / ('u' + owner)
     cwd = pathlib.Path(requested).resolve(strict=True)
@@ -181,12 +206,6 @@ def main():
     cwd.relative_to(tenant)
     if any(ord(character) < 32 for character in str(cwd)):
         raise ValueError('invalid workspace path')
-    body = sys.stdin.buffer.read(65537)
-    if len(body) > 65536:
-        raise ValueError('service request too large')
-    request = json.loads(body)
-    if not isinstance(request, dict):
-        raise ValueError('invalid service request')
     print(json.dumps(manage(config, owner, str(cwd), username, request), ensure_ascii=False))
 
 
