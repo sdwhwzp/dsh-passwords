@@ -82,6 +82,7 @@ test('principal access returns only the account-owned resources inside allowed f
     db.claimSessionOwner('outside', customer.id);
     db.claimSessionOwner('other-owned', other.id);
     db.claimSessionOwner('new-blank', customer.id);
+    db.claimSessionOwner('foreign-child', other.id);
 
     const services = new Map<string, unknown>([
       ['workspaceRegistry', {
@@ -98,6 +99,21 @@ test('principal access returns only the account-owned resources inside allowed f
           { header: { id: 'outside', cwd: otherRoot } },
           { header: { id: 'other-owned', cwd: ownRoot } },
           { header: { id: 'new-blank', cwd: ownRoot } },
+          ...[
+            ['child', 'owned', ownRoot, 'subagent'],
+            ['grandchild', 'child', ownRoot, 'subagent'],
+            ['foreign-child', 'owned', ownRoot, 'subagent'],
+            ['foreign-parent', 'other-owned', ownRoot, 'subagent'],
+            ['disabled-parent', 'disabled', ownRoot, 'subagent'],
+            ['outside-child', 'owned', otherRoot, 'subagent'],
+            ['escape-child', 'owned', path.join(ownRoot, 'escape'), 'subagent'],
+            ['fork', 'owned', ownRoot, 'fork'],
+            ['missing-parent', 'missing', ownRoot, 'subagent'],
+            ['unclaimed-root', '', ownRoot, 'root'],
+            ['unclaimed-child', 'unclaimed-root', ownRoot, 'subagent'],
+            ['cycle-a', 'cycle-b', ownRoot, 'subagent'],
+            ['cycle-b', 'cycle-a', ownRoot, 'subagent'],
+          ].map(([id, parentSession, cwd, origin]) => ({ header: { id, parentSession, cwd, origin } })),
         ],
       }],
     ]);
@@ -120,6 +136,11 @@ test('principal access returns only the account-owned resources inside allowed f
     });
     assert.deepEqual([...access.readableSessionIds], ['owned', 'new-blank']);
     assert.deepEqual([...access.readableWorkspaceIds], ['workspace-own']);
+    const descendants = await provider.resolve(principal, {
+      sessionIds: ['child', 'grandchild', 'foreign-child', 'foreign-parent', 'disabled-parent',
+        'outside-child', 'escape-child', 'fork', 'missing-parent', 'unclaimed-root', 'unclaimed-child', 'cycle-a', 'cycle-b'],
+    });
+    assert.deepEqual([...descendants.readableSessionIds], ['child', 'grandchild']);
 
     const forged = await provider.resolve({ ...principal, username: 'forged' }, {
       sessionIds: ['owned'], workspaceIds: ['workspace-own'],

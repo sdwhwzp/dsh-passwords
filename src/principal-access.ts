@@ -22,6 +22,8 @@ interface SessionRecord {
   readonly header: {
     readonly id: string;
     readonly cwd?: string;
+    readonly parentSession?: string;
+    readonly origin?: string;
   };
 }
 
@@ -114,13 +116,25 @@ export class DshPasswordsPrincipalAccessProvider {
     if (requestedSessions.length > 0 && query !== undefined) {
       const records = await query.listSessions(signal);
       signal?.throwIfAborted();
-      const cwdBySession = new Map(records.map((record) => [String(record.header.id), record.header.cwd]));
+      const headers = new Map(records.map((record) => [String(record.header.id), record.header]));
       const disabled = new Set(permissions.disabled_sessions);
       for (const sessionId of requestedSessions) {
-        if (disabled.has(sessionId)) continue;
-        const cwd = cwdBySession.get(sessionId);
-        if (cwd === undefined || !await pathAllowed(cwd)) continue;
-        if (this.db.getSessionOwner(sessionId) === user.id) readableSessionIds.add(sessionId);
+        // Only Host-recorded subagents inherit an unclaimed parent's account.
+        // Explicit ownership and disabled sessions stop traversal immediately.
+        const seen = new Set<string>();
+        let current: string | undefined = sessionId;
+        while (current !== undefined && !seen.has(current)) {
+          signal?.throwIfAborted();
+          seen.add(current);
+          const header = headers.get(current);
+          if (disabled.has(current) || header?.cwd === undefined || !await pathAllowed(header.cwd)) break;
+          const owner = this.db.getSessionOwner(current);
+          if (owner !== null) {
+            if (owner === user.id) readableSessionIds.add(sessionId);
+            break;
+          }
+          current = header.origin === 'subagent' ? header.parentSession : undefined;
+        }
       }
     }
     signal?.throwIfAborted();

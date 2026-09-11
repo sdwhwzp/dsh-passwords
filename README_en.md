@@ -410,7 +410,7 @@ Enable `MCP_TENANT_EDITOR=true` only with the tenant edition of `dsh-vsceditor` 
 
 ## Fork synchronization and deployment adaptation
 
-This branch merges `slywalker2006/dsh-passwords` commit `59968d3` (2.7.0). The deployment build is `2.7.0-dsh.20260911.1` and requires the personal Harness 0.1.5-rc.2 build with native principal support. Official npm Harness packages do not contain those private extensions; deployment overrides must select the matching Harness artifacts throughout.
+This branch merges `slywalker2006/dsh-passwords` commit `59968d3` (2.7.0). The deployment build is `2.7.0-dsh.20260911.3` and requires the personal Harness 0.1.5-rc.2 build with native principal support. Official npm Harness packages do not contain those private extensions; deployment overrides must select the matching Harness artifacts throughout.
 
 Without `TENANT_SSH_ENABLED=true`, the gateway retains legacy SSH alias ownership checks: restricted accounts may use only their claimed connections; import, cluster, and tunnel operations remain administrator-only. SQLite and MySQL/MariaDB persist alias ownership, which the account-isolated Host uses to migrate existing connections.
 
@@ -437,3 +437,7 @@ Existing connections migrate only to their recorded owner; unclaimed connections
 The gateway rejects private, loopback, and proxy-assigned virtual IP addresses by default. Deployments using Fake-IP DNS or specific private DNS targets can set `TENANT_SSH_TRUSTED_HOSTS=ssh.example.com,second.example.com` in the private `.env` and restart the service. This setting applies only in account SSH mode and accepts exact DNS names, without wildcards, IP literals, URLs, or ports; every account with SSH permission can use the listed names. Trusted names remain unchanged for deployment DNS routing and SSH server authentication, so administrators must trust those names and their DNS results. Other targets retain DNS validation and public-IP pinning. Network-policy rejection and DNS lookup failure display distinct SSH errors.
 
 See the [compatibility matrix](docs/compatibility-matrix.md) for native interfaces, SSH endpoint configuration and fork update restrictions.
+
+Session exports can include unclaimed Host subagents through their persisted parent lineage. Every traversed Session must remain inside the account’s allowed directories and must not be disabled. Explicit ownership by another account, ordinary forks, missing ancestors and cyclic lineage do not inherit access.
+
+With `MCP_TENANT_SERVICE_LAUNCHER` configured, Agents use `dev_server` to start, inspect, read logs and stop persistent development services in the current project. Services survive conversations, Harness restarts and host reboots. Agents stop them only at the user’s request; background jobs in ordinary `bash` calls remain temporary. See the [deployment and network guide](docs/plans/2026-09-11-persistent-development-services.md).

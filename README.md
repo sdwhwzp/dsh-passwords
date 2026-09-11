@@ -434,7 +434,7 @@ Linux 部署由管理员将 `scripts/tenant-terminal-launcher.py` 安装为 root
 
 ## Fork 同步与部署适配
 
-当前分支合入 `slywalker2006/dsh-passwords` 的 `59968d3`（2.7.0）。本部署构建为 `2.7.0-dsh.20260911.1`，配合包含原生 principal 扩展的 Harness 0.1.5-rc.2 使用；普通 npm 上游 Harness 包不提供这些私有扩展，部署时必须统一指向本次 Harness 构建。
+当前分支合入 `slywalker2006/dsh-passwords` 的 `59968d3`（2.7.0）。本部署构建为 `2.7.0-dsh.20260911.3`，配合包含原生 principal 扩展的 Harness 0.1.5-rc.2 使用；普通 npm 上游 Harness 包不提供这些私有扩展，部署时必须统一指向本次 Harness 构建。
 
 未设置 `TENANT_SSH_ENABLED=true` 时，网关保留旧版 SSH alias 归属检查：普通账号只能使用本人已认领的连接，导入、cluster 和 tunnel 仍仅供管理员。SSH alias 归属同时支持 SQLite 和 MySQL/MariaDB；账号隔离版 Host 使用这些记录迁移已有连接。
 
@@ -463,3 +463,7 @@ Linux 部署由管理员将 `scripts/tenant-terminal-launcher.py` 安装为 root
 网关默认拒绝内网、回环及代理虚拟 IP 地址。部署使用 Fake-IP DNS 或需要连接指定内网域名时，管理员可在私有 `.env` 设置 `TENANT_SSH_TRUSTED_HOSTS=ssh.example.com,second.example.com`，重启服务后生效。此配置仅在账号 SSH 模式启用时有效，只接受完整域名，不接受通配符、IP、URL 或端口；所有获得 SSH 权限的账号均可使用所列域名。可信域名保留原名称，由部署 DNS 和 SSH 服务器认证决定连接，管理员需要信任这些域名及其解析结果；其他地址继续解析校验并固定到通过检查的公网 IP。地址被网络策略拒绝与 DNS 解析失败分别显示对应 SSH 错误。
 
 本 fork 的原生接口、SSH 端点配置与更新限制见[兼容性说明](docs/compatibility-matrix.md)。
+
+导出包含子代理的会话时，未单独认领的 Host 子代理沿持久化父会话关系继承读取权限。祖先及子代理都必须处于当前账号允许的目录且未被禁用；显式其他账号归属、普通 fork、缺失祖先和循环关系不会继承权限。
+
+配置 `MCP_TENANT_SERVICE_LAUNCHER` 后，Agent 用 `dev_server` 启动、查询、查看日志和停止当前项目的持久测试环境。服务跨会话、Harness 重启及主机重启保留，只有用户要求停止时才由 Agent 停止；普通 `bash` 的后台进程仍随调用结束清理。安装与网络配置见[持续运行测试环境](docs/plans/2026-09-11-persistent-development-services.md)。

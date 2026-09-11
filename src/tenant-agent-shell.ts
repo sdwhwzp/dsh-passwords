@@ -8,6 +8,7 @@ import type { Database } from './db.js';
 import { DshPasswordsPrincipalAccessProvider } from './principal-access.js';
 import { tenantDirectory } from './tenant-terminal.js';
 import { runTenantCommand, type TenantCommandRequest, type TenantCommandResult } from './tenant-command.js';
+import { tenantServiceTool, type TenantServiceRequest } from './tenant-service-tool.js';
 
 /** The shared Harness policy service is resolved at execution, after profile composition. */
 interface SandboxPolicy {
@@ -36,6 +37,12 @@ export class TenantAgentShell {
     if (owner === null || this.db.getUserListRowById(owner)?.role !== 'user') return;
     const lifetime = new AbortController();
     agent.ctx.tools.register(this.tool(agent, owner, lifetime.signal));
+    if (this.config.tenantAgentShell?.serviceLauncher) {
+      agent.ctx.tools.register(tenantServiceTool((request, exec) => this.execute(agent, owner, { command: '' }, exec, lifetime.signal, request)));
+      agent.ctx.systemPrompt.section({ name: 'tenant-persistent-services', order: 96,
+        text: 'For a user-requested running test environment, use dev_server start with a foreground command, then inspect status and logs and verify the requested URL. Keep the service enabled after your reply; stop it only when the user explicitly asks. Bash background jobs are temporary and cannot substitute for dev_server. Use dev_server list in later conversations to find existing services. Do not claim network reachability from a listening port alone; test the requested URL. An enabled service survives Agent and Harness restarts and host reboot.',
+      });
+    }
     agent.ctx.systemPrompt.section({
       name: 'tenant-workspace-shell', order: 95,
       text: 'The bash tool executes commands in this account’s server workspace sandbox. The account root is /workspace; its persistent personal HOME is /home/dsh, shared with the web terminal and editor. Use relative workdir paths or /workspace paths. Install development tools in HOME (for example ~/.local/bin); sudo and host-wide installation are unavailable. Each call starts a fresh shell; files persist, shell variables and background processes do not. Explicitly load a version manager when needed. Cancellation and timeout stop the command. Inspect the command result before reporting an installation as completed.',
@@ -92,7 +99,7 @@ export class TenantAgentShell {
 
   private async execute(
     agent: Agent, owner: number,
-    args: { command: string; workdir?: string; timeoutMs?: number }, exec: ToolRunContext, lifetime: AbortSignal,
+    args: { command: string; workdir?: string; timeoutMs?: number }, exec: ToolRunContext, lifetime: AbortSignal, service?: TenantServiceRequest,
   ): Promise<TenantCommandResult> {
     exec.signal.throwIfAborted();
     if (this.disposed || exec.agent !== agent) throw new Error('agent shell is unavailable');
@@ -126,9 +133,11 @@ export class TenantAgentShell {
     const signal = AbortSignal.any([exec.signal, lifetime, controller.signal]);
     const settings = this.config.tenantAgentShell!;
     const done = this.run({
-      executable: '/usr/bin/sudo', args: ['-n', '--', this.config.tenantTerminal!.launcher, principal.id, sessionCwd, principal.username, '--command'],
-      command: `cd -- '${('/workspace' + cwd.slice(root.length)).replaceAll("'", "'\\''")}' || exit\n${args.command}`,
-      timeoutMs: args.timeoutMs ?? settings.timeoutMs,
+      executable: '/usr/bin/sudo', args: service === undefined
+        ? ['-n', '--', this.config.tenantTerminal!.launcher, principal.id, sessionCwd, principal.username, '--command']
+        : ['-n', '--', settings.serviceLauncher!, principal.id, sessionCwd, principal.username],
+      command: service === undefined ? `cd -- '${('/workspace' + cwd.slice(root.length)).replaceAll("'", "'\\''")}' || exit\n${args.command}` : JSON.stringify(service),
+      timeoutMs: service === undefined ? args.timeoutMs ?? settings.timeoutMs : 30000,
       maxOutputBytes: settings.maxOutputBytes, signal,
     });
     const active = { owner, agent, controller, done };

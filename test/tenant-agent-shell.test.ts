@@ -130,3 +130,33 @@ test('disabled deployments and non-managed workspaces do not receive a host shel
   h.db.setManagedWorkspace(admin.id, '/unused-admin-root');
   assert.equal(h.createAgent('/unused-admin-root').tools.length, 0);
 });
+
+test('persistent service commands retain account authorization and do not stop services on disposal', async (t) => {
+  const h = await harness(t);
+  h.config.tenantAgentShell!.serviceLauncher = '/usr/local/libexec/dsh-tenant-service';
+  const a = h.createAgent();
+  const tool = a.tools.find(item => item.name === 'dev_server')!;
+  assert.ok(tool);
+  assert.match(a.sections.find(section => section.name === 'tenant-persistent-services')!.text, /stop it only when the user explicitly asks/);
+  const start = { action: 'start', name: 'vite-front', command: 'exec pnpm exec vite --host 0.0.0.0 --port 7111', port: 7111, expose: true };
+  await tool.execute(start, a.exec);
+  assert.deepEqual(h.calls[0]!.args, ['-n', '--', h.config.tenantAgentShell!.serviceLauncher, String(h.owner.id), h.cwd, h.owner.username]);
+  assert.deepEqual(JSON.parse(h.calls[0]!.command), start);
+  for (const action of ['status', 'logs', 'stop', 'list']) {
+    await assert.rejects(tool.execute({ action, name: 'vite-front' }, { ...a.exec, principal: { ...a.exec.principal!, id: String(h.other.id), username: h.other.username } }), /access denied/);
+  }
+  for (const bad of [{ ...start, name: '../other' }, { ...start, port: 22 }, { ...start, command: '' }, { ...start, port: 65536 }]) {
+    await assert.rejects(tool.execute(bad, a.exec));
+  }
+  h.db.setPermissions(h.owner.id, { ...h.permissions, banned: true });
+  await assert.rejects(tool.execute({ action: 'stop', name: 'vite-front' }, a.exec), /active account/);
+  h.db.setPermissions(h.owner.id, h.permissions);
+  await tool.execute({ action: 'status', name: 'vite-front' }, a.exec);
+  assert.equal(h.calls.length, 2);
+  await a.dispose();
+  assert.equal(h.calls.length, 2);
+  await assert.rejects(tool.execute({ action: 'stop', name: 'vite-front' }, a.exec), /abort/i);
+  const next = h.createAgent();
+  await next.tools.find(item => item.name === 'dev_server')!.execute({ action: 'list' }, next.exec);
+  assert.deepEqual(JSON.parse(h.calls[2]!.command), { action: 'list' });
+});
