@@ -35,3 +35,24 @@ test('service page searches, confirms only the selected service, and clears poll
   assert.equal(button(zh.servicesStop).props.disabled, true);
   assert.match(JSON.stringify(renderer.toJSON()), /已停止 demo/);
 });
+
+test('sidebar entry and return control navigate inside the app without opening a browser tab', async t => {
+  const { ServicesLauncher } = await import('../src/client/services-launcher.tsx');
+  let opened = 0, returned = 0;
+  let launcher: ReactTestRenderer, panel: ReactTestRenderer;
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: { setInterval: () => 1, clearInterval: () => {} } });
+  t.mock.method(globalThis, 'fetch', async () => Response.json({ me: { id: '2', role: 'user' }, services: [] }));
+  t.after(async () => { await act(async () => { launcher.unmount(); panel.unmount(); }); if (previous) Object.defineProperty(globalThis, 'window', previous); else Reflect.deleteProperty(globalThis, 'window'); });
+  const translate = (key: keyof typeof zh) => zh[key];
+  await act(async () => {
+    launcher = create(createElement(ServicesLauncher, { t: translate, wide: true, onOpen: () => opened++ }));
+    panel = create(createElement(ServicesPage, { t: translate, onBack: () => returned++ }));
+  });
+  assert.equal(launcher.root.findAllByType('a').length, 0);
+  await act(async () => launcher.root.findByType('button').props.onClick());
+  assert.equal(opened, 1);
+  assert.equal(panel.root.findAllByType('a').length, 0);
+  await act(async () => panel.root.findByType('nav').findByType('button').props.onClick());
+  assert.equal(returned, 1);
+});

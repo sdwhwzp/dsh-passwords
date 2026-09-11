@@ -7,7 +7,7 @@ interface Service { accountId: string; accountName: string; name: string; worksp
 interface Inventory { me: { id: string; role: 'admin' | 'user'; username: string }; services: Service[] }
 
 /** Render only the authenticated inventory returned by the gateway. */
-export function ServicesPage({ t }: PropsLocale<'dshpw'>) {
+export function ServicesPage({ t, onBack }: PropsLocale<'dshpw'> & { onBack?: () => void }) {
   const [data, setData] = useState<Inventory>();
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
@@ -53,7 +53,8 @@ export function ServicesPage({ t }: PropsLocale<'dshpw'>) {
     && [service.accountName, service.accountId, service.name, service.workspace, String(service.port)].join(' ').toLowerCase().includes(search.toLowerCase())) ?? [];
   const labels = { running: t('servicesRunning'), stopped: t('servicesStopped'), pending: t('servicesPending') };
   return h('main', { className: 'services-page' },
-    h('nav', null, h('a', { href: '/' }, `← ${t('accountsBack')}`), h('span', null, h('a', { href: '?lang=zh', lang: 'zh-CN' }, '中文'), ' / ', h('a', { href: '?lang=en', lang: 'en' }, 'English'))),
+    h('nav', null, onBack ? h('button', { type: 'button', onClick: onBack }, `← ${t('accountsBack')}`) : h('a', { href: '/' }, `← ${t('accountsBack')}`),
+      onBack ? null : h('span', null, h('a', { href: '?lang=zh', lang: 'zh-CN' }, '中文'), ' / ', h('a', { href: '?lang=en', lang: 'en' }, 'English'))),
     h('header', null, h('div', null, h('h1', null, t('servicesTitle')), h('p', null, data?.me.role === 'admin' ? t('servicesAdminHint') : t('servicesUserHint'))),
       h('button', { type: 'button', disabled: busy, onClick: () => void load() }, t('accountsRefresh'))),
     h('p', { className: 'services-note' }, t('servicesLifetime')),

@@ -1,4 +1,3 @@
-import { ServicesLauncher } from './services-launcher';
 // dsh 浏览器侧插件：在设置页"插件"列表里注册 dsh-passwords 卡片。
 // 卡片内容：
 //   - 远程设置补丁状态 + "重载补丁"按钮（任何登录用户可触发；补丁强制启用）
@@ -19,6 +18,9 @@ import { DshPasswordsSection } from './section';
 import { ChatLauncher } from './chat';
 import { TokenReporter } from './token';
 import { LocalWorkspaceLauncher } from './local-workspace-launcher';
+import { ServicesLauncher } from './services-launcher';
+import { ServicesPanel } from './services-panel';
+import type { MainPanelId } from '@deepseek-ai/dsh-client-ui-layout/client';
 import { ManagedFilesLauncher } from './managed-files-launcher';
 import { zh, en } from './locales';
 import { AccountLogoutRow, installDesktopLauncherSuppression } from './account-logout';
@@ -202,8 +204,16 @@ export async function apply(ctx: ClientContext): Promise<() => void | Promise<vo
     }, AccountsLauncher),
   );
 
+  const servicesPanelId = 'dsh-passwords-services' as MainPanelId;
+  ctx.slots.inject('main', () =>
+    ctx.slots.register({ name: 'main', id: servicesPanelId, key: servicesPanelId, locale: 'dshpw',
+      inject: () => ({ onBack: () => ctx.layout.selectPanel(null) }),
+    }, ServicesPanel),
+  );
   ctx.slots.inject('sidebar.workspaces.action', () =>
-    ctx.slots.register({ name: 'sidebar.workspaces.action', id: 'dsh-passwords-services', order: 6, locale: 'dshpw' }, ServicesLauncher),
+    ctx.slots.register({ name: 'sidebar.workspaces.action', id: servicesPanelId, order: 6, locale: 'dshpw',
+      inject: () => ({ onOpen: () => ctx.layout.selectPanel(servicesPanelId) }),
+    }, ServicesLauncher),
   );
 
   // 子账号的专属文件管理固定在 Workspace 列表上方。
