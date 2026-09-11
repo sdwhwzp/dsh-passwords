@@ -6,6 +6,7 @@
 // 优先按 code 本地化，未知 code 回退到服务端返回的 error 文案。
 
 export const zh = {
+  managedFilesDragHint: '拖动文件或文件夹到目标文件夹或“返回上级”即可移动；也可以使用“移动”和“粘贴”。',
   servicesTitle: '运行服务',
   servicesAdminHint: '管理所有账号由 Agent 托管的测试服务。',
   servicesUserHint: '查看和停止自己在各个项目中启动的测试服务。',
@@ -304,6 +305,7 @@ export const zh = {
 };
 
 export const en: Record<keyof typeof zh, string> = {
+  managedFilesDragHint: 'Drag a file or folder onto a destination folder or Up to move it. Move and Paste are also available.',
   servicesTitle: 'Running services',
   servicesAdminHint: 'Manage Agent-hosted development services across all accounts.',
   servicesUserHint: 'View and stop your development services across projects.',

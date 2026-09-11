@@ -40,7 +40,7 @@ test('managed host file panel exposes upload, download, and confirmed delete con
   assert.match(source, /t\('managedFilesDelete'\)/);
 });
 
-test('sidebar folder management opens the private file panel as a page dialog', () => {
+test('sidebar folder management opens an in-app page through the main panel registry', () => {
   const source = readFileSync(path.join(root, 'src/client/managed-files-launcher.tsx'), 'utf8');
   const indexSource = readFileSync(path.join(root, 'src/client/index.tsx'), 'utf8');
 
@@ -48,8 +48,10 @@ test('sidebar folder management opens the private file panel as a page dialog', 
   assert.match(source, /fetch\('\/gateway\/api\/managed-files\/status'/);
   assert.match(source, /setTimeout\(probe, 3_000\)/);
   assert.match(source, /window\.addEventListener\('focus', probe\)/);
-  assert.match(source, /h\(\s*Modal,/);
-  assert.match(source, /h\(ManagedFilesPanel,/);
+  assert.doesNotMatch(source, /Modal|setOpen/);
+  assert.match(source, /onClick: onOpen/);
+  assert.match(indexSource, /key: filesPanelId/);
+  assert.match(indexSource, /selectPanel\(filesPanelId\)/);
   assert.match(source, /t\('managedFilesManage'\)/);
   assert.match(indexSource, /ctx\.slots\.inject\('sidebar\.workspaces\.action'/);
   assert.match(indexSource, /id: 'dsh-passwords-managed-files'/);

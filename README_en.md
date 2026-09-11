@@ -410,7 +410,7 @@ Enable `MCP_TENANT_EDITOR=true` only with the tenant edition of `dsh-vsceditor` 
 
 ## Fork synchronization and deployment adaptation
 
-This branch merges `slywalker2006/dsh-passwords` commit `59968d3` (2.7.0). The deployment build is `2.7.0-dsh.20260911.7` and requires the personal Harness 0.1.5-rc.2 build with native principal support. Official npm Harness packages do not contain those private extensions; deployment overrides must select the matching Harness artifacts throughout.
+This branch merges `slywalker2006/dsh-passwords` commit `59968d3` (2.7.0). The deployment build is `2.7.0-dsh.20260911.8` and requires the personal Harness 0.1.5-rc.2 build with native principal support. Official npm Harness packages do not contain those private extensions; deployment overrides must select the matching Harness artifacts throughout.
 
 Without `TENANT_SSH_ENABLED=true`, the gateway retains legacy SSH alias ownership checks: restricted accounts may use only their claimed connections; import, cluster, and tunnel operations remain administrator-only. SQLite and MySQL/MariaDB persist alias ownership, which the account-isolated Host uses to migrate existing connections.
 
@@ -445,3 +445,5 @@ With `MCP_TENANT_SERVICE_LAUNCHER` configured, Agents use `dev_server` to start,
 Administrators can list and stop child-account services with `dev_server_admin`. A stop is audited and disables the service’s automatic startup.
 
 Open **Running services** in the sidebar to view the list inside the current app, retaining the sidebar and selected conversation without opening another tab. **Back to conversation** restores that conversation. Regular accounts manage their own projects; administrators manage all accounts. Stopping disables automatic restart and startup on boot. Direct access to `/gateway/services` remains available.
+
+Folder management opens in the center of the app, retaining the sidebar and selected conversation. Drag a file or folder onto a destination folder or **Up** to move it. Move/Paste and upload controls remain available; name conflicts return an error. See the [folder page and drag-move guide](docs/plans/2026-09-11-managed-files-page.md).

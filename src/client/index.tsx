@@ -22,6 +22,7 @@ import { ServicesLauncher } from './services-launcher';
 import { ServicesPanel } from './services-panel';
 import type { MainPanelId } from '@deepseek-ai/dsh-client-ui-layout/client';
 import { ManagedFilesLauncher } from './managed-files-launcher';
+import { ManagedFilesPage } from './managed-files-page';
 import { zh, en } from './locales';
 import { AccountLogoutRow, installDesktopLauncherSuppression } from './account-logout';
 import { DSH_PASSWORDS_REMOTE, type DshPasswordsRemoteClient } from './remote';
@@ -216,6 +217,13 @@ export async function apply(ctx: ClientContext): Promise<() => void | Promise<vo
     }, ServicesLauncher),
   );
 
+  const filesPanelId = 'dsh-passwords-managed-files' as MainPanelId;
+  ctx.slots.inject('main', () =>
+    ctx.slots.register({ name: 'main', key: filesPanelId, locale: 'dshpw',
+      inject: () => ({ onBack: () => ctx.layout.selectPanel(null) }),
+    }, ManagedFilesPage),
+  );
+
   // 子账号的专属文件管理固定在 Workspace 列表上方。
   ctx.slots.inject('sidebar.workspaces.action', () =>
     ctx.slots.register(
@@ -224,6 +232,7 @@ export async function apply(ctx: ClientContext): Promise<() => void | Promise<vo
         id: 'dsh-passwords-managed-files',
         order: 10,
         locale: 'dshpw',
+        inject: () => ({ onOpen: () => ctx.layout.selectPanel(filesPanelId) }),
       },
       ManagedFilesLauncher,
     ),

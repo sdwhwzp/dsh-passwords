@@ -1,6 +1,6 @@
 /** Browser file transfer panel for the signed-in subuser's host-managed directory. */
 
-import { createElement as h, useEffect, useRef, useState } from 'react';
+import { createElement as h, useEffect, useRef, useState, type DragEvent } from 'react';
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots';
 
 interface ManagedFileEntry {
@@ -78,6 +78,8 @@ export function ManagedFilesPanel(props: Props) {
   const [clipboard, setClipboard] = useState<ManagedClipboard | null>(null);
   const [cloneForm, setCloneForm] = useState<{ url: string; directory: string } | null>(null);
   const [gitOutput, setGitOutput] = useState('');
+  const dragged = useRef<ManagedFileEntry | null>(null);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -217,6 +219,33 @@ export function ManagedFilesPanel(props: Props) {
     });
   };
 
+  const canDrop = (directory: string) => {
+    const source = dragged.current;
+    return !busy && !loading && source !== null && directory !== currentDirectory && directory !== source.path
+      && !(source.kind === 'directory' && directory.startsWith(source.path + '/'));
+  };
+
+  const dropProps = (directory: string) => ({
+    onDragOver: (event: DragEvent<HTMLElement>) => {
+      if (!canDrop(directory)) return;
+      event.preventDefault(); event.dataTransfer.dropEffect = 'move'; setDropTarget(directory);
+    },
+    onDragLeave: (event: DragEvent<HTMLElement>) => {
+      if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropTarget(null);
+    },
+    onDrop: (event: DragEvent<HTMLElement>) => {
+      event.preventDefault(); event.stopPropagation(); setDropTarget(null);
+      const source = dragged.current;
+      if (!canDrop(directory) || source === null || event.dataTransfer.getData('application/x-dsh-managed-file') !== source.path) return;
+      dragged.current = null;
+      run(async () => {
+        await postJson('/gateway/api/managed-files/move', { from: source.path, toDirectory: directory });
+        if (clipboard?.path === source.path) setClipboard(null);
+        return t('managedFilesMoved', { name: source.name });
+      });
+    },
+  });
+
   const cloneRepository = () => {
     const form = cloneForm;
     if (form === null || form.url.trim() === '') return;
@@ -255,12 +284,14 @@ export function ManagedFilesPanel(props: Props) {
       h('code', { className: 'dshpw-managed-files-path', title: currentPath }, currentPath),
     ),
     h('div', { className: 'dshpw-hint' }, t('managedFilesHint')),
+    h('div', { className: 'dshpw-hint' }, t('managedFilesDragHint')),
     h(
       'div',
       { className: 'dshpw-managed-files-toolbar' },
       h('button', {
         type: 'button',
-        className: 'dshpw-btn',
+        className: `dshpw-btn${dropTarget !== null && dropTarget === listing?.parent ? ' dshpw-drop-target' : ''}`,
+        ...(listing?.parent !== null && listing?.parent !== undefined ? dropProps(listing.parent) : {}),
         disabled: busy || loading || listing?.parent === null || listing === null,
         onClick: () => load(listing?.parent ?? ''),
       }, t('managedFilesBack')),
@@ -433,7 +464,17 @@ export function ManagedFilesPanel(props: Props) {
             { className: 'dshpw-managed-files-list' },
             ...listing.entries.map((entry) => h(
               'div',
-              { className: 'dshpw-managed-files-row', key: entry.path },
+              { className: `dshpw-managed-files-row${dropTarget === entry.path ? ' dshpw-drop-target' : ''}`, key: entry.path,
+                'data-managed-path': entry.path,
+                draggable: !busy && !loading,
+                onDragStart: (event: DragEvent<HTMLDivElement>) => {
+                  if (busy || loading) { event.preventDefault(); return; }
+                  dragged.current = entry; setDropTarget(null);
+                  event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('application/x-dsh-managed-file', entry.path);
+                },
+                onDragEnd: () => { dragged.current = null; setDropTarget(null); },
+                ...(entry.kind === 'directory' ? dropProps(entry.path) : {}),
+              },
               entry.kind === 'directory'
                 ? h('button', {
                     type: 'button',

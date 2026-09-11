@@ -434,7 +434,7 @@ Linux 部署由管理员将 `scripts/tenant-terminal-launcher.py` 安装为 root
 
 ## Fork 同步与部署适配
 
-当前分支合入 `slywalker2006/dsh-passwords` 的 `59968d3`（2.7.0）。本部署构建为 `2.7.0-dsh.20260911.7`，配合包含原生 principal 扩展的 Harness 0.1.5-rc.2 使用；普通 npm 上游 Harness 包不提供这些私有扩展，部署时必须统一指向本次 Harness 构建。
+当前分支合入 `slywalker2006/dsh-passwords` 的 `59968d3`（2.7.0）。本部署构建为 `2.7.0-dsh.20260911.8`，配合包含原生 principal 扩展的 Harness 0.1.5-rc.2 使用；普通 npm 上游 Harness 包不提供这些私有扩展，部署时必须统一指向本次 Harness 构建。
 
 未设置 `TENANT_SSH_ENABLED=true` 时，网关保留旧版 SSH alias 归属检查：普通账号只能使用本人已认领的连接，导入、cluster 和 tunnel 仍仅供管理员。SSH alias 归属同时支持 SQLite 和 MySQL/MariaDB；账号隔离版 Host 使用这些记录迁移已有连接。
 
@@ -471,3 +471,5 @@ Linux 部署由管理员将 `scripts/tenant-terminal-launcher.py` 安装为 root
 管理员可使用 `dev_server_admin` 列出并停止子账号服务，停止操作会写入审计记录，并取消该服务的自启动。
 
 网页左侧“运行服务”在当前应用中打开列表，保留侧栏和原会话，不打开新标签页。“返回对话”恢复原会话。普通账号管理自己的所有项目，管理员管理所有账号；可以搜索并手动确认停止服务，停止后取消自动重启和开机启动。直接访问 `/gateway/services` 仍可打开独立列表。
+
+文件夹管理在应用中央打开，侧栏和原会话保留，支持返回对话。拖动文件或文件夹到目标目录或“返回上级”即可移动；已有移动/粘贴和上传按钮保留。同名冲突会报错。详见[文件夹管理与拖拽移动](docs/plans/2026-09-11-managed-files-page.md)。
