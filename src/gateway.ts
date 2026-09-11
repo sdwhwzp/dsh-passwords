@@ -30,6 +30,7 @@ import zlib from 'node:zlib';
 import { URL, fileURLToPath } from 'node:url';
 import dns from 'node:dns';
 import express, { type Request, type Response } from 'express';
+import { registerDesktopDownloads } from './desktop-downloads.js';
 import { registerTenantServiceRoutes } from './tenant-service-routes.js';
 import WebSocket, { type RawData, WebSocketServer } from 'ws';
 import {
@@ -826,7 +827,7 @@ ${params.script ?? ''}
 </html>`;
 }
 
-function renderLoginPage(params: { lang: Lang; next: string; error?: string; dbHealthy: boolean; csrf: string }): string {
+function renderLoginPage(params: { lang: Lang; next: string; error?: string; dbHealthy: boolean; csrf: string; downloads?: boolean }): string {
   const tr = (key: string, tp?: Record<string, string | number>) => t(params.lang, key, tp);
   const errorBlock = params.error
     ? `<div class="error-bar" id="error-bar">${escapeHtml(params.error)}</div>`
@@ -849,7 +850,8 @@ function renderLoginPage(params: { lang: Lang; next: string; error?: string; dbH
     <button type="submit" id="submit-btn">${tr('gw.login')}</button>
   </form>
   ${errorBlock}
-  ${dbHint}`;
+  ${dbHint}
+  ${params.downloads ? `<p class="sub"><a href="/gateway/desktop" style="color:var(--brand)">${tr('desktop.title')}</a></p>` : ''}`;
   return pageShell({
     lang: params.lang,
     title: tr('gw.titleLogin'),
@@ -1164,6 +1166,8 @@ export function createGatewayServer(
     );
     next();
   });
+
+  registerDesktopDownloads(app, config.desktopDownloadsDirectory, langOf);
 
   const upstream = new URL(config.gateway.upstream);
   const upstreamHost = upstream.hostname;
@@ -2354,7 +2358,7 @@ export function createGatewayServer(
       res.type('html').send(renderSetupPage({ lang, csrf }));
       return;
     }
-    res.type('html').send(renderLoginPage({ lang, next, dbHealthy, csrf }));
+    res.type('html').send(renderLoginPage({ downloads: Boolean(config.desktopDownloadsDirectory), lang, next, dbHealthy, csrf }));
   });
 
   // ── 首次配置提交（POST）→ 302 回登录页 ────────────────────────
@@ -2448,7 +2452,7 @@ export function createGatewayServer(
         .status(403)
         .type('html')
         .send(
-          renderLoginPage({ lang: langOf(req), next, error: t(langOf(req), 'gw.csrfFailed'), dbHealthy, csrf }),
+          renderLoginPage({ downloads: Boolean(config.desktopDownloadsDirectory), lang: langOf(req), next, error: t(langOf(req), 'gw.csrfFailed'), dbHealthy, csrf }),
         );
       return;
     }
@@ -2465,7 +2469,7 @@ export function createGatewayServer(
         res
           .status(429)
           .type('html')
-          .send(renderLoginPage({ lang: langOf(req), next, error: '登录过于频繁，请稍后再试', dbHealthy, csrf }));
+          .send(renderLoginPage({ downloads: Boolean(config.desktopDownloadsDirectory), lang: langOf(req), next, error: '登录过于频繁，请稍后再试', dbHealthy, csrf }));
         return;
       }
       recent.push(nowTs);
@@ -2492,7 +2496,7 @@ export function createGatewayServer(
       const dbHealthy = await db.health().catch(() => false);
       const csrf = newCsrfToken(csrfSecret);
       setCsrfCookie(res, csrf, config.gateway.tls !== null);
-      res.status(status).type('html').send(renderLoginPage({ lang, next, error: message, dbHealthy, csrf }));
+      res.status(status).type('html').send(renderLoginPage({ downloads: Boolean(config.desktopDownloadsDirectory), lang, next, error: message, dbHealthy, csrf }));
     }
   });
 

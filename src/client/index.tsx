@@ -20,6 +20,7 @@ import { TokenReporter } from './token';
 import { LocalWorkspaceLauncher } from './local-workspace-launcher';
 import { ServicesLauncher } from './services-launcher';
 import { ServicesPanel } from './services-panel';
+import { DesktopDownloadsLauncher, DesktopDownloadsPanel } from './desktop-downloads';
 import type { MainPanelId } from '@deepseek-ai/dsh-client-ui-layout/client';
 import { ManagedFilesLauncher } from './managed-files-launcher';
 import { ManagedFilesPage } from './managed-files-page';
@@ -203,6 +204,18 @@ export async function apply(ctx: ClientContext): Promise<() => void | Promise<vo
     ctx.slots.register({ name: 'sidebar.workspaces.action', id: 'dsh-passwords-accounts', order: 5, locale: 'dshpw',
       inject: () => ({ loadState: () => loadDshPasswordsState(dshPasswords) }),
     }, AccountsLauncher),
+  );
+
+  const desktopPanelId = 'dsh-passwords-desktop' as MainPanelId;
+  ctx.slots.inject('main', () =>
+    ctx.slots.register({ name: 'main', key: desktopPanelId, locale: 'dshpw',
+      inject: () => ({ onBack: () => ctx.layout.selectPanel(null) }),
+    }, DesktopDownloadsPanel),
+  );
+  ctx.slots.inject('sidebar.workspaces.action', () =>
+    ctx.slots.register({ name: 'sidebar.workspaces.action', id: desktopPanelId, order: 7, locale: 'dshpw',
+      inject: () => ({ onOpen: () => ctx.layout.selectPanel(desktopPanelId) }),
+    }, DesktopDownloadsLauncher),
   );
 
   const servicesPanelId = 'dsh-passwords-services' as MainPanelId;

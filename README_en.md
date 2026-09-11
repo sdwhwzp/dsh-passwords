@@ -449,3 +449,10 @@ Administrators can list and stop child-account services with `dev_server_admin`.
 Open **Running services** in the sidebar to view the list inside the current app, retaining the sidebar and selected conversation without opening another tab. **Back to conversation** restores that conversation. Regular accounts manage their own projects; administrators manage all accounts. Stopping disables automatic restart and startup on boot. Direct access to `/gateway/services` remains available.
 
 Folder management opens in the center of the app, retaining the sidebar and selected conversation. Drag a file or folder onto a destination folder or **Up** to move it. Move/Paste and upload controls remain available; name conflicts return an error. See the [folder page and drag-move guide](docs/plans/2026-09-11-managed-files-page.md).
+## Desktop installer downloads
+
+Set `MCP_DESKTOP_DOWNLOADS_DIR` to an independent, read-only installer release directory to add downloads to the login page and web sidebar. Signed-in users view the catalog in the existing main panel and return to their conversation. Installers and their catalog are public; business data and existing file-download permissions retain their authorization checks. The Windows one-click assistant retains its existing entry and reads the connection address supplied during pairing.
+
+The directory contains `manifest.json` with `version`, a 40-character source `commit`, and `files`. Each entry has `file`, `platform` (`windows-x64` or `mac-arm64`), `bytes`, and `sha256`. Only simple `.exe`, `.dmg`, and `.zip` filenames are published; directory listings and unlisted files are unavailable. Verify uploaded SHA-256 hashes before switching configuration and restarting the gateway. Published releases must remain read-only; do not replace files in place. Downloads support HEAD and Range. An empty setting disables these public routes.
+
+The remote desktop starts with empty server addresses, which users fill with administrator-provided values. Current builds are unsigned; the Mac build supports Apple Silicon only. Website TLS and application signing are managed separately.

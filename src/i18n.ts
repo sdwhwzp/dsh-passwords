@@ -20,6 +20,10 @@ type Params = Record<string, string | number>;
 
 const DICT: Record<Lang, Record<string, string>> = {
   zh: {
+    'desktop.title': '下载桌面客户端',
+    'desktop.back': '返回网页',
+    'desktop.description': '连接现有账号，并接入本机目录。服务器地址默认为空，请填写管理员提供的地址。',
+    'desktop.unsigned': '当前安装包未签名。Mac 版本适用于 Apple Silicon（M 系列），系统可能要求确认安装来源。',
     // ── 认证 / 业务错误（AuthError.code → 文案） ──
     'err.ALREADY_INITIALIZED': '平台已初始化，不能重复配置',
     'err.INVALID_SETUP_KEY': '预设密钥不正确',
@@ -138,6 +142,10 @@ const DICT: Record<Lang, Record<string, string>> = {
     'cli.dockerInitScriptMissing': '找不到 Docker 初始化脚本：{path}',
   },
   en: {
+    'desktop.title': 'Download desktop client',
+    'desktop.back': 'Back to web app',
+    'desktop.description': 'Connect your existing account and local folders. Server addresses start empty; enter the address provided by your administrator.',
+    'desktop.unsigned': 'These installers are unsigned. The Mac build supports Apple Silicon (M series); your system may ask you to confirm the source.',
     'err.ALREADY_INITIALIZED': 'The platform is already initialized and cannot be set up again',
     'err.INVALID_SETUP_KEY': 'Incorrect setup key',
     'err.INVALID_USERNAME': 'Username must be 3-32 letters, digits, underscores or hyphens',

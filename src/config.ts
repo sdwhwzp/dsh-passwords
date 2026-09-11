@@ -31,6 +31,8 @@ export function resolveConfigPath(value: string, configRoot: string, fallbackNam
 }
 
 export interface PlatformConfig {
+  /** Operator-owned immutable installer directory; empty disables public downloads. */
+  desktopDownloadsDirectory?: string;
   /** Enable only with a dsh-ssh Host that isolates every operation by authenticated principal. */
   tenantSsh?: {
     enabled: boolean;
@@ -219,6 +221,7 @@ export function loadConfig(): PlatformConfig {
     dbPath,
     database,
     dbEncKey: readEnv('MCP_DB_ENC_KEY', ''),
+    desktopDownloadsDirectory: readEnv('MCP_DESKTOP_DOWNLOADS_DIR', ''),
     gateway: {
       host: readEnv('MCP_GATEWAY_HOST', '0.0.0.0'),
       port: gatewayPort,

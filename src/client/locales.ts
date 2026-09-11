@@ -7,6 +7,12 @@
 
 export const zh = {
   managedFilesDragHint: '拖动文件或文件夹到目标文件夹或“返回上级”即可移动；也可以使用“移动”和“粘贴”。',
+  desktopTitle: '下载桌面端',
+  desktopBack: '返回会话',
+  desktopDescription: '连接现有账号，并接入本机目录。服务器地址默认为空，请填写管理员提供的地址。',
+  desktopUnsigned: '当前安装包未签名。Mac 版本适用于 Apple Silicon（M 系列），系统可能要求确认安装来源。',
+  desktopUnavailable: '安装包暂不可用，请联系管理员。',
+  desktopLoading: '正在加载安装包…',
   servicesTitle: '运行服务',
   servicesAdminHint: '管理所有账号由 Agent 托管的测试服务。',
   servicesUserHint: '查看和停止自己在各个项目中启动的测试服务。',
@@ -309,6 +315,12 @@ export const zh = {
 
 export const en: Record<keyof typeof zh, string> = {
   managedFilesDragHint: 'Drag a file or folder onto a destination folder or Up to move it. Move and Paste are also available.',
+  desktopTitle: 'Download desktop',
+  desktopBack: 'Back to conversation',
+  desktopDescription: 'Connect your existing account and local folders. Server addresses start empty; enter the address provided by your administrator.',
+  desktopUnsigned: 'These installers are unsigned. The Mac build supports Apple Silicon (M series); your system may ask you to confirm the source.',
+  desktopUnavailable: 'Installers are unavailable. Please contact your administrator.',
+  desktopLoading: 'Loading installers…',
   servicesTitle: 'Running services',
   servicesAdminHint: 'Manage Agent-hosted development services across all accounts.',
   servicesUserHint: 'View and stop your development services across projects.',
