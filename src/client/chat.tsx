@@ -712,7 +712,7 @@ const CHAT_CSS = `
 .dshpw-chat-close:hover{background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-primary);transform:rotate(90deg)}
 .dshpw-chat-close:active{transform:scale(.85) rotate(45deg)}
 /* 微信式消息列表：浅灰底、头像+气泡两列 */
-.dshpw-chat-list{flex:1;overflow-y:auto;padding:14px 14px 16px;display:flex;flex-direction:column;gap:12px;background:var(--dsw-alias-bg-layer-1);scrollbar-width:thin;scrollbar-color:var(--dsw-alias-border-l2) transparent}
+.dshpw-chat-list{flex:1;overflow-y:auto;padding:14px 14px 16px;display:flex;flex-direction:column;gap:12px;background:var(--dsw-alias-bg-layer-1);scrollbar-width:thin;scrollbar-color:var(--dsw-alias-border-l2) transparent;scroll-behavior:smooth;overscroll-behavior:contain}
 .dshpw-chat-list::-webkit-scrollbar{width:8px}
 .dshpw-chat-list::-webkit-scrollbar-thumb{background:var(--dsw-alias-border-l2);border-radius:999px}
 .dshpw-chat-list::-webkit-scrollbar-thumb:hover{background:var(--dsw-alias-label-tertiary)}

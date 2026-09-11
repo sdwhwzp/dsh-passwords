@@ -17,7 +17,7 @@
   &nbsp;
   <a href="https://github.com/slywalker2006/dsh-passwords/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/slywalker2006/dsh-passwords/ci.yml?style=flat-square&label=CI" alt="CI"></a>
   &nbsp;
-  <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/DSH-0.1.5--rc.1-4c6ef5?style=flat-square&labelColor=454a54" alt="DSH"></a>
+  <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/DSH-0.1.5-4c6ef5?style=flat-square&labelColor=454a54" alt="DSH"></a>
   &nbsp;
   <img src="https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square" alt="License">
   &nbsp;
@@ -74,7 +74,7 @@
 
 ### Prerequisites
 
-Host installs need Node.js 22.19+ or 24+, a working dsh installation, and git. Keep this plugin on the same Node major line as the dsh host; DSH `0.1.5-rc.1` is the currently verified host baseline, while the compatibility layer retains the tested `0.1.2` and `0.1.3` API boundaries. Docker installs only need Docker Engine or Docker Desktop and a DeepSeek API key.
+Host installs need Node.js 22.19+ or 24+, a working dsh installation, and git. Keep this plugin on the same Node major line as the dsh host; every DSH `0.1.5` release (alpha.1 / alpha.2 / rc.1 / rc.2) is verified, with `0.1.5-rc.2` as the current host baseline, while the compatibility layer retains the tested `0.1.2` and `0.1.3` API boundaries. Docker installs only need Docker Engine or Docker Desktop and a DeepSeek API key.
 
 ### Install
 
@@ -104,7 +104,7 @@ docker run -d \
   -p 127.0.0.1:3088:3088 \
   -v dsh-home:/data/dsh \
   -v dsh-passwords-state:/data/dsh-passwords \
-  skywalker237234/dsh-passwords:2.7.0
+  skywalker237234/dsh-passwords:2.7.1
 ```
 
 `.env` needs at least `DEEPSEEK_API_KEY`. Set `MCP_GATEWAY_PUBLIC_HOST` to the domain you actually use. The container listens on loopback 3088 only; terminate TLS on nginx or Caddy for public access. Initialization is complete once the log shows `dsh patch applied; starting dsh`.
@@ -316,7 +316,7 @@ The bottleneck is usually the network path to the server.
 
 ## Manual install
 
-> The v2.7.0 compatibility layer covers the full DSH `0.1.5` line (`alpha.1`, `alpha.2`, `rc.1`) API and runtime boundaries, retaining the `0.1.2` and `0.1.3` interface boundaries; the host installer and bundled Docker ship DSH `0.1.5-rc.1`. The installers strictly require Node.js `22.19+` or `24+`, register the plugin, detect the dsh installation and apply the compatibility patch. Automatic updates and settings-page patch reload use the same patch path.
+> The v2.7.1 compatibility layer covers every DSH `0.1.5` release (`alpha.1`, `alpha.2`, `rc.1`, `rc.2`) API and runtime boundaries, retaining the `0.1.2` and `0.1.3` interface boundaries; the host installer and bundled Docker ship DSH `0.1.5-rc.2`. The installers strictly require Node.js `22.19+` or `24+`, register the plugin, detect the dsh installation and apply the compatibility patch. Automatic updates and settings-page patch reload use the same patch path.
 
 1. `git clone https://github.com/slywalker2006/dsh-passwords && cd dsh-passwords`
 2. `npm install && npm run build`
@@ -343,7 +343,7 @@ The UI is bilingual zh/en and follows the dsh language setting. The login page h
 
 ## Version compatibility
 
-Current version: 2.7.0. Compatible with the full DSH `0.1.5` line (`alpha.1`, `alpha.2`, `rc.1`) API and runtime boundaries, retaining compatibility with the `0.1.2` and `0.1.3` interface boundaries; the host installer and bundled Docker ship DSH `0.1.5-rc.1`. The npm package ships prebuilt dist, TypeScript sources, and all scripts; Docker and npm are built from the same source revision.
+Current version: 2.7.1. Compatible with every DSH `0.1.5` release (`alpha.1`, `alpha.2`, `rc.1`, `rc.2`) API and runtime boundaries, retaining compatibility with the `0.1.2` and `0.1.3` interface boundaries; the host installer and bundled Docker ship DSH `0.1.5-rc.2`. The npm package ships prebuilt dist, TypeScript sources, and all scripts; Docker and npm are built from the same source revision.
 
 ## Contributing
 

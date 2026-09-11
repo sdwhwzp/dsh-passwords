@@ -562,7 +562,7 @@ before(async () => {
     internalSecret: 'test-internal',
     patch: { dshRoot: '', restartService: '' },
     webSocket: {
-      sshEndpoints: ['/api/dsh-ssh/terminal', '/plugins/ssh-b/terminal'],
+      sshEndpoints: ['/api/dsh-ssh/terminal', '/plugins/ssh-b/terminal', '/plugins/ssh-wild/*'],
     },
   };
 
@@ -1249,6 +1249,41 @@ test('多 SSH WebSocket 端点：子用户只需勾选 SSH 总开关即可使用
     cookie: `dsh_gateway_token=${allowedToken}`, origin: 'http://127.0.0.1', host: '127.0.0.1',
   });
   assert.match(allowed.statusLine, /101/, '勾选 SSH 权限后无需逐路径授权即可使用已登记端点');
+});
+
+test('通配 SSH WebSocket 端点：只放行直接子路径，基路径与更深路径对子用户拒绝', async () => {
+  const sshUser = db.createUser('ssh-wildcard-allowed', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(sshUser.id, {
+    allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false, allowSsh: true,
+    allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: [],
+  });
+  const sshToken = jwt.sign({ sub: String(sshUser.id), username: sshUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' });
+  const sshHeaders = { cookie: `dsh_gateway_token=${sshToken}`, origin: 'http://127.0.0.1', host: '127.0.0.1' };
+
+  const child = await websocketHandshake('/plugins/ssh-wild/terminal', sshHeaders);
+  assert.match(child.statusLine, /101/, '已登记通配端点的直接子路径必须放行');
+  const base = await websocketHandshake('/plugins/ssh-wild', sshHeaders);
+  assert.match(base.statusLine, /404/, '通配规则不放行基路径本身');
+  const deeper = await websocketHandshake('/plugins/ssh-wild/a/b', sshHeaders);
+  assert.match(deeper.statusLine, /404/, '通配规则不放行更深层路径');
+
+  const deniedUser = db.createUser('ssh-wildcard-denied', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(deniedUser.id, {
+    allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false, allowSsh: false,
+    allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: [],
+  });
+  const deniedToken = jwt.sign({ sub: String(deniedUser.id), username: deniedUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' });
+  const denied = await websocketHandshake('/plugins/ssh-wild/terminal', {
+    cookie: `dsh_gateway_token=${deniedToken}`, origin: 'http://127.0.0.1', host: '127.0.0.1',
+  });
+  assert.match(denied.statusLine, /403/, '未勾选 SSH 权限时通配端点仍被拒绝');
+
+  const admin = await websocketHandshake('/plugins/ssh-wild/terminal', {
+    cookie, origin: 'http://127.0.0.1', host: '127.0.0.1',
+  });
+  assert.match(admin.statusLine, /101/, '管理员不受端点清单限制');
 });
 
 test('Issue #25：alpha.3 session.list 先到时等待 Remote 基线并只返回显式授权会话', async () => {
@@ -2368,7 +2403,7 @@ test('子用户第三方 WebSocket：除内置事件与已配置 SSH 端点外�
       sshWebSocketEndpoints: string[];
       users: Array<{ id: number; permissions: { allowSsh: boolean } }>;
     };
-    assert.deepEqual(overviewBody.sshWebSocketEndpoints, ['/api/dsh-ssh/terminal', '/plugins/ssh-b/terminal']);
+    assert.deepEqual(overviewBody.sshWebSocketEndpoints, ['/api/dsh-ssh/terminal', '/plugins/ssh-b/terminal', '/plugins/ssh-wild/*']);
 
     const afterGrant = await websocketHandshake('/plugin/ws/run', {
       cookie: subCookie,

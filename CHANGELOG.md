@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.7.1 - 2026-09-11
+
+### 中文
+
+更新公告：
+
+1. 兼容 DSH `0.1.5` 全版本（alpha.1 / alpha.2 / rc.1 / rc.2）：补丁锚点与 Cookie 桥校验覆盖整个 rc 系列，rc.2 的反馈弹窗与交付文件卡片等界面更新已实测兼容，bundled Docker 内置 DSH `0.1.5-rc.2`。
+2. 修复显式 SSH WebSocket 端点尾部通配规则未实际命中的问题；通配只放行直接子路径，不放行基路径或更深路径。
+3. 加固自动更新引擎：重复启动不再叠加轮询器，释放时清理定时器；更新接口状态码统一为 202/429/422，不再把业务错误误报为 409。
+4. 设置界面与登录页动效按 iOS 手感细化：分区错落进场、开关弹簧滑动、按钮按压反馈、状态与错误进场动画；全部只动 transform/opacity/box-shadow 并尊重 prefers-reduced-motion。
+5. 清理无效示例配置项，完成全量逻辑、权限、生命周期、安装与依赖审计，保留旧数据库迁移所需兼容字段。
+
+验证：282/282 本地回归测试、TypeScript 构建、npm 官方 registry 生产依赖审计、发布包内容与 Git 差异检查通过；测试服务器以 DSH `0.1.5-rc.2` 实际部署，反馈与交付文件 bundle 与官方 npm 产物逐字节一致。
+
+### English
+
+Release notes:
+
+1. Compatible with the whole DSH `0.1.5` line (alpha.1 / alpha.2 / rc.1 / rc.2): patch anchors and the Cookie-bridge check cover the full rc series, the rc.2 feedback-dialog and delivered-file-card UI refinements are verified compatible, and the bundled Docker image ships DSH `0.1.5-rc.2`.
+2. Fixes explicit SSH WebSocket endpoint suffix wildcards that were accepted by configuration but never matched at upgrade time; wildcards now allow direct child paths only, never the base or deeper descendants.
+3. Hardens the automatic-update engine: repeated starts cannot stack polling timers, disposal clears the active timer, and update API statuses are normalized to 202/429/422 instead of misreporting business errors as 409.
+4. Refines the settings UI and sign-in page motion to an iOS-like feel: staggered section entrances, spring-loaded toggles, pressed-button feedback, and entrance animations for statuses and errors; all motion stays on transform/opacity/box-shadow and respects prefers-reduced-motion.
+5. Removes an ineffective example configuration option and completes a full logic, authorization, lifecycle, installation, and dependency audit while retaining the legacy database field required for migration compatibility.
+
+Validation: 282/282 local regression tests, the TypeScript build, the official-registry production dependency audit, package-content checks, and Git whitespace checks passed; the test server runs DSH `0.1.5-rc.2`, and the feedback/deliverable bundles are byte-identical to the official npm artifacts.
+
 ## 2.7.0 - 2026-09-10
 
 ### 中文

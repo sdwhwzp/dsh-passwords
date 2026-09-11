@@ -17,7 +17,7 @@
   &nbsp;
   <a href="https://github.com/slywalker2006/dsh-passwords/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/slywalker2006/dsh-passwords/ci.yml?style=flat-square&label=CI" alt="CI"></a>
   &nbsp;
-  <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/DSH-0.1.5--rc.1-4c6ef5?style=flat-square&labelColor=454a54" alt="DSH"></a>
+  <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/DSH-0.1.5-4c6ef5?style=flat-square&labelColor=454a54" alt="DSH"></a>
   &nbsp;
   <img src="https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square" alt="License">
   &nbsp;
@@ -74,7 +74,7 @@
 
 ### 前置条件
 
-宿主机安装需要 Node.js 22.19+ 或 24+、可正常运行的 dsh 和 git。请让本插件与 dsh 宿主使用同一 Node 主线版本；DSH `0.1.5-rc.1` 是当前验证过的主机基线，同时保留对 `0.1.2` 和 `0.1.3` 接口边界的兼容。Docker 安装只需要 Docker Engine 或 Docker Desktop 和一个 DeepSeek API key。
+宿主机安装需要 Node.js 22.19+ 或 24+、可正常运行的 dsh 和 git。请让本插件与 dsh 宿主使用同一 Node 主线版本；DSH `0.1.5` 全版本（alpha.1 / alpha.2 / rc.1 / rc.2）均已验证，其中 `0.1.5-rc.2` 是当前验证过的主机基线，同时保留对 `0.1.2` 和 `0.1.3` 接口边界的兼容。Docker 安装只需要 Docker Engine 或 Docker Desktop 和一个 DeepSeek API key。
 
 ### 安装
 
@@ -104,7 +104,7 @@ docker run -d \
   -p 127.0.0.1:3088:3088 \
   -v dsh-home:/data/dsh \
   -v dsh-passwords-state:/data/dsh-passwords \
-  skywalker237234/dsh-passwords:2.7.0
+  skywalker237234/dsh-passwords:2.7.1
 ```
 
 `.env` 至少包含 `DEEPSEEK_API_KEY`。`MCP_GATEWAY_PUBLIC_HOST` 建议填实际访问的域名。容器只在回环地址监听 3088，公网访问由 nginx 或 Caddy 终结 TLS 后转发。初始化完成以日志出现 `dsh patch applied; starting dsh` 为准。
@@ -316,7 +316,7 @@ curl -so /dev/null -w "TLS:%{time_appconnect}s\n" https://地址/gateway/login
 
 ### 手动安装
 
-> v2.7.0 的兼容层覆盖 DSH `0.1.5` 全系列（`alpha.1`、`alpha.2`、`rc.1`）的接口和运行时结构，并保留 `0.1.2` 与 `0.1.3` 接口边界；宿主机安装器与 bundled Docker 内置 DSH `0.1.5-rc.1`。安装器会严格检查 Node.js `22.19+` 或 `24+`，并在安装完成后注册插件、探测 dsh 安装目录并应用兼容补丁。自动更新与设置页“重载补丁”沿用同一补丁链路。
+> v2.7.1 的兼容层覆盖 DSH `0.1.5` 全版本（`alpha.1`、`alpha.2`、`rc.1`、`rc.2`）的接口和运行时结构，并保留 `0.1.2` 与 `0.1.3` 接口边界；宿主机安装器与 bundled Docker 内置 DSH `0.1.5-rc.2`。安装器会严格检查 Node.js `22.19+` 或 `24+`，并在安装完成后注册插件、探测 dsh 安装目录并应用兼容补丁。自动更新与设置页“重载补丁”沿用同一补丁链路。
 
 1. `git clone https://github.com/slywalker2006/dsh-passwords && cd dsh-passwords`
 2. `npm install && npm run build`
@@ -343,7 +343,7 @@ curl -so /dev/null -w "TLS:%{time_appconnect}s\n" https://地址/gateway/login
 
 ## 版本兼容
 
-当前版本 2.7.0。兼容 DSH `0.1.5` 全系列（`alpha.1`、`alpha.2`、`rc.1`）的接口和运行时结构，并保留对 `0.1.2` 与 `0.1.3` 接口边界的兼容；宿主机安装器与 bundled Docker 内置 DSH `0.1.5-rc.1`。npm 包包含预构建 dist、TypeScript 源码与全部脚本，Docker 与 npm 包出自同一源码修订。
+当前版本 2.7.1。兼容 DSH `0.1.5` 全版本（`alpha.1`、`alpha.2`、`rc.1`、`rc.2`）的接口和运行时结构，并保留对 `0.1.2` 和 `0.1.3` 接口边界的兼容；宿主机安装器与 bundled Docker 内置 DSH `0.1.5-rc.2`。npm 包包含预构建 dist、TypeScript 源码与全部脚本，Docker 与 npm 包出自同一源码修订。
 
 ## 参与贡献
 

@@ -80,6 +80,7 @@ import {
   collectSessionIds,
   collectAuthorizedSessionIds,
   parseSessionAddress,
+  webSocketPathAllowed,
   clientConnectionArgs,
   replaceArchivedSessionSnapshot,
   collectArchivedSessionIds,
@@ -542,7 +543,10 @@ button:disabled{opacity:.7;cursor:default}
 .lang-switch a{color:var(--caption);text-decoration:none;transition:color .15s}
 .lang-switch a:hover{color:var(--sub)}
 .lang-switch a.on{color:var(--brand);font-weight:600}
-@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+/* 按钮提交中的加载 spinner：用 currentColor 继承按钮文字色 */
+.btn-spin{display:inline-block;width:13px;height:13px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:btnSpin .7s linear infinite;vertical-align:-2px;margin-right:7px}
+@keyframes btnSpin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.btn-spin{animation:none!important}}
 `;
 
 /** 语言切换链接：中文 / English（当前语言高亮，点击带 ?lang= 走同一个登录路径） */
@@ -606,7 +610,8 @@ function renderLoginPage(params: { lang: Lang; next: string; error?: string; dbH
   if (err) { setTimeout(() => { err.style.display = 'block'; }, 50); }
   document.getElementById('login-form').addEventListener('submit', () => {
     const btn = document.getElementById('submit-btn');
-    btn.textContent = ${JSON.stringify(tr('gw.loggingIn'))};
+    // 提交中：文字前加 spinner（不影响布局，防重复点击已有 disabled 兜底）
+    btn.innerHTML = '<span class="btn-spin" aria-hidden="true"></span>' + ${JSON.stringify(tr('gw.loggingIn'))};
     btn.disabled = true;
   });
 </script>`,
@@ -691,7 +696,7 @@ function renderSetupPage(params: { lang: Lang; error?: string; csrf: string }): 
       return;
     }
     const btn = document.getElementById('submit-btn');
-    btn.textContent = ${JSON.stringify(tr('gw.initializing'))};
+    btn.innerHTML = '<span class="btn-spin" aria-hidden="true"></span>' + ${JSON.stringify(tr('gw.initializing'))};
     btn.disabled = true;
   });
 </script>`,
@@ -4879,7 +4884,7 @@ export function createGatewayServer(
     // A registered SSH WebSocket endpoint is governed by the single per-subuser
     // SSH toggle. No per-path grant is required: the owner controls which paths
     // are SSH endpoints through the environment registry.
-    const userSshEndpointPassed = userRole === 'user' && sshWebSocketEndpoints.has(gatePath);
+    const userSshEndpointPassed = userRole === 'user' && webSocketPathAllowed(gatePath, [...sshWebSocketEndpoints]);
     if (userSshEndpointPassed) {
       const perms = authUserId === null ? null : effectivePermissions(authUserId);
       if (perms === null || !perms.allow_ssh) {

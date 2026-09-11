@@ -39,6 +39,7 @@ import { Database, type UserListRow } from './db.js';
 import { createFieldCrypto } from './encrypt.js';
 import { AuthService, AuthError, assertNoSqlInjection, type AuthedUser, type RequestMeta } from './auth.js';
 import { findDshRoot, patchStatus } from './patch.js';
+import { updateApplyHttpStatus } from './update.js';
 
 /** 稳定 cordis 插件名（insert 进 cordis.yml 时用同一个名字） */
 export const name = 'dsh-passwords';
@@ -1143,13 +1144,11 @@ export function apply(ctx: Context): void {
           writeJson(res, 502, { ok: false, code: 'BAD_GATEWAY', error: '更新服务不可用（网关未就绪）' });
           return;
         }
-        const code = typeof result.body.code === 'string' ? result.body.code : '';
-        // 下载/安装进行中是可轮询的正常状态，不应让设置页把它误显示为 HTTP 错误。
-        const status = code === 'DOWNLOAD_STARTED' || code === 'DOWNLOAD_IN_PROGRESS' || code === 'INSTALL_STARTED' || code === 'INSTALL_IN_PROGRESS' ? 202
-          : code === 'RATE_LIMITED' ? 429
-            : code === 'NOT_READY' ? 409
-              : result.body.ok === false ? 422 : 200;
-        writeJson(res, status, result.body);
+        const status = updateApplyHttpStatus(result.body);
+        const body = status >= 400 && typeof result.body.error !== 'string' && typeof result.body.message === 'string'
+          ? { ...result.body, error: result.body.message }
+          : result.body;
+        writeJson(res, status, body);
       },
     },
 

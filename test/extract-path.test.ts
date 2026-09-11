@@ -21,6 +21,7 @@ import {
   extractWorkspaceRenamePaths,
   normalizePath,
   parseWebSocketAllowlist,
+  webSocketPathAllowed,
 } from '../src/permissions.js';
 
 // ── 1) args 伪包裹跳过 ─────────────────────────────────────────────
@@ -33,6 +34,19 @@ test('WebSocket 白名单只支持精确路径和显式子路径', () => {
   for (const value of ['/gateway/x', '/api/dsh-passwords/internal/x', '/*', '/x/../y', '/x%2fy', '/x?y=1']) {
     assert.throws(() => parseWebSocketAllowlist(value, 'TEST'));
   }
+});
+
+test('webSocketPathAllowed：精确路径与尾部通配的匹配口径一致（通配只放行直接子路径）', () => {
+  const rules = ['/sidebar/ws/terminal', '/plugin/ws/*'];
+  assert.equal(webSocketPathAllowed('/sidebar/ws/terminal', rules), true, '精确路径命中');
+  assert.equal(webSocketPathAllowed('/sidebar/ws/terminal/extra', rules), false, '精确路径不匹配更深路径');
+  assert.equal(webSocketPathAllowed('/plugin/ws/terminal', rules), true, '通配命中直接子路径');
+  assert.equal(webSocketPathAllowed('/plugin/ws/a/b', rules), false, '通配不匹配更深路径');
+  assert.equal(webSocketPathAllowed('/plugin/ws', rules), false, '通配不匹配基路径本身');
+  assert.equal(webSocketPathAllowed('/plugin/ws/', rules), false, '空子段不算直接子路径');
+  assert.equal(webSocketPathAllowed('/plugin/wsx/terminal', rules), false, '前缀相似但不共享路径分段不算命中');
+  assert.equal(webSocketPathAllowed('/other/ws/terminal', rules), false, '未登记路径不命中');
+  assert.equal(webSocketPathAllowed('/plugin/ws/terminal', []), false, '空规则集 fail-closed');
 });
 
 test('R-A：extractPathFromBody 跳过 args 伪包裹（防 fail-open 越权）', () => {

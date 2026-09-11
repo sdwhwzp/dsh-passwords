@@ -118,15 +118,17 @@ const EXIT_DSH_ROOT_UNAVAILABLE = 34;
 const EXIT_ALPHA3_SETTINGS_UNAVAILABLE = 35;
 const EXIT_PATCH_VERIFICATION_FAILED = 36;
 const DSH_REMOTE_COOKIE_BRIDGE_RE =
-  /^0\.1\.(?:2-(?:alpha\.(?:[3-9]|[1-9][0-9]+)|rc\.[1-9][0-9]*)|5-(?:alpha\.[1-2]|rc\.1))$/;
+  /^0\.1\.(?:2-(?:alpha\.(?:[3-9]|[1-9][0-9]+)|rc\.[1-9][0-9]*)|5-(?:alpha\.[1-2]|rc\.[1-9][0-9]*))$/;
 
 function requiresCookieBridge(dshRoot: string): boolean {
   try {
     const packageJson = JSON.parse(readFileSync(path.join(dshRoot, 'package.json'), 'utf8')) as { version?: unknown };
-    // DSH 0.1.2 alpha/rc and the verified 0.1.5 alpha/rc releases use the
-    // public Host API without an authenticatedCookie method. A missing private
-    // bridge must fail closed; do not silently fall back to the one-time launch
-    // token when a known release is running.
+    // DSH 0.1.2 alpha/rc and the verified 0.1.5 alpha/rc line (rc.1, rc.2, …)
+    // use the public Host API without an authenticatedCookie method. A missing
+    // private bridge must fail closed; do not silently fall back to the one-time
+    // launch token when a known release is running. rc.2 keeps the same
+    // connection bundle contract as rc.1, so the gate extends to the full
+    // 0.1.5 rc series instead of pinning a single release.
     return typeof packageJson.version === 'string' && DSH_REMOTE_COOKIE_BRIDGE_RE.test(packageJson.version);
   } catch {
     return false;
