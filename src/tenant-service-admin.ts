@@ -4,7 +4,6 @@ import type { Agent } from '@deepseek-ai/dsh-agent';
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
 import type { PlatformConfig } from './config.js';
 import type { Database } from './db.js';
-import { AgentTurnPrincipalTracker } from './principal.js';
 import { DshPasswordsPrincipalAccessProvider } from './principal-access.js';
 import { runTenantCommand } from './tenant-command.js';
 
@@ -42,19 +41,20 @@ export function tenantServiceAdminTool(ctx: Context, agent: Agent, db: Database,
   });
 }
 
-/** Expose administration only after a verified administrator begins an Agent step. */
+/** Register before prompt assembly, from the authenticated principal persisted at turn start. */
 export function registerTenantServiceAdministration(ctx: Context, db: Database, config: PlatformConfig): void {
   if (!config.tenantAgentShell?.enabled || !config.tenantAgentShell.serviceLauncher) return;
-  const tracker = new AgentTurnPrincipalTracker();
   const installed = new WeakSet<Agent>();
   const access = new DshPasswordsPrincipalAccessProvider(ctx, db);
-  ctx.on('agent/pre-step', (payload, next) => {
-    const principal = tracker.resolve(payload);
-    if (principal?.role === 'admin' && !installed.has(payload.agent)) {
+  ctx.on('session/event', (session, event) => {
+    if (event.type !== 'turn/start') return;
+    const principal = event.data.principal;
+    const registry = ctx.root.get('agents') as { get(id: typeof session.id): Agent | undefined } | undefined;
+    const agent = registry?.get(session.id);
+    if (principal?.role === 'admin' && agent !== undefined && !installed.has(agent)) {
       access.assertAuthenticated(principal);
-      payload.agent.ctx.tools.register(tenantServiceAdminTool(ctx, payload.agent, db, config));
-      installed.add(payload.agent);
+      agent.ctx.tools.register(tenantServiceAdminTool(ctx, agent, db, config));
+      installed.add(agent);
     }
-    return next();
   });
 }

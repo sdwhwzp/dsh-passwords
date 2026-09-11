@@ -3,7 +3,8 @@ import { mkdtemp, mkdir, realpath, rm, symlink, readFile } from 'node:fs/promise
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import type { Context } from '@deepseek-ai/cordis';
+import { Context } from '@deepseek-ai/cordis';
+import SessionStore, { SessionId } from '@deepseek-ai/dsh-session';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools';
 import type { PlatformConfig } from '../src/config.js';
@@ -11,7 +12,7 @@ import { Database } from '../src/db.js';
 import { createFieldCrypto } from '../src/encrypt.js';
 import { TenantAgentShell, registerTenantAgentShell } from '../src/tenant-agent-shell.js';
 import type { TenantCommandRequest, TenantCommandResult } from '../src/tenant-command.js';
-import { tenantServiceAdminTool } from '../src/tenant-service-admin.js';
+import { tenantServiceAdminTool, registerTenantServiceAdministration } from '../src/tenant-service-admin.js';
 
 const success: TenantCommandResult = { stdout: 'v22.21.1\n10.15.1\n', stderr: '', exitCode: 0, signal: null, truncated: false, timedOut: false, aborted: false };
 
@@ -179,4 +180,21 @@ test('only an active administrator can stop another account service and the acti
   h.db.setPermissions(admin.id, { ...h.permissions, banned: true });
   await assert.rejects(tool.execute(args, { ...a.exec, principal }), /active account/);
   assert.equal(calls.length, 1);
+});
+
+test('the first administrator turn has its service tool before prompt assembly', async (t) => {
+  const h = await harness(t); const a = h.createAgent();
+  h.config.tenantAgentShell!.serviceLauncher = '/usr/local/libexec/dsh-tenant-service';
+  const admin = h.db.createUser('administrator', 'hash', 'admin');
+  const ctx = new Context();
+  try {
+    await ctx.plugin(SessionStore);
+    ctx.provide('agents', { get: () => a.agent } as never);
+    registerTenantServiceAdministration(ctx, h.db, h.config);
+    const session = ctx.sessions.create(SessionId('admin-first-request'));
+    session.append('turn/start', { turn: 1, principal: a.exec.principal! });
+    assert.equal(a.tools.some(tool => tool.name === 'dev_server_admin'), false);
+    session.append('turn/start', { turn: 2, principal: { source: 'dsh-passwords', id: String(admin.id), username: admin.username, role: 'admin' } });
+    assert.equal(a.tools.filter(tool => tool.name === 'dev_server_admin').length, 1);
+  } finally { await ctx.fiber.dispose(); }
 });
