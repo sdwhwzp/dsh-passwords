@@ -165,15 +165,17 @@ def manage(config, owner, cwd, username, request):
         return describe(record)
 
 
-def administer(config, request):
+def administer(config, request, account=None):
     """The authenticated administrator may inspect ownership and disable an existing service."""
     state = trusted(pathlib.Path(config['stateDir']))
     action = request.get('action')
     if action == 'list':
         with (state / 'manager.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            return {'services': [describe(record) | {'accountId': record['owner'], 'workspace': record['cwd']} for _, record in records(state)]}
+            return {'services': [describe(record) | {'accountId': record['owner'], 'workspace': record['cwd']} for _, record in records(state) if account is None or record['owner'] == account]}
     owner, name = request.get('accountId'), request.get('name')
+    if account is not None and owner != account:
+        raise ValueError('service belongs to another account')
     if action not in ['status', 'stop'] or not isinstance(owner, str) or not re.fullmatch(r'[1-9][0-9]{0,15}', owner) or not isinstance(name, str) or not re.fullmatch(r'[a-z][a-z0-9-]{0,47}', name):
         raise ValueError('invalid administrator service request')
     record = json.loads((state / ('u' + owner) / name / 'record.json').read_text())
@@ -182,7 +184,8 @@ def administer(config, request):
 
 def main():
     admin = len(sys.argv) == 2 and sys.argv[1] == '--admin'
-    if os.geteuid() != 0 or not (admin or len(sys.argv) == 4 and re.fullmatch(r'[1-9][0-9]{0,15}', sys.argv[1])):
+    account = sys.argv[2] if len(sys.argv) == 3 and sys.argv[1] == '--account' and re.fullmatch(r'[1-9][0-9]{0,15}', sys.argv[2]) else None
+    if os.geteuid() != 0 or not (admin or account is not None or len(sys.argv) == 4 and re.fullmatch(r'[1-9][0-9]{0,15}', sys.argv[1])):
         raise ValueError('invalid service invocation')
     config = json.loads(trusted(CONFIG).read_text())
     trusted(pathlib.Path(config['launcher']))
@@ -192,8 +195,8 @@ def main():
     request = json.loads(body)
     if not isinstance(request, dict):
         raise ValueError('invalid service request')
-    if admin:
-        print(json.dumps(administer(config, request), ensure_ascii=False))
+    if admin or account is not None:
+        print(json.dumps(administer(config, request, account), ensure_ascii=False))
         return
     owner, requested, username = sys.argv[1:]
     if not re.fullmatch(r'[A-Za-z0-9._-]{1,64}', username):

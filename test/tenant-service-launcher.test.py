@@ -58,6 +58,14 @@ class ServicesTest(unittest.TestCase):
                 self.assertNotIn('command', inventory[0])
                 with self.assertRaises(ValueError):
                     services.administer(config, {'action': 'logs', 'accountId': '2', 'name': 'web'})
+                self.assertEqual(services.administer(config, {'action': 'list'}, '3')['services'], [])
+                self.assertEqual(len(services.administer(config, {'action': 'list'}, '2')['services']), 1)
+                with self.assertRaisesRegex(ValueError, 'another account'):
+                    services.administer(config, {'action': 'stop', 'accountId': '2', 'name': 'web'}, '3')
+                with self.assertRaises(ValueError):
+                    services.administer(config, {'action': 'start', 'accountId': '2', 'name': 'web'}, '2')
+                result = services.administer(config, {'action': 'stop', 'accountId': '2', 'name': 'web'}, '2')
+                self.assertFalse(result['enabled'])
                 result = services.administer(config, {'action': 'stop', 'accountId': '2', 'name': 'web'})
                 self.assertFalse(result['enabled'])
                 self.assertNotIn('7111', (root / 'ports.nft').read_text())

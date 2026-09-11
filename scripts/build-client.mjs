@@ -67,3 +67,14 @@ await build({
   minify: true,
   define: { 'process.env.NODE_ENV': '"production"' },
 });
+await build({
+  entryPoints: ['src/client/services-entry.tsx'],
+  outfile: path.join(path.dirname(OUT_FILE), 'services.js'),
+  bundle: true,
+  format: 'iife',
+  platform: 'browser',
+  target: ['es2020'],
+  jsx: 'automatic',
+  minify: true,
+  define: { 'process.env.NODE_ENV': '"production"' },
+});

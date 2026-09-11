@@ -1,3 +1,4 @@
+import { ServicesLauncher } from './services-launcher';
 // dsh 浏览器侧插件：在设置页"插件"列表里注册 dsh-passwords 卡片。
 // 卡片内容：
 //   - 远程设置补丁状态 + "重载补丁"按钮（任何登录用户可触发；补丁强制启用）
@@ -199,6 +200,10 @@ export async function apply(ctx: ClientContext): Promise<() => void | Promise<vo
     ctx.slots.register({ name: 'sidebar.workspaces.action', id: 'dsh-passwords-accounts', order: 5, locale: 'dshpw',
       inject: () => ({ loadState: () => loadDshPasswordsState(dshPasswords) }),
     }, AccountsLauncher),
+  );
+
+  ctx.slots.inject('sidebar.workspaces.action', () =>
+    ctx.slots.register({ name: 'sidebar.workspaces.action', id: 'dsh-passwords-services', order: 6, locale: 'dshpw' }, ServicesLauncher),
   );
 
   // 子账号的专属文件管理固定在 Workspace 列表上方。

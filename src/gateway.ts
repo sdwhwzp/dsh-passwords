@@ -30,6 +30,7 @@ import zlib from 'node:zlib';
 import { URL, fileURLToPath } from 'node:url';
 import dns from 'node:dns';
 import express, { type Request, type Response } from 'express';
+import { registerTenantServiceRoutes } from './tenant-service-routes.js';
 import WebSocket, { type RawData, WebSocketServer } from 'ws';
 import {
   MANAGED_GIT_OUTPUT_MAX_BYTES,
@@ -2681,6 +2682,23 @@ export function createGatewayServer(
     res.setHeader('Cache-Control', 'no-store');
     res.sendFile(fileURLToPath(new URL('./accounts.js', import.meta.url)));
   });
+
+  app.get('/gateway/services', (req, res) => {
+    if (!authedUser(req)) { res.redirect('/gateway/login?next=%2Fgateway%2Fservices'); return; }
+    if (!apiAuth(req, res)) return;
+    const lang = langOf(req);
+    const nonce = randomBytes(18).toString('base64');
+    const themeScript = themeBootScript(readDshThemePreference()).replace('<script>', `<script nonce="${nonce}">`);
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Content-Security-Policy', `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`);
+    res.type('html').send(`<!doctype html><html lang="${lang === 'en' ? 'en' : 'zh-CN'}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${lang === 'en' ? 'Running services' : '运行服务'}</title>${themeScript}<style>${PAGE_THEME_STYLE}</style></head><body><div id="services-root"></div><script nonce="${nonce}" defer src="/gateway/services.js"></script></body></html>`);
+  });
+  app.get('/gateway/services.js', (req, res) => {
+    if (!apiAuth(req, res)) return;
+    res.setHeader('Cache-Control', 'no-store');
+    res.sendFile(fileURLToPath(new URL('./services.js', import.meta.url)));
+  });
+  registerTenantServiceRoutes(app, config, db, apiAuth);
 
   // token 用量上报节流（客户端 15 秒 flush 一次；这里再加 5 秒最小间隔，防高频自刷）。
   // 声明在权限路由之前：permissions 路由改配额时会清理该缓存。

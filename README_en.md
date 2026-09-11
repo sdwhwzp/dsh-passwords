@@ -410,7 +410,7 @@ Enable `MCP_TENANT_EDITOR=true` only with the tenant edition of `dsh-vsceditor` 
 
 ## Fork synchronization and deployment adaptation
 
-This branch merges `slywalker2006/dsh-passwords` commit `59968d3` (2.7.0). The deployment build is `2.7.0-dsh.20260911.4` and requires the personal Harness 0.1.5-rc.2 build with native principal support. Official npm Harness packages do not contain those private extensions; deployment overrides must select the matching Harness artifacts throughout.
+This branch merges `slywalker2006/dsh-passwords` commit `59968d3` (2.7.0). The deployment build is `2.7.0-dsh.20260911.5` and requires the personal Harness 0.1.5-rc.2 build with native principal support. Official npm Harness packages do not contain those private extensions; deployment overrides must select the matching Harness artifacts throughout.
 
 Without `TENANT_SSH_ENABLED=true`, the gateway retains legacy SSH alias ownership checks: restricted accounts may use only their claimed connections; import, cluster, and tunnel operations remain administrator-only. SQLite and MySQL/MariaDB persist alias ownership, which the account-isolated Host uses to migrate existing connections.
 
@@ -443,3 +443,5 @@ Session exports can include unclaimed Host subagents through their persisted par
 With `MCP_TENANT_SERVICE_LAUNCHER` configured, Agents use `dev_server` to start, inspect, read logs and stop persistent development services in the current project. Services survive conversations, Harness restarts and host reboots. Agents stop them only at the user’s request; background jobs in ordinary `bash` calls remain temporary. See the [deployment and network guide](docs/plans/2026-09-11-persistent-development-services.md).
 
 Administrators can list and stop child-account services with `dev_server_admin`. A stop is audited and disables the service’s automatic startup.
+
+Open **Running services** in the sidebar (`/gateway/services`) to search by account, service, project or port and explicitly stop a service. Regular accounts manage their own projects; administrators manage all accounts. Stopping disables automatic restart and startup on boot.
