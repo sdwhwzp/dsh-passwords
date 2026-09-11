@@ -206,7 +206,7 @@ export async function apply(ctx: ClientContext): Promise<() => void | Promise<vo
 
   const servicesPanelId = 'dsh-passwords-services' as MainPanelId;
   ctx.slots.inject('main', () =>
-    ctx.slots.register({ name: 'main', id: servicesPanelId, key: servicesPanelId, locale: 'dshpw',
+    ctx.slots.register({ name: 'main', key: servicesPanelId, locale: 'dshpw',
       inject: () => ({ onBack: () => ctx.layout.selectPanel(null) }),
     }, ServicesPanel),
   );
