@@ -103,8 +103,7 @@ before(async () => {
       reply({ result: { ok: true, value: { items: [{ sessionId: 'existing-session', cwd: '/work/allowed', agentPreset: 'preset/allowed' }, { sessionId: 'gzip-session', cwd: '/work/allowed' }, { sessionId: 'alpha-session', cwd: '/work/allowed' }] } } });
     } else if (req.url?.startsWith('/api/session.create')) {
       successfulCreates += 1;
-      const sessionId = successfulCreates === 1 ? 'restricted-session' : 'new-session';
-      reply({ result: { ok: true, value: { sessionId, cwd: '/work/allowed' } } });
+      reply({ result: { ok: true, value: { sessionId: 'new-session', cwd: '/work/allowed', agentPreset: 'preset/allowed' } } });
     } else if (req.url?.startsWith('/api/agentPreset.select') || req.url === '/api/agentPresets/select') {
         if (selectBlocked) {
         reply({ result: { ok: false, error: { message: 'boom' } } });
@@ -166,13 +165,24 @@ test('Issue #22: restricted subuser cannot create a session with an unapproved a
   assert.equal(upstreamCalls.some((url) => url.startsWith('/api/session.create')), false);
 });
 
-test('Issue #22: 默认空白名单用户无 preset 创建会话时不被网关伪协议字段拦截', async () => {
+test('preset 白名单为空的账号建不出会话，而不是建出一个发不了消息的会话', async () => {
+  // 旧行为：不带 agentPreset 的 create 直接放行，Host 随后把会话定成部署默认 preset，
+  // 而 prompt 要求"已知且在白名单内"，于是账号拥有一个永远 403 的空会话。
+  // create 现在与 prompt 判据一致：必须显式带上被授权的 preset。
   upstreamCalls = [];
   const noPreset = await request('/api/session.create', JSON.stringify({ cwd: '/work/allowed' }), restrictedCookie);
-  assert.equal(noPreset.status, 200, noPreset.body);
-  assert.equal(upstreamCalls.some((url) => url.startsWith('/api/session.create')), true);
+  assert.equal(noPreset.status, 403, noPreset.body);
+  assert.equal(upstreamCalls.some((url) => url.startsWith('/api/session.create')), false);
   const anyPreset = await request('/api/session.create', JSON.stringify({ cwd: '/work/allowed', agentPreset: 'preset/whatever' }), restrictedCookie);
   assert.equal(anyPreset.status, 403);
+});
+
+test('preset 拒绝的文案指向 preset 授权，而不是文件夹白名单', async () => {
+  const denied = await request('/api/session.create', JSON.stringify({ cwd: '/work/allowed' }), restrictedCookie);
+  assert.equal(denied.status, 403);
+  const body = JSON.parse(denied.body) as { error: string };
+  assert.match(body.error, /Agent preset/);
+  assert.doesNotMatch(body.error, /folder|文件夹/);
 });
 
 test('Issue #22: 授权 preset 允许创建会话，并登记缓存供 prompt 使用', async () => {

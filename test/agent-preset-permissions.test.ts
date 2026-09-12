@@ -42,7 +42,7 @@ test('Issue #23: 请求体上限按角色和大请求体权限分档', () => {
   );
 });
 
-test('Issue #22: 正常新增子用户默认 allowed_agent_presets 为空数组（不允许任何 Agent preset）', async () => {
+test('Issue #22: 正常新增子用户默认 allowed_agent_presets 为 NULL（不限制，拦截由目录白名单承担）', async () => {
   const tempDir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-preset-perms-'));
   const dbPath = path.join(tempDir, 'test.db');
   const crypto = createFieldCrypto('test-key', 'test-key');
@@ -73,7 +73,12 @@ test('Issue #22: 正常新增子用户默认 allowed_agent_presets 为空数组�
     const user = db.getUserByUsername('new-subuser');
     assert.ok(user, '子用户应已创建');
     const perms = db.getPermissions(user.id);
-    assert.deepEqual(perms?.allowed_agent_presets, [], '新子用户默认不允许任何 Agent preset');
+    // 曾经播种 []（允许零个 preset）。provision 与 mergedPermissions 都不带这个字段，
+    // setPermissions 遇 undefined 保留旧值，于是 [] 永久留下：账号目录开通、预算给足
+    // 之后，每一条 session/prompt 仍被 preset 闸门 403。建号窗口期的 fail-closed 由
+    // allowed_folders: ['__deny__'] 与 monthly_budget_micros: 0 承担，preset 不参与。
+    assert.equal(perms?.allowed_agent_presets, null, '新子用户默认不限制 Agent preset');
+    assert.deepEqual(perms?.allowed_folders, ['__deny__'], '建号窗口期仍然拒绝全部目录');
     assert.equal(perms?.allow_upload, true, 'fork 默认允许子用户使用明确的流式上传端点');
     assert.equal(perms?.allow_ssh, true, '启用账号隔离 SSH 的部署默认授权新子用户');
     const legacyAuth = new AuthService({ ...config, tenantSsh: { enabled: false } }, db);

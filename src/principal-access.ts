@@ -50,7 +50,8 @@ function defaultPermissions(userId: number): UserPermissionsRow {
     allow_git_download: false,
     allow_workspace_create: false,
     allow_ssh: false,
-    allowed_agent_presets: [],
+    // 缺行时由 DENY_ALL_WORKSPACES 拦截；空数组会隐式变成“一个 preset 都不许用”
+    allowed_agent_presets: null,
     banned: false,
     sandbox_mode: null,
     disabled_sessions: [],

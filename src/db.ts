@@ -122,6 +122,8 @@ export interface SessionOwnerRow {
   session_id: string;
   user_id: number;
   created_at: string;
+  /** Agent preset the Host resolved for this session, null before it was observed. */
+  agent_preset: string | null;
 }
 
 /** Durable model selection owned by one DSH session. */
@@ -260,9 +262,10 @@ CREATE TABLE IF NOT EXISTS managed_workspaces (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS session_owners (
-  session_id TEXT PRIMARY KEY,
-  user_id    INTEGER NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  session_id   TEXT PRIMARY KEY,
+  user_id      INTEGER NOT NULL,
+  created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  agent_preset TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_session_owners_user ON session_owners(user_id);
 CREATE TABLE IF NOT EXISTS session_model_selections (
@@ -397,9 +400,10 @@ CREATE TABLE IF NOT EXISTS managed_workspaces (
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE IF NOT EXISTS session_owners (
-  session_id VARCHAR(200) PRIMARY KEY,
-  user_id    INT UNSIGNED NOT NULL,
-  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  session_id   VARCHAR(200) PRIMARY KEY,
+  user_id      INT UNSIGNED NOT NULL,
+  created_at   DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  agent_preset VARCHAR(200),
   KEY idx_session_owners_user (user_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE IF NOT EXISTS session_model_selections (
@@ -516,6 +520,7 @@ export class Database {
       this.db.exec(MYSQL_SCHEMA);
       this.migrateRoles();
       this.migratePermissions();
+      this.migrateSessionOwners();
       this.migrateUsers();
       this.migrateAuditLogs();
       this.setSetting('mysql_schema_version', '1');
@@ -527,6 +532,7 @@ export class Database {
     this.db.exec(SCHEMA);
     this.migrateRoles();
     this.migratePermissions();
+    this.migrateSessionOwners();
     const changedUsers = this.migrateUsers();
     const changedAudit = this.migrateAuditLogs();
     const changedAttempts = this.migrateLoginAttempts();
@@ -586,6 +592,19 @@ export class Database {
     add('sandbox_mode', 'TEXT', 'VARCHAR(64)');
     add('disabled_sessions', "TEXT NOT NULL DEFAULT '[]'", 'MEDIUMTEXT NULL');
     add('monthly_budget_micros', 'INTEGER NOT NULL DEFAULT 0', 'BIGINT NOT NULL DEFAULT 0');
+  }
+
+  // ── 迁移：session_owners 补 agent_preset 列（可重复执行） ─────────────────
+  private migrateSessionOwners(): void {
+    const names = new Set(
+      this.mysql
+        ? (this.stmt('SHOW COLUMNS FROM session_owners').all() as { Field: string }[]).map((column) => column.Field)
+        : (this.stmt('PRAGMA table_info(session_owners)').all() as { name: string }[]).map((column) => column.name),
+    );
+    if (names.has('agent_preset')) return;
+    this.db.exec(
+      `ALTER TABLE session_owners ADD COLUMN agent_preset ${this.mysql ? 'VARCHAR(200)' : 'TEXT'}`,
+    );
   }
 
   // ── 迁移：users.username 明文 → 密文 + username_hash ──────────
@@ -1396,9 +1415,20 @@ export class Database {
   /** Load the durable ownership index used by the gateway. */
   listSessionOwners(): SessionOwnerRow[] {
     const rows = this.stmt(
-      'SELECT session_id, user_id, created_at FROM session_owners ORDER BY created_at ASC, session_id ASC',
+      'SELECT session_id, user_id, created_at, agent_preset FROM session_owners ORDER BY created_at ASC, session_id ASC',
     ).all() as unknown as SessionOwnerRow[];
     return rows.map((row) => ({ ...row, user_id: Number(row.user_id) }));
+  }
+
+  /**
+   * Record the agent preset the Host resolved for one owned session. The gateway
+   * authorizes every later prompt against this value, so it must outlive the
+   * process that observed the session being created.
+   */
+  setSessionAgentPreset(sessionId: string, agentPreset: string): void {
+    if (sessionId.length === 0 || sessionId.length > 200) throw new Error('Invalid session id');
+    if (agentPreset.length === 0 || agentPreset.length > 200) throw new Error('Invalid agent preset id');
+    this.stmt('UPDATE session_owners SET agent_preset = ? WHERE session_id = ?').run(agentPreset, sessionId);
   }
 
   /** Persist one resolved model selection without changing the deployment default. */

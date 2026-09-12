@@ -1275,11 +1275,15 @@ export function createGatewayServer(
     }
     return map;
   };
-  const collectSessionAgentPresets = (value: unknown, target: Map<string, string>, depth = 0): void => {
-    if (depth > 8 || value === null || typeof value !== 'object') return;
+  const collectSessionAgentPresets = (
+    value: unknown,
+    target: Map<string, string>,
+    depth = 0,
+  ): Map<string, string> => {
+    if (depth > 8 || value === null || typeof value !== 'object') return target;
     if (Array.isArray(value)) {
       for (const item of value) collectSessionAgentPresets(item, target, depth + 1);
-      return;
+      return target;
     }
     const row = value as Record<string, unknown>;
     const id = typeof row.sessionId === 'string'
@@ -1291,10 +1295,33 @@ export function createGatewayServer(
       target.set(id, row.agentPreset);
     }
     for (const child of Object.values(row)) collectSessionAgentPresets(child, target, depth + 1);
+    return target;
   };
+  const sessionOwnerRows = db.listSessionOwners();
   const sessionOwnerById = new Map(
-    db.listSessionOwners().map((row) => [row.session_id, row.user_id] as const),
+    sessionOwnerRows.map((row) => [row.session_id, row.user_id] as const),
   );
+  // A preset whitelist authorizes every later prompt, so the mapping has to survive
+  // this process. `session/list` carries no preset, which is why it is read back from
+  // the ownership table instead of being re-collected after a restart.
+  for (const row of sessionOwnerRows) {
+    if (row.agent_preset !== null) {
+      sessionAgentPresetMapFor(row.user_id).set(row.session_id, row.agent_preset);
+    }
+  }
+  /** Remember one owned session's resolved preset for this account, in memory and on disk. */
+  function recordSessionAgentPreset(userId: number, sessionId: string, agentPreset: string): void {
+    sessionAgentPresetMapFor(userId).set(sessionId, agentPreset);
+    try {
+      db.setSessionAgentPreset(sessionId, agentPreset);
+    } catch (error) {
+      // 会话已经建好，落库失败只影响重启后的可用性，不能把成功的建会话请求改成失败
+      console.warn(
+        '[dsh-passwords] 会话 preset 落库失败，重启后需重新授权:',
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
   /** Resolve setup-created or replaced administrators at the instant an internal read is signed. */
   function currentAdminUserId(): number | null {
     return db.listUsers().find((user) => user.role === 'admin')?.id ?? null;
@@ -2156,6 +2183,9 @@ export function createGatewayServer(
         user_id: userId,
         // 新子用户默认关闭全部工作区；旧的显式空数组权限行仍保留“不限制”兼容语义。
         allowed_folders: ['__deny__'],
+        // 缺行时不隐含 preset 白名单：拦截由上面的目录拒绝承担。空数组的语义是
+        // “一个 preset 都不许用”，隐式落到这里会让账号建得出会话却永远发不出消息。
+        // 要限制 preset 必须由主用户显式写一行。
         hourly_token_limit: null,
         daily_minutes_limit: null,
         monthly_budget_micros: 0,
@@ -2165,7 +2195,7 @@ export function createGatewayServer(
         allow_git_download: false,
         allow_workspace_create: false,
         allow_ssh: false,
-        allowed_agent_presets: [],
+        allowed_agent_presets: null,
         banned: false,
         sandbox_mode: null,
         disabled_sessions: [],
@@ -5988,11 +6018,10 @@ export function createGatewayServer(
                 ? successfulSessionId(parsed)
                 : null;
               if (sessionId !== null && reqAs.dshpwUser !== undefined) {
-                if (reqAs.dshpwAgentPreset !== undefined) {
-                  sessionAgentPresetMapFor(reqAs.dshpwUser).set(sessionId, reqAs.dshpwAgentPreset);
-                } else {
-                  collectSessionAgentPresets(parsed, sessionAgentPresetMapFor(reqAs.dshpwUser));
-                }
+                // The preset is recorded only once ownership is confirmed below: the
+                // durable row it updates does not exist until the session is claimed.
+                const resolvedPreset = reqAs.dshpwAgentPreset ??
+                  collectSessionAgentPresets(parsed, sessionAgentPresetMapFor(reqAs.dshpwUser)).get(sessionId);
                 const requestedSessionId = reqAs.dshpwRequestedSessionId;
                 if (requestedSessionId !== undefined && requestedSessionId !== sessionId) {
                   if (!res.headersSent) {
@@ -6010,6 +6039,9 @@ export function createGatewayServer(
                     sendApiError(res, 403, 'OWNER_CONFLICT', 'session identity belongs to another account');
                   }
                   return;
+                }
+                if (resolvedPreset !== undefined) {
+                  recordSessionAgentPreset(reqAs.dshpwUser, sessionId, resolvedPreset);
                 }
                 const reqCwd = reqAs.dshpwSessionCwd;
                 const cwd = typeof reqCwd === 'string' && reqCwd.length > 0
@@ -6163,7 +6195,7 @@ export function createGatewayServer(
               businessOk = false;
             }
             if (businessOk && sessionId !== undefined && reqAs.dshpwUser !== undefined) {
-              sessionAgentPresetMapFor(reqAs.dshpwUser).set(sessionId, selectedAgentPreset);
+              recordSessionAgentPreset(reqAs.dshpwUser, sessionId, selectedAgentPreset);
             }
             const respHeaders = headersForStreaming(upstreamRes.headers);
             if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
@@ -6433,7 +6465,7 @@ export function createGatewayServer(
     ) {
       rejectProxyRequestBody();
       upstreamReq.destroy();
-      denyRequest(req, res, langOf(req), t(langOf(req), 'gw.folderDenied'));
+      denyRequest(req, res, langOf(req), t(langOf(req), 'gw.agentPresetDenied'));
       return;
     }
     // SSH targets require public-address validation unless the deployment has
@@ -6528,18 +6560,20 @@ export function createGatewayServer(
             : [];
           const selectedPreset = requestedPreset ?? inheritedPreset;
           const isSessionCreate = /^\/api\/session[.\/]create$/.test(proxyPath);
-          const allowed = isSessionCreate
-            ? requestedPreset === null || allowedPresets.has(requestedPreset)
-            : requiresExplicitPreset
-              ? requestedPreset !== null && allowedPresets.has(requestedPreset)
-              : /^\/api\/session[.\/]fork$/.test(proxyPath)
-                ? selectedPreset !== undefined && allowedPresets.has(selectedPreset)
-                : promptPresets.length > 0 && promptPresets.every(
-                    (preset) => preset !== undefined && allowedPresets.has(preset),
-                  );
+          // A create that names no preset lets the Host resolve its deployment default,
+          // which prompt then rejects because it is outside this whitelist — the account
+          // would own a session it can never send to. Creation demands the same explicit
+          // allowed preset that every later prompt is checked against.
+          const allowed = isSessionCreate || requiresExplicitPreset
+            ? requestedPreset !== null && allowedPresets.has(requestedPreset)
+            : /^\/api\/session[.\/]fork$/.test(proxyPath)
+              ? selectedPreset !== undefined && allowedPresets.has(selectedPreset)
+              : promptPresets.length > 0 && promptPresets.every(
+                  (preset) => preset !== undefined && allowedPresets.has(preset),
+                );
           if (!allowed) {
             upstreamReq.destroy();
-            denyRequest(req, res, lang, t(lang, 'gw.folderDenied'));
+            denyRequest(req, res, lang, t(lang, 'gw.agentPresetDenied'));
             return;
           }
           if (

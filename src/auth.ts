@@ -364,6 +364,13 @@ export class AuthService {
     const user = await this.db.createUser(name, hash, 'user');
     // 先 fail-closed；宿主机专属工作区创建并注册成功后，provision 再原子地
     // 替换成该目录与 workspace-write。失败时删除刚创建的账号，允许管理员重试。
+    //
+    // allowedAgentPresets 播种 null（不限制）而不是 []：建号窗口期的 fail-closed 由
+    // allowedFolders: ['__deny__'] 与 monthlyBudgetMicros: 0 保证，preset 白名单在这里
+    // 不承担任何额外拦截。而 provision 与 mergedPermissions 都不带这个字段，
+    // setPermissions 遇 undefined 保留旧值 —— 播种 [] 会永久留下"一个 preset 都不许用"，
+    // 于是账号建好、目录开通、预算给足之后，每一条 session/prompt 仍被网关 403，
+    // 且文案是"文件夹权限被拒"。要限制 preset 的部署请在子用户权限页显式设白名单。
     this.db.setPermissions(user.id, {
       allowedFolders: ['__deny__'],
       hourlyTokenLimit: null,
@@ -373,7 +380,7 @@ export class AuthService {
       allowGitDownload: false,
       allowWorkspaceCreate: false,
       allowSsh: this.config.tenantSsh?.enabled === true,
-      allowedAgentPresets: [],
+      allowedAgentPresets: null,
       banned: false,
       sandboxMode: null,
       disabledSessions: [],
