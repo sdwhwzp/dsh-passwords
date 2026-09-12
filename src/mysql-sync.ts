@@ -51,6 +51,42 @@ const HEADER_BYTES = Int32Array.BYTES_PER_ELEMENT * 2;
 const RESPONSE_BYTES = 32 * 1024 * 1024;
 
 /**
+ * The request/response buffer shared with the query worker, reused across calls.
+ *
+ * `MysqlSyncConnection.call` blocks its thread until the worker answers, so a second
+ * request cannot begin while one is in flight and a single buffer suffices. Allocating
+ * one per query instead costs `bytes` of freshly zeroed memory for every statement —
+ * at production query rates that dominated the process's CPU time and GC pressure.
+ */
+export class SyncCallBuffer {
+  private shared: SharedArrayBuffer | null = null;
+
+  /**
+   * @param bytes - total buffer size, header included.
+   */
+  constructor(private readonly bytes: number) {}
+
+  /**
+   * Take the buffer for one request, with its completion header reset.
+   * @returns the shared buffer and its `[done, length]` header view.
+   */
+  acquire(): { shared: SharedArrayBuffer; header: Int32Array } {
+    const shared = this.shared ?? new SharedArrayBuffer(this.bytes);
+    this.shared = shared;
+    const header = new Int32Array(shared, 0, 2);
+    // 复位必须早于 postMessage：worker 只在写完响应后才把 header[0] 置 1
+    Atomics.store(header, 1, 0);
+    Atomics.store(header, 0, 0);
+    return { shared, header };
+  }
+
+  /** Drop the current buffer so a late worker write cannot corrupt the next request. */
+  forfeit(): void {
+    this.shared = null;
+  }
+}
+
+/**
  * Present MySQL's asynchronous protocol as the same synchronous repository API
  * used by node:sqlite. Network I/O runs in one worker and one connection, so
  * transaction statements and their following queries cannot switch sessions.
@@ -59,6 +95,7 @@ export class MysqlSyncConnection implements SqlConnection {
   private readonly worker: Worker;
   private fatalError: Error | null = null;
   private closed = false;
+  private readonly buffer = new SyncCallBuffer(HEADER_BYTES + RESPONSE_BYTES);
 
   constructor(private readonly options: MysqlConnectionOptions) {
     // `--input-type` only applies to eval/stdin entry points and makes a file-backed worker fail at startup.
@@ -95,11 +132,11 @@ export class MysqlSyncConnection implements SqlConnection {
     if (this.closed) throw new Error('MySQL connection is closed');
     if (this.fatalError !== null) throw new Error(`MySQL worker failed: ${this.fatalError.message}`);
 
-    const shared = new SharedArrayBuffer(HEADER_BYTES + RESPONSE_BYTES);
-    const header = new Int32Array(shared, 0, 2);
+    const { shared, header } = this.buffer.acquire();
     this.worker.postMessage({ request, shared });
     const wait = Atomics.wait(header, 0, 0, this.options.queryTimeoutMs);
     if (wait === 'timed-out') {
+      this.buffer.forfeit();
       throw new Error(`MySQL operation timed out after ${String(this.options.queryTimeoutMs)}ms`);
     }
 
