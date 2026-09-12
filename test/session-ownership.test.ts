@@ -12,7 +12,7 @@ import {
   filterSessionItems,
   collectSessionCwd,
   collectSessionCwdFromWorkspaces,
-} from '../src/permissions.js';
+  collectSessionParents,} from '../src/permissions.js';
 
 test('工作区授权：会话 RPC 路由命中，create/list 单独处理', () => {
   for (const method of ['history', 'prompt', 'respond', 'archive', 'delete', 'rename', 'fork']) {
@@ -161,4 +161,22 @@ test('深度超限：不可验证会话子树不原样透传', () => {
   let cursor: unknown = out;
   for (let i = 0; i < 10; i++) cursor = (cursor as Record<string, unknown>)?.nested;
   assert.ok(cursor === null || cursor === undefined);
+});
+
+test('collectSessionParents：只收集有效的委派链，自指与空值丢弃', () => {
+  // session.list 的响应是嵌套的，链接可能出现在任意深度。
+  const parents = collectSessionParents({
+    result: {
+      value: {
+        items: [
+          { sessionId: 'child', parentSessionId: 'parent', cwd: '/w' },
+          { sessionId: 'plain', cwd: '/w' },
+          { sessionId: 'self', parentSessionId: 'self' },
+          { sessionId: 'blank', parentSessionId: '' },
+          { nested: { items: [{ sessionId: 'deep', parentSessionId: 'root' }] } },
+        ],
+      },
+    },
+  });
+  assert.deepEqual([...parents.entries()].sort(), [['child', 'parent'], ['deep', 'root']]);
 });

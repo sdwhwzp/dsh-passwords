@@ -439,6 +439,31 @@ export function collectSessionCwd(value: unknown, out: Map<string, string> = new
 }
 
 
+/**
+ * 从 session.list 响应收集 sessionId → parentSessionId 映射。
+ *
+ * 委派产生的会话（子代理、workflow 成员、被续接的会话）只能通过父会话地址读取
+ * 自身历史，直接寻址会得到 `session/agent-busy`。归属并非未知——委派继承发起它的
+ * 账号——所以这条链是这类会话唯一能判出归属的依据。
+ */
+export function collectSessionParents(value: unknown, out: Map<string, string> = new Map(), depth = 0): Map<string, string> {
+  if (depth > 8 || value === null) return out;
+  if (Array.isArray(value)) {
+    for (const item of value) collectSessionParents(item, out, depth + 1);
+  } else if (typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    if (
+      typeof obj.sessionId === 'string' && obj.sessionId.length > 0 &&
+      typeof obj.parentSessionId === 'string' && obj.parentSessionId.length > 0 &&
+      obj.parentSessionId !== obj.sessionId
+    ) {
+      out.set(obj.sessionId, obj.parentSessionId);
+    }
+    for (const v of Object.values(obj)) collectSessionParents(v, out, depth + 1);
+  }
+  return out;
+}
+
 /** 从 workspace.list 响应收集会话 cwd：工作区 path → 其 sessionIds 对应会话的 cwd（无则覆盖）。 */
 export function collectSessionCwdFromWorkspaces(value: unknown, out: Map<string, string> = new Map(), depth = 0): Map<string, string> {
   if (depth > 8 || value === null) return out;

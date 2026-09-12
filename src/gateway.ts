@@ -81,6 +81,7 @@ import {
   collectIdPathPairs,
   collectSessionCwd,
   collectSessionCwdFromWorkspaces,
+  collectSessionParents,
   extractWorkspaceId,
   extractWorkspaceRenamePaths,
   findStringField,
@@ -1884,6 +1885,9 @@ export function createGatewayServer(
     value: unknown,
     deadline = Date.now() + SESSION_OWNERSHIP_BOOTSTRAP_TIMEOUT_MS,
   ): Promise<SessionIdentitySnapshot> {
+    // The delegation links ride the same response; recording them before the
+    // pass is what lets a delegated Session resolve an owner at all.
+    for (const [child, parent] of collectSessionParents(value)) sessionParentById.set(child, parent);
     return resolveSessionIdentitySnapshot(
       collectSessionIds(value),
       collectSessionCwd(value),
