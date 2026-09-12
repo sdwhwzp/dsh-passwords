@@ -1342,6 +1342,8 @@ export function createGatewayServer(
    * cleared.
    */
   const unresolvableSessionOwners = new Set<string>();
+  /** `sessionId → parentSessionId` for delegated Sessions, from the trusted roster. */
+  const sessionParentById = new Map<string, string>();
 
   /** Read one durable session owner, filling the hot index after a cache miss. */
   function sessionOwner(sessionId: string): number | null {
@@ -1762,6 +1764,34 @@ export function createGatewayServer(
     }
   }
 
+  /** How far a delegation chain is followed before it is treated as a cycle. */
+  const MAX_DELEGATION_DEPTH = 16;
+
+  /**
+   * The owner a delegated Session inherits from the Session that initiated it.
+   *
+   * Walks the roster's `parentSessionId` links to the nearest ancestor with an
+   * owner, resolving that ancestor first when it is itself unowned, and claims
+   * the answer for the child so the walk runs once. A chain that reaches no
+   * owner, revisits a Session, or runs past its deadline yields null and the
+   * caller reports the original read failure.
+   * @param sessionId - the delegated Session.
+   * @param deadline - epoch ms after which the walk stops.
+   * @returns the inherited owner id, or null.
+   */
+  async function inheritOwnerFromParent(sessionId: string, deadline: number): Promise<number | null> {
+    const seen = new Set<string>([sessionId]);
+    let parent = sessionParentById.get(sessionId);
+    for (let depth = 0; parent !== undefined && depth < MAX_DELEGATION_DEPTH; depth += 1) {
+      if (seen.has(parent) || Date.now() >= deadline) return null;
+      seen.add(parent);
+      const owner = sessionOwner(parent) ?? await resolveLegacySessionOwner(parent, deadline);
+      if (owner !== null) return claimSessionOwner(sessionId, owner);
+      parent = sessionParentById.get(parent);
+    }
+    return null;
+  }
+
   /**
    * Resolve one pre-ownership-table session from the authenticated identity on its first prompt.
    * A directory path alone is not identity evidence because administrators can work inside a
@@ -1780,7 +1810,15 @@ export function createGatewayServer(
       upstreamRemoteTransport
         ? resolveRemoteSessionOwnerViaPages(sessionId, deadline)
         : resolveLegacySessionOwnerViaHistory(sessionId)
-    ).catch((error: unknown) => {
+    ).catch(async (error: unknown) => {
+      // A delegated Session has no readable evidence of its own: the Host
+      // serves its history only through the durable parent address and answers
+      // `session/agent-busy` otherwise. Its owner is not unknown, though —
+      // delegation inherits the account that initiated it — so the parent's
+      // owner is the answer, and refusing to look for it leaves the whole
+      // family invisible to the account that actually created it.
+      const inherited = await inheritOwnerFromParent(sessionId, deadline);
+      if (inherited !== null) return inherited;
       console.warn(
         '[dsh-passwords] 旧会话归属证据读取失败，保持不可见:',
         `session=${sessionId}`,
@@ -4999,6 +5037,12 @@ export function createGatewayServer(
       const sessionId = item.sessionId as string;
       sessionIds.add(sessionId);
       if (typeof item.cwd === 'string' && item.cwd.length > 0) sessionCwds.set(sessionId, item.cwd);
+      // The roster already carries the delegation link; remembering it is what
+      // lets a subagent Session resolve an owner at all, since the Host serves
+      // its ownership evidence only through the durable parent address.
+      if (typeof item.parentSessionId === 'string' && item.parentSessionId.length > 0) {
+        sessionParentById.set(sessionId, item.parentSessionId);
+      }
     }
     return { sessionIds, sessionCwds };
   }

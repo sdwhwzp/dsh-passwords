@@ -20,6 +20,8 @@ const GOOD_SESSION = 'alpha-owned';
 const WRONG_RPC_SESSION = 'alpha-wrong-rpc';
 const INCOMPLETE_SESSION = 'alpha-incomplete-oldest';
 const INTERNAL_SECRET = 'internal-secret';
+/** A delegated Session: the Host serves its evidence only through the parent address. */
+const SUBAGENT_SESSION = 'alpha-subagent-child';
 
 interface PageRequest {
   readonly sessionId: string;
@@ -123,13 +125,22 @@ test('Alpha.4 session/page adopts only complete oldest-prefix ownership evidence
   const httpPaths: string[] = [];
   const openedRemoteEndpoints: string[] = [];
   const sessionListPrincipalRoles: string[] = [];
-  const sessionSummaries = [GOOD_SESSION, WRONG_RPC_SESSION, INCOMPLETE_SESSION].map((sessionId) => ({
+  const sessionSummaries: Array<Record<string, unknown>> = [GOOD_SESSION, WRONG_RPC_SESSION, INCOMPLETE_SESSION].map((sessionId) => ({
     sessionId,
     updatedAt: 1_800_000_000_000,
     running: false,
     blank: false,
     cwd: sessionCwd,
   }));
+  sessionSummaries.push({
+    sessionId: SUBAGENT_SESSION,
+    updatedAt: 1_800_000_000_000,
+    running: false,
+    blank: false,
+    cwd: sessionCwd,
+    parentSessionId: GOOD_SESSION,
+    origin: 'subagent',
+  });
   const services = new Map<string, unknown>([
     ['workspaceRegistry', { list: () => [{ id: 'customer-workspace', path: sessionCwd }] }],
     ['sessionQuery', {
@@ -193,6 +204,15 @@ test('Alpha.4 session/page adopts only complete oldest-prefix ownership evidence
       };
       pageRequests.push(pageRequest);
 
+      if (sessionId === SUBAGENT_SESSION) {
+        // Exactly what the Host answers for a delegated Session addressed
+        // directly: its evidence is reachable only through the parent.
+        sendResponse(res, body.rpcId as string, {
+          ok: false,
+          error: { code: 'session/agent-busy', message: 'subagent Sessions require their durable parent address' },
+        });
+        return;
+      }
       if (sessionId === WRONG_RPC_SESSION) {
         sendResponse(res, `${body.rpcId as string}-wrong`, {
           ok: true,
@@ -301,7 +321,7 @@ test('Alpha.4 session/page adopts only complete oldest-prefix ownership evidence
                 workspaceId: 'customer-workspace',
                 path: sessionCwd,
                 title: 'Customer workspace',
-                sessionIds: [GOOD_SESSION, WRONG_RPC_SESSION, INCOMPLETE_SESSION],
+                sessionIds: [GOOD_SESSION, WRONG_RPC_SESSION, INCOMPLETE_SESSION, SUBAGENT_SESSION],
                 createdAt: '2026-08-30T00:00:00.000Z',
                 updatedAt: '2026-08-30T00:00:00.000Z',
               }],
@@ -368,7 +388,13 @@ test('Alpha.4 session/page adopts only complete oldest-prefix ownership evidence
     const visible = await response.json() as {
       result: { value: { items: Array<{ sessionId: string }> } };
     };
-    assert.deepEqual(visible.result.value.items.map((item) => item.sessionId), [GOOD_SESSION]);
+    // The delegated child rides with the Session that initiated it: both are
+    // the tenant's, and hiding the child is what a 403 on its first prompt
+    // looked like from the browser.
+    assert.deepEqual(
+      visible.result.value.items.map((item) => item.sessionId).sort(),
+      [GOOD_SESSION, SUBAGENT_SESSION].sort(),
+    );
     assert.deepEqual(
       sessionListPrincipalRoles,
       ['admin', 'user'],
@@ -378,6 +404,10 @@ test('Alpha.4 session/page adopts only complete oldest-prefix ownership evidence
     assert.equal(db.getSessionOwner(GOOD_SESSION), customer.id);
     assert.equal(db.getSessionOwner(WRONG_RPC_SESSION), null);
     assert.equal(db.getSessionOwner(INCOMPLETE_SESSION), null);
+    // The delegated Session's own evidence is unreadable by contract, so its
+    // owner comes from the Session that initiated it. Leaving it unowned is
+    // what made a whole family invisible to the account that created it.
+    assert.equal(db.getSessionOwner(SUBAGENT_SESSION), customer.id);
 
     const completePages = pageRequests.filter(
       (request) => request.sessionId === GOOD_SESSION && request.maxMessages === 512,
