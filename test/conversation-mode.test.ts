@@ -37,6 +37,8 @@ test('chat creation claims the authenticated owner and durable mode before Host 
   } } as unknown as Context;
   const first = await createConversation(ctx, f.db, f.principal);
   const second = await createConversation(ctx, f.db, f.principal);
+  assert.equal(first.cwd, f.directory);
+  assert.equal(second.cwd, f.directory);
   assert.notEqual(first.sessionId, second.sessionId);
   assert.deepEqual(created, [first.sessionId, second.sessionId]);
   await assert.rejects(createConversation(ctx, f.db, { ...f.principal, id: String(f.other.id) }), /active account/);

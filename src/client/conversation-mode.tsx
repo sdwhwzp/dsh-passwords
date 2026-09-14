@@ -46,7 +46,7 @@ export function ConversationModeControls({ sessions, layout, client, t }: Conver
       const result = await client.createConversation();
       if (!result.ok) throw new Error(result.error.message);
       setIds(previous => [...new Set([...previous, result.value.sessionId])]);
-      await sessions.refresh();
+      await sessions.create({ sessionId: result.value.sessionId as SessionId, cwd: result.value.cwd });
       sessions.open(result.value.sessionId as SessionId);
       layout.selectPanel(null);
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }

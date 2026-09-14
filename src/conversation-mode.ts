@@ -21,7 +21,7 @@ export function isConversationSession(db: Database, id: string): boolean {
 }
 
 /** Create only server-generated identities and claim ownership before publishing the Session. */
-export async function createConversation(ctx: Context, db: Database, principal: AuthenticatedPrincipal): Promise<{ sessionId: SessionId }> {
+export async function createConversation(ctx: Context, db: Database, principal: AuthenticatedPrincipal): Promise<{ sessionId: SessionId; cwd: string }> {
   const root = await ctx.managedUserWorkspace.resolve(principal);
   if (root === undefined || db.getPermissions(Number(principal.id))?.banned) throw new Error('active account required');
   const workspace = await ctx.workspaceRegistry.resolveByPath(root)
@@ -31,7 +31,7 @@ export async function createConversation(ctx: Context, db: Database, principal: 
   db.setSetting(key(sessionId), 'chat');
   // Keep the mode on a failed create: a partially persisted Session must never resume with development privileges.
   await ctx.sessionController.create({ sessionId, workspaceId: workspace.id });
-  return { sessionId };
+  return { sessionId, cwd: root };
 }
 
 /** Install per-Agent restrictions on creation and restoration; development Sessions are unchanged. */

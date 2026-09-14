@@ -5,3 +5,5 @@
 服务端模式记录在 Session 发布前持久化，并随恢复与父会话分支继承。`tools.restrict` 过滤继承工具，无法独自屏蔽后注册的 Agent 自有工具；因此还必须在 `system-prompt/assemble` 返回前过滤工具列表，并通过 `tools.guard` 拒绝实际执行。组装后的列表由原生请求日志记录，模型可见内容可从历史重建。
 
 使用、备份要求与验证入口见 [纯会话模式](../../docs/2026-09-14-conversation-mode.md)。
+
+原生 `sessions.refresh()` 复用正在进行的请求，其结果可能早于自定义创建 RPC。成功创建后用公开的 `sessions.create({ sessionId, cwd })` 幂等接入已创建会话并登记摘要，再打开会话；原生列表会将该变更重放到尚未完成的列表响应上。

@@ -10,7 +10,7 @@
 
 Harness 输入框要求 Session 关联 Workspace，因此服务器自动关联登录账号自己的托管目录，用户不需要创建或选择工作区。该目录仅用于满足 Session 生命周期要求；工具权限由独立的服务端模式记录控制。
 
-`dshPasswords/createConversation` 从登录 principal 解析目录，生成 Session ID，并在发布 Session 前保存归属和 `conversation_mode:<sessionId>=chat` 设置。创建中断仍保留限制，避免部分保存的会话恢复成开发会话。`dshPasswords/conversations` 只返回当前账号拥有的纯会话 ID。
+`dshPasswords/createConversation` 从登录 principal 解析目录，生成 Session ID，并在发布 Session 前保存归属和 `conversation_mode:<sessionId>=chat` 设置。创建中断仍保留限制，避免部分保存的会话恢复成开发会话。`dshPasswords/conversations` 只返回当前账号拥有的纯会话 ID。创建成功的响应先通过原生 `sessions.create({ sessionId, cwd })` 幂等接入客户端，再选择会话；正在进行的旧列表请求不能作为新会话已可选择的依据。
 
 `agent/created` 为纯会话安装原生工具展示、知识库工具白名单和执行守卫；恢复及 Host 记录的父会话分支继承限制。模型请求组装时再次过滤工具列表，后注册的 scoped 工具不会进入已记录的模型请求；额外注册的 scoped shell 也必须经过执行守卫。租户 shell 和服务管理插件不向纯会话注册开发工具。网关拒绝该会话的指令执行、打开目录、文件搜索、预设切换，以及侧栏文件、终端和编辑器访问。
 

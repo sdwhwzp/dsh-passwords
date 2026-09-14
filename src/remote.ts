@@ -35,7 +35,7 @@ export class DshPasswordsRemote extends TypertRemoteService {
 
   /** Create a chat Session for the transport-authenticated caller. */
   @Remote('createConversation')
-  async createConversation(): Promise<{ sessionId: string }> {
+  async createConversation(): Promise<{ sessionId: string; cwd: string }> {
     const principal = this.ctx.typertGateway.currentPrincipal();
     authenticatedUser(this.db, principal);
     if (principal === undefined) throw new Error('authenticated principal required');

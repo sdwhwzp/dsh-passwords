@@ -58,7 +58,7 @@ export type DshPasswordsRemoteResult<T> =
 export interface DshPasswordsRemoteClient {
   $mount(contribution: typeof DSH_PASSWORDS_REMOTE): Promise<() => void | Promise<void>>;
   dshPasswords: {
-    createConversation(): Promise<DshPasswordsRemoteResult<{ sessionId: string }>>;
+    createConversation(): Promise<DshPasswordsRemoteResult<{ sessionId: string; cwd: string }>>;
     conversations(): Promise<DshPasswordsRemoteResult<{ sessionIds: string[] }>>;
     state(): Promise<DshPasswordsRemoteResult<StateData>>;
   };
