@@ -21,3 +21,13 @@ Harness 输入框要求 Session 关联 Workspace，因此服务器自动关联�
 `test/conversation-mode.test.ts` 覆盖创建前归属、创建失败、历史恢复、分支继承和实际工具注册表执行限制。`test/conversation-mode-client.test.ts` 覆盖模式切换、空会话复用与订阅清理。`test/gateway-proxy-headers.test.ts` 覆盖管理员和普通账号对纯会话开发接口的拒绝。
 
 网页使用现有 slot 及局部样式隐藏开发入口，不修改 Harness 主仓库。升级 Harness UI 后需要复核侧栏、会话标题栏和输入框布局。发布验收应包括实时回复、刷新恢复、两账号隔离、知识库调用和切回开发模式。
+
+## 2026-09-14 部署验收
+
+版本 `2.7.1-dsh.20260914.2` 已部署到 [线上入口](https://gr.gr-iot.cn:3081/)，运行代码提交为 `e6b4b511a2ac50594aa90ceb103a9c951797e749`，已推送到 `dev`。
+
+构建、20 项相关测试和 49 项网关测试通过；工具组装过滤调整后，5 项模式测试再次通过。本地浏览器验证自动显示回复、刷新恢复、切回开发模式和 shell 强制调用拒绝；WeKnora 真实工具调用返回 3 个知识库。两个测试账号的纯会话列表互相隔离，越权读取历史返回 403。
+
+生产健康入口返回 200，未登录 Host 返回 401，新纯会话查询接口返回 200。165 个已有会话保留；331 个依赖中仅更新 dsh-passwords，330 个保持原版本；原有 32 行配置保留，另加 WeKnora 配置。地址和 Key 仅保存在服务器受限配置中，不进入 Git。
+
+制品 SHA-256 为 `9272cfc11124a5c6206084443e1f64217b8f47aeb12a64c9e52c5647d3d6b6fc`。回滚 profile：`/home/tzwl3/.dsh/profiles/web-before-20260914-conversation-mode`；服务器审计：`/home/tzwl3/apps/deploy-staging/20260914-conversation-mode`。本地专用测试进程、临时 profile、数据库、凭据、日志、缓存与压缩包均已清理，源代码、共享依赖和服务器回滚资料保留。
