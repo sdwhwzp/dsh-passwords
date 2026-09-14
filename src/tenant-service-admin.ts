@@ -1,3 +1,4 @@
+import { isConversationSession } from './conversation-mode.js';
 /** Administrator control of child-account development service lifetimes. */
 import type { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
@@ -47,7 +48,7 @@ export function registerTenantServiceAdministration(ctx: Context, db: Database, 
   const installed = new WeakSet<Agent>();
   const access = new DshPasswordsPrincipalAccessProvider(ctx, db);
   ctx.on('session/event', (session, event) => {
-    if (event.type !== 'turn/start') return;
+    if (event.type !== 'turn/start' || isConversationSession(db, session.id)) return;
     const principal = event.data.principal;
     const registry = ctx.root.get('agents') as { get(id: typeof session.id): Agent | undefined } | undefined;
     const agent = registry?.get(session.id);

@@ -1,3 +1,4 @@
+import { ConversationModeControls, CONVERSATION_MODE_CSS } from './conversation-mode';
 // dsh 浏览器侧插件：在设置页"插件"列表里注册 dsh-passwords 卡片。
 // 卡片内容：
 //   - 远程设置补丁状态 + "重载补丁"按钮（任何登录用户可触发；补丁强制启用）
@@ -69,7 +70,7 @@ export async function apply(ctx: ClientContext): Promise<() => void | Promise<vo
     if (existing) return () => {};
     const el = document.createElement('style');
     el.dataset.dshpwStyle = '1';
-    el.textContent = CSS;
+    el.textContent = CSS + CONVERSATION_MODE_CSS;
     document.head.appendChild(el);
     return () => el.remove();
   }, 'dsh-passwords: styles');
@@ -204,6 +205,12 @@ export async function apply(ctx: ClientContext): Promise<() => void | Promise<vo
     ctx.slots.register({ name: 'sidebar.workspaces.action', id: 'dsh-passwords-accounts', order: 5, locale: 'dshpw',
       inject: () => ({ loadState: () => loadDshPasswordsState(dshPasswords) }),
     }, AccountsLauncher),
+  );
+
+  ctx.slots.inject('sidebar.workspaces.action', () =>
+    ctx.slots.register({ name: 'sidebar.workspaces.action', id: 'dsh-passwords-conversation-modes', order: -100, locale: 'dshpw',
+      inject: () => ({ sessions: ctx.sessions, layout: ctx.layout, client: dshPasswords }),
+    }, ConversationModeControls),
   );
 
   const desktopPanelId = 'dsh-passwords-desktop' as MainPanelId;

@@ -26,6 +26,7 @@ import { Database, type UserListRow } from './db.js';
 import { createFieldCrypto } from './encrypt.js';
 import { registerTenantTaskBoard } from './tenant-task-board.js';
 import { registerTenantTerminal } from './tenant-terminal.js';
+import { registerConversationMode } from './conversation-mode.js';
 import { registerTenantAgentShell } from './tenant-agent-shell.js';
 import { AuthService, AuthError, assertNoSqlInjection, type AuthedUser, type RequestMeta } from './auth.js';
 import { findDshRoot, patchStatus } from './patch.js';
@@ -416,11 +417,12 @@ export function apply(ctx: Context): void {
     registerManagedUserWorkspace(ctx, db, cfg);
     registerPrincipalAccess(ctx, db);
     registerTenantTerminal(ctx, db, cfg);
+    registerConversationMode(ctx, db);
     registerTenantAgentShell(ctx, db, cfg);
     registerTenantTaskBoard(ctx, db, cfg);
     if (auth !== null) registerBotBridge(ctx, db, auth);
     const remoteDb = db;
-    ctx.inject(['typertGateway'], (scope) => {
+    ctx.inject(['typertGateway', 'managedUserWorkspace', 'sessionController', 'workspaceRegistry'], (scope) => {
       new DshPasswordsRemote(scope, remoteDb);
     });
   }

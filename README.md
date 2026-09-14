@@ -12,6 +12,12 @@ dsh 的网页界面默认面向本机使用。服务器地址一旦暴露，拿�
 
 收录于 [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek-harness)（Infrastructure & Development）和 [Awesome DSH Plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)（Development & Runtime）。
 
+## 开发模式与纯会话
+
+左侧选择“开发模式”继续使用工作区、终端和编辑器；选择“纯会话”直接提问，不需要手动选择工作区。“新建纯会话”开启另一个话题，未提问的空会话会复用。聊天记录随账号保存，重新进入时可以继续。
+
+纯会话保留模型选择、流式回复和历史记录，仅开放已安装的 WeKnora 检索、文档读取、知识库列表和问答工具；文件读写、Shell、代码执行和子代理不可用。两种模式使用独立会话，切换不会提升已有聊天的权限。实现与维护说明见 [纯会话模式](docs/2026-09-14-conversation-mode.md)。
+
 ## 功能一览
 
 ### 1️⃣ 远程连接

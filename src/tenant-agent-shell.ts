@@ -1,3 +1,4 @@
+import { isConversationSession } from './conversation-mode.js';
 /** Agent bash commands confined to the authenticated account's managed workspace. */
 import type { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
@@ -32,6 +33,7 @@ export class TenantAgentShell {
   /** Register only in managed server workspaces; paired computers keep their own bash provider. */
   install(agent: Agent): void {
     if (this.disposed) return;
+    if (isConversationSession(this.db, agent.session.id)) return;
     const cwd = agent.session.header.cwd;
     if (cwd === undefined || this.db.localWorkspaceOwnerForPath(cwd) !== null) return;
     const owner = this.db.managedWorkspaceOwnerForPath(cwd);

@@ -37,7 +37,12 @@ export const DSH_PASSWORDS_REMOTE = {
     invocation: { kind: 'direct' as const },
     parameters: [],
     result: resultCodec,
-  }],
+  }, ...['createConversation', 'conversations'].map(method => ({
+    id: `dsh-passwords#dshPasswords/${method}`,
+    service: 'dshPasswords', namespace: 'dshPasswords', method,
+    invocation: { kind: 'direct' as const }, parameters: [],
+    result: { mode: 'strict' as const, typeSymbol: `dsh-passwords#${method}`, schema: { parse: parseJson } },
+  }))],
 };
 
 export interface DshPasswordsRemoteFailure {
@@ -53,6 +58,8 @@ export type DshPasswordsRemoteResult<T> =
 export interface DshPasswordsRemoteClient {
   $mount(contribution: typeof DSH_PASSWORDS_REMOTE): Promise<() => void | Promise<void>>;
   dshPasswords: {
+    createConversation(): Promise<DshPasswordsRemoteResult<{ sessionId: string }>>;
+    conversations(): Promise<DshPasswordsRemoteResult<{ sessionIds: string[] }>>;
     state(): Promise<DshPasswordsRemoteResult<StateData>>;
   };
 }

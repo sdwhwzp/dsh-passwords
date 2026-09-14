@@ -12,6 +12,12 @@ See the [2026-09-11 update summary (Chinese)](docs/2026-09-11-changes-overview.m
 
 Listed in [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek-harness) (Infrastructure & Development) and [Awesome DSH Plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) (Development & Runtime).
 
+## Development and chat modes
+
+Choose **Development** in the sidebar to use workspaces, terminals and the editor. Choose **Chat** to ask questions without selecting a workspace. **New chat** starts another topic and reuses an existing unasked chat. History belongs to the signed-in account and can be resumed later.
+
+Chat keeps model selection, streamed replies and history. Its tool allowlist contains installed WeKnora search, document reading, knowledge-base listing and answer tools. File access, shell commands, code execution and subagents are unavailable. The two modes use separate Sessions; switching modes does not grant development privileges to an existing chat. See the [implementation and maintenance notes (Chinese)](docs/2026-09-14-conversation-mode.md).
+
 ## Features
 
 #Administrators can open `/gateway/accounts` from the sidebar or password settings. The standalone account table supports username/ID search, role and ban filters, name/recent-login/creation sorting, and 25/50/100-row pages. It displays monthly budgets and spending; create, rename, reset passwords, delete or edit one account at a time. Only the selected permission editor mounts. The page can be bookmarked and requires a current administrator session. Personal settings retain password, username and preference controls.

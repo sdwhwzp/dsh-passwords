@@ -2122,3 +2122,32 @@ test('Cookie Chaos 加固（P3）：Unicode 空白前缀的会话 cookie 不再�
   const ok = await gatewayReq('GET', '/html', { cookie: `dsh_gateway_token=${tokenValue}` });
   assert.equal(ok.status, 200, '正常会话 cookie 应认证通过');
 });
+
+test('chat Sessions reject development commands for administrators and subusers before proxy dispatch', async () => {
+  const sessionId = 'session-chat-gateway-guard';
+  db.claimSessionOwner(sessionId, customerId);
+  db.setSetting(`conversation_mode:${sessionId}`, 'chat');
+  for (const selectedCookie of [cookie, customerCookie]) {
+    for (const endpoint of [`/sidebar/files?sessionId=${sessionId}`, `/dsh-vsceditor/ide/${sessionId}/`]) {
+      assert.equal((await gatewayReq('GET', endpoint, { cookie: selectedCookie })).status, 403);
+    }
+    await new Promise<void>((resolve, reject) => {
+      const ws = new NodeWebSocket(`ws://127.0.0.1:${gatewayPort}/sidebar/ws/terminal?sessionId=${sessionId}`, { headers: { cookie: selectedCookie } });
+      ws.on('unexpected-response', (_request: unknown, response: http.IncomingMessage) => {
+        try { assert.equal(response.statusCode, 403); response.resume(); ws.terminate(); resolve(); }
+        catch (error) { reject(error); }
+      });
+      ws.on('error', () => { /* terminate after an expected rejected handshake emits an error. */ });
+      ws.on('open', () => { ws.terminate(); reject(new Error('chat terminal unexpectedly opened')); });
+    });
+    for (const [endpoint, request] of [
+      ['commands/execute', { agentId: sessionId, line: '/permission unrestricted' }],
+      ['session/openWorkspacePath', { sessionId, path: '/workspaces/a' }],
+    ] as const) {
+      const response = await gatewayReq('POST', `/api/${endpoint}`, { cookie: selectedCookie, 'content-type': 'application/json' },
+        JSON.stringify({ type: 'client-request', rpcId: 'chat-mode-test', method: endpoint, payload: { args: { request } } }));
+      assert.equal(response.status, 403);
+      assert.match(response.body, /development Session|纯会话/);
+    }
+  }
+});

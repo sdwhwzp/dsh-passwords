@@ -1,3 +1,4 @@
+import { isConversationSession } from './conversation-mode.js';
 // 登录网关：劫持 dsh 访问入口
 //   用户访问网关端口 → 未认证则渲染登录页（dsh 风格 + 动画）
 //   → 登录成功 Set-Cookie(JWT, HttpOnly) → 302 回到原始 URL（重定向兼容层）
@@ -4137,6 +4138,12 @@ export function createGatewayServer(
       const parsed = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const requestPath = gatePath;
       const editorPath = requestPath === '/dsh-vsceditor' || requestPath.startsWith('/dsh-vsceditor/');
+      const developmentSessionId = /^\/dsh-vsceditor\/ide\/(session-[a-zA-Z0-9-]{1,100})(?:\/|$)/.exec(requestPath)?.[1]
+        ?? (requestPath.startsWith('/sidebar/') ? parsed.searchParams.get('sessionId') : null);
+      if (developmentSessionId && isConversationSession(db, developmentSessionId)) {
+        denyRequest(req, res, langOf(req), t(langOf(req), 'gw.conversationModeDenied'), 403);
+        return;
+      }
       if (editorPath && (
         !config.tenantEditor?.enabled ||
         req.headers['sec-fetch-site'] === 'cross-site' ||
@@ -6427,6 +6434,10 @@ export function createGatewayServer(
     // 沙盒切换的实际主路径是 /permission slash 命令：经 commands/execute RPC
     // （body { agentId, line }，line 形如 "/permission workspace-write"），
     // 而不是 settings.mutate。这里对受限子用户同样做越权预设检查。
+    const needsConversationCommandCheck = reqAs.dshpwUser !== undefined && req.method === 'POST' && (
+      /^\/api\/commands[.\/]execute$/.test(proxyPath) ||
+      SESSION_OPEN_WORKSPACE_PATH_RE.test(proxyPath) || AT_FILE_SEARCH_RE.test(proxyPath) || AGENT_PRESET_SELECT_RE.test(proxyPath)
+    );
     const needsCommandCheck =
       reqAs.dshpwPerms !== undefined &&
       reqAs.dshpwPerms.sandbox_mode !== null &&
@@ -6486,7 +6497,7 @@ export function createGatewayServer(
     if (getListRpcBody !== null) {
       completeProxyRequestBody();
       upstreamReq.end(getListRpcBody);
-    } else if (needsFolderCheck || needsSandboxCheck || needsCommandCheck || needsApprovalCheck || needsOwnershipCheck || needsAgentPresetCheck || needsSshHostCheck || needsSshPermissionCheck) {
+    } else if (needsConversationCommandCheck || needsFolderCheck || needsSandboxCheck || needsCommandCheck || needsApprovalCheck || needsOwnershipCheck || needsAgentPresetCheck || needsSshHostCheck || needsSshPermissionCheck) {
       const chunks: Buffer[] = [];
       let size = 0;
       let settled = false;
@@ -6549,6 +6560,14 @@ export function createGatewayServer(
           upstreamReq.destroy();
           denyRequest(req, res, lang, t(lang, 'gw.folderDenied'));
           return;
+        }
+        if (needsConversationCommandCheck) {
+          const sessionId = extractSessionId(bodyObj) ?? extractAgentId(bodyObj);
+          if (sessionId !== null && isConversationSession(db, sessionId)) {
+            upstreamReq.destroy();
+            sendApiError(res, 403, 'FORBIDDEN', t(lang, 'gw.conversationModeDenied'));
+            return;
+          }
         }
         // 转发体默认原样；SSRF 校验或审批改写时会整体重建（重建必须同步更新 content-length）
 
@@ -7682,6 +7701,12 @@ export function createGatewayServer(
     // WebSocket 仅是 dsh 的服务器→客户端事件下行通道；客户端消息是协议违规。
     // 不允许把任意 HTTP 路径升级为 WS，否则会绕过 HTTP 侧完整的权限模型。
     const terminalPath = gatePath === '/sidebar/ws/terminal';
+    const developmentSessionId = /^\/dsh-vsceditor\/ide\/(session-[a-zA-Z0-9-]{1,100})(?:\/|$)/.exec(gatePath)?.[1]
+      ?? (terminalPath ? new URL(req.url ?? '/', 'http://localhost').searchParams.get('sessionId') : null);
+    if (developmentSessionId && isConversationSession(db, developmentSessionId)) {
+      rejectUpgrade(socket, 403);
+      return;
+    }
     const editorPath = /^\/dsh-vsceditor\/ide\/session-[a-zA-Z0-9-]{1,100}\/(?:stable-[a-f0-9]{40})?$/.test(gatePath);
     if (editorPath && (
       !config.tenantEditor?.enabled ||
