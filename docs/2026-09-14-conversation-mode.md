@@ -39,3 +39,11 @@ Harness 输入框要求 Session 关联 Workspace，因此服务器自动关联�
 54 项相关测试、构建通过；旧实现会触发新增的回归断言。线上确认报错会话存在，原生接入返回同一 ID。167 个会话保留，健康入口 200，未登录 Host 401，连续稳定检查通过；331 个依赖中仅更新 dsh-passwords，33 行配置及 WeKnora 凭据保持原样。
 
 首次切换因 90 秒总就绪时限不足以容纳启动和完整稳定检查而自动回滚；第二次将部署脚本启动预算设为 180 秒，保留全部健康及回滚条件后通过。制品 SHA-256：`a3e5ac232f9dbb251a8ce1c36ddd42a06e6ec397bd7748f42907f59b4c484117`；审计目录 `/home/tzwl3/apps/deploy-staging/20260914-conversation-selection-fix-retry`；回滚 profile `/home/tzwl3/.dsh/profiles/web-before-20260914-conversation-selection-fix-retry`。本次本地临时压缩包、脚本和日志已清理，服务器审计及回滚资料保留。
+
+## 2026-09-14 纯会话全部工具
+
+版本 `2.7.1-dsh.20260914.4` 已上线，代码提交 `9ca4416fb9f59e6ba4a6cee4ae51d77bad901f82` 已推送到 `dev`。纯会话按账号原有权限使用全部已安装工具，恢复 GenUI 校验与渲染、租户 Shell、服务工具和子代理；聊天界面允许工具面板显示，提示词明确 `dsh-ui` 围栏及卡片字段格式。已有纯会话恢复时同样生效；已保存的错误 JSON 回答需要重新生成。
+
+65 项相关测试和构建通过，覆盖实际工具注册、账号守卫、目录限制、网关归属和沙盒拒绝；GenUI 解析器确认错误卡片字段可被诊断，修正后的 `cols`/`items` 规格可解析。线上 167 个会话保留，健康入口 200、未登录 Host 401，连续稳定检查通过；330 个其他依赖和 33 行配置保持不变。
+
+制品 SHA-256：`d54954fe837bf9bd2e6c94e1adebdc432a5b2d9dc437a44ca5422a2794853ac9`；服务器审计 `/home/tzwl3/apps/deploy-staging/20260914-chat-tools`；回滚 profile `/home/tzwl3/.dsh/profiles/web-before-20260914-chat-tools`。本地临时包、测试日志与脚本已清理，源代码、共享依赖及服务器回滚资料保留。
