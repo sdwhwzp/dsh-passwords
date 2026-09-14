@@ -31,3 +31,11 @@ Harness 输入框要求 Session 关联 Workspace，因此服务器自动关联�
 生产健康入口返回 200，未登录 Host 返回 401，新纯会话查询接口返回 200。165 个已有会话保留；331 个依赖中仅更新 dsh-passwords，330 个保持原版本；原有 32 行配置保留，另加 WeKnora 配置。地址和 Key 仅保存在服务器受限配置中，不进入 Git。
 
 制品 SHA-256 为 `9272cfc11124a5c6206084443e1f64217b8f47aeb12a64c9e52c5647d3d6b6fc`。回滚 profile：`/home/tzwl3/.dsh/profiles/web-before-20260914-conversation-mode`；服务器审计：`/home/tzwl3/apps/deploy-staging/20260914-conversation-mode`。本地专用测试进程、临时 profile、数据库、凭据、日志、缓存与压缩包均已清理，源代码、共享依赖和服务器回滚资料保留。
+
+## 2026-09-14 新建会话选择修复
+
+版本 `2.7.1-dsh.20260914.3` 已上线，代码提交 `f41192b03a6b3e6194cb296d3f1e3de21fbcad24` 已推送到 `dev`。自定义创建成功后，客户端使用原生幂等接入接口登记同一个 ID 和服务端解析的账号目录，再打开会话，避免列表尚未包含新 ID 时出现 `sessions.select: unknown session`。
+
+54 项相关测试、构建通过；旧实现会触发新增的回归断言。线上确认报错会话存在，原生接入返回同一 ID。167 个会话保留，健康入口 200，未登录 Host 401，连续稳定检查通过；331 个依赖中仅更新 dsh-passwords，33 行配置及 WeKnora 凭据保持原样。
+
+首次切换因 90 秒总就绪时限不足以容纳启动和完整稳定检查而自动回滚；第二次将部署脚本启动预算设为 180 秒，保留全部健康及回滚条件后通过。制品 SHA-256：`a3e5ac232f9dbb251a8ce1c36ddd42a06e6ec397bd7748f42907f59b4c484117`；审计目录 `/home/tzwl3/apps/deploy-staging/20260914-conversation-selection-fix-retry`；回滚 profile `/home/tzwl3/.dsh/profiles/web-before-20260914-conversation-selection-fix-retry`。本次本地临时压缩包、脚本和日志已清理，服务器审计及回滚资料保留。
