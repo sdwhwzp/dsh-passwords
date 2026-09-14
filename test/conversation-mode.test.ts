@@ -45,7 +45,7 @@ test('chat creation claims the authenticated owner and durable mode before Host 
   assert.equal(created.length, 2);
 });
 
-test('failed Host creation retains its restriction', async t => {
+test('failed Host creation retains ownership and display mode', async t => {
   const f = await fixture(t);
   let failedId = '';
   const ctx = { managedUserWorkspace: f.provider, workspaceRegistry: { resolveByPath: async (root: string) => { assert.equal(root, f.directory); return { id: 'owned-workspace' }; } }, sessionController: {
@@ -56,33 +56,27 @@ test('failed Host creation retains its restriction', async t => {
 
 });
 
-test('chat restoration and forks receive native allowlisting and an execution guard; development is untouched', async t => {
+test('chat restoration and forks preserve display mode without restricting tools', async t => {
   const f = await fixture(t);
   let listener!: (payload: { agent: Agent }) => void;
-  registerConversationMode({ on: (event: string, callback: typeof listener) => { if (event === 'agent/created') listener = callback; } } as unknown as Context, f.db);
-  const modes: string[] = [], restrictions: unknown[] = [];
-  let guard!: (exec: { name: string }) => string | undefined;
-  const agent = (id: string, cwd: string) => ({ session: { id, header: { cwd, ...(id === 'forked-chat' ? { parentSession: 'parent-chat' } : {}) } }, ctx: {
-    tools: { presentAs: (mode: string) => modes.push(mode), get: (name: string) => name === 'weknora_search' ? {} : undefined,
-      restrict: (value: unknown) => restrictions.push(value), guard: (value: typeof guard) => { guard = value; } },
-    systemPrompt: { section: () => {} },
+  registerConversationMode({ on: (event: string, callback: typeof listener) => { assert.equal(event, 'agent/created'); listener = callback; } } as unknown as Context, f.db);
+  const sections: { text: string }[] = [];
+  const agent = (id: string) => ({ session: { id, header: { cwd: f.directory, ...(id === 'forked-chat' ? { parentSession: 'parent-chat' } : {}) } }, ctx: {
+    tools: { restrict: () => assert.fail('chat must not restrict tools'), guard: () => assert.fail('chat must not install a tool guard') },
+    systemPrompt: { section: (section: { text: string }) => sections.push(section) },
   } } as unknown as Agent);
-  listener({ agent: agent('development', f.directory) });
-  assert.equal(modes.length, 0);
+  listener({ agent: agent('development') });
+  assert.equal(sections.length, 0);
   f.db.setSetting('conversation_mode:parent-chat', 'chat');
-  listener({ agent: agent('forked-chat', path.join(f.directory, '.dsh-conversations')) });
-  assert.deepEqual(restrictions, [{ allow: ['weknora_search'] }]);
-  assert.deepEqual(modes, ['native']);
-  assert.equal(guard({ name: 'weknora_search' }), undefined);
-  for (const name of ['bash', 'read_file', 'write_file', 'run_code', 'subagent', 'new_future_tool']) {
-    assert.match(guard({ name })!, /CONVERSATION_MODE_TOOL_DENIED/);
-  }
+  listener({ agent: agent('forked-chat') });
   assert.equal(isConversationSession(f.db, 'forked-chat'), true);
-  listener({ agent: agent('forked-chat', '/different-directory') });
-  assert.equal(modes.length, 2);
+  listener({ agent: agent('forked-chat') });
+  assert.equal(sections.length, 2);
+  assert.match(sections[0]!.text, /validate_dsh_ui/);
+  assert.match(sections[0]!.text, /account permissions and workspace sandbox/);
 });
 
-test('real registry blocks a late scoped shell even after permissive pre-execute policy', async t => {
+test('chat exposes inherited and late scoped tools while preserving an existing account guard', async t => {
   const { Context } = await import('@deepseek-ai/cordis');
   const { createScope } = await import('@deepseek-ai/dsh-scope');
   const { default: Tools } = await import('@deepseek-ai/dsh-tools');
@@ -104,19 +98,15 @@ test('real registry blocks a late scoped shell even after permissive pre-execute
   f.db.setSetting('conversation_mode:chat-registry', 'chat');
   registerConversationMode(ctx, f.db);
   ctx.emit('agent/created', { agent });
-  assert.deepEqual(ctx.tools.schemas(agent).map(x => x.name), ['weknora_search']);
-  agent.ctx.tools.register(tool('bash'));
-  agent.ctx.tools.register(tool('subagent'));
-  assert.deepEqual((await ctx.systemPrompt.assemble({ scope: agent })).tools.map(tool => tool.name), ['weknora_search']);
-  ctx.on('tools/pre-execute', async () => ({ kind: 'allow' }));
+  for (const name of ['validate_dsh_ui', 'render_ui', 'subagent', 'new_future_tool']) agent.ctx.tools.register(tool(name));
+  const names = (await ctx.systemPrompt.assemble({ scope: agent })).tools.map(tool => tool.name);
+  for (const name of ['bash', 'weknora_search', 'validate_dsh_ui', 'render_ui', 'subagent', 'new_future_tool']) assert.ok(names.includes(name), name);
   const run = (name: string) => ctx.tools.execute({ name, agent, callId: ToolCallId('chat-test'), arguments: {}, signal: new AbortController().signal });
+  for (const name of ['bash', 'weknora_search', 'validate_dsh_ui', 'render_ui', 'subagent', 'new_future_tool']) assert.equal((await run(name)).isError, false, name);
+  assert.equal(executions, 6);
+  agent.ctx.tools.guard(exec => exec.name === 'bash' ? 'account policy denies shell' : undefined);
   const denied = await run('bash');
   assert.equal(denied.isError, true);
-  assert.match(JSON.stringify(denied.content), /CONVERSATION_MODE_TOOL_DENIED/);
-  assert.equal((await run('run_code')).isError, true);
-  assert.equal(executions, 0);
-  assert.equal((await run('weknora_search')).isError, false);
-  assert.equal(executions, 1);
-  assert.equal((await ctx.tools.execute({ name: 'bash', callId: ToolCallId('dev-test'), arguments: {}, signal: new AbortController().signal })).isError, false);
-  assert.equal(executions, 2);
+  assert.match(JSON.stringify(denied.content), /account policy denies shell/);
+  assert.equal(executions, 6);
 });

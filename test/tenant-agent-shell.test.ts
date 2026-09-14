@@ -62,6 +62,7 @@ async function harness(t: { after(fn: () => Promise<void>): void }, runner?: (re
 
 test('managed parent and child agents receive bash with logged terminal output and persistent-home guidance', async (t) => {
   const h = await harness(t);
+  h.db.setSetting('conversation_mode:owned-session', 'chat');
   for (const id of ['owned-session', 'delegated-child']) {
     const a = h.createAgent(h.cwd, id);
     assert.equal(a.tools.length, 1);
@@ -78,7 +79,7 @@ test('managed parent and child agents receive bash with logged terminal output a
 });
 
 test('anonymous, other-account, revoked, read-only and foreign-directory calls never reach the launcher', async (t) => {
-  const h = await harness(t); const a = h.createAgent();
+  const h = await harness(t); h.db.setSetting('conversation_mode:owned-session', 'chat'); const a = h.createAgent();
   for (const principal of [undefined, { ...a.exec.principal!, id: String(h.other.id), username: h.other.username }, { ...a.exec.principal!, source: 'forged' }, { ...a.exec.principal!, username: 'forged' }]) {
     await assert.rejects(a.run(undefined, { ...a.exec, principal }), /access denied|active account/);
   }

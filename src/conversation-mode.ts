@@ -1,4 +1,4 @@
-/** Account-owned chat Sessions retain history without exposing development tools. */
+/** Account-owned chat Sessions use a simplified interface and the account’s normal tools. */
 import type { Context } from '@deepseek-ai/cordis';
 import type {} from '@deepseek-ai/dsh-agent';
 import type {} from '@deepseek-ai/dsh-api-session-controller';
@@ -9,13 +9,9 @@ import type { Database } from './db.js';
 import type { AuthenticatedPrincipal } from './principal.js';
 import type {} from './managed-workspace.js';
 
-/** Audited knowledge retrieval tools; new tools require an explicit policy change. */
-const CONVERSATION_TOOLS = new Set([
-  'weknora_search', 'weknora_read_document', 'weknora_list_knowledge_bases', 'weknora_ask',
-]);
 const key = (id: string) => `conversation_mode:${id}`;
 
-/** Identify a durable chat Session; new forks inherit only a Host-recorded parent mode. */
+/** Identify a durable chat display mode; forks inherit the Host-recorded parent mode. */
 export function isConversationSession(db: Database, id: string): boolean {
   return db.getSetting(key(id)) === 'chat';
 }
@@ -29,30 +25,19 @@ export async function createConversation(ctx: Context, db: Database, principal: 
   const sessionId = `session-${randomUUID()}` as SessionId;
   db.claimSessionOwner(sessionId, Number(principal.id));
   db.setSetting(key(sessionId), 'chat');
-  // Keep the mode on a failed create: a partially persisted Session must never resume with development privileges.
+  // Keep ownership and display mode when creation partially persists.
   await ctx.sessionController.create({ sessionId, workspaceId: workspace.id });
   return { sessionId, cwd: root };
 }
 
-/** Install per-Agent restrictions on creation and restoration; development Sessions are unchanged. */
+/** Restore chat presentation and inherit it on forks without changing tool permissions. */
 export function registerConversationMode(ctx: Context, db: Database): void {
-  const chatAgents = new WeakSet<object>();
-  ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
-    const result = await next();
-    if (context.scope === undefined || !chatAgents.has(context.scope)) return result;
-    return { ...result, tools: result.tools.filter(tool => CONVERSATION_TOOLS.has(tool.name)) };
-  });
   ctx.on('agent/created', ({ agent }) => {
     if (!isConversationSession(db, agent.session.id) && !(agent.session.header.parentSession !== undefined
       && isConversationSession(db, agent.session.header.parentSession))) return;
-    chatAgents.add(agent);
     db.setSetting(key(agent.session.id), 'chat');
-    const tools = agent.ctx.tools;
-    tools.presentAs('native');
-    tools.restrict({ allow: [...CONVERSATION_TOOLS].filter(name => tools.get(name) !== undefined) });
-    tools.guard(exec => CONVERSATION_TOOLS.has(exec.name) ? undefined : 'CONVERSATION_MODE_TOOL_DENIED: development and code execution tools are unavailable in chat mode');
     agent.ctx.systemPrompt.section({ name: 'conversation-mode', order: 1000,
-      text: 'This is a conversation-only Session. Answer questions and use the available knowledge retrieval tools when useful. No project workspace, local file access, terminal, code execution, or delegated development is available. Do not claim to have performed those actions. Ask the user to open a separate development Session when they need code changes.',
+      text: 'This Session uses a simplified chat interface. Use any available tools when useful, subject to the authenticated account permissions and workspace sandbox. The account workspace is attached automatically. For structured visual answers, use a dsh-ui fenced block, never a json block with a separate dsh-ui label. If UI rendering fails, use validate_dsh_ui when available to diagnose and repair it. Grid columns use cols; card bodies use items containing text nodes.',
     });
   });
 }

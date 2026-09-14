@@ -1,4 +1,3 @@
-import { isConversationSession } from './conversation-mode.js';
 /** Authenticated sidebar terminals confined by the deployment's root-owned launcher. */
 import type { Context } from '@deepseek-ai/cordis';
 import type {} from '@deepseek-ai/dsh-host-webserver';
@@ -67,7 +66,6 @@ export function registerTenantTerminal(ctx: Context, db: Database, config: Platf
           listSessions(): Promise<Array<{ header: { id: string; cwd?: string } }>>;
         };
         const record = (await query.listSessions()).find(item => item.header.id === sessionId);
-        if (isConversationSession(db, sessionId)) throw new Error('conversation mode has no terminal');
         if (!record?.header.cwd) throw new Error('session directory unavailable');
         const cwd = await tenantDirectory(config.managedWorkspaceRoot, principal.id, record.header.cwd);
         const hint = url.searchParams.get('cwd');

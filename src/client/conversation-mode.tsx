@@ -79,7 +79,7 @@ export function ConversationModeControls({ sessions, layout, client, t }: Conver
   </div>;
 }
 
-/** Presentation only; Host tool guards enforce the mode independently of these selectors. */
+/** Chat presentation leaves tool-generated panels available; account permissions remain server-owned. */
 export const CONVERSATION_MODE_CSS = `
 .dshpw-modes{display:flex;flex-direction:column;gap:8px;min-width:0;width:100%;padding:4px;box-sizing:border-box}
 .dshpw-mode-switch{display:flex;gap:4px}
@@ -97,7 +97,6 @@ html[data-dshpw-conversation-mode=chat] [data-slot="sidebar"] button[class*="_br
 html[data-dshpw-conversation-mode=chat] [data-slot="conversation.session.header"],
 html[data-dshpw-conversation-mode=chat] [data-slot="conversation.composer.bar"] button[class*="_add"],
 html[data-dshpw-conversation-mode=chat] [data-slot="conversation.composer.bar"] [class*="_modes"],
-html[data-dshpw-conversation-mode=chat] [data-rightbar-col],
 html[data-dshpw-conversation-mode=chat] [data-conversation-header-corner],
 html[data-dshpw-conversation-mode=chat] [data-dsh-better-sidebar],
 html[data-dshpw-conversation-mode=chat] [class*="heroWorkspaceRow"]{display:none!important}

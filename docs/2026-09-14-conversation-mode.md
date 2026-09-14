@@ -8,17 +8,17 @@
 
 ## 实现决策
 
-Harness 输入框要求 Session 关联 Workspace，因此服务器自动关联登录账号自己的托管目录，用户不需要创建或选择工作区。该目录仅用于满足 Session 生命周期要求；工具权限由独立的服务端模式记录控制。
+Harness 输入框要求 Session 关联 Workspace，因此服务器自动关联登录账号自己的托管目录，用户不需要创建或选择工作区。工具使用该账号目录，并遵守与开发模式相同的账号权限和沙盒设置。
 
-`dshPasswords/createConversation` 从登录 principal 解析目录，生成 Session ID，并在发布 Session 前保存归属和 `conversation_mode:<sessionId>=chat` 设置。创建中断仍保留限制，避免部分保存的会话恢复成开发会话。`dshPasswords/conversations` 只返回当前账号拥有的纯会话 ID。创建成功的响应先通过原生 `sessions.create({ sessionId, cwd })` 幂等接入客户端，再选择会话；正在进行的旧列表请求不能作为新会话已可选择的依据。
+`dshPasswords/createConversation` 从登录 principal 解析目录，生成 Session ID，并在发布 Session 前保存归属和 `conversation_mode:<sessionId>=chat` 设置。创建中断仍保留归属与显示模式，便于恢复已部分保存的会话。`dshPasswords/conversations` 只返回当前账号拥有的纯会话 ID。创建成功的响应先通过原生 `sessions.create({ sessionId, cwd })` 幂等接入客户端，再选择会话；正在进行的旧列表请求不能作为新会话已可选择的依据。
 
-`agent/created` 为纯会话安装原生工具展示、知识库工具白名单和执行守卫；恢复及 Host 记录的父会话分支继承限制。模型请求组装时再次过滤工具列表，后注册的 scoped 工具不会进入已记录的模型请求；额外注册的 scoped shell 也必须经过执行守卫。租户 shell 和服务管理插件不向纯会话注册开发工具。网关拒绝该会话的指令执行、打开目录、文件搜索、预设切换，以及侧栏文件、终端和编辑器访问。
+`agent/created` 恢复显示模式，并让分支继承父会话模式。纯会话不设置工具白名单、不安装额外执行守卫，也不修改工具展示方式；已安装的 GenUI 校验、渲染、文件、Shell 和子代理等工具按账号权限可用。网关、租户 shell 和服务管理继续执行原有账号认证、目录限制与管理员检查。
 
-模式属于会话，前端状态和隐藏按钮均不作为后端授权依据。模式设置与账号数据库必须一起备份；回滚到不识别纯会话的旧插件之前，应暂停访问这些会话。
+模式只决定界面与聊天提示，不作为服务端授权依据。GenUI 使用 `dsh-ui` 代码围栏，渲染失败时可调用 `validate_dsh_ui` 诊断修复；网格列数使用 `cols`，卡片正文使用 `items`。聊天界面保留工具生成的面板；工作区导航等开发入口仍由开发模式展示。
 
 ## 验证与维护
 
-`test/conversation-mode.test.ts` 覆盖创建前归属、创建失败、历史恢复、分支继承和实际工具注册表执行限制。`test/conversation-mode-client.test.ts` 覆盖模式切换、空会话复用与订阅清理。`test/gateway-proxy-headers.test.ts` 覆盖管理员和普通账号对纯会话开发接口的拒绝。
+`test/conversation-mode.test.ts` 覆盖创建前归属、创建失败、历史恢复、分支继承、全部工具可见和账号工具守卫保留。`test/conversation-mode-client.test.ts` 覆盖模式切换、空会话复用与订阅清理。`test/gateway-proxy-headers.test.ts` 覆盖纯会话工具相关请求的账号归属与沙盒限制。
 
 网页使用现有 slot 及局部样式隐藏开发入口，不修改 Harness 主仓库。升级 Harness UI 后需要复核侧栏、会话标题栏和输入框布局。发布验收应包括实时回复、刷新恢复、两账号隔离、知识库调用和切回开发模式。
 

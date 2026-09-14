@@ -16,7 +16,7 @@ Listed in [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek
 
 Choose **Development** in the sidebar to use workspaces, terminals and the editor. Choose **Chat** to ask questions without selecting a workspace. **New chat** starts another topic and reuses an existing unasked chat. History belongs to the signed-in account and can be resumed later.
 
-Chat keeps model selection, streamed replies and history. Its tool allowlist contains installed WeKnora search, document reading, knowledge-base listing and answer tools. File access, shell commands, code execution and subagents are unavailable. The two modes use separate Sessions; switching modes does not grant development privileges to an existing chat. See the [implementation and maintenance notes (Chinese)](docs/2026-09-14-conversation-mode.md).
+Chat keeps model selection, streamed replies and history. All tools authorized for the account are available, including knowledge retrieval, GenUI, files, shell commands and subagents. The account workspace is attached automatically; account permissions, sandbox rules and account isolation match development mode. See the [implementation and maintenance notes (Chinese)](docs/2026-09-14-conversation-mode.md).
 
 ## Features
 
