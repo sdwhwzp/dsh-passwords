@@ -1148,9 +1148,15 @@ export function createGatewayServer(
 
   // HTTPS 模式：全站 HSTS（浏览器强制后续走 HTTPS）+ 会话 Cookie 加 Secure
   //（Cookie 标志在登录处理器内按 config.gateway.tls 决定）
-  if (config.gateway.tls !== null) {
+  //
+  // max-age 由部署决定：HSTS 绑主机名并忽略端口，所以与本网关共用主机名的任何
+  // 明文端口服务都会被一并锁成 https。`off` 不发头；0 发 `max-age=0`，主动让
+  // 已经种下策略的浏览器忘掉它。
+  const hstsMaxAge = config.gateway.hstsMaxAge;
+  if (config.gateway.tls !== null && hstsMaxAge !== null) {
+    const hstsValue = `max-age=${String(hstsMaxAge)}`;
     app.use((_req, res, next) => {
-      res.setHeader('Strict-Transport-Security', 'max-age=31536000');
+      res.setHeader('Strict-Transport-Security', hstsValue);
       next();
     });
   }

@@ -81,6 +81,16 @@ export interface PlatformConfig {
     acmeEmail: string;
     /** 使用 Let's Encrypt 测试环境签发（浏览器不信任，仅调试用） */
     acmeStaging: boolean;
+    /**
+     * HSTS 的 max-age 秒数，null = 不发这个响应头。
+     *
+     * HSTS 绑主机名并且**忽略端口**：同一主机名上任何一个明文端口的服务都会被
+     * 一起判定为「只许 https」。当本网关与别的明文服务共用主机名时，那个服务会
+     * 因此在浏览器里打不开，所以这是随部署而变的选择，不能写死。
+     * 设为 0 会发 `max-age=0`，主动通知浏览器忘掉已经种下的策略——这是把受影响
+     * 的浏览器批量解开的唯一办法；不发头只会让旧策略留到过期。
+     */
+    hstsMaxAge: number | null;
   };
   jwtSecret: string;
   /** 网关内部管理接口密钥（dsh 插件通知网关用；留空则从 SETUP_KEY 派生） */
@@ -273,6 +283,16 @@ export function loadConfig(): PlatformConfig {
       autoTls,
       acmeEmail: readEnv('MCP_GATEWAY_ACME_EMAIL', ''),
       acmeStaging: ['1', 'true', 'yes'].includes(readEnv('MCP_GATEWAY_ACME_STAGING', '').trim().toLowerCase()),
+      hstsMaxAge: (() => {
+        const raw = readEnv('MCP_GATEWAY_HSTS_MAX_AGE', '').trim();
+        if (raw === '') return 31536000;
+        if (raw.toLowerCase() === 'off') return null;
+        const n = Number(raw);
+        if (!Number.isSafeInteger(n) || n < 0) {
+          throw new Error('MCP_GATEWAY_HSTS_MAX_AGE 只能是非负整数秒或 off');
+        }
+        return n;
+      })(),
     },
     jwtSecret,
     internalSecret,
