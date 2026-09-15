@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+const exec = promisify(execFile);
 import { once } from 'node:events';
 import { mkdtemp, mkdir, writeFile, rm, symlink, readFile, realpath } from 'node:fs/promises';
 import os from 'node:os';
@@ -13,7 +16,7 @@ import { Database } from '../src/db.js';
 import { createFieldCrypto } from '../src/encrypt.js';
 import type { PlatformConfig } from '../src/config.js';
 
-test('paired file picker, directories and previews use the companion with Shell disabled', { timeout: 20_000 }, async t => {
+for (const shellEnabled of [false, true]) test(`paired file and Git routes use the companion (Shell ${shellEnabled})`, { timeout: 20_000 }, async t => {
   const temp = await realpath(await mkdtemp(path.join(os.tmpdir(), 'dsh-file-browser-')));
   const root = path.join(temp, 'computer');
   const placeholder = path.join(temp, 'host');
@@ -25,6 +28,9 @@ test('paired file picker, directories and previews use the companion with Shell 
   await writeFile(path.join(root, 'node_modules', 'hidden.js'), 'dependency');
   const binary = Buffer.alloc(1024 * 1024 + 19, 7);
   await writeFile(path.join(root, 'image.pdf'), binary);
+  if (shellEnabled) {
+    await exec('git', ['init', '-b', 'dev'], { cwd: root });
+  }
   const ctx = new Context();
   const db = new Database(path.join(temp, 'db'), createFieldCrypto('test', 'test'));
   db.init();
@@ -33,11 +39,12 @@ test('paired file picker, directories and previews use the companion with Shell 
   const principal = { source: 'dsh-passwords', id: String(owner.id), username: owner.username, role: 'user' as const };
   db.claimSessionOwner('session-local', owner.id);
   const token = 'x'.repeat(43);
-  const workspace = db.createLocalWorkspace({ id: 'browser-workspace', userId: owner.id, token, deviceName: 'computer', workspaceName: 'project', remoteRoot: root, placeholderPath: placeholder, platform: process.platform, shellEnabled: false });
+  const workspace = db.createLocalWorkspace({ id: 'browser-workspace', userId: owner.id, token, deviceName: 'computer', workspaceName: 'project', remoteRoot: root, placeholderPath: placeholder, platform: process.platform, shellEnabled });
   const header = { id: 'session-local', cwd: placeholder };
   ctx.provide('sessionQuery', { listSessions: async () => [{ header }] } as never);
   let registry = ctx.provide('workspaceRegistry', { list: () => [{ id: 'workspace', path: placeholder }] } as never);
-  ctx.provide('connection', { authenticateRequest: async () => principal } as never);
+  let requestPrincipal = principal;
+  ctx.provide('connection', { authenticateRequest: async () => requestPrincipal } as never);
   ctx.provide('typertGateway', { invoke: async () => ({ enabled: true, ignoreFiles: [], workspaceIgnoreFiles: [] }) } as never);
   const config = { gateway: { tls: null }, localWorkspace: { host: '127.0.0.1', port: 0, publicUrl: '', placeholderRoot: path.join(temp, 'paired'), browserMaxEntries: 5000, browserMaxFileBytes: 32 * 1024 * 1024, browserIgnoreDirs: ['node_modules', '.git'] } } as PlatformConfig;
   const hub = new LocalWorkspaceHub(ctx, db, config);
@@ -52,7 +59,7 @@ test('paired file picker, directories and previews use the companion with Shell 
   socket = new WebSocket(`ws://127.0.0.1:${hub.connectionInfo().port}`);
   await once(socket, 'open', { signal: AbortSignal.timeout(3000) });
   const ready = once(socket, 'message', { signal: AbortSignal.timeout(3000) });
-  socket.send(JSON.stringify({ type: 'resume', protocol: 2, token, workspaceId: workspace.id, root, platform: process.platform, shellEnabled: false, deviceName: 'computer', workspaceName: 'project' }));
+  socket.send(JSON.stringify({ type: 'resume', protocol: 2, token, workspaceId: workspace.id, root, platform: process.platform, shellEnabled, deviceName: 'computer', workspaceName: 'project' }));
   const handshake = JSON.parse(String((await ready)[0]));
   assert.equal(handshake.type, 'ready', JSON.stringify(handshake));
   registry = ctx.provide('workspaceRegistry', { list: () => [{ id: 'workspace', path: placeholder }], resolveByPath: async () => undefined, delete: async () => undefined } as never);
@@ -61,6 +68,16 @@ test('paired file picker, directories and previews use the companion with Shell 
     const message = JSON.parse(String(data));
     if (message.type !== 'request') return;
     operations++;
+    if (message.operation === 'bash') {
+      try {
+        const result = await exec('bash', ['-c', message.args.command], { cwd: root });
+        socket!.send(JSON.stringify({ type: 'response', id: message.id, ok: true, value: { ...result, exitCode: 0 } }));
+      } catch (error) {
+        const result = error as { stdout: string; stderr: string; code: number };
+        socket!.send(JSON.stringify({ type: 'response', id: message.id, ok: true, value: { stdout: result.stdout, stderr: result.stderr, exitCode: result.code } }));
+      }
+      return;
+    }
     assert.equal(message.operation, 'files');
     try { socket!.send(JSON.stringify({ type: 'response', id: message.id, ok: true, value: await browseLocalWorkspace(root, message.args, new AbortController().signal) })); }
     catch (error) { socket!.send(JSON.stringify({ type: 'response', id: message.id, ok: false, error: (error as Error).message })); }
@@ -84,7 +101,18 @@ test('paired file picker, directories and previews use the companion with Shell 
   assert.ok((sidebar!.value as { entries: Array<{name:string}> }).entries.some(entry => entry.name === '空目录'));
   const sidebarText = await routes.sidebar('fs.read', { sessionId: header.id, path: 'src/中文 文件.md' }, { headers: {} }, new AbortController().signal);
   assert.deepEqual(sidebarText?.value, { kind: 'text', content: '第一行\n第二行\n', truncated: false });
+  if (shellEnabled) {
+    const result = await routes.sidebar('git.status', { sessionId: header.id }, { headers: {} }, new AbortController().signal);
+    assert.equal((result?.value as { isRepo: boolean }).isRepo, true);
+    assert.ok((result?.value as { entries: Array<{ path: string }> }).entries.some(entry => entry.path === 'src/中文 文件.md'));
+  } else {
+    await assert.rejects(routes.sidebar('git.status', { sessionId: header.id }, { headers: {} }, new AbortController().signal), /Shell|shell|终端/);
+  }
   const before = operations;
+  requestPrincipal = { ...principal, id: String(other.id), username: other.username };
+  await assert.rejects(routes.sidebar('git.status', { sessionId: header.id }, { headers: {} }, new AbortController().signal), /unavailable/);
+  assert.equal(operations, before);
+  requestPrincipal = principal;
   await assert.rejects(invoke('atFile/search', { agentId: header.id }, { ...principal, id: String(other.id), username: other.username }), /unavailable/);
   assert.equal(operations, before);
   const envelope = await routes.fetch('workspaceFiles/list', new Request('http://localhost/api/workspaceFiles/list', { method: 'POST', body: JSON.stringify({ type: 'client-request', rpcId: 'test-id', method: 'workspaceFiles/list', payload: { args: { workspaceFileScopeId: header.id, path: '空目录' } } }) }), principal);

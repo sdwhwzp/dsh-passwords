@@ -8,6 +8,7 @@ import path from 'node:path';
 import type { PlatformConfig } from './config.js';
 import type { Database } from './db.js';
 import type { LocalWorkspaceHub } from './local-workspace-hub.js';
+import { pairedGitView } from './paired-git.js';
 import { LOCAL_FILE_WINDOW } from './local-workspace-browser.js';
 import { DshPasswordsPrincipalAccessProvider } from './principal-access.js';
 import type { AuthenticatedPrincipal } from './principal.js';
@@ -41,7 +42,7 @@ export class LocalWorkspaceFileRoutes {
 
   /** Adapt the sidebar's file vocabulary; undefined delegates an ordinary server workspace. */
   async sidebar(method: string, payload: unknown, request: { headers: Readonly<Record<string, string | readonly string[] | undefined>> }, signal: AbortSignal): Promise<{ value: unknown } | undefined> {
-    if (!method.startsWith('fs.')) return undefined;
+    if (!method.startsWith('fs.') && !method.startsWith('git.')) return undefined;
     const args = object(payload);
     const sessionId = text(args.sessionId) as SessionId;
     const record = (await this.ctx.sessionQuery.listSessions(signal)).find(row => row.header.id === sessionId);
@@ -49,6 +50,18 @@ export class LocalWorkspaceFileRoutes {
     const workspace = cwd === undefined ? null : this.hub.browserWorkspace(cwd);
     if (workspace === null) return undefined;
     const principal = await this.ctx.connection.authenticateRequest(request);
+    if (method.startsWith('git.')) {
+      if (principal === undefined) throw new Error('Authenticated account required');
+      this.access.assertAuthenticated(principal);
+      if (!(await this.access.resolve(principal, { sessionIds: [sessionId] }, signal)).readableSessionIds.has(sessionId)) throw new Error('Session is unavailable to this account');
+      // The hub rechecks ownership, revocation and the live companion before dispatch.
+      await this.hub.browse(workspace.id, principal, { action: 'stat', path: '.' }, signal);
+      return { value: await pairedGitView(method, args, workspace.placeholder_path, async argv => {
+        const result = await this.hub.runPairedArgv(workspace.placeholder_path, argv, { signal });
+        if (result === null) throw new Error('本机目录配对已失效');
+        return result;
+      }) };
+    }
     const invoke = (name: string, fields: Record<string, unknown>) => this.invoke(`workspaceFiles/${name}`, { workspaceFileScopeId: sessionId, ...fields }, principal, signal);
     const input = typeof args.path === 'string' ? args.path : '.';
     if (method === 'fs.tree') {
