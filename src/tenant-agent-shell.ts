@@ -155,6 +155,9 @@ export function registerTenantAgentShell(ctx: Context, db: Database, config: Pla
   }
   const shell = new TenantAgentShell(ctx, db, config);
   registerTenantServiceAdministration(ctx, db, config);
-  ctx.on('agent/created', ({ agent }) => shell.install(agent));
+  ctx.on('agent/created', ({ agent }): undefined => {
+    shell.install(agent);
+    return undefined;
+  });
   ctx.effect(() => () => shell.dispose(), 'dsh-passwords: tenant agent shell');
 }

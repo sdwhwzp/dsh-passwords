@@ -276,7 +276,7 @@ After logging in to dsh, open **Settings → Plugins** to find the "dsh-password
 | `MCP_LOCAL_WORKSPACE_PUBLIC_URL` | empty | Full `ws://` or `wss://` URL used in pairing commands; set it explicitly behind NAT/reverse proxies |
 | `MCP_DSH_ROOT` | auto-detected | dsh install directory (where `@deepseek-ai/dsh` lives); set manually if detection fails |
 | `MCP_DSH_RESTART_SERVICE` | `dsh-web` | systemd service to restart after a patch reload; an explicit empty value disables auto-restart |
-| `DSH_PASSWORDS_ENV_FILE` | empty | Explicit path to `.env` (the plugin passes it automatically — usually not needed) |
+| `DSH_PASSWORDS_ENV_FILE` | empty | Shared `.env` path for the Host and gateway. In production, set it in the Host launch environment to a durable file outside the package directory so replacing `node_modules` preserves configuration. Defaults to the package-local `.env`. |
 
 ## Common commands
 

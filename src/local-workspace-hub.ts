@@ -235,11 +235,12 @@ export class LocalWorkspaceHub {
       console.warn('[dsh-passwords] ⚠ 本机助手使用明文 WS；仅在可信局域网使用，公网请启用 HTTPS/WSS。');
     }
 
-    this.ctx.on('agent/created', ({ agent }) => {
+    this.ctx.on('agent/created', ({ agent }): undefined => {
       const cwd = agent.session.header.cwd;
-      if (cwd === undefined) return;
+      if (cwd === undefined) return undefined;
       const workspace = this.workspaceForPlaceholder(cwd);
       if (workspace !== null) this.installAgentTools(agent, workspace);
+      return undefined;
     });
   }
 

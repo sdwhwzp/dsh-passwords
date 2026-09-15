@@ -76,11 +76,11 @@ test('task-board HTTP state and mutations are isolated by signed principal and p
       headers: { origin, 'content-type': 'application/json', ...signedPrincipalHeaders({ userId: user.id, username: user.username, role: 'user' }, 'secret') },
       ...(action ? { body: JSON.stringify({ requestId: crypto.randomUUID(), action }) } : {}),
     });
-    assert.equal(response.status, expectedStatus, response.status === expectedStatus ? undefined : await response.text()); return await response.json() as { tasks: Array<{ id: string; title: string }> };
+    assert.equal(response.status, expectedStatus, response.status === expectedStatus ? undefined : await response.text()); return await response.json() as { tasks: Array<{ id: string; title: string; workspaceId?: string; reuseSession?: boolean; tags?: Array<{ name: string }> }> };
   };
   try {
     registerTenantTaskBoard(ctx as never, db as never, config as never);
-    assert.deepEqual((await call('2', { kind: 'create', id: 'shared-id', input: { title: 'owner-2', description: '', prompt: 'only mine', workspaceId: 'ws-owned', permission: 'read-only' } })).tasks.map(task => task.title), ['owner-2']);
+    assert.deepEqual((await call('2', { kind: 'create', id: 'shared-id', input: { title: 'owner-2', description: '', prompt: 'only mine', workspaceId: 'ws-owned', permission: 'read-only', reuseSession: true, tags: [{ name: 'frontend' }] } })).tasks.map(task => task.title), ['owner-2']);
     assert.deepEqual((await call('3')).tasks, []);
     await call('3', { kind: 'delete', taskId: 'shared-id' }, 400);
     assert.equal((await call('2')).tasks[0].title, 'owner-2');
@@ -92,6 +92,7 @@ test('task-board HTTP state and mutations are isolated by signed principal and p
     const jwt = (await import('jsonwebtoken')).default;
     for (const call of mutations) { const token = call.cookie!.slice('dsh_gateway_token='.length); assert.equal((jwt.verify(token, 'jwt-secret') as { sub: string }).sub, '2'); }
     assert.deepEqual(mutations[0].args, { request: { workspaceId: 'ws-owned' } });
+    await call('2', { kind: 'create', id: 'other-project', input: { title: 'owner-2 backend', description: '', prompt: 'second project', workspaceId: 'ws-backend' } });
     const httpBrowser = await fetch(origin + '/api/task-board/state', { headers: signedPrincipalHeaders({ userId: 2, username: 'first', role: 'user' }, 'secret') });
     assert.equal(httpBrowser.status, 200);
     await httpBrowser.body?.cancel();
@@ -99,7 +100,11 @@ test('task-board HTTP state and mutations are isolated by signed principal and p
     assert.equal(denied.status, 403);
     for (const dispose of disposers.splice(0).reverse()) dispose();
     registerTenantTaskBoard(ctx as never, db as never, config as never);
-    assert.equal((await call('2')).tasks[0].title, 'owner-2');
+    const restored = (await call('2')).tasks;
+    assert.equal(restored.find(task => task.id === 'shared-id')?.title, 'owner-2');
+    assert.equal(restored.find(task => task.id === 'shared-id')?.reuseSession, true);
+    assert.deepEqual(restored.find(task => task.id === 'shared-id')?.tags, [{ name: 'frontend' }]);
+    assert.deepEqual(restored.map(task => task.workspaceId).sort(), ['ws-backend', 'ws-owned']);
     assert.deepEqual((await call('3')).tasks, []);
   } finally {
     for (const dispose of disposers.reverse()) dispose();

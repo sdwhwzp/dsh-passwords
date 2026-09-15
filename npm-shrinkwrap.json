@@ -1,12 +1,12 @@
 {
   "name": "dsh-passwords",
-  "version": "2.7.1-dsh.20260914.1",
+  "version": "2.7.1-dsh.20260915.2",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
     "": {
       "name": "dsh-passwords",
-      "version": "2.7.1-dsh.20260914.1",
+      "version": "2.7.1-dsh.20260915.2",
       "license": "BSD-3-Clause",
       "dependencies": {
         "bcryptjs": "^3.0.2",
@@ -57,35 +57,36 @@
         "react-dom": "^18.2.0",
         "react-test-renderer": "18.3.1",
         "tsx": "^4.19.0",
-        "typescript": "^5.5.4"
+        "typescript": "^5.5.4",
+        "@deepseek-ai/dsh-scope": "file:../../deepseek-harness/packages/core/scope"
       },
       "engines": {
         "node": "^22.19.0 || >=24.0.0"
       },
       "peerDependencies": {
         "@deepseek-ai/cordis": "^4.0.2",
-        "@deepseek-ai/dsh-agent": "^0.1.5-rc.2",
-        "@deepseek-ai/dsh-api-gateway": "^0.1.5-rc.2",
-        "@deepseek-ai/dsh-api-session-controller": "^0.1.5-rc.2",
-        "@deepseek-ai/dsh-api-workspace-controller": "^0.1.5-rc.2",
-        "@deepseek-ai/dsh-client-connection": "^0.1.5-rc.2",
-        "@deepseek-ai/dsh-client-locale": "^0.1.5-rc.2",
-        "@deepseek-ai/dsh-client-ui-conversation": "^0.1.5-rc.2",
-        "@deepseek-ai/dsh-client-ui-layout": "^0.1.5-rc.2",
-        "@deepseek-ai/dsh-client-ui-primitives": "^0.1.5-rc.2",
-        "@deepseek-ai/dsh-client-ui-renderer": "^0.1.5-rc.2",
-        "@deepseek-ai/dsh-client-ui-settings": "^0.1.5-rc.2",
-        "@deepseek-ai/dsh-client-ui-slots": "^0.1.5-rc.2",
-        "@deepseek-ai/dsh-client-ui-workspace": "^0.1.5-rc.2",
-        "@deepseek-ai/dsh-host-webserver": "^0.1.5-rc.2",
-        "@deepseek-ai/dsh-llm": "^0.1.5-rc.2",
-        "@deepseek-ai/dsh-principal-access": "^0.1.5-rc.2",
-        "@deepseek-ai/dsh-session": "^0.1.5-rc.2",
-        "@deepseek-ai/dsh-session-query": "^0.1.5-rc.2",
-        "@deepseek-ai/dsh-system-prompt": "^0.1.5-rc.2",
-        "@deepseek-ai/dsh-tools": "^0.1.5-rc.2",
-        "@deepseek-ai/dsh-typert-protocol": "^0.1.5-rc.2",
-        "@deepseek-ai/dsh-workspace": "^0.1.5-rc.2"
+        "@deepseek-ai/dsh-agent": "^0.1.6-alpha.1",
+        "@deepseek-ai/dsh-api-gateway": "^0.1.6-alpha.1",
+        "@deepseek-ai/dsh-api-session-controller": "^0.1.6-alpha.1",
+        "@deepseek-ai/dsh-api-workspace-controller": "^0.1.6-alpha.1",
+        "@deepseek-ai/dsh-client-connection": "^0.1.6-alpha.1",
+        "@deepseek-ai/dsh-client-locale": "^0.1.6-alpha.1",
+        "@deepseek-ai/dsh-client-ui-conversation": "^0.1.6-alpha.1",
+        "@deepseek-ai/dsh-client-ui-layout": "^0.1.6-alpha.1",
+        "@deepseek-ai/dsh-client-ui-primitives": "^0.1.6-alpha.1",
+        "@deepseek-ai/dsh-client-ui-renderer": "^0.1.6-alpha.1",
+        "@deepseek-ai/dsh-client-ui-settings": "^0.1.6-alpha.1",
+        "@deepseek-ai/dsh-client-ui-slots": "^0.1.6-alpha.1",
+        "@deepseek-ai/dsh-client-ui-workspace": "^0.1.6-alpha.1",
+        "@deepseek-ai/dsh-host-webserver": "^0.1.6-alpha.1",
+        "@deepseek-ai/dsh-llm": "^0.1.6-alpha.1",
+        "@deepseek-ai/dsh-principal-access": "^0.1.6-alpha.1",
+        "@deepseek-ai/dsh-session": "^0.1.6-alpha.1",
+        "@deepseek-ai/dsh-session-query": "^0.1.6-alpha.1",
+        "@deepseek-ai/dsh-system-prompt": "^0.1.6-alpha.1",
+        "@deepseek-ai/dsh-tools": "^0.1.6-alpha.1",
+        "@deepseek-ai/dsh-typert-protocol": "^0.1.6-alpha.1",
+        "@deepseek-ai/dsh-workspace": "^0.1.6-alpha.1"
       },
       "peerDependenciesMeta": {
         "@deepseek-ai/dsh-principal-access": {
@@ -95,15 +96,15 @@
     },
     "../../deepseek-harness/packages/api/gateway": {
       "name": "@deepseek-ai/dsh-api-gateway",
-      "version": "0.1.5-rc.2",
+      "version": "0.1.6-alpha.1",
       "dev": true,
       "license": "MIT",
       "dependencies": {
         "@deepseek-ai/dsh-deque": "workspace:^",
         "@deepseek-ai/dsh-timeout": "workspace:^",
-        "@deepseek-ai/dsh-typert-protocol": "workspace:^",
         "@deepseek-ai/schemastery": "workspace:^",
-        "ws": "^8.21.0"
+        "ws": "^8.21.0",
+        "@deepseek-ai/dsh-typert-protocol": "workspace:^"
       },
       "devDependencies": {
         "@deepseek-ai/cordis": "workspace:^",
@@ -118,13 +119,13 @@
         "zod": "^4.4.3"
       },
       "peerDependencies": {
-        "@deepseek-ai/cordis": "workspace:^",
-        "@deepseek-ai/dsh-principal-access": "workspace:^"
+        "@deepseek-ai/dsh-principal-access": "workspace:^",
+        "@deepseek-ai/cordis": "workspace:^"
       }
     },
     "../../deepseek-harness/packages/api/session-controller": {
       "name": "@deepseek-ai/dsh-api-session-controller",
-      "version": "0.1.5-rc.2",
+      "version": "0.1.6-alpha.1",
       "dev": true,
       "license": "MIT",
       "dependencies": {
@@ -224,7 +225,7 @@
     },
     "../../deepseek-harness/packages/api/workspace-controller": {
       "name": "@deepseek-ai/dsh-api-workspace-controller",
-      "version": "0.1.5-rc.2",
+      "version": "0.1.6-alpha.1",
       "dev": true,
       "license": "MIT",
       "dependencies": {
@@ -261,7 +262,7 @@
     },
     "../../deepseek-harness/packages/client/connection": {
       "name": "@deepseek-ai/dsh-client-connection",
-      "version": "0.1.5-rc.2",
+      "version": "0.1.6-alpha.1",
       "dev": true,
       "license": "MIT",
       "dependencies": {
@@ -289,7 +290,7 @@
     },
     "../../deepseek-harness/packages/client/locale": {
       "name": "@deepseek-ai/dsh-client-locale",
-      "version": "0.1.5-rc.2",
+      "version": "0.1.6-alpha.1",
       "dev": true,
       "license": "MIT",
       "dependencies": {
@@ -315,7 +316,7 @@
     },
     "../../deepseek-harness/packages/client/ui-conversation": {
       "name": "@deepseek-ai/dsh-client-ui-conversation",
-      "version": "0.1.5-rc.2",
+      "version": "0.1.6-alpha.1",
       "dev": true,
       "license": "MIT",
       "dependencies": {
@@ -371,7 +372,7 @@
     },
     "../../deepseek-harness/packages/client/ui-layout": {
       "name": "@deepseek-ai/dsh-client-ui-layout",
-      "version": "0.1.5-rc.2",
+      "version": "0.1.6-alpha.1",
       "dev": true,
       "license": "MIT",
       "devDependencies": {
@@ -392,7 +393,7 @@
     },
     "../../deepseek-harness/packages/client/ui-primitives": {
       "name": "@deepseek-ai/dsh-client-ui-primitives",
-      "version": "0.1.5-rc.2",
+      "version": "0.1.6-alpha.1",
       "dev": true,
       "license": "MIT",
       "devDependencies": {
@@ -426,7 +427,7 @@
     },
     "../../deepseek-harness/packages/client/ui-renderer": {
       "name": "@deepseek-ai/dsh-client-ui-renderer",
-      "version": "0.1.5-rc.2",
+      "version": "0.1.6-alpha.1",
       "dev": true,
       "license": "MIT",
       "devDependencies": {
@@ -447,7 +448,7 @@
     },
     "../../deepseek-harness/packages/client/ui-settings": {
       "name": "@deepseek-ai/dsh-client-ui-settings",
-      "version": "0.1.5-rc.2",
+      "version": "0.1.6-alpha.1",
       "dev": true,
       "license": "MIT",
       "devDependencies": {
@@ -468,7 +469,7 @@
     },
     "../../deepseek-harness/packages/client/ui-slots": {
       "name": "@deepseek-ai/dsh-client-ui-slots",
-      "version": "0.1.5-rc.2",
+      "version": "0.1.6-alpha.1",
       "dev": true,
       "license": "MIT",
       "devDependencies": {
@@ -482,7 +483,7 @@
     },
     "../../deepseek-harness/packages/client/ui-workspace": {
       "name": "@deepseek-ai/dsh-client-ui-workspace",
-      "version": "0.1.5-rc.2",
+      "version": "0.1.6-alpha.1",
       "dev": true,
       "license": "MIT",
       "devDependencies": {
@@ -515,7 +516,7 @@
     },
     "../../deepseek-harness/packages/core/agent": {
       "name": "@deepseek-ai/dsh-agent",
-      "version": "0.1.5-rc.2",
+      "version": "0.1.6-alpha.1",
       "dev": true,
       "license": "MIT",
       "devDependencies": {
@@ -531,7 +532,6 @@
         "@deepseek-ai/dsh-util-values": "workspace:^"
       },
       "peerDependencies": {
-        "@deepseek-ai/cordis": "workspace:^",
         "@deepseek-ai/dsh-invariants": "workspace:^",
         "@deepseek-ai/dsh-llm": "workspace:^",
         "@deepseek-ai/dsh-scope": "workspace:^",
@@ -539,17 +539,18 @@
         "@deepseek-ai/dsh-session-projection": "workspace:^",
         "@deepseek-ai/dsh-system-prompt": "workspace:^",
         "@deepseek-ai/dsh-typert-protocol": "workspace:^",
-        "@deepseek-ai/dsh-util-values": "workspace:^"
+        "@deepseek-ai/dsh-util-values": "workspace:^",
+        "@deepseek-ai/cordis": "workspace:^"
       }
     },
     "../../deepseek-harness/packages/core/session": {
       "name": "@deepseek-ai/dsh-session",
-      "version": "0.1.5-rc.2",
+      "version": "0.1.6-alpha.1",
       "dev": true,
       "license": "MIT",
       "dependencies": {
-        "@deepseek-ai/dsh-brand": "workspace:^",
         "@deepseek-ai/dsh-llm": "workspace:^",
+        "@deepseek-ai/dsh-brand": "workspace:^",
         "@deepseek-ai/dsh-util-values": "workspace:^"
       },
       "devDependencies": {
@@ -560,13 +561,13 @@
         "@deepseek-ai/dsh-typert-registry": "workspace:^"
       },
       "peerDependencies": {
-        "@deepseek-ai/cordis": "workspace:^",
-        "@deepseek-ai/dsh-scope": "workspace:^"
+        "@deepseek-ai/dsh-scope": "workspace:^",
+        "@deepseek-ai/cordis": "workspace:^"
       }
     },
     "../../deepseek-harness/packages/core/system-prompt": {
       "name": "@deepseek-ai/dsh-system-prompt",
-      "version": "0.1.5-rc.2",
+      "version": "0.1.6-alpha.1",
       "dev": true,
       "license": "MIT",
       "dependencies": {
@@ -579,15 +580,15 @@
         "@deepseek-ai/dsh-scope": "workspace:^"
       },
       "peerDependencies": {
-        "@deepseek-ai/cordis": "workspace:^",
         "@deepseek-ai/dsh-invariants": "workspace:^",
         "@deepseek-ai/dsh-llm": "workspace:^",
-        "@deepseek-ai/dsh-scope": "workspace:^"
+        "@deepseek-ai/dsh-scope": "workspace:^",
+        "@deepseek-ai/cordis": "workspace:^"
       }
     },
     "../../deepseek-harness/packages/core/tools": {
       "name": "@deepseek-ai/dsh-tools",
-      "version": "0.1.5-rc.2",
+      "version": "0.1.6-alpha.1",
       "dev": true,
       "license": "MIT",
       "dependencies": {
@@ -610,18 +611,20 @@
       "peerDependencies": {
         "@deepseek-ai/cordis": "workspace:^",
         "@deepseek-ai/dsh-agent": "workspace:^",
-        "@deepseek-ai/dsh-code-runtime": "workspace:^",
+        "@deepseek-ai/dsh-ptc-runtime": "workspace:^",
         "@deepseek-ai/dsh-invariants": "workspace:^",
         "@deepseek-ai/dsh-llm": "workspace:^",
         "@deepseek-ai/dsh-scope": "workspace:^",
         "@deepseek-ai/dsh-session": "workspace:^",
         "@deepseek-ai/dsh-system-prompt": "workspace:^",
-        "@deepseek-ai/dsh-user-approval": "workspace:^"
+        "@deepseek-ai/dsh-user-approval": "workspace:^",
+        "@deepseek-ai/dsh-sandbox": "workspace:^",
+        "@deepseek-ai/dsh-sandbox-policy": "workspace:^"
       }
     },
     "../../deepseek-harness/packages/host/webserver": {
       "name": "@deepseek-ai/dsh-host-webserver",
-      "version": "0.1.5-rc.2",
+      "version": "0.1.6-alpha.1",
       "dev": true,
       "license": "MIT",
       "dependencies": {
@@ -640,17 +643,17 @@
     },
     "../../deepseek-harness/packages/llm/llm": {
       "name": "@deepseek-ai/dsh-llm",
-      "version": "0.1.5-rc.2",
+      "version": "0.1.6-alpha.1",
       "dev": true,
       "license": "MIT",
       "dependencies": {
-        "@deepseek-ai/dsh-brand": "workspace:^",
-        "@deepseek-ai/dsh-timeout": "workspace:^",
-        "@deepseek-ai/dsh-typert-protocol": "workspace:^",
         "@deepseek-ai/dsh-util-crypto": "workspace:^",
-        "@deepseek-ai/dsh-util-values": "workspace:^",
         "@deepseek-ai/schemastery": "workspace:^",
-        "zod": "^4.4.3"
+        "zod": "^4.4.3",
+        "@deepseek-ai/dsh-timeout": "workspace:^",
+        "@deepseek-ai/dsh-brand": "workspace:^",
+        "@deepseek-ai/dsh-util-values": "workspace:^",
+        "@deepseek-ai/dsh-typert-protocol": "workspace:^"
       },
       "devDependencies": {
         "@deepseek-ai/cordis": "workspace:^",
@@ -663,7 +666,7 @@
     },
     "../../deepseek-harness/packages/session-query/session-query": {
       "name": "@deepseek-ai/dsh-session-query",
-      "version": "0.1.5-rc.2",
+      "version": "0.1.6-alpha.1",
       "dev": true,
       "license": "MIT",
       "devDependencies": {
@@ -678,15 +681,15 @@
         "@deepseek-ai/dsh-tool-todo": "workspace:^"
       },
       "peerDependencies": {
-        "@deepseek-ai/cordis": "workspace:^",
         "@deepseek-ai/dsh-brand": "workspace:^",
         "@deepseek-ai/dsh-llm": "workspace:^",
         "@deepseek-ai/dsh-session": "workspace:^",
+        "@deepseek-ai/dsh-session-title": "workspace:^",
+        "@deepseek-ai/dsh-tool-todo": "workspace:^",
         "@deepseek-ai/dsh-session-persistence": "workspace:^",
         "@deepseek-ai/dsh-session-projection": "workspace:^",
         "@deepseek-ai/dsh-session-projection-cache": "workspace:^",
-        "@deepseek-ai/dsh-session-title": "workspace:^",
-        "@deepseek-ai/dsh-tool-todo": "workspace:^"
+        "@deepseek-ai/cordis": "workspace:^"
       },
       "peerDependenciesMeta": {
         "@deepseek-ai/dsh-session-persistence": {
@@ -698,11 +701,14 @@
         "@deepseek-ai/dsh-session-projection-cache": {
           "optional": true
         }
+      },
+      "dependencies": {
+        "@deepseek-ai/dsh-session-format-catalog": "workspace:^"
       }
     },
     "../../deepseek-harness/packages/typert/protocol": {
       "name": "@deepseek-ai/dsh-typert-protocol",
-      "version": "0.1.5-rc.2",
+      "version": "0.1.6-alpha.1",
       "dev": true,
       "license": "MIT",
       "devDependencies": {
@@ -714,7 +720,7 @@
     },
     "../../deepseek-harness/packages/workspace/workspace": {
       "name": "@deepseek-ai/dsh-workspace",
-      "version": "0.1.5-rc.2",
+      "version": "0.1.6-alpha.1",
       "dev": true,
       "license": "MIT",
       "dependencies": {
@@ -746,8 +752,8 @@
       "dev": true,
       "license": "MIT",
       "dependencies": {
-        "@deepseek-ai/cosmokit": "workspace:^",
-        "@standard-schema/spec": "^1.1.0"
+        "@standard-schema/spec": "^1.1.0",
+        "@deepseek-ai/cosmokit": "workspace:^"
       },
       "bin": {
         "cordis": "bin.js"

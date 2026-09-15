@@ -16,7 +16,7 @@ const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 // dsh 进程里没有本项目的 .env（通过 DSH_PASSWORDS_ENV_FILE 显式指定网关 .env 路径）
 const explicitEnvFile = process.env.DSH_PASSWORDS_ENV_FILE?.trim();
 if (explicitEnvFile) {
-  loadEnv({ path: explicitEnvFile, quiet: true });
+  loadEnv({ path: envFilePath(), quiet: true });
 }
 loadEnv({ path: path.join(moduleDir, '..', '.env'), quiet: true });
 
@@ -400,9 +400,9 @@ function parseBoundedInteger(raw: string, min: number, max: number, name: string
   return value;
 }
 
-/** 当前生效的 .env 文件路径（与 loadConfig 的读取路径保持一致） */
-function envFilePath(): string {
-  return process.env.DSH_PASSWORDS_ENV_FILE?.trim() || path.join(moduleDir, '..', '.env');
+/** Absolute configuration path shared by the Host and its gateway child. */
+export function envFilePath(): string {
+  return path.resolve(process.env.DSH_PASSWORDS_ENV_FILE?.trim() || path.join(moduleDir, '..', '.env'));
 }
 
 /**

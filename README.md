@@ -284,7 +284,7 @@ node scripts/start-http.mjs [端口]    # 默认 8080，会弹 y/N 确认
 | `MCP_LOCAL_WORKSPACE_PLACEHOLDER_ROOT` | `~/dsh-local-workspaces` | 本机助手工作区注册使用的稳定占位目录；应位于 release/current 之外，避免每次部署产生重复工作区 |
 | `MCP_DSH_ROOT` | 自动探测 | dsh Web Profile 根目录或其中的 `@deepseek-ai/dsh` 包目录；补丁会自动向上定位同一 Profile 的客户端包 |
 | `MCP_DSH_RESTART_SERVICE` | `dsh-web` | 重载补丁后自动重启的 dsh systemd 服务名；显式留空不自动重启 |
-| `DSH_PASSWORDS_ENV_FILE` | 空 | 手动指定 `.env` 路径（插件自动传，一般不用填） |
+| `DSH_PASSWORDS_ENV_FILE` | 空 | Host 与网关共用的 `.env` 路径；生产环境在 Host 启动环境中指定包目录外的持久文件，升级替换 `node_modules` 时保留配置。未指定时使用包目录内的 `.env`。 |
 
 ## 常用命令
 

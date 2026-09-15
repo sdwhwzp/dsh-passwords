@@ -21,7 +21,7 @@ import { createReadStream, existsSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { databaseTarget, loadConfig, type PlatformConfig } from './config.js';
+import { databaseTarget, envFilePath, loadConfig, type PlatformConfig } from './config.js';
 import { Database, type UserListRow } from './db.js';
 import { createFieldCrypto } from './encrypt.js';
 import { registerTenantTaskBoard } from './tenant-task-board.js';
@@ -61,6 +61,11 @@ import { updateApplyHttpStatus } from './update.js';
 
 interface SpendAccounting {
   reconcile(): Promise<void>;
+  recordUsage(principal: AuthenticatedPrincipal, call: {
+    sessionId: string; turn: number; step: number; provider: string; model: string;
+    inputTokens: number; outputTokens: number; cacheReadTokens: number;
+    cacheWriteTokens: number; reasoningTokens: number; time: number;
+  }): boolean;
   registerBudgetResolver(
     resolve: (principal: AuthenticatedPrincipal) => number | null | undefined,
   ): () => void;
@@ -306,7 +311,7 @@ function startGateway(ctx: Context, cfg: PlatformConfig): void {
             ...process.env,
             DSH_GATEWAY_PARENT_PID: String(process.pid),
             DSH_GATEWAY_BROWSER_AUTH_REQUIRED: upstreamBrowserAuthenticationRequired ? '1' : '0',
-            DSH_PASSWORDS_ENV_FILE: path.join(INSTALL_ROOT, '.env'),
+            DSH_PASSWORDS_ENV_FILE: envFilePath(),
           },
           stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
         });

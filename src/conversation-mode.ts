@@ -32,12 +32,13 @@ export async function createConversation(ctx: Context, db: Database, principal: 
 
 /** Restore chat presentation and inherit it on forks without changing tool permissions. */
 export function registerConversationMode(ctx: Context, db: Database): void {
-  ctx.on('agent/created', ({ agent }) => {
+  ctx.on('agent/created', ({ agent }): undefined => {
     if (!isConversationSession(db, agent.session.id) && !(agent.session.header.parentSession !== undefined
-      && isConversationSession(db, agent.session.header.parentSession))) return;
+      && isConversationSession(db, agent.session.header.parentSession))) return undefined;
     db.setSetting(key(agent.session.id), 'chat');
     agent.ctx.systemPrompt.section({ name: 'conversation-mode', order: 1000,
       text: 'This Session uses a simplified chat interface. Use any available tools when useful, subject to the authenticated account permissions and workspace sandbox. The account workspace is attached automatically. For structured visual answers, use a dsh-ui fenced block, never a json block with a separate dsh-ui label. If UI rendering fails, use validate_dsh_ui when available to diagnose and repair it. Grid columns use cols; card bodies use items containing text nodes.',
     });
+    return undefined;
   });
 }

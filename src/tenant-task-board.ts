@@ -6,10 +6,24 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import WebSocket from 'ws';
+import type { LlmRuntime, TokenUsage } from '@deepseek-ai/dsh-llm';
 import type { Database } from './db.js';
 import type { PlatformConfig } from './config.js';
 import { verifyPrincipalHeaders, type AuthenticatedPrincipal } from './principal.js';
-import { TaskBoardHostService, HostTaskLedger, makeTaskBoardRoutes, type BoardGatewayRequest } from './task-board-engine.js';
+import { TaskBoardHostService, HostTaskLedger, makeTaskBoardRoutes, parseTaskDraft, splitModelRoute, TaskParseError, type BoardGatewayRequest, type BoardParseRequest } from './task-board-engine.js';
+import { customerModelAllowed } from './model-policy.js';
+import { todayLocal } from './permissions.js';
+import { dailyTimeQuotaError, hourlyTokenQuotaError, monthlySpendQuotaError, spendCheckUnavailableError } from './quota-notice.js';
+
+/** A gateway catalog is untrusted transport data; only an exact visible route admits a parse. */
+function catalogAllows(catalog: unknown, provider: string, model: string): boolean {
+  if (catalog === null || typeof catalog !== 'object' || !('groups' in catalog) || !Array.isArray(catalog.groups)) return false;
+  return catalog.groups.some((group: unknown) => {
+    if (group === null || typeof group !== 'object' || !('id' in group) || group.id !== provider ||
+      !('models' in group) || !Array.isArray(group.models)) return false;
+    return group.models.some((entry: unknown) => entry !== null && typeof entry === 'object' && 'id' in entry && entry.id === model);
+  });
+}
 
 /** Gateway transport never calls Host mutations directly; account policy runs for each RPC. */
 export class TenantBoardGateway {
@@ -84,6 +98,27 @@ export function registerTenantTaskBoard(ctx: Context, db: Database, config: Plat
   const origin = new URL(settings.gatewayOrigin).origin;
   const target = new URL(origin);
   if (!['127.0.0.1', '[::1]', 'localhost'].includes(target.hostname) || !['http:', 'https:'].includes(target.protocol)) throw new Error('task gateway must be local');
+  const admitParse = async (principal: AuthenticatedPrincipal): Promise<void> => {
+    const user = validate(principal);
+    if (user.role === 'admin') return;
+    const permissions = db.getPermissions(user.id);
+    if (permissions === null) throw spendCheckUnavailableError();
+    const usage = db.getUsage(user.id, todayLocal());
+    if (permissions.daily_minutes_limit !== null && (usage?.active_seconds ?? 0) >= permissions.daily_minutes_limit * 60) {
+      throw dailyTimeQuotaError(permissions.daily_minutes_limit);
+    }
+    const windowStart = usage?.hourly_window_start == null ? NaN : new Date(usage.hourly_window_start).getTime();
+    const tokens = Number.isFinite(windowStart) && Date.now() - windowStart < 3_600_000 ? usage!.hourly_tokens : 0;
+    if (permissions.hourly_token_limit !== null && tokens >= permissions.hourly_token_limit) {
+      throw hourlyTokenQuotaError(tokens, permissions.hourly_token_limit);
+    }
+    const accounting = ctx.get('spendAccounting');
+    if (accounting === undefined) throw spendCheckUnavailableError();
+    await accounting.reconcile();
+    validate(principal);
+    const status = accounting.budgetStatus(principal, permissions.monthly_budget_micros);
+    if (status.exhausted) throw monthlySpendQuotaError(status.usedMicros, permissions.monthly_budget_micros ?? 0);
+  };
   const boardFor = (principal: AuthenticatedPrincipal) => {
     validate(principal);
     const key = principal.id;
@@ -102,7 +137,56 @@ export function registerTenantTaskBoard(ctx: Context, db: Database, config: Plat
       ledger: new HostTaskLedger(ledgerPath),
       commandDispatcher: { execute: (sessionId, line, signal) => gateway.invoke({ namespace: 'commands', method: 'execute', args: { agentId: sessionId, line, submittedAttachments: [] }, signal }) },
     });
-    const board = { principal, service, routes: makeTaskBoardRoutes(service) };
+    const parseTask = async (request: BoardParseRequest, signal: AbortSignal) => {
+      signal.throwIfAborted();
+      validate(principal);
+      const route = splitModelRoute(request.model);
+      if (route === undefined || (principal.role !== 'admin' && !customerModelAllowed(route.provider, route.model))) {
+        throw new TaskParseError('no-model', 'the selected model is unavailable for this account');
+      }
+      const catalog = await gateway.invoke({ namespace: 'session', method: 'modelCatalog', args: {}, signal });
+      if (!catalogAllows(catalog, route.provider, route.model)) {
+        throw new TaskParseError('no-model', 'the selected model is unavailable for this account');
+      }
+      await admitParse(principal);
+      signal.throwIfAborted();
+      const accounting = ctx.get('spendAccounting');
+      if (accounting === undefined || typeof accounting.recordUsage !== 'function') throw spendCheckUnavailableError();
+      const llm = ctx.get('llm');
+      if (llm === undefined) throw new TaskParseError('no-model', 'task parsing model service is unavailable');
+      const usageId = `task-board-parse:${randomUUID()}`;
+      const startedAt = Date.now();
+      let usage: TokenUsage | undefined;
+      const scopedLlm: Pick<LlmRuntime, 'stream'> = { async *stream(options) {
+        validate(principal);
+        options.signal?.throwIfAborted();
+        try {
+          for await (const chunk of llm.stream(options)) {
+            if (chunk.type === 'usage') usage = chunk.usage;
+            validate(principal);
+            options.signal?.throwIfAborted();
+            if (chunk.type === 'finish' && (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted')) {
+              throw new TaskParseError(chunk.reason.kind === 'aborted' ? 'timeout' : 'model-error', chunk.reason.failure.message);
+            }
+            yield chunk;
+          }
+          options.signal?.throwIfAborted();
+        } finally {
+          if (usage !== undefined) {
+            const tokens = usage.totalTokens ?? usage.inputTokens + usage.outputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0);
+            db.addTokens(Number(principal.id), todayLocal(), tokens, new Date().toISOString());
+            await accounting.recordUsage(principal, {
+              sessionId: usageId, turn: 0, step: 0, provider: route.provider, model: route.model,
+              inputTokens: usage.inputTokens, outputTokens: usage.outputTokens,
+              cacheReadTokens: usage.cacheReadTokens ?? 0, cacheWriteTokens: usage.cacheWriteTokens ?? 0,
+              reasoningTokens: usage.reasoningTokens ?? 0, time: startedAt,
+            });
+          }
+        }
+      } };
+      return parseTaskDraft(scopedLlm, request, signal);
+    };
+    const board = { principal, service, routes: makeTaskBoardRoutes(service, { assertPrincipal: () => { validate(principal); } }, { parseTask }) };
     boards.set(key, board);
     service.start();
     return board;
@@ -115,7 +199,7 @@ export function registerTenantTaskBoard(ctx: Context, db: Database, config: Plat
       boardFor(principal);
     } catch { console.warn('[dsh-passwords] task board owner unavailable:', entry.name); }
   }
-  for (const suffix of ['state', 'action', 'events']) {
+  for (const suffix of ['state', 'action', 'events', 'parse']) {
     const pathname = `/api/task-board/${suffix}`;
     ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: pathname, handler: async (req, res) => {
       try {
