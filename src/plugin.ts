@@ -440,6 +440,18 @@ export function apply(ctx: Context): void {
   });
   if (localWorkspaceHub !== null) {
     registerLocalWorkspaceFileRoutes(ctx, db!, localWorkspaceHub, cfg);
+    // Host-side surfaces that shell out (the SCM panel runs git through the
+    // subprocess seam) see only the empty placeholder directory of a paired
+    // folder. This service lets them route the same argv to the computer that
+    // actually holds the checkout; `null` keeps them on their own execution
+    // path for every ordinary workspace, so nothing changes for Host folders.
+    ctx.effect(
+      () => ctx.root.provide('localWorkspaceCommands', {
+        runInPairedWorkspace: (cwd: string, argv: readonly string[], options?: { signal?: AbortSignal; timeoutMs?: number }) =>
+          localWorkspaceHub.runPairedArgv(cwd, argv, options ?? {}),
+      }),
+      'dsh-passwords: paired workspace commands',
+    );
     ctx.effect(
       () => async () => {
         await localWorkspaceReady.catch(() => undefined);

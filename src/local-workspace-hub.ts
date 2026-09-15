@@ -388,6 +388,52 @@ export class LocalWorkspaceHub {
     return this.workspaceForPlaceholder(cwd);
   }
 
+  /**
+   * Run one argv on the paired computer that owns a Host-side workspace path.
+   *
+   * Host-side surfaces that shell out — the SCM panel runs `git` through the
+   * subprocess seam — see only the placeholder directory this Host keeps for a
+   * paired folder, which is empty by construction: the real checkout is on the
+   * user's computer. Routing the same argv through the companion lets those
+   * surfaces work on a paired folder without a network mount.
+   *
+   * The companion runs a command STRING (PowerShell on Windows, bash
+   * elsewhere), so each argument is quoted for that platform rather than
+   * concatenated. `null` means the path is not a paired folder and the caller
+   * should keep using its own local execution.
+   * @param cwd - Host-side path a surface is about to run in.
+   * @param argv - executable and arguments, unquoted.
+   * @param options - abort signal and per-call timeout.
+   * @returns the finished command, or null when `cwd` is not paired.
+   * @throws RemoteOperationError when the folder is offline, Shell is not
+   *   granted, the call times out, or the companion refuses it.
+   */
+  async runPairedArgv(
+    cwd: string,
+    argv: readonly string[],
+    options: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<{ exitCode: number | null; stdout: string; stderr: string; truncated: boolean } | null> {
+    if (argv.length === 0) throw new RemoteOperationError('argv 不能为空', 'INVALID_ARGUMENT');
+    const workspace = this.workspaceForPlaceholder(cwd);
+    if (workspace === null) return null;
+    const signal = options.signal ?? new AbortController().signal;
+    const timeoutMs = options.timeoutMs ?? DEFAULT_RPC_TIMEOUT_MS;
+    const command = argv.map((part) => quoteForPlatform(part, workspace.platform)).join(' ');
+    const value = await this.request(workspace.id, 'bash', { command, timeoutMs }, signal, timeoutMs + 10_000) as {
+      stdout?: unknown;
+      stderr?: unknown;
+      exitCode?: unknown;
+      stdoutTruncated?: unknown;
+      stderrTruncated?: unknown;
+    };
+    return {
+      exitCode: typeof value.exitCode === 'number' ? value.exitCode : null,
+      stdout: typeof value.stdout === 'string' ? value.stdout : '',
+      stderr: typeof value.stderr === 'string' ? value.stderr : '',
+      truncated: value.stdoutTruncated === true || value.stderrTruncated === true,
+    };
+  }
+
   /** Dispatch a read-only browser operation after rechecking the current grant and account. */
   browse(workspaceId: string, principal: AuthenticatedPrincipal, args: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
     const workspace = this.db.getLocalWorkspace(workspaceId);
@@ -1048,6 +1094,23 @@ type RemoteRequest = (
  * every tool call must carry the durable owner of the model step that emitted
  * it.  Legacy/anonymous calls deliberately fail closed for remote files.
  */
+/**
+ * Quote one argument for the shell the companion uses on that platform.
+ *
+ * Both shells treat a single-quoted run as literal, and that is the only
+ * property this needs — but they escape an embedded quote differently:
+ * PowerShell doubles it, POSIX shells close the run and splice an escaped one.
+ * Using the wrong rule silently splits an argument, so the platform decides.
+ * @param value - the raw argument.
+ * @param platform - the companion's reported platform.
+ * @returns the argument as one quoted shell word.
+ */
+export function quoteForPlatform(value: string, platform: string): string {
+  return platform === 'win32'
+    ? `'${value.replaceAll("'", "''")}'`
+    : `'${value.replaceAll("'", "'\\''")}'`;
+}
+
 export function localWorkspacePrincipalAllowed(
   principal: AuthenticatedPrincipal | undefined,
   userId: number,
