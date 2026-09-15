@@ -27,7 +27,13 @@ interface LaunchHarness {
 test('launch hello 严格校验 256-bit ticket，初始 URI 不信任或携带 server', () => {
   const ticket = 'A'.repeat(43);
   const hello = launchHello(ticket, 'launch-protocol-1');
-  assert.deepEqual(parseHello(JSON.stringify(hello)), hello);
+  // desktopControl is the one field the strict key set accepts on both sides of
+  // its introduction, so companions built before it keep launching.
+  assert.deepEqual(parseHello(JSON.stringify(hello)), { ...hello, desktopControl: false });
+  assert.deepEqual(
+    parseHello(JSON.stringify({ ...hello, desktopControl: true })),
+    { ...hello, desktopControl: true },
+  );
   assert.throws(
     () => parseHello(JSON.stringify({ ...hello, ticket: 'short' })),
     /256-bit base64url/,

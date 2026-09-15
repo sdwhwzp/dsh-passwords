@@ -3,7 +3,17 @@
 export const LOCAL_WORKSPACE_PROTOCOL_VERSION = 2;
 export const LOCAL_WORKSPACE_MAX_MESSAGE_BYTES = 3 * 1024 * 1024;
 
-export type LocalWorkspaceOperation = 'read' | 'write' | 'edit' | 'glob' | 'grep' | 'bash' | 'office' | 'files';
+export type LocalWorkspaceOperation =
+  | 'read'
+  | 'write'
+  | 'edit'
+  | 'glob'
+  | 'grep'
+  | 'bash'
+  | 'office'
+  | 'files'
+  | 'screenshot'
+  | 'input';
 
 export interface LocalWorkspaceHelloFields {
   protocol: typeof LOCAL_WORKSPACE_PROTOCOL_VERSION;
@@ -13,6 +23,18 @@ export interface LocalWorkspaceHelloFields {
   root: string;
   platform: string;
   shellEnabled: boolean;
+  /**
+   * Whether this connection may observe and drive the computer's desktop.
+   *
+   * Absent from every companion built before the screenshot and input
+   * operations existed, so the field is optional on the wire and parses to
+   * `false`; the protocol version stays 2 and already-paired companions keep
+   * connecting without the capability. It is deliberately separate from
+   * `shellEnabled`: a screen capture exposes every visible window, including
+   * password managers and private conversations, and injected input reaches
+   * whichever window currently holds focus.
+   */
+  desktopControl: boolean;
 }
 
 export interface LocalWorkspacePairHello extends LocalWorkspaceHelloFields {
@@ -101,6 +123,18 @@ export function parseWireObject(raw: string): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
+/**
+ * Exact key sets a launch hello may carry, with and without `desktopControl`.
+ *
+ * The launch flow spends a browser-issued bearer ticket, so it rejects any
+ * unexpected field rather than ignoring it. Companions predating desktop
+ * control omit the field entirely and must keep connecting.
+ */
+const LAUNCH_HELLO_KEYS = new Set([
+  'deviceName,platform,protocol,root,shellEnabled,ticket,type,workspaceId,workspaceName',
+  'desktopControl,deviceName,platform,protocol,root,shellEnabled,ticket,type,workspaceId,workspaceName',
+]);
+
 /** Validate the first companion frame before authentication or pairing. */
 export function parseHello(raw: string): LocalWorkspaceHello {
   const value = parseWireObject(raw);
@@ -114,6 +148,9 @@ export function parseHello(raw: string): LocalWorkspaceHello {
   const root = boundedString(value.root, 'root', 1, 4096);
   const platform = boundedString(value.platform, 'platform', 1, 40);
   if (typeof value.shellEnabled !== 'boolean') throw new Error('shellEnabled must be boolean');
+  if (value.desktopControl !== undefined && typeof value.desktopControl !== 'boolean') {
+    throw new Error('desktopControl must be boolean');
+  }
   const shared: LocalWorkspaceHelloFields = {
     protocol: LOCAL_WORKSPACE_PROTOCOL_VERSION,
     deviceName,
@@ -122,6 +159,7 @@ export function parseHello(raw: string): LocalWorkspaceHello {
     root,
     platform,
     shellEnabled: value.shellEnabled,
+    desktopControl: value.desktopControl === true,
   };
   if (value.type === 'device') {
     // Reject accidentally retained legacy secrets instead of silently accepting them
@@ -133,9 +171,7 @@ export function parseHello(raw: string): LocalWorkspaceHello {
   }
   if (value.type === 'launch') {
     const keys = Object.keys(value).sort().join(',');
-    if (keys !== 'deviceName,platform,protocol,root,shellEnabled,ticket,type,workspaceId,workspaceName') {
-      throw new Error('launch hello contains unexpected fields');
-    }
+    if (!LAUNCH_HELLO_KEYS.has(keys)) throw new Error('launch hello contains unexpected fields');
     return { type: 'launch', ticket: launchTicket(value.ticket), ...shared };
   }
   if (value.type === 'pair') {

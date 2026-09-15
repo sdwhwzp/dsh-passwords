@@ -67,6 +67,7 @@ dsh 的网页界面默认面向本机使用。服务器地址一旦暴露，拿�
 - Windows EXE 自动启用 `--allow-shell`，包括恢复已有工作区；非 Windows EXE 命令行模式默认关闭，显式添加后 Shell 才会在该用户电脑上执行
 - 桌面端接入目录后会报告当前 Shell 权限。每次模型请求都会重新读取连接状态，并通过 `local-workspace-capabilities` 写入可回放的上下文；原会话在重连后也会使用新状态。启用时直接调用 `bash` 执行 Git、构建等命令；离线或未启用时明确提示，服务端和本机助手均保留检查。
 - Windows 工作区自动注册 `word_native_status`、`word_native_read`、`word_native_edit`：优先调用客户电脑已经安装的 Microsoft Word，不可用时回退 WPS 文字，不依赖 `@univerjs-pro/*`
+- 单独授权「桌面控制」后还会注册 `computer_screenshot` 与 `computer_use`，让模型看到并操作那台电脑自己的屏幕、鼠标和键盘；该授权与 Shell 相互独立，默认关闭
 
 ## 身份与消费额度同步
 
@@ -173,11 +174,29 @@ Windows 本机工作区还提供原生 Word 自动化。`word_native_read` 可�
 
 Office RPC 使用本机助手协议 v2。升级服务器端插件后必须重新下载并运行新版 EXE；旧版助手会收到协议版本不支持提示。
 
+### 桌面控制（computer-use）
+
+授权后，模型可以看到并操作**用户自己那台电脑**的桌面，而不是服务器的桌面：
+
+- `computer_screenshot` 截取一块屏幕。截图会等比缩小到 1280×800 以内并作为附件入会话；**模型给的所有坐标都按这张截图的像素计算**，助手再换算回真实显示器，因此模型不需要自己做比例换算。多显示器用 `display` 选择，序号从 0 开始。
+- `computer_use` 执行一个动作：`mouse_move`、`left_click`、`right_click`、`middle_click`、`double_click`、`left_click_drag`、`scroll`、`key`、`type`、`cursor_position`、`wait`。`key` 接受 `ctrl+c`、`alt+Tab` 这类组合，`type` 直接输入字面文本（Windows 与 macOS 均按 Unicode 发送，不受键盘布局影响）。
+
+实现按平台走系统自带能力，不引入原生模块：Windows 用一段固定的 PowerShell（`SendInput` / `System.Drawing`，测量前先 `SetProcessDPIAware`），macOS 用 `osascript` 调 CoreGraphics 加 `screencapture`/`sips`，Linux 用 `xdotool` 加 ImageMagick 或 `gnome-screenshot`。
+
+**这项授权与 `--allow-shell` 完全独立，而且不会被任何运行方式自动开启**——截屏会拍到屏幕上全部可见窗口（包括密码管理器、邮件和私人聊天），输入会进入当前获得焦点的窗口。开启方式二选一：
+
+- 桌面端：在「本机目录」页对某个目录点 **允许控制桌面**，确认原生风险提示；改动会重连该目录，让新的握手带上授权
+- 命令行助手：配对时加 `--allow-desktop`，或在 `--setup` 向导第 4 问回答 `y`
+
+两个工具在**会话开始时**按当前授权决定是否注册（Shell 是每次调用实时判定）。因此中途开启授权后需要新开一个会话；`local-workspace-capabilities` 上下文会如实写明这一点。
+
+平台限制：macOS 需要在「系统设置 → 隐私与安全性」中分别授予**屏幕录制**和**辅助功能**，缺少时助手返回 `DESKTOP_PERMISSION_REQUIRED` 而不是静默失败；Windows 上非提权进程无法向以管理员身份运行的窗口发送输入（截屏不受影响）。
+
 默认配置文件是 `~/.dsh-local-workspace/config.json`；Windows 网页一键选择的每个目录会另存为 `~/.dsh-local-workspace/profiles/<工作区ID>.json`，双击助手时会一起恢复。命令行要授权多个目录时，请为每个目录使用不同配置文件，例如 `--config ~/.dsh-local-workspace/project-b.json`。
 
 本机助手端口默认是网关端口加一。例如 dsh 网页网关是 `3081`，助手端口就是 `3082`。服务器防火墙需放行该端口；经过 NAT、反向代理或网页推导地址不正确时，设置 `MCP_LOCAL_WORKSPACE_PUBLIC_URL=wss://你的域名:端口`。
 
-网页一键入口签发 256 位随机启动票据：绑定当前登录用户、两分钟失效、只能消费一次，且不会写入助手配置或日志。真正的高强度设备令牌通过 WebSocket 自动下发，只保存在用户电脑，服务器仅保存不可逆散列。文件操作只接受授权目录内的路径，并会解析符号链接后再次检查。`--allow-shell` 是高权限开关；Windows 打包 EXE 会为新连接和已有配置自动启用。Shell 以当前系统用户身份运行，可能访问授权目录之外的文件。明文 `ws://` 仅限可信局域网；跨不可信网络必须使用 HTTPS/WSS。
+网页一键入口签发 256 位随机启动票据：绑定当前登录用户、两分钟失效、只能消费一次，且不会写入助手配置或日志。真正的高强度设备令牌通过 WebSocket 自动下发，只保存在用户电脑，服务器仅保存不可逆散列。文件操作只接受授权目录内的路径，并会解析符号链接后再次检查。`--allow-shell` 是高权限开关；Windows 打包 EXE 会为新连接和已有配置自动启用。Shell 以当前系统用户身份运行，可能访问授权目录之外的文件。`--allow-desktop` 是另一个更高权限的开关，**任何运行方式都不会自动开启**：授权检查放在能力模块自身，桌面端 worker 与命令行助手共用同一条判定，未授权时 `screenshot`/`input` 在参数校验之前就被拒绝。明文 `ws://` 仅限可信局域网；跨不可信网络必须使用 HTTPS/WSS。
 
 维护者可运行 `npm run build:windows-assistant` 生成 `release/山东梯智物联AI本机助手.exe`。仓库中的 `Build Windows Local Workspace Assistant` 工作流也会在 Windows runner 上构建并上传同名 artifact。
 

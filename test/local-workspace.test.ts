@@ -262,9 +262,11 @@ test('本机工作区令牌、所有权与撤销持久化', () => {
       placeholderPath: placeholder,
       platform: 'darwin',
       shellEnabled: false,
+      desktopControl: false,
     });
 
     assert.equal(workspace.user_id, owner.id);
+    assert.equal(workspace.desktop_control_enabled, false);
     assert.equal(db.authenticateLocalWorkspace(token)?.id, workspace.id);
     assert.equal(db.authenticateLocalWorkspace(token + '-wrong'), null);
     assert.equal(db.localWorkspaceOwnerForPath(path.join(placeholder, 'src')), owner.id);
@@ -354,6 +356,9 @@ async function startCompanion(
       child.stdin?.write(`${root}\n`);
     } else if (wizardStep === 2 && stdout.includes('允许 AI 在本机执行')) {
       wizardStep = 3;
+      child.stdin?.write('n\n');
+    } else if (wizardStep === 3 && stdout.includes('允许 AI 截取本机屏幕')) {
+      wizardStep = 4;
       child.stdin?.write('n\n');
     }
   });

@@ -2,6 +2,7 @@
 
 import type { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
+import type { AttachmentStore, ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment';
 import type {} from '@deepseek-ai/dsh-system-prompt';
 import type { ToolDefinition, ToolResult } from '@deepseek-ai/dsh-tools';
 import type { WorkspaceRegistry } from '@deepseek-ai/dsh-workspace';
@@ -95,6 +96,8 @@ export interface LocalWorkspaceView {
   workspacePath: string;
   platform: string;
   shellEnabled: boolean;
+  /** Whether this pairing may capture the computer's screen and drive its input. */
+  desktopControl: boolean;
   online: boolean;
   createdAt: string;
   lastSeenAt: string;
@@ -378,6 +381,7 @@ export class LocalWorkspaceHub {
       workspacePath: workspace.placeholder_path,
       platform: workspace.platform,
       shellEnabled: workspace.shell_enabled,
+      desktopControl: workspace.desktop_control_enabled,
       online: this.connections.has(workspace.id),
       createdAt: workspace.created_at,
       lastSeenAt: workspace.last_seen_at,
@@ -609,6 +613,7 @@ export class LocalWorkspaceHub {
       remoteRoot: hello.root,
       platform: hello.platform,
       shellEnabled: hello.shellEnabled,
+      desktopControl: hello.desktopControl,
     });
     let workspace = this.db.getLocalWorkspace(authenticated.id) ?? authenticated;
     const registry = this.ctx.get('workspaceRegistry');
@@ -697,6 +702,7 @@ export class LocalWorkspaceHub {
       placeholderPath,
       platform: hello.platform,
       shellEnabled: hello.shellEnabled,
+      desktopControl: hello.desktopControl,
     });
     try {
       const registry = this.ctx.get('workspaceRegistry');
@@ -810,13 +816,16 @@ export class LocalWorkspaceHub {
   }
 
   private installAgentTools(agent: Agent, workspace: LocalWorkspaceRow): void {
-    const tools = remoteToolDefinitions(workspace, (operation, args, signal, timeoutMs) =>
+    // Desktop control decides the tool list once, at Session start, because the
+    // two desktop tools cost every paired Session their schemas and the grant is
+    // off for almost all of them. Shell stays a per-request check inside bash.
+    const tools = remoteToolDefinitions(agent.ctx, workspace, (operation, args, signal, timeoutMs) =>
       this.request(workspace.id, operation, args, signal, timeoutMs));
     for (const tool of tools) agent.ctx.tools.register(tool);
     agent.ctx.systemPrompt.section({
       name: 'remote-local-workspace',
       order: 95,
-      text: `This session workspace is on the user’s paired computer. read, write, edit, glob, grep, and bash operate there through the local companion.${workspace.platform === 'win32' ? ' word_native_read and word_native_edit use the installed Microsoft Word or WPS Writer on that computer.' : ''} Paths are relative to the selected local folder. Use the current local-workspace-capabilities context for connection and Shell permission; earlier refusals do not describe the current connection. When Shell is enabled, use bash for requested terminal operations, including Git branch inspection and switching, and inspect its result before reporting a failure. Do not edit Git internals to substitute for Git commands.`,
+      text: `This session workspace is on the user’s paired computer. read, write, edit, glob, grep, and bash operate there through the local companion.${workspace.platform === 'win32' ? ' word_native_read and word_native_edit use the installed Microsoft Word or WPS Writer on that computer.' : ''} Paths are relative to the selected local folder. Use the current local-workspace-capabilities context for connection and Shell permission; earlier refusals do not describe the current connection. When Shell is enabled, use bash for requested terminal operations, including Git branch inspection and switching, and inspect its result before reporting a failure. Do not edit Git internals to substitute for Git commands.${workspace.desktop_control_enabled ? ' computer_screenshot and computer_use observe and drive that computer’s own screen, mouse and keyboard. Always take a screenshot before acting, measure coordinates on that screenshot rather than on the physical display, and take another screenshot to confirm each action landed. Input goes to whichever window holds focus, so never type credentials and stop and ask the user when a screen shows sign-in, payment or other sensitive fields.' : ''}`,
     });
     agent.ctx.systemPrompt.context({
       name: 'local-workspace-capabilities',
@@ -832,10 +841,32 @@ export class LocalWorkspaceHub {
       return 'Local workspace connection: offline. File and terminal operations are unavailable until the user reconnects this folder in the desktop app or local companion.';
     }
     if (!connection.workspace.shell_enabled) {
-      return 'Local workspace connection: online. Shell permission: disabled. File tools remain available. To run commands, the user must reconnect with Shell enabled; the command-line companion requires --allow-shell.';
+      return `Local workspace connection: online. Shell permission: disabled. File tools remain available. To run commands, the user must reconnect with Shell enabled; the command-line companion requires --allow-shell. ${this.desktopContext(connection.workspace)}`;
     }
     const shell = connection.workspace.platform === 'win32' ? 'PowerShell on Windows' : 'Bash';
-    return `Local workspace connection: online. Shell permission: enabled. The bash tool runs ${shell} in the selected local folder as the current operating-system user. Terminal operations are already authorized; no --allow-shell startup step is needed for this connection. Each call starts a fresh shell. Operating-system permissions still apply; this does not grant administrator or root privileges.`;
+    return `Local workspace connection: online. Shell permission: enabled. The bash tool runs ${shell} in the selected local folder as the current operating-system user. Terminal operations are already authorized; no --allow-shell startup step is needed for this connection. Each call starts a fresh shell. Operating-system permissions still apply; this does not grant administrator or root privileges. ${this.desktopContext(connection.workspace)}`;
+  }
+
+  /**
+   * State the current desktop-control permission for each model request.
+   *
+   * The grant travels in the companion's handshake, so reconnecting with it
+   * turned on or off changes what this connection allows without restarting
+   * the Session; a refusal recorded earlier in the transcript does not describe
+   * the connection the next request runs on.
+   * @param workspace - the connected pairing.
+   * @returns one sentence naming the permission and, when granted, the coordinate space.
+   */
+  private desktopContext(workspace: LocalWorkspaceRow): string {
+    if (!workspace.desktop_control_enabled) {
+      return 'Desktop control permission: disabled, so computer_screenshot and computer_use are not available. '
+        + 'To grant it the user turns on desktop control for this folder in the desktop app, or reconnects the '
+        + 'command-line companion with --allow-desktop, and then starts a new conversation: these two tools are '
+        + 'selected when a conversation begins, unlike the Shell permission, which this line reports live.';
+    }
+    return 'Desktop control permission: enabled. computer_screenshot captures that computer\u2019s screen and '
+      + 'computer_use drives its mouse and keyboard as the current operating-system user. Coordinates are measured '
+      + 'on the returned screenshot, never on the physical display.';
   }
 
   private workspaceForPlaceholder(cwd: string): LocalWorkspaceRow | null {
@@ -1131,7 +1162,257 @@ export function localWorkspacePrincipalAllowed(
   return principal?.source === 'dsh-passwords' && principal.id === String(userId);
 }
 
-function remoteToolDefinitions(workspace: LocalWorkspaceRow, request: RemoteRequest): ToolDefinition[] {
+/** Dispatches one operation to the paired companion after the principal check. */
+type ExecuteRemote = (
+  exec: { readonly signal: AbortSignal },
+  operation: LocalWorkspaceOperation,
+  args: Record<string, unknown>,
+  timeoutMs?: number,
+) => Promise<unknown>;
+
+/** Capture fields the companion returns for one screenshot. */
+interface CompanionScreenshot {
+  mediaType: ImageMediaType;
+  data: string;
+  width: number;
+  height: number;
+  screenWidth: number;
+  screenHeight: number;
+  scale: number;
+  display: number;
+  displays: number;
+}
+
+/** The logged screenshot result; the bytes live in the attachment store, not here. */
+interface ScreenshotOutput {
+  image: {
+    attachmentId: string;
+    mediaType: ImageMediaType;
+    bytes: number;
+    width: number;
+    height: number;
+  };
+  display: number;
+  displays: number;
+  /** Capture width; every coordinate the model sends is measured in this space. */
+  width: number;
+  height: number;
+  screenWidth: number;
+  screenHeight: number;
+  scale: number;
+}
+
+/** Action fields the companion returns after one input action. */
+interface CompanionInputResult {
+  action: string;
+  cursor: { x: number; y: number };
+  width: number;
+  height: number;
+  screenWidth: number;
+  screenHeight: number;
+  scale: number;
+  display: number;
+  displays: number;
+}
+
+/** Actions `computer_use` accepts, in the order the tool description lists them. */
+const DESKTOP_ACTIONS = [
+  'mouse_move', 'left_click', 'right_click', 'middle_click', 'double_click',
+  'left_click_drag', 'scroll', 'key', 'type', 'cursor_position', 'wait',
+] as const;
+
+const DESKTOP_SCREENSHOT_TIMEOUT_MS = 60_000;
+const DESKTOP_INPUT_TIMEOUT_MS = 45_000;
+
+/**
+ * Describe one capture for the model, naming the space its coordinates live in.
+ *
+ * The attachment store normalizes what it publishes. Screen captures are far
+ * below its dimension and byte caps, so the published image matches the
+ * capture; when a deployment tightens those caps enough to resize it, the
+ * envelope names the multiplier rather than letting the model measure one
+ * image and click on another.
+ * @param value - the logged capture result, including the published image's size.
+ * @returns the model-facing envelope accompanying the image block.
+ */
+function screenshotEnvelope(value: ScreenshotOutput): string {
+  const resized = value.image.width !== value.width || value.image.height !== value.height
+    ? `\n<attached>${String(value.image.width)}x${String(value.image.height)} px — the attached image was resized after capture; `
+      + `multiply coordinates measured on it by ${(value.width / value.image.width).toFixed(3)} horizontally and `
+      + `${(value.height / value.image.height).toFixed(3)} vertically before passing them to computer_use.</attached>`
+    : '';
+  return `<display>${String(value.display + 1)} of ${String(value.displays)}</display>
+<screen>${String(value.screenWidth)}x${String(value.screenHeight)} logical px</screen>
+<screenshot>${String(value.width)}x${String(value.height)} px</screenshot>
+<coordinates>Measure every computer_use coordinate on this screenshot: x from 0 to ${String(value.width - 1)}, y from 0 to ${String(value.height - 1)}. The companion scales them onto the display.</coordinates>${resized}`;
+}
+
+/**
+ * Build the screen-observation and input tools for a pairing granted desktop control.
+ * @param ctx - the agent context; its attachment store publishes each capture.
+ * @param executeRemote - the principal-checked dispatcher to the companion.
+ * @returns the two desktop tools.
+ */
+function desktopToolDefinitions(ctx: Context, executeRemote: ExecuteRemote): ToolDefinition[] {
+  const textOutput = (text: string) => ({ type: 'text' as const, text });
+  const imageSchema = objectSchema(['attachmentId', 'mediaType', 'bytes', 'width', 'height'], {
+    attachmentId: { type: 'string' },
+    mediaType: { type: 'string' },
+    bytes: { type: 'integer' },
+    width: { type: 'integer' },
+    height: { type: 'integer' },
+  });
+  const geometryFields = {
+    display: { type: 'integer' },
+    displays: { type: 'integer' },
+    width: { type: 'integer' },
+    height: { type: 'integer' },
+    screenWidth: { type: 'integer' },
+    screenHeight: { type: 'integer' },
+    scale: { type: 'number' },
+  };
+  const geometryRequired = ['display', 'displays', 'width', 'height', 'screenWidth', 'screenHeight', 'scale'];
+
+  const screenshot: ToolDefinition = {
+    name: 'computer_screenshot',
+    description: 'Capture the screen of the user’s paired computer and attach it to the conversation. '
+      + 'The capture is reduced to a fixed working size; measure every computer_use coordinate on the returned image, '
+      + 'not on the physical display. Take a fresh screenshot after any action that changes what is on screen, '
+      + 'and verify the result before acting again.',
+    parameters: objectSchema([], {
+      display: { type: 'integer', minimum: 0, maximum: 15, description: 'Zero-based monitor index; defaults to the primary monitor.' },
+    }),
+    timeoutMs: DESKTOP_SCREENSHOT_TIMEOUT_MS,
+    output: {
+      schema: objectSchema(['image', ...geometryRequired], { image: imageSchema, ...geometryFields }),
+      render: (_args, value) => {
+        const result = value as unknown as ScreenshotOutput;
+        // The store issued this identifier; the logged result carries it as the
+        // plain string a session log can hold, so the brand is restored here.
+        const attachment: ImageAttachmentRef = {
+          ...result.image,
+          attachmentId: result.image.attachmentId as ImageAttachmentRef['attachmentId'],
+        };
+        return [textOutput(screenshotEnvelope(result)), { type: 'image', attachment }];
+      },
+    },
+    async execute(args, exec): Promise<ScreenshotOutput> {
+      const attachments: AttachmentStore | undefined = ctx.get('attachments');
+      if (attachments === undefined) {
+        throw new Error('this deployment has no attachment store, so a screenshot cannot be published');
+      }
+      const display = (args as Record<string, unknown>).display;
+      const value = await executeRemote(
+        exec,
+        'screenshot',
+        display === undefined ? {} : { display },
+        DESKTOP_SCREENSHOT_TIMEOUT_MS,
+      ) as CompanionScreenshot;
+      const ref = await attachments.saveImage({
+        data: Buffer.from(value.data, 'base64'),
+        mediaType: value.mediaType,
+        name: `screen-${String(value.display + 1)}.png`,
+      });
+      return {
+        image: {
+          attachmentId: ref.attachmentId,
+          mediaType: ref.mediaType,
+          bytes: ref.bytes,
+          width: ref.width,
+          height: ref.height,
+        },
+        display: value.display,
+        displays: value.displays,
+        width: value.width,
+        height: value.height,
+        screenWidth: value.screenWidth,
+        screenHeight: value.screenHeight,
+        scale: value.scale,
+      };
+    },
+    presentCall(args) {
+      const display = (args as { display?: unknown }).display;
+      return {
+        card: 'generic',
+        kind: 'read',
+        title: typeof display === 'number' ? `截取配对电脑的第 ${String(display + 1)} 块屏幕` : '截取配对电脑的屏幕',
+      };
+    },
+  };
+
+  const computerUse: ToolDefinition = {
+    name: 'computer_use',
+    description: 'Perform one mouse or keyboard action on the user’s paired computer. '
+      + 'Coordinates are measured on the most recent computer_screenshot image, not on the physical display. '
+      + 'Actions: mouse_move and left_click_drag need coordinate; the click actions and scroll accept an optional '
+      + 'coordinate and otherwise act where the pointer already is; key takes a combination such as "ctrl+c" or '
+      + '"alt+Tab"; type enters literal text; cursor_position only reports where the pointer is; wait pauses. '
+      + 'Input reaches whichever window currently holds focus, so take a screenshot first and verify the result after.',
+    parameters: objectSchema(['action'], {
+      action: { type: 'string', enum: [...DESKTOP_ACTIONS] },
+      coordinate: {
+        type: 'array', items: { type: 'integer', minimum: 0 }, minItems: 2, maxItems: 2,
+        description: 'Target [x, y] in screenshot pixels.',
+      },
+      start_coordinate: {
+        type: 'array', items: { type: 'integer', minimum: 0 }, minItems: 2, maxItems: 2,
+        description: 'Drag origin in screenshot pixels; defaults to the current pointer position.',
+      },
+      text: { type: 'string', description: 'Literal text for type, or a key combination for key.' },
+      scroll_direction: { type: 'string', enum: ['up', 'down', 'left', 'right'] },
+      scroll_amount: { type: 'integer', minimum: 1, maximum: 30 },
+      duration_ms: { type: 'integer', minimum: 1, maximum: 5000 },
+      display: { type: 'integer', minimum: 0, maximum: 15 },
+    }),
+    timeoutMs: DESKTOP_INPUT_TIMEOUT_MS,
+    output: {
+      schema: objectSchema(['action', 'cursor', ...geometryRequired], {
+        action: { type: 'string' },
+        cursor: objectSchema(['x', 'y'], { x: { type: 'integer' }, y: { type: 'integer' } }),
+        ...geometryFields,
+      }),
+      render: (_args, value) => {
+        const result = value as unknown as CompanionInputResult;
+        return [textOutput(
+          `${result.action} done; pointer at (${String(result.cursor.x)}, ${String(result.cursor.y)}) `
+          + `in the ${String(result.width)}x${String(result.height)} screenshot space. `
+          + 'Take a new computer_screenshot to see the result.',
+        )];
+      },
+    },
+    async execute(args, exec) {
+      const value = args as Record<string, unknown>;
+      const duration = typeof value.duration_ms === 'number' ? value.duration_ms : undefined;
+      return await executeRemote(exec, 'input', {
+        action: requireStringField(value.action, 'action'),
+        ...value.coordinate === undefined ? {} : { coordinate: value.coordinate },
+        ...value.start_coordinate === undefined ? {} : { startCoordinate: value.start_coordinate },
+        ...value.text === undefined ? {} : { text: requireStringField(value.text, 'text') },
+        ...value.scroll_direction === undefined ? {} : { scrollDirection: value.scroll_direction },
+        ...value.scroll_amount === undefined ? {} : { scrollAmount: value.scroll_amount },
+        ...duration === undefined ? {} : { durationMs: duration },
+        ...value.display === undefined ? {} : { display: value.display },
+      }, DESKTOP_INPUT_TIMEOUT_MS + (duration ?? 0));
+    },
+    presentCall(args) {
+      const value = args as { action?: unknown; coordinate?: unknown; text?: unknown };
+      if (typeof value.action !== 'string') return undefined;
+      const where = Array.isArray(value.coordinate) && value.coordinate.length === 2
+        ? ` @ (${String(value.coordinate[0])}, ${String(value.coordinate[1])})`
+        : '';
+      const what = typeof value.text === 'string' ? ` ${value.text.slice(0, 60)}` : '';
+      return { card: 'generic', kind: 'execute', title: `${value.action}${where}${what}` };
+    },
+  };
+
+  return [screenshot, computerUse];
+}
+
+function remoteToolDefinitions(
+  ctx: Context,
+  workspace: LocalWorkspaceRow,
+  request: RemoteRequest,
+): ToolDefinition[] {
   const pathArg = (value: unknown, name = 'file_path') => remotePath(workspace.placeholder_path, requireStringField(value, name));
   const textOutput = (text: string) => ({ type: 'text' as const, text });
   const executeRemote = (
@@ -1386,6 +1667,7 @@ function remoteToolDefinitions(workspace: LocalWorkspaceRow, request: RemoteRequ
     },
   };
   const tools = [read, write, edit, glob, grep, bash];
+  if (workspace.desktop_control_enabled) tools.push(...desktopToolDefinitions(ctx, executeRemote));
   if (workspace.platform !== 'win32') return tools;
 
   const providerSchema = { type: 'string', enum: ['auto', 'office', 'wps'] };

@@ -68,6 +68,7 @@ The owner can configure, per subuser, from the settings page:
 - The Windows EXE enables `--allow-shell` automatically, including restored workspaces; non-Windows-EXE command-line mode keeps Shell off until the user adds it explicitly
 - Desktop connections report their current Shell permission. Every model request refreshes the connection state through the replayable `local-workspace-capabilities` context, including existing sessions after reconnect. When enabled, the Agent uses `bash` for Git and builds; offline or disabled connections report their state, with checks retained in both the server and companion.
 - Windows workspaces register `word_native_status`, `word_native_read`, and `word_native_edit`: they prefer Microsoft Word installed on the customer computer and fall back to WPS Writer without any `@univerjs-pro/*` dependency
+- A separately granted folder also registers `computer_screenshot` and `computer_use`, letting the model observe and drive that computer's own screen, mouse, and keyboard; the grant is independent of Shell and off by default
 
 ## Identity and spend synchronization
 
@@ -168,11 +169,29 @@ Windows local workspaces also expose native Word automation. `word_native_read` 
 
 Office RPC requires local-companion protocol v2. After upgrading the server plugin, download and run the new EXE again; an older companion is rejected with an unsupported-protocol message.
 
+### Desktop control (computer use)
+
+Once granted, the model observes and drives the desktop of **the user's own computer**, not the server's:
+
+- `computer_screenshot` captures one display. The capture is reduced to fit 1280x800 and attached to the conversation; **every coordinate the model sends is measured on that image**, and the companion scales it back onto the display, so the model never does the arithmetic. `display` selects a monitor, counting from 0.
+- `computer_use` performs one action: `mouse_move`, `left_click`, `right_click`, `middle_click`, `double_click`, `left_click_drag`, `scroll`, `key`, `type`, `cursor_position`, `wait`. `key` accepts combinations such as `ctrl+c` or `alt+Tab`; `type` enters literal text, sent as Unicode on both Windows and macOS so the keyboard layout does not matter.
+
+Each platform uses what it already ships, with no native module: a fixed PowerShell script on Windows (`SendInput` and `System.Drawing`, with `SetProcessDPIAware` before anything is measured), `osascript` into CoreGraphics plus `screencapture`/`sips` on macOS, and `xdotool` with ImageMagick or `gnome-screenshot` on Linux.
+
+**This grant is independent of `--allow-shell` and is never enabled automatically**: a capture records every visible window, including password managers, mail, and private conversations, and injected input reaches whichever window holds focus. Grant it either way:
+
+- Desktop app: choose **允许控制桌面** for one folder on the local-folders page and confirm the native warning; the folder reconnects so the new handshake carries the grant
+- Command-line companion: pair with `--allow-desktop`, or answer `y` to the fourth `--setup` question
+
+Both tools are selected **when a conversation starts**, from the grant in effect at that moment, while Shell is checked per call. Granting desktop control mid-conversation therefore needs a new conversation, and the `local-workspace-capabilities` context says so.
+
+Platform limits: macOS requires **Screen Recording** and **Accessibility** to be granted separately under System Settings, Privacy & Security; without them the companion returns `DESKTOP_PERMISSION_REQUIRED` instead of failing silently. On Windows a non-elevated process cannot send input to a window running as administrator, though captures are unaffected.
+
 The default config file is `~/.dsh-local-workspace/config.json`. Each folder selected by the Windows one-click flow gets its own `~/.dsh-local-workspace/profiles/<workspace-id>.json`, and double-clicking the companion restores them together. For multiple CLI folders, use a different config file for each one, such as `--config ~/.dsh-local-workspace/project-b.json`.
 
 The companion port defaults to the gateway port plus one. If the dsh web gateway uses `3081`, the companion uses `3082`. Allow it through the server firewall. Behind NAT or a reverse proxy, or when the browser-derived address is incorrect, set `MCP_LOCAL_WORKSPACE_PUBLIC_URL=wss://your-domain:port`.
 
-The one-click web entry issues a random 256-bit launch ticket bound to the signed-in user; it expires after two minutes, can be consumed once, and is never written to companion configuration or logs. The real high-entropy token is delivered over the existing WebSocket, stays on the user's computer, and is stored by the server only as a one-way hash. File operations accept only paths within the authorized folder and re-check resolved symlinks. `--allow-shell` is a high-privilege option enabled by the packaged Windows EXE for new connections and saved profiles. The shell runs as the current OS user and may access files outside the authorized folder. Plain `ws://` is only for trusted LANs; use HTTPS/WSS across untrusted networks.
+The one-click web entry issues a random 256-bit launch ticket bound to the signed-in user; it expires after two minutes, can be consumed once, and is never written to companion configuration or logs. The real high-entropy token is delivered over the existing WebSocket, stays on the user's computer, and is stored by the server only as a one-way hash. File operations accept only paths within the authorized folder and re-check resolved symlinks. `--allow-shell` is a high-privilege option enabled by the packaged Windows EXE for new connections and saved profiles. The shell runs as the current OS user and may access files outside the authorized folder. `--allow-desktop` is a further high-privilege option that **no launch path enables automatically**: the check lives in the capability module itself, shared by the desktop worker and the command-line companion, so `screenshot` and `input` are refused before their arguments are even validated. Plain `ws://` is only for trusted LANs; use HTTPS/WSS across untrusted networks.
 
 Maintainers can run `npm run build:windows-assistant` to create `release/山东梯智物联AI本机助手.exe`. The repository's `Build Windows Local Workspace Assistant` workflow also builds and uploads the same artifact on a Windows runner.
 

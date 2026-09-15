@@ -93,7 +93,7 @@ test('无 token/--pair 时显示 6 位码，网页批准后只保存高熵设备
   resumedSocket.terminate();
 });
 
-test('Windows --setup 备用向导只询问服务器、目录和 Shell，并进入设备确认流程', async (context) => {
+test('Windows --setup 备用向导依次询问服务器、目录、Shell 与桌面控制，并进入设备确认流程', async (context) => {
   const temp = mkdtempSync(path.join(tmpdir(), 'dsh-local-device-wizard-'));
   const root = path.join(temp, 'workspace');
   mkdirSync(root);
@@ -126,14 +126,18 @@ test('Windows --setup 备用向导只询问服务器、目录和 Shell，并进�
     } else if (step === 2 && output.includes('允许 AI 在本机执行')) {
       step = 3;
       cli.child.stdin?.write('n\n');
+    } else if (step === 3 && output.includes('允许 AI 截取本机屏幕')) {
+      step = 4;
+      cli.child.stdin?.write('n\n');
     }
   };
   cli.child.stdout?.on('data', answerWizard);
   answerWizard();
 
   const { socket, hello } = await pendingHello;
-  assert.equal(step, 3);
+  assert.equal(step, 4);
   assert.equal(hello.type, 'device');
+  assert.equal(hello.desktopControl, false);
   socket.send(JSON.stringify({
     type: 'device-code',
     code: '654 321',

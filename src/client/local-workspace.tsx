@@ -9,6 +9,7 @@ interface WorkspaceView {
   workspaceName: string;
   platform: string;
   shellEnabled: boolean;
+  desktopControl: boolean;
   online: boolean;
   createdAt: string;
   lastSeenAt: string;
@@ -94,7 +95,7 @@ export function LocalWorkspacePanel(props: Props) {
             { className: 'dshpw-local-workspace', key: workspace.id },
             h('div', { className: 'dshpw-switch-copy' },
               h('strong', null, workspace.workspaceName),
-              h('small', null, `${workspace.deviceName} · ${workspace.platform} · ${workspace.shellEnabled ? t('localShellOn') : t('localShellOff')}`),
+              h('small', null, `${workspace.deviceName} · ${workspace.platform} · ${workspace.shellEnabled ? t('localShellOn') : t('localShellOff')}${workspace.desktopControl ? ` · ${t('localDesktopOn')}` : ''}`),
             ),
             h('span', { className: workspace.online ? 'dshpw-ok' : 'dshpw-hint' }, workspace.online ? t('localOnline') : t('localOffline')),
             h('button', { className: 'dshpw-btn danger', disabled: busy, onClick: () => revoke(workspace) }, t('localRevoke')),

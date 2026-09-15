@@ -29,7 +29,17 @@ interface HubHarness {
 
 test('device hello 不携带长码，六码保留前导零并使用固定展示格式', () => {
   const hello = deviceHello('device-protocol-0001');
-  assert.deepEqual(parseHello(JSON.stringify(hello)), hello);
+  // A companion that predates desktop control omits the field; the parsed hello
+  // still carries the grant as an explicit false.
+  assert.deepEqual(parseHello(JSON.stringify(hello)), { ...hello, desktopControl: false });
+  assert.deepEqual(
+    parseHello(JSON.stringify({ ...hello, desktopControl: true })),
+    { ...hello, desktopControl: true },
+  );
+  assert.throws(
+    () => parseHello(JSON.stringify({ ...hello, desktopControl: 'yes' })),
+    /desktopControl must be boolean/,
+  );
   assert.throws(
     () => parseHello(JSON.stringify({ ...hello, token: 't'.repeat(43) })),
     /must not include code or token/,

@@ -1,7 +1,7 @@
 {
   "name": "dsh-passwords",
   "version": "2.7.1-dsh.20260915.7",
-  "description": "dsh-passwords: a server-grade gateway that turns DeepSeek Harness into a multi-tenant platform \u2014 remote access + automatic HTTPS, per-subuser permissions & quotas, sandbox enforcement, first-run setup, SQLite/MySQL auth with at-rest encryption, rate-limit and audit log (bilingual zh/en UI)",
+  "description": "dsh-passwords: a server-grade gateway that turns DeepSeek Harness into a multi-tenant platform — remote access + automatic HTTPS, per-subuser permissions & quotas, sandbox enforcement, first-run setup, SQLite/MySQL auth with at-rest encryption, rate-limit and audit log (bilingual zh/en UI)",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -79,7 +79,7 @@
     "build:client": "node scripts/build-client.mjs",
     "typecheck:client": "tsc -p tsconfig.client.json --noEmit",
     "build:local-workspace:bundle": "node scripts/build-local-workspace.mjs",
-    "build:windows-assistant": "npm run build:local-workspace:bundle && pkg dist/local-workspace-standalone.cjs --targets node22-win-x64 --output \"release/\u5c71\u4e1c\u68af\u667a\u7269\u8054AI\u672c\u673a\u52a9\u624b.exe\" --compress Brotli --no-bytecode --public-packages \"*\" --public",
+    "build:windows-assistant": "npm run build:local-workspace:bundle && pkg dist/local-workspace-standalone.cjs --targets node22-win-x64 --output \"release/山东梯智物联AI本机助手.exe\" --compress Brotli --no-bytecode --public-packages \"*\" --public",
     "prepare": "npm run build",
     "start": "node dist/cli.js serve-gateway",
     "start:gateway": "node dist/cli.js serve-gateway",
@@ -100,6 +100,7 @@
     "@deepseek-ai/dsh-api-gateway": "^0.1.6-alpha.1",
     "@deepseek-ai/dsh-api-session-controller": "^0.1.6-alpha.1",
     "@deepseek-ai/dsh-api-workspace-controller": "^0.1.6-alpha.1",
+    "@deepseek-ai/dsh-attachment": "^0.1.6-alpha.1",
     "@deepseek-ai/dsh-client-connection": "^0.1.6-alpha.1",
     "@deepseek-ai/dsh-client-locale": "^0.1.6-alpha.1",
     "@deepseek-ai/dsh-client-ui-conversation": "^0.1.6-alpha.1",
@@ -128,6 +129,7 @@
     "@deepseek-ai/dsh-api-gateway": "file:../../deepseek-harness/packages/api/gateway",
     "@deepseek-ai/dsh-api-session-controller": "file:../../deepseek-harness/packages/api/session-controller",
     "@deepseek-ai/dsh-api-workspace-controller": "file:../../deepseek-harness/packages/api/workspace-controller",
+    "@deepseek-ai/dsh-attachment": "file:../../deepseek-harness/packages/attachment/attachment",
     "@deepseek-ai/dsh-client-connection": "file:../../deepseek-harness/packages/client/connection",
     "@deepseek-ai/dsh-client-locale": "file:../../deepseek-harness/packages/client/locale",
     "@deepseek-ai/dsh-client-ui-conversation": "file:../../deepseek-harness/packages/client/ui-conversation",
@@ -139,6 +141,7 @@
     "@deepseek-ai/dsh-client-ui-workspace": "file:../../deepseek-harness/packages/client/ui-workspace",
     "@deepseek-ai/dsh-host-webserver": "file:../../deepseek-harness/packages/host/webserver",
     "@deepseek-ai/dsh-llm": "file:../../deepseek-harness/packages/llm/llm",
+    "@deepseek-ai/dsh-scope": "file:../../deepseek-harness/packages/core/scope",
     "@deepseek-ai/dsh-session": "file:../../deepseek-harness/packages/core/session",
     "@deepseek-ai/dsh-session-query": "file:../../deepseek-harness/packages/session-query/session-query",
     "@deepseek-ai/dsh-system-prompt": "file:../../deepseek-harness/packages/core/system-prompt",
@@ -158,8 +161,7 @@
     "react-dom": "^18.2.0",
     "react-test-renderer": "18.3.1",
     "tsx": "^4.19.0",
-    "typescript": "^5.5.4",
-    "@deepseek-ai/dsh-scope": "file:../../deepseek-harness/packages/core/scope"
+    "typescript": "^5.5.4"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-principal-access": {

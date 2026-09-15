@@ -105,6 +105,8 @@ export interface LocalWorkspaceRow {
   placeholder_path: string;
   platform: string;
   shell_enabled: boolean;
+  /** Whether this pairing may capture the computer's screen and drive its input. */
+  desktop_control_enabled: boolean;
   created_at: string;
   last_seen_at: string;
   revoked_at: string | null;
@@ -251,6 +253,7 @@ CREATE TABLE IF NOT EXISTS local_workspaces (
   placeholder_path TEXT NOT NULL UNIQUE,
   platform         TEXT NOT NULL,
   shell_enabled    INTEGER NOT NULL DEFAULT 0,
+  desktop_control_enabled INTEGER NOT NULL DEFAULT 0,
   created_at       TEXT NOT NULL DEFAULT (datetime('now')),
   last_seen_at     TEXT NOT NULL DEFAULT (datetime('now')),
   revoked_at       TEXT
@@ -389,6 +392,7 @@ CREATE TABLE IF NOT EXISTS local_workspaces (
   placeholder_path VARCHAR(768) NOT NULL UNIQUE,
   platform         VARCHAR(64) NOT NULL,
   shell_enabled    TINYINT NOT NULL DEFAULT 0,
+  desktop_control_enabled TINYINT NOT NULL DEFAULT 0,
   created_at       DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   last_seen_at     DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   revoked_at       DATETIME(3),
@@ -521,6 +525,7 @@ export class Database {
       this.migrateRoles();
       this.migratePermissions();
       this.migrateSessionOwners();
+      this.migrateLocalWorkspaces();
       this.migrateUsers();
       this.migrateAuditLogs();
       this.setSetting('mysql_schema_version', '1');
@@ -533,6 +538,7 @@ export class Database {
     this.migrateRoles();
     this.migratePermissions();
     this.migrateSessionOwners();
+    this.migrateLocalWorkspaces();
     const changedUsers = this.migrateUsers();
     const changedAudit = this.migrateAuditLogs();
     const changedAttempts = this.migrateLoginAttempts();
@@ -592,6 +598,23 @@ export class Database {
     add('sandbox_mode', 'TEXT', 'VARCHAR(64)');
     add('disabled_sessions', "TEXT NOT NULL DEFAULT '[]'", 'MEDIUMTEXT NULL');
     add('monthly_budget_micros', 'INTEGER NOT NULL DEFAULT 0', 'BIGINT NOT NULL DEFAULT 0');
+  }
+
+  // ── 迁移：local_workspaces 补 desktop_control_enabled 列（可重复执行） ─────
+  private migrateLocalWorkspaces(): void {
+    const names = new Set(
+      this.mysql
+        ? (this.stmt('SHOW COLUMNS FROM local_workspaces').all() as { Field: string }[]).map((column) => column.Field)
+        : (this.stmt('PRAGMA table_info(local_workspaces)').all() as { name: string }[]).map((column) => column.name),
+    );
+    if (names.has('desktop_control_enabled')) return;
+    // Existing pairings default to off: the grant is new, so no companion has
+    // ever presented it and no user has ever been asked for it.
+    this.db.exec(
+      `ALTER TABLE local_workspaces ADD COLUMN desktop_control_enabled ${
+        this.mysql ? 'TINYINT NOT NULL DEFAULT 0' : 'INTEGER NOT NULL DEFAULT 0'
+      }`,
+    );
   }
 
   // ── 迁移：session_owners 补 agent_preset 列（可重复执行） ─────────────────
@@ -1482,11 +1505,13 @@ export class Database {
     placeholderPath: string;
     platform: string;
     shellEnabled: boolean;
+    desktopControl: boolean;
   }): LocalWorkspaceRow {
     this.stmt(
       `INSERT INTO local_workspaces
-       (id, user_id, token_hash, device_name, workspace_name, remote_root, placeholder_path, platform, shell_enabled)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, user_id, token_hash, device_name, workspace_name, remote_root, placeholder_path, platform, shell_enabled,
+        desktop_control_enabled)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       input.id,
       input.userId,
@@ -1497,6 +1522,7 @@ export class Database {
       input.placeholderPath,
       input.platform,
       input.shellEnabled ? 1 : 0,
+      input.desktopControl ? 1 : 0,
     );
     const row = this.getLocalWorkspace(input.id);
     if (row === null) throw new Error('本机工作区配对写入后无法读取');
@@ -1568,12 +1594,19 @@ export class Database {
   /** 刷新伴随连接上报的展示事实，并记录最近在线时间。 */
   touchLocalWorkspace(
     id: string,
-    input: { deviceName: string; workspaceName: string; remoteRoot: string; platform: string; shellEnabled: boolean },
+    input: {
+      deviceName: string;
+      workspaceName: string;
+      remoteRoot: string;
+      platform: string;
+      shellEnabled: boolean;
+      desktopControl: boolean;
+    },
   ): void {
     this.stmt(
       `UPDATE local_workspaces
        SET device_name = ?, workspace_name = ?, remote_root = ?, platform = ?, shell_enabled = ?,
-           last_seen_at = datetime('now')
+           desktop_control_enabled = ?, last_seen_at = datetime('now')
        WHERE id = ? AND revoked_at IS NULL`,
     ).run(
       this.crypto.encrypt(input.deviceName),
@@ -1581,6 +1614,7 @@ export class Database {
       this.crypto.encrypt(input.remoteRoot),
       input.platform,
       input.shellEnabled ? 1 : 0,
+      input.desktopControl ? 1 : 0,
       id,
     );
   }
@@ -1630,6 +1664,7 @@ export class Database {
       placeholder_path: string;
       platform: string;
       shell_enabled: number;
+      desktop_control_enabled: number;
       created_at: string;
       last_seen_at: string;
       revoked_at: string | null;
@@ -1643,6 +1678,7 @@ export class Database {
       placeholder_path: row.placeholder_path,
       platform: row.platform,
       shell_enabled: row.shell_enabled === 1,
+      desktop_control_enabled: row.desktop_control_enabled === 1,
       created_at: row.created_at,
       last_seen_at: row.last_seen_at,
       revoked_at: row.revoked_at,

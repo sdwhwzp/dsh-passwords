@@ -21,6 +21,11 @@ import { createInterface } from 'node:readline/promises';
 import WebSocket from 'ws';
 import { browseLocalWorkspace } from './local-workspace-browser.js';
 import {
+  captureDesktopScreen,
+  sendDesktopInput,
+} from './local-workspace-desktop.js';
+import { CompanionError } from './local-workspace-error.js';
+import {
   LOCAL_WORKSPACE_MAX_MESSAGE_BYTES,
   LOCAL_WORKSPACE_PROTOCOL_VERSION,
   parseWireObject,
@@ -47,7 +52,8 @@ const WINDOWS_PROTOCOL_PREFIXES = [
 const MAX_LAUNCH_URI_LENGTH = 4_096;
 const MAX_SERVER_URL_LENGTH = 2_048;
 
-interface CompanionConfig {
+/** Resolved companion configuration, including both agent-facing grants. */
+export interface CompanionConfig {
   server: string;
   token?: string;
   workspaceId: string;
@@ -55,6 +61,8 @@ interface CompanionConfig {
   workspaceName: string;
   root: string;
   shellEnabled: boolean;
+  /** Whether the agent may capture this screen and drive its mouse and keyboard. */
+  desktopControl: boolean;
 }
 
 interface CliOptions {
@@ -67,19 +75,13 @@ interface CliOptions {
   deviceName?: string;
   workspaceName?: string;
   allowShell: boolean;
+  allowDesktop: boolean;
   help: boolean;
   setup: boolean;
 }
 
 interface RunningOperation {
   controller: AbortController;
-}
-
-class CompanionError extends Error {
-  constructor(message: string, readonly code: string) {
-    super(message);
-    this.name = 'CompanionError';
-  }
 }
 
 const WINDOWS_WORD_AUTOMATION_SCRIPT = String.raw`
@@ -550,6 +552,7 @@ function runConnection(
         root: config.root,
         platform: isWindowsRuntime() ? 'win32' : process.platform,
         shellEnabled: config.shellEnabled,
+        desktopControl: config.desktopControl,
       } as const;
       if (launchTicket !== undefined) {
         socket.send(JSON.stringify({ type: 'launch', ticket: launchTicket, ...shared }));
@@ -625,6 +628,7 @@ function runConnection(
         console.log(`[dsh-local-workspace] 已连接：${config.workspaceName}`);
         console.log(`[dsh-local-workspace] 授权目录：${config.root}`);
         console.log(`[dsh-local-workspace] Shell：${config.shellEnabled ? '已启用（可访问当前系统用户权限范围）' : '已关闭'}`);
+        console.log(`[dsh-local-workspace] 桌面控制：${config.desktopControl ? '已启用（可截屏并操作鼠标键盘）' : '已关闭'}`);
         return;
       }
       if (value.type === 'error') {
@@ -669,7 +673,17 @@ function runConnection(
   });
 }
 
-async function executeOperation(
+/**
+ * Run one companion operation against the authorized folder or, for the desktop
+ * operations, this computer's own screen and input devices.
+ * @param config - the resolved companion configuration, carrying both grants.
+ * @param operation - the requested operation.
+ * @param args - the operation's arguments as received from the host.
+ * @param signal - cancellation for the operation.
+ * @returns the operation's result value.
+ * @throws CompanionError when the grant is absent or the operation fails.
+ */
+export async function executeOperation(
   config: CompanionConfig,
   operation: LocalWorkspaceOperation,
   args: Record<string, unknown>,
@@ -693,6 +707,10 @@ async function executeOperation(
       return await runShell(config.root, args, signal);
     case 'office':
       return await runOfficeOperation(config.root, args, signal);
+    case 'screenshot':
+      return await captureDesktopScreen(config, args, signal);
+    case 'input':
+      return await sendDesktopInput(config, args, signal);
   }
 }
 
@@ -1560,6 +1578,9 @@ async function runFirstPairingWizard(defaults: CliOptions): Promise<CliOptions> 
     );
     const folder = stripOuterQuotes(await terminal.question('2. 输入或拖入要授权的本机文件夹：\n> '));
     const shellAnswer = (await terminal.question('3. 允许 AI 在本机执行 PowerShell 命令？风险较高 [y/N]：\n> ')).trim();
+    const desktopAnswer = (await terminal.question(
+      '4. 允许 AI 截取本机屏幕并操作鼠标键盘？截屏会拍到所有可见窗口，风险很高 [y/N]：\n> ',
+    )).trim();
     console.log('正在验证目录并连接服务器…');
     return {
       ...defaults,
@@ -1567,6 +1588,7 @@ async function runFirstPairingWizard(defaults: CliOptions): Promise<CliOptions> 
       pairCode: legacy.pairCode,
       folder,
       allowShell: /^(?:y|yes|是)$/i.test(shellAnswer),
+      allowDesktop: /^(?:y|yes|是)$/i.test(desktopAnswer),
     };
   } finally {
     terminal.close();
@@ -1760,10 +1782,26 @@ async function resolveConfig(cli: CliOptions): Promise<CompanionConfig> {
   if (!launching && saved?.token !== undefined && token === undefined) {
     throw new Error(`配置文件中的设备令牌格式无效：${cli.configPath}`);
   }
+  // Desktop control is never inferred from a packaged Windows runtime the way
+  // Shell is: a capture exposes every window on the screen, so it stays off
+  // until this run or the saved configuration was granted it explicitly.
+  const desktopControl = cli.allowDesktop || (!launching && saved?.desktopControl === true);
   if (shellEnabled) {
     console.warn('[dsh-local-workspace] 警告：Shell 命令以当前系统用户身份执行，可能访问授权目录之外的文件。');
   }
-  return { server: parsed.toString(), token, workspaceId, deviceName, workspaceName, root, shellEnabled };
+  if (desktopControl) {
+    console.warn('[dsh-local-workspace] 警告：桌面控制会截取整个屏幕（包括密码管理器等窗口），并向当前焦点窗口发送鼠标键盘操作。');
+  }
+  return {
+    server: parsed.toString(),
+    token,
+    workspaceId,
+    deviceName,
+    workspaceName,
+    root,
+    shellEnabled,
+    desktopControl,
+  };
 }
 
 async function saveConfig(file: string, config: CompanionConfig): Promise<void> {
@@ -1783,10 +1821,12 @@ function parseArgs(args: string[]): CliOptions {
   const protocolArguments = args.filter((arg) => /^dsh-local-workspace:/iu.test(arg));
   if (protocolArguments.length > 0) {
     const allowShellArguments = args.filter((arg) => arg === '--allow-shell');
+    const allowDesktopArguments = args.filter((arg) => arg === '--allow-desktop');
     if (
       protocolArguments.length !== 1
       || allowShellArguments.length > 1
-      || args.length !== protocolArguments.length + allowShellArguments.length
+      || allowDesktopArguments.length > 1
+      || args.length !== protocolArguments.length + allowShellArguments.length + allowDesktopArguments.length
     ) {
       throw invalidLaunchUri();
     }
@@ -1797,6 +1837,7 @@ function parseArgs(args: string[]): CliOptions {
     return {
       ...result,
       allowShell: allowShellArguments.length === 1,
+      allowDesktop: allowDesktopArguments.length === 1,
       configPath: path.join(path.dirname(result.configPath), 'profiles', `${launchWorkspaceId}.json`),
       launchTicket: launch.ticket,
       launchWorkspaceId,
@@ -1806,6 +1847,7 @@ function parseArgs(args: string[]): CliOptions {
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];
     if (arg === '--allow-shell') result.allowShell = true;
+    else if (arg === '--allow-desktop') result.allowDesktop = true;
     else if (arg === '--help' || arg === '-h') result.help = true;
     else if (arg === '--setup') result.setup = true;
     else if (arg === '--server') result.server = nextArg(args, ++index, '--server');
@@ -1824,6 +1866,7 @@ function defaultCliOptions(configPath = path.join(os.homedir(), '.dsh-local-work
   return {
     configPath,
     allowShell: false,
+    allowDesktop: false,
     help: false,
     setup: false,
   };
@@ -1925,6 +1968,8 @@ Windows EXE 会自动启用 PowerShell（包括已有工作区），并以当前
   --pair CODE         旧版一次性长配对码；新设备确认流程不需要
   --name NAME         工作区显示名；默认使用目录名
   --allow-shell       非 Windows EXE 命令行模式明确允许 AI 执行 Shell；默认关闭
+  --allow-desktop     允许 AI 截取本机屏幕并操作鼠标键盘；默认关闭，且不会被任何
+                      运行方式自动开启。截屏会拍到全部可见窗口，输入会进入当前焦点窗口
   --device-name NAME  设备显示名
   --config PATH       使用另一份配置文件（可同时共享多个目录）
 `);

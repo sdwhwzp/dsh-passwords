@@ -27,6 +27,7 @@ test('existing agents receive current Shell capability after reconnect, disable 
     id: 'capabilities-workspace', userId: owner.id, token, deviceName: 'test-mac',
     workspaceName: 'project', remoteRoot: '/Users/test/project',
     placeholderPath: path.join(temp, 'workspaces', 'project'), platform: 'darwin', shellEnabled: true,
+    desktopControl: false,
   });
   const config = {
     gateway: { tls: null },
@@ -57,14 +58,15 @@ test('existing agents receive current Shell capability after reconnect, disable 
     const assembly = await ctx.systemPrompt.assemble();
     contexts[name] = assembly.contexts.find(item => item.name === 'local-workspace-capabilities')!.text;
   };
-  const connect = async (shellEnabled: boolean, platform = 'darwin') => {
+  const connect = async (shellEnabled: boolean, platform = 'darwin', desktopControl = false) => {
     const socket = new WebSocket(`ws://127.0.0.1:${hub.connectionInfo().port}`);
     sockets.push(socket);
     const signal = AbortSignal.timeout(3_000);
     await once(socket, 'open', { signal });
     const ready = once(socket, 'message', { signal });
     socket.send(JSON.stringify({ type: 'resume', protocol: 2, token, workspaceId: workspace.id,
-      deviceName: 'test-device', workspaceName: 'project', root: '/Users/test/project', platform, shellEnabled }));
+      deviceName: 'test-device', workspaceName: 'project', root: '/Users/test/project', platform, shellEnabled,
+      desktopControl }));
     assert.equal(JSON.parse(String((await ready)[0])).type, 'ready');
     return socket;
   };
@@ -90,6 +92,16 @@ test('existing agents receive current Shell capability after reconnect, disable 
 
   await connect(true, 'win32');
   await capture('windows');
+  await connect(true, 'darwin', true);
+  await capture('desktopEnabled');
+  assert.equal(db.getLocalWorkspace(workspace.id)!.desktop_control_enabled, true);
+  // The grant was absent when this agent was created, so its tool list never
+  // gained the desktop tools; only the reported permission follows the handshake.
+  assert.equal(ctx.tools.get('computer_screenshot'), undefined);
+  assert.equal(ctx.tools.get('computer_use'), undefined);
+  await connect(true, 'darwin');
+  await capture('desktopDisabledAgain');
+  assert.equal(db.getLocalWorkspace(workspace.id)!.desktop_control_enabled, false);
   const disabled = await connect(false);
   await capture('disabledAfterReconnect');
   let dispatched = false;
