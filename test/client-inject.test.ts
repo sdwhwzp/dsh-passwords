@@ -152,3 +152,14 @@ test('browser entrypoint returns the mounted Remote disposer', () => {
   assert.ok(!manifest.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-slots'));
   assert.match(source, /return disposeRemote;/);
 });
+
+
+test('browser Remote descriptors expose strict factories that reject non-JSON results', async () => {
+  const { DSH_PASSWORDS_REMOTE } = await import('../src/client/remote.ts');
+  for (const descriptor of DSH_PASSWORDS_REMOTE.descriptors) {
+    const parser = descriptor.result.create();
+    assert.deepEqual(parser.parse({ ok: true }), { ok: true });
+    assert.throws(() => parser.parse(Infinity));
+    assert.throws(() => parser.parse({ value: undefined }));
+  }
+});

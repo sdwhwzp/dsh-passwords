@@ -1,5 +1,6 @@
 /** Manual Typert Remote contribution for this externally built plugin. */
 
+import type { TypertRemoteContribution } from '@deepseek-ai/dsh-typert-protocol';
 import type { StateData } from './card';
 
 function parseJson(value: unknown, seen = new Set<object>()): unknown {
@@ -24,7 +25,7 @@ function parseJson(value: unknown, seen = new Set<object>()): unknown {
 const resultCodec = {
   mode: 'strict' as const,
   typeSymbol: 'dsh-passwords#State',
-  schema: { parse: (value: unknown) => parseJson(value) as StateData },
+  create: () => ({ parse: (value: unknown) => parseJson(value) as StateData }),
 };
 
 export const DSH_PASSWORDS_REMOTE = {
@@ -41,9 +42,9 @@ export const DSH_PASSWORDS_REMOTE = {
     id: `dsh-passwords#dshPasswords/${method}`,
     service: 'dshPasswords', namespace: 'dshPasswords', method,
     invocation: { kind: 'direct' as const }, parameters: [],
-    result: { mode: 'strict' as const, typeSymbol: `dsh-passwords#${method}`, schema: { parse: parseJson } },
+    result: { mode: 'strict' as const, typeSymbol: `dsh-passwords#${method}`, create: () => ({ parse: (value: unknown) => parseJson(value) }) },
   }))],
-};
+} satisfies TypertRemoteContribution;
 
 export interface DshPasswordsRemoteFailure {
   code: string;
