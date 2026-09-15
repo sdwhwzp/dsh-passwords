@@ -9,7 +9,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { quoteForPlatform } from '../src/local-workspace-hub.ts';
+import { commandForPlatform, quoteForPlatform } from '../src/local-workspace-hub.ts';
 
 test('every argument becomes one literal shell word on both platforms', () => {
   for (const platform of ['win32', 'linux', 'darwin']) {
@@ -41,4 +41,13 @@ test('an unknown platform string uses the POSIX rule, not the Windows one', () =
   // The companion reports process.platform; anything that is not win32 runs
   // under /bin/bash, so the default must be the POSIX escape.
   assert.equal(quoteForPlatform("x'y", 'freebsd'), "'x'\\''y'");
+});
+
+test('Windows invokes a quoted executable and preserves native output and exit status', () => {
+  const command = commandForPlatform(['C:\\Program Files\\Git\\bin\\git.exe', 'status', '--', "中文 Bob's $notes.md"], 'win32');
+  assert.equal(command, "$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); & 'C:\\Program Files\\Git\\bin\\git.exe' 'status' '--' '中文 Bob''s $notes.md'; exit $LASTEXITCODE");
+});
+
+test('POSIX executable invocation keeps literal operands without PowerShell syntax', () => {
+  assert.equal(commandForPlatform(['git', 'status', '--', '中文 $notes.md'], 'darwin'), "'git' 'status' '--' '中文 $notes.md'");
 });

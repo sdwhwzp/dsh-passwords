@@ -419,7 +419,7 @@ export class LocalWorkspaceHub {
     if (workspace === null) return null;
     const signal = options.signal ?? new AbortController().signal;
     const timeoutMs = options.timeoutMs ?? DEFAULT_RPC_TIMEOUT_MS;
-    const command = argv.map((part) => quoteForPlatform(part, workspace.platform)).join(' ');
+    const command = commandForPlatform(argv, workspace.platform);
     const value = await this.request(workspace.id, 'bash', { command, timeoutMs }, signal, timeoutMs + 10_000) as {
       stdout?: unknown;
       stderr?: unknown;
@@ -1110,6 +1110,18 @@ export function quoteForPlatform(value: string, platform: string): string {
   return platform === 'win32'
     ? `'${value.replaceAll("'", "''")}'`
     : `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+/** Builds a native executable invocation for the companion's shell.
+ * @param argv - Executable and literal arguments; must be nonempty.
+ * @param platform - Companion platform.
+ * @returns Shell command preserving UTF-8 output and the native exit code on Windows.
+ */
+export function commandForPlatform(argv: readonly string[], platform: string): string {
+  const invocation = argv.map((part) => quoteForPlatform(part, platform)).join(' ');
+  return platform === 'win32'
+    ? `$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); & ${invocation}; exit $LASTEXITCODE`
+    : invocation;
 }
 
 export function localWorkspacePrincipalAllowed(
