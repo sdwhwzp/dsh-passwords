@@ -1,0 +1,5 @@
+- id: web-ui-liangshen
+  disabled: false
+  config:
+    plugin: '@linxin666/dsh-liangshen'
+    clientOnly: true
