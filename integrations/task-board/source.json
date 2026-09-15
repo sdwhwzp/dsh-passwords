@@ -1,0 +1,31 @@
+{
+  "repository": "https://github.com/sdwhwzp/dsh-web",
+  "branch": "dev",
+  "commit": "d294badb7604c6fa5ae2f44b1da83144eb35d406",
+  "package": "@linxin666/dsh-client-ui-task-board",
+  "version": "0.3.22-dsh.20260915.1",
+  "files": {
+    "core/freeze-snapshot.ts": "9361e7232a3afaaca2290d9a0e93547f52034a72",
+    "core/handover.ts": "9a73a6e17576fa7d5e5cdccba0c66abb08c1a9e1",
+    "core/schedule.ts": "dacf4484a023f147900d64208331f003a847421b",
+    "core/session-reuse.ts": "6afb8ce8940af8ca3f32712ef3e08c0e086ca68c",
+    "core/store.ts": "7f536d761f3045bf12cd297b3ef2e3b20d944174",
+    "core/tasks.ts": "1b008479979299b12c40e1c86bb89fe659d1739e",
+    "core/use-cases/task-archive.ts": "638643d0196edf5cf0258fa4b5c4b2b70228e5f1",
+    "core/use-cases/task-create.ts": "a6d360667c4ce119d1fc237165b0f60b2e827f0e",
+    "core/use-cases/task-delete.ts": "51dbba262102ccd709ee361d2beef850cc468643",
+    "core/use-cases/task-schedule.ts": "bdb458fc5967640a74ad0893de18acb0ae4c7838",
+    "core/use-cases/task-update.ts": "421d26d9a1014ad72876b8a632753924223de146",
+    "dsh-home.ts": "bb586c1b8f1504e2fcb16f2cedb38598665d2852",
+    "host-accounts.ts": "193c2869b1c9a5ca6d71a3fc0a6da59e55ef3e6c",
+    "host-ai.ts": "2bfa42ee697d3a2fb73c9d19f565a8d8bf115407",
+    "host-ledger.ts": "0265193b9eb0366dc6169ec47b0fa03c73d2abdf",
+    "host-routes.ts": "c24855bbeadeb7a3af4a214c50883f9a1424621a",
+    "host-runner.ts": "22f0700655df033eff1c44a2e867750ae7f88f1a",
+    "host-service.ts": "ab23d116ebabf105b910c660bcad6f92a894efe3",
+    "http.ts": "bb3e8f5a818125337eebd3e306577ce334409d39",
+    "loopback.ts": "a3942699a673105ef0308bef50ad8ea4dd99a9b9",
+    "power-inhibitor.ts": "eecf463f40846c9fc5dc9af9c353d61932d2169c",
+    "protocol.ts": "9a3adc2abe333b656e549adfa67e3f073bff5fed"
+  }
+}
