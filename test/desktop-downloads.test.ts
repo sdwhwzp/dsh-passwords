@@ -13,9 +13,11 @@ test('published installers support public catalog, download, HEAD and resumed do
   const manifest = { version: '20260911', commit: 'a'.repeat(40), files: [
     { file, platform: 'windows-x64', bytes: 10, sha256: 'b'.repeat(64) },
     { file: 'desktop-mac-arm64.zip', platform: 'mac-arm64', bytes: 10, sha256: 'c'.repeat(64), signing: 'apple-notarized' },
+    { file: 'desktop-mac-arm64.dmg', platform: 'mac-arm64', bytes: 10, sha256: 'd'.repeat(64), signing: 'developer-id-signed' },
   ] };
   writeFileSync(path.join(root, file), '0123456789');
   writeFileSync(path.join(root, 'desktop-mac-arm64.zip'), '9876543210');
+  writeFileSync(path.join(root, 'desktop-mac-arm64.dmg'), '0123456789');
   writeFileSync(path.join(root, '.env'), 'private');
   writeFileSync(path.join(root, 'manifest.json'), JSON.stringify(manifest));
   const app = express();
@@ -30,6 +32,7 @@ test('published installers support public catalog, download, HEAD and resumed do
   assert.match(page, /Windows x64/);
   assert.match(page, /未签名/);
   assert.match(page, /已签名 · 已通过 Apple 公证/);
+  assert.match(page, /Developer ID 已签名 · 未经 Apple 公证/);
   assert.doesNotMatch(page, /gr-iot|192\.168\./);
   const url = `${origin}/gateway/desktop/files/${file}`;
   const download = await fetch(url);
@@ -60,7 +63,7 @@ test('an absent release directory does not register public routes; invalid or es
     assert.throws(() => registerDesktopDownloads(app, root, () => 'en'), /file mismatch/);
     put([entry, entry]);
     assert.throws(() => registerDesktopDownloads(app, root, () => 'en'), /Invalid desktop installer entry/);
-    for (const signing of ['apple-notarized', 'unverified', true]) {
+    for (const signing of ['apple-notarized', 'developer-id-signed', 'unverified', true]) {
       put([{ ...entry, signing }]);
       assert.throws(() => registerDesktopDownloads(app, root, () => 'en'), /Invalid desktop installer entry/);
     }

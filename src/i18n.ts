@@ -24,6 +24,7 @@ const DICT: Record<Lang, Record<string, string>> = {
     'desktop.back': '返回网页',
     'desktop.description': '连接现有账号，并接入本机目录。服务器地址默认为空，请填写管理员提供的地址。',
     'desktop.unsigned': '未签名',
+    'desktop.signed': 'Developer ID 已签名 · 未经 Apple 公证',
     'desktop.notarized': '已签名 · 已通过 Apple 公证',
     'desktop.compatibility': 'Mac 版本适用于 Apple Silicon（M 系列）。Windows 版本适用于 x64，未签名安装包可能显示 SmartScreen 提示。',
     // ── 认证 / 业务错误（AuthError.code → 文案） ──
@@ -149,6 +150,7 @@ const DICT: Record<Lang, Record<string, string>> = {
     'desktop.back': 'Back to web app',
     'desktop.description': 'Connect your existing account and local folders. Server addresses start empty; enter the address provided by your administrator.',
     'desktop.unsigned': 'Unsigned',
+    'desktop.signed': 'Developer ID signed · Not Apple notarized',
     'desktop.notarized': 'Signed · Apple notarized',
     'desktop.compatibility': 'The Mac build supports Apple Silicon (M series). The Windows build supports x64; unsigned installers may trigger SmartScreen.',
     'err.ALREADY_INITIALIZED': 'The platform is already initialized and cannot be set up again',

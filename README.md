@@ -499,3 +499,5 @@ Linux 部署由管理员将 `scripts/tenant-terminal-launcher.py` 安装为 root
 `MCP_LOCAL_WORKSPACE_MAX_ENTRIES` 控制每次索引或目录列表的条数（默认 5000，最多 20000）；`MCP_LOCAL_WORKSPACE_MAX_FILE_BYTES` 控制单个完整预览的大小（默认 32 MiB）；`MCP_LOCAL_WORKSPACE_IGNORE_DIRS` 为递归索引跳过的目录名，以逗号分隔。@ 同时应用插件设置中的文件名过滤。列表不跟随符号链接，所有读取重新验证授权目录；大文件按 1 MiB 分块传输，文件改变时拒绝拼接不同版本。
 
 `localWorkspaceFiles.sidebar` 是右侧栏的可选 Host 适配接口，支持目录、搜索、文本与二进制预览；当前不支持从面板上传、重命名、删除或保存本机文件，写入操作请使用 Agent 文件工具。回归使用分离的本机目录与空服务器占位目录，验证两账号隔离、离线与撤销、中文路径、空目录、分块读取和路径越界。
+
+桌面安装包清单支持 `unsigned`、`developer-id-signed` 和 `apple-notarized`，下载页分别显示未签名、Developer ID 已签名但未公证、已签名且已公证。后两种状态仅适用于 Mac；未公证包不会标成已公证。
