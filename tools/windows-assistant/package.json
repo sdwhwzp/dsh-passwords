@@ -1,0 +1,11 @@
+{
+  "name": "dsh-windows-assistant-toolchain",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "esbuild": "0.25.12",
+    "@yao-pkg/pkg": "6.22.0",
+    "ws": "8.21.0"
+  }
+}

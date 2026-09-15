@@ -195,6 +195,8 @@ The one-click web entry issues a random 256-bit launch ticket bound to the signe
 
 Maintainers can run `npm run build:windows-assistant` to create `release/山东梯智物联AI本机助手.exe`. The repository's `Build Windows Local Workspace Assistant` workflow also builds and uploads the same artifact on a Windows runner.
 
+Windows CI builds the assistant with the locked toolchain in `tools/windows-assistant`, installing only esbuild, pkg, ws and their dependencies. It does not install server plugins or depend on a local Harness source checkout.
+
 ## The gate follows dsh
 
 No systemd unit, no manual gateway process, no extra flags for dsh:

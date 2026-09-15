@@ -7,6 +7,7 @@ on:
     paths:
       - 'src/local-workspace-*.ts'
       - 'scripts/build-local-workspace.mjs'
+      - 'tools/windows-assistant/**'
       - 'package.json'
       - 'package-lock.json'
       - '.github/workflows/build-windows-assistant.yml'
@@ -23,10 +24,36 @@ jobs:
         with:
           node-version: 22.21.1
           cache: npm
-      - run: npm ci
-      - run: npm run build:windows-assistant
+          cache-dependency-path: tools/windows-assistant/package-lock.json
+      - name: Build with the isolated assistant toolchain
+        shell: pwsh
+        run: |
+          $buildRoot = Join-Path $env:RUNNER_TEMP 'dsh-windows-assistant'
+          New-Item -ItemType Directory -Force "$buildRoot/src", "$buildRoot/scripts" | Out-Null
+          Copy-Item tools/windows-assistant/package*.json $buildRoot
+          foreach ($file in @('local-workspace-cli.ts', 'local-workspace-browser.ts', 'local-workspace-desktop.ts', 'local-workspace-error.ts', 'local-workspace-protocol.ts')) {
+            Copy-Item "src/$file" "$buildRoot/src/$file"
+          }
+          Copy-Item scripts/build-local-workspace.mjs "$buildRoot/scripts/"
+          Push-Location $buildRoot
+          try {
+            npm ci
+            if ($LASTEXITCODE -ne 0) { throw 'Assistant dependency install failed' }
+            node scripts/build-local-workspace.mjs
+            if ($LASTEXITCODE -ne 0) { throw 'Assistant bundle failed' }
+            & ./node_modules/.bin/pkg.cmd dist/local-workspace-standalone.cjs --targets node22-win-x64 --output 'release/山东梯智物联AI本机助手.exe' --compress Brotli --no-bytecode --public-packages '*' --public
+            if ($LASTEXITCODE -ne 0) { throw 'Assistant executable build failed' }
+          } finally { Pop-Location }
+          New-Item -ItemType Directory -Force release | Out-Null
+          Copy-Item "$buildRoot/release/山东梯智物联AI本机助手.exe" release/
+          "${{ github.sha }}" | Set-Content -Encoding ascii release/COMMIT
+          $hash = (Get-FileHash 'release/山东梯智物联AI本机助手.exe' -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  山东梯智物联AI本机助手.exe" | Set-Content -Encoding utf8 release/SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
           name: 山东梯智物联AI本机助手-windows-x64
-          path: release/山东梯智物联AI本机助手.exe
+          path: |
+            release/山东梯智物联AI本机助手.exe
+            release/COMMIT
+            release/SHA256SUMS
           if-no-files-found: error

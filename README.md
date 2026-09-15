@@ -200,6 +200,8 @@ Office RPC 使用本机助手协议 v2。升级服务器端插件后必须重新
 
 维护者可运行 `npm run build:windows-assistant` 生成 `release/山东梯智物联AI本机助手.exe`。仓库中的 `Build Windows Local Workspace Assistant` 工作流也会在 Windows runner 上构建并上传同名 artifact。
 
+Windows CI 使用 `tools/windows-assistant` 的锁定工具链构建助手，仅安装 esbuild、pkg 和 ws 及其依赖；不会安装服务端插件或依赖本机构建机上的 Harness 源码目录。
+
 ## 密码门跟着 dsh 走
 
 不需要 systemd，不需要手动启动网关进程，不需要给 dsh 加任何启动参数：

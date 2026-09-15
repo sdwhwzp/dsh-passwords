@@ -1,12 +1,12 @@
 {
   "name": "dsh-passwords",
-  "version": "2.7.1-dsh.20260915.7",
+  "version": "2.7.1-dsh.20260916.1",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
     "": {
       "name": "dsh-passwords",
-      "version": "2.7.1-dsh.20260915.7",
+      "version": "2.7.1-dsh.20260916.1",
       "license": "BSD-3-Clause",
       "dependencies": {
         "bcryptjs": "^3.0.2",
