@@ -282,3 +282,13 @@ test('sandboxPresetRank：未知值按最宽松 2 处理（防越权切换）', 
   assert.equal(sandboxPresetRank('danger-full-access'), 2);
   assert.equal(sandboxPresetRank('bogus'), 2);
 });
+
+
+test('extended subscription account management requires an administrator for every method', () => {
+  for (const method of ['GET', 'POST', 'PUT', 'DELETE']) {
+    for (const pathname of ['/dsh-subscriptions', '/dsh-subscriptions/config', '/dsh-subscriptions/oauth/start', '/dsh-subscriptions/export', '/dsh-subscriptions/proxy']) {
+      assert.equal(isAdminOnlyPluginEndpoint(method, pathname), true, method + pathname);
+    }
+  }
+  assert.equal(isAdminOnlyPluginEndpoint('GET', '/dsh-subscriptions-other'), false);
+});

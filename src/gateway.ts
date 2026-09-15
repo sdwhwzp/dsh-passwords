@@ -206,6 +206,7 @@ const SESSION_OWNERSHIP_BOOTSTRAP_TIMEOUT_MS = 15_000;
 const SESSION_OWNERSHIP_BOOTSTRAP_RETRY_DELAY_MS = 30_000;
 const SESSION_OWNERSHIP_BOOTSTRAP_CONCURRENCY = 4;
 const ADMIN_ONLY_CLIENT_ENTRY_IDS = new Set([
+  '@goodandready/dsh-subscriptions',
   '@linxin666/dsh-usage',
   'dsh-usage',
   'ui-settings-plugin-inventory',

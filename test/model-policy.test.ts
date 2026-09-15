@@ -68,3 +68,14 @@ test('customer catalog passes upstream errors through and rejects malformed succ
   assert.equal(filterCustomerModelCatalogResponse(upstreamError), upstreamError);
   assert.equal(filterCustomerModelCatalogResponse({ result: { ok: true, value: { groups: [] } } }), null);
 });
+
+
+test('extended Codex models follow the same customer policy as the original plugin', () => {
+  assert.equal(customerModelAllowed('subscriptions-codex', 'gpt-5.5'), false);
+  assert.equal(customerModelAllowed('subscriptions-codex', 'gpt-6-astra'), true);
+  const input = structuredClone(response);
+  input.result.value.groups[0]!.id = 'subscriptions-codex';
+  const filtered = filterCustomerModelCatalogResponse(input) as typeof input;
+  assert.equal(filtered.result.value.groups[0]!.id, 'subscriptions-codex');
+  assert.equal(filtered.result.value.groups[0]!.models.some(model => model.id === 'gpt-5.5'), false);
+});

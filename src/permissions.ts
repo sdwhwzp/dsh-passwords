@@ -766,6 +766,7 @@ export function isTenantSshEndpoint(method: string, pathname: string): boolean {
 
 export function isAdminOnlyPluginEndpoint(method: string, pathname: string): boolean {
   return (
+    pathname === '/dsh-subscriptions' || pathname.startsWith('/dsh-subscriptions/') ||
     /^\/api\/settings[.\/](?:describe|openSettingsDocument|openAgentPresetDirectory|canOpenAgentPresetDirectory)$/.test(pathname) ||
     isSharedSettingsWrite(pathname) ||
     pathname === '/api/dsh-web-ui-settings/describe' ||

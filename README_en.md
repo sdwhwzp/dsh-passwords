@@ -463,3 +463,5 @@ The directory contains `manifest.json` with `version`, a 40-character source `co
 The remote desktop starts with empty server addresses, which users fill with administrator-provided values. The catalog displays each installer’s signing status; the Mac build supports Apple Silicon only. Website TLS and application signing are managed separately.
 
 Desktop catalogs accept `unsigned`, `developer-id-signed`, and `apple-notarized`. The download page distinguishes unsigned installers, Developer ID signatures without notarization, and notarized installers. The latter two states are valid only for Mac.
+
+The extended subscription plugin account UI and `/dsh-subscriptions/*` endpoints are administrator-only. Customer accounts using `subscriptions-codex` follow the same GPT 5.6 minimum as Codex.

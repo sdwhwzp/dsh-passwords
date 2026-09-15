@@ -8,7 +8,7 @@ export const CUSTOMER_MODEL_PROVIDER = 'codex';
  * @returns whether the route meets the customer model policy.
  */
 export function customerModelAllowed(provider: string, model: string): boolean {
-  if (provider !== CUSTOMER_MODEL_PROVIDER) return true;
+  if (provider !== CUSTOMER_MODEL_PROVIDER && provider !== 'subscriptions-codex') return true;
   const version = /^gpt-(\d+)(?:\.(\d+))?(?:-[a-z0-9]+(?:-[a-z0-9]+)*)?$/.exec(model);
   if (version === null) return false;
   const major = Number(version[1]);
@@ -40,7 +40,7 @@ export function filterCustomerModelCatalogResponse(response: unknown): unknown |
   const groups = value.groups.flatMap((candidate) => {
     const group = recordOf(candidate);
     if (group === null || !Array.isArray(group.models)) return [];
-    if (group.id !== CUSTOMER_MODEL_PROVIDER) return [group];
+    if (group.id !== CUSTOMER_MODEL_PROVIDER && group.id !== 'subscriptions-codex') return [group];
     const models = group.models.filter((candidateModel) => {
       const model = recordOf(candidateModel);
       return model !== null && typeof model.id === 'string' && customerModelAllowed(CUSTOMER_MODEL_PROVIDER, model.id);

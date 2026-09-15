@@ -501,3 +501,5 @@ Linux 部署由管理员将 `scripts/tenant-terminal-launcher.py` 安装为 root
 `localWorkspaceFiles.sidebar` 是右侧栏的可选 Host 适配接口，支持目录、搜索、文本与二进制预览；当前不支持从面板上传、重命名、删除或保存本机文件，写入操作请使用 Agent 文件工具。回归使用分离的本机目录与空服务器占位目录，验证两账号隔离、离线与撤销、中文路径、空目录、分块读取和路径越界。
 
 桌面安装包清单支持 `unsigned`、`developer-id-signed` 和 `apple-notarized`，下载页分别显示未签名、Developer ID 已签名但未公证、已签名且已公证。后两种状态仅适用于 Mac；未公证包不会标成已公证。
+
+扩展订阅插件 `@goodandready/dsh-subscriptions` 的账号管理界面和 `/dsh-subscriptions/*` 接口仅管理员可用。普通账号使用 `subscriptions-codex` 模型时同样要求 GPT 5.6 或以上。
