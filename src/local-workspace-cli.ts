@@ -748,10 +748,23 @@ async function editTextFile(root: string, args: Record<string, unknown>, signal:
   if (info.size > MAX_TEXT_BYTES) throw new CompanionError('文本文件超过 2 MiB 上限', 'FILE_TOO_LARGE');
   const before = await readFile(target, 'utf8');
   throwIfAborted(signal);
-  const count = countOccurrences(before, oldString);
+  // `read` splits on /\r?\n/, so a caller quoting several lines back sends them
+  // LF-joined even when the file on disk keeps CRLF. Matching the raw text then
+  // fails on every multi-line edit of a Windows checkout. Try the text as sent,
+  // then as the file spells its line endings, and write the replacement in that
+  // same spelling so one edit never leaves the file with mixed endings.
+  const crlf = before.includes('\r\n');
+  const toFileEol = (value: string): string => (crlf ? value.replace(/\r?\n/g, '\r\n') : value);
+  let needle = oldString;
+  let count = countOccurrences(before, needle);
+  if (count === 0 && crlf) {
+    needle = toFileEol(oldString);
+    count = countOccurrences(before, needle);
+  }
   if (count === 0) throw new CompanionError('old_string 未在文件中出现', 'NO_MATCH');
   if (!replaceAll && count !== 1) throw new CompanionError(`old_string 出现 ${String(count)} 次，请提供更具体内容或设置 replace_all`, 'MULTIPLE_MATCHES');
-  const after = replaceAll ? before.split(oldString).join(newString) : before.replace(oldString, newString);
+  const replacement = toFileEol(newString);
+  const after = replaceAll ? before.split(needle).join(replacement) : before.replace(needle, replacement);
   if (Buffer.byteLength(after, 'utf8') > MAX_TEXT_BYTES) throw new CompanionError('编辑后文件超过 2 MiB 上限', 'FILE_TOO_LARGE');
   await atomicWrite(target, after);
   throwIfAborted(signal);

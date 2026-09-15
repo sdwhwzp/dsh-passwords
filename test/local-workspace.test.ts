@@ -107,6 +107,32 @@ test('本机助手只在授权目录执行文件操作，默认拒绝 Shell', as
   assert.equal(shell.code, 'SHELL_DISABLED');
 });
 
+test('CRLF 文件的跨行编辑不会因换行符而匹配失败', async (context) => {
+  // read 按 /\r?\n/ 拆行，交给模型的是 LF 拼接的内容；Windows 检出的文件在磁盘上
+  // 是 CRLF。若 edit 只拿原样文本匹配，任何跨行编辑都必然 NO_MATCH。
+  const harness = await startCompanion(false);
+  context.after(() => stopCompanion(harness));
+
+  const file = path.join(harness.root, 'crlf.txt');
+  writeFileSync(file, 'alpha\r\nbeta\r\ngamma\r\n');
+
+  const read = await request(harness.socket, 'read', { path: 'crlf.txt' });
+  assert.equal(read.ok, true, harness.output());
+  // 读出来的行不带 \r，模型照抄回来的就是 LF 版本。
+  assert.deepEqual((read.value as { lines: Array<{ text: string }> }).lines.map(line => line.text), [
+    'alpha', 'beta', 'gamma', '',
+  ]);
+
+  const edited = await request(harness.socket, 'edit', {
+    path: 'crlf.txt',
+    oldString: 'alpha\nbeta',
+    newString: 'alpha\ndelta',
+  });
+  assert.equal(edited.ok, true, harness.output());
+  // 写回时沿用文件自己的换行风格，不把文件改成混合换行。
+  assert.equal(readFileSync(file, 'utf8'), 'alpha\r\ndelta\r\ngamma\r\n');
+});
+
 test('本机助手显式启用后在授权目录启动 Shell', async (context) => {
   const harness = await startCompanion(true);
   context.after(() => stopCompanion(harness));
