@@ -28,6 +28,7 @@ test('chat creation claims the authenticated owner and durable mode before Host 
   const f = await fixture(t);
   const created: string[] = [];
   const ctx = { managedUserWorkspace: f.provider, workspaceRegistry: { resolveByPath: async (root: string) => { assert.equal(root, f.directory); return { id: 'owned-workspace' }; } }, sessionController: {
+    async list() { return { items: [] }; },
     async create(request: { sessionId: string; workspaceId: string }) {
       assert.equal(f.db.getSessionOwner(request.sessionId), f.user.id);
       assert.equal(isConversationSession(f.db, request.sessionId), true);
@@ -49,6 +50,7 @@ test('failed Host creation retains ownership and display mode', async t => {
   const f = await fixture(t);
   let failedId = '';
   const ctx = { managedUserWorkspace: f.provider, workspaceRegistry: { resolveByPath: async (root: string) => { assert.equal(root, f.directory); return { id: 'owned-workspace' }; } }, sessionController: {
+    async list() { return { items: [] }; },
     async create(request: { sessionId: string }) { failedId = request.sessionId; throw new Error('Host failed'); },
   } } as unknown as Context;
   await assert.rejects(createConversation(ctx, f.db, f.principal), /Host failed/);
@@ -109,4 +111,45 @@ test('chat exposes inherited and late scoped tools while preserving an existing 
   assert.equal(denied.isError, true);
   assert.match(JSON.stringify(denied.content), /account policy denies shell/);
   assert.equal(executions, 6);
+});
+
+
+test('concurrent chat creation and later requests reuse the same account blank, but preserve occupied and archived chats', async t => {
+  const f = await fixture(t);
+  const rows: { sessionId: string; cwd: string; blank: boolean; running: boolean; projections: { values: { inbox: { 'next-turn': unknown[] }; title?: string } } }[] = [];
+  const archived: string[] = [];
+  let created = 0;
+  const ctx = { managedUserWorkspace: f.provider,
+    workspaceRegistry: { archivedSessionIds: archived, resolveByPath: async () => ({ id: 'workspace' }) },
+    sessionController: {
+      list: async () => ({ items: rows }),
+      create: async (request: { sessionId: string }) => {
+        created++;
+        rows.push({ sessionId: request.sessionId, cwd: f.directory, blank: true, running: false, projections: { values: { inbox: { 'next-turn': [] } } } });
+      },
+    },
+  } as unknown as Context;
+  const results = await Promise.all(Array.from({ length: 8 }, () => createConversation(ctx, f.db, f.principal)));
+  assert.equal(created, 1);
+  assert.ok(results.every(result => result.sessionId === results[0]!.sessionId));
+  assert.equal((await createConversation(ctx, f.db, f.principal)).sessionId, results[0]!.sessionId);
+  rows[0]!.projections.values.inbox['next-turn'].push({ message: 'pending' });
+  const second = await createConversation(ctx, f.db, f.principal);
+  assert.notEqual(second.sessionId, results[0]!.sessionId);
+  rows[1]!.running = true;
+  const third = await createConversation(ctx, f.db, f.principal);
+  archived.push(third.sessionId);
+  const fourth = await createConversation(ctx, f.db, f.principal);
+  rows[3]!.blank = false;
+  const fifth = await createConversation(ctx, f.db, f.principal);
+  rows[4]!.projections.values.title = 'saved draft';
+  const sixth = await createConversation(ctx, f.db, f.principal);
+  rows[5]!.blank = false;
+  f.db.claimSessionOwner('foreign-chat', f.other.id);
+  f.db.setSetting('conversation_mode:foreign-chat', 'chat');
+  rows.unshift({ sessionId: 'foreign-chat', cwd: f.directory, blank: true, running: false, projections: { values: { inbox: { 'next-turn': [] } } } });
+  const seventh = await createConversation(ctx, f.db, f.principal);
+  assert.notEqual(seventh.sessionId, sixth.sessionId);
+  assert.notEqual(seventh.sessionId, 'foreign-chat');
+  assert.equal(created, 7);
 });

@@ -1,5 +1,5 @@
 /** Chat/development navigation uses the existing Session renderer and its live stream. */
-import React, { useEffect, useState, useSyncExternalStore } from 'react';
+import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots';
 import type { Context } from '@deepseek-ai/cordis';
 import type {} from '@deepseek-ai/dsh-api-session-controller/client';
@@ -19,6 +19,7 @@ export function ConversationModeControls({ sessions, layout, client, t }: Conver
   const state = useSyncExternalStore(sessions.list.subscribe, sessions.list.getSnapshot);
   const [ids, setIds] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
+  const creating = useRef(false);
   const [error, setError] = useState('');
   const chat = state.current !== undefined && ids.includes(state.current);
   useEffect(() => {
@@ -38,9 +39,10 @@ export function ConversationModeControls({ sessions, layout, client, t }: Conver
   }, [chat, layout]);
 
   async function create() {
-    if (busy) return;
+    if (creating.current) return;
     const blank = state.ids.find(id => ids.includes(id) && state.byId[id]?.blank);
     if (blank !== undefined) { sessions.open(blank); layout.selectPanel(null); return; }
+    creating.current = true;
     setBusy(true); setError('');
     try {
       const result = await client.createConversation();
@@ -50,7 +52,7 @@ export function ConversationModeControls({ sessions, layout, client, t }: Conver
       sessions.open(result.value.sessionId as SessionId);
       layout.selectPanel(null);
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
-    finally { setBusy(false); }
+    finally { creating.current = false; setBusy(false); }
   }
   function development() {
     if (chat) sessions.clear();
@@ -71,7 +73,7 @@ export function ConversationModeControls({ sessions, layout, client, t }: Conver
       <button type="button" disabled={busy} onClick={() => { void create(); }}>{busy ? t('conversationCreating') : t('conversationNew')}</button>
       <p>{t('conversationModeHint')}</p>
       <nav aria-label={t('conversationHistory')} className="dshpw-mode-history">
-        {state.ids.filter(id => ids.includes(id) && (id === state.current || !state.byId[id]?.blank)).map(id => <button type="button" key={id} aria-current={id === state.current ? 'page' : undefined}
+        {state.ids.filter(id => ids.includes(id) && state.byId[id] !== undefined && (id === state.current || state.byId[id]!.blank === false)).map(id => <button type="button" key={id} aria-current={id === state.current ? 'page' : undefined}
           onClick={() => { sessions.open(id); layout.selectPanel(null); }}>{state.byId[id]?.title || t('conversationUntitled')}</button>)}
       </nav>
     </>}

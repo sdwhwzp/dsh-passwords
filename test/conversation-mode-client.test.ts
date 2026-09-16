@@ -35,10 +35,14 @@ test('chat navigation creates through the account API, opens a created Session d
   await act(async () => button(zh.conversationNew).props.onClick());
   assert.equal(created, 1, 'reuse an unasked chat rather than accumulating blank Sessions');
   state.byId['chat-1']!.blank = false;
-  await act(async () => button(zh.conversationNew).props.onClick());
+  await act(async () => { const click = button(zh.conversationNew).props.onClick; click(); click(); });
   assert.equal(state.current, 'chat-2'); assert.equal(created, 2);
   await act(async () => button(zh.developmentMode).props.onClick());
   assert.equal(state.current, undefined); assert.equal(dataset.dshpwConversationMode, undefined);
   await act(async () => button(zh.conversationMode).props.onClick());
   assert.equal(created, 2); assert.equal(state.current, 'chat-1');
+  assert.equal(renderer.root.findByType('nav').findAllByType('button').length, 1, 'non-current blank stays out of history');
+  ids.push('loading-chat'); state.ids.push('loading-chat');
+  await act(async () => publish());
+  assert.equal(renderer.root.findByType('nav').findAllByType('button').length, 1, 'missing summaries must not become fake new chats');
 });

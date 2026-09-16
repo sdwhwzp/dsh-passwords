@@ -16,12 +16,39 @@ export function isConversationSession(db: Database, id: string): boolean {
   return db.getSetting(key(id)) === 'chat';
 }
 
+type Conversation = { sessionId: SessionId; cwd: string };
+const creations = new WeakMap<Database, Map<string, Promise<Conversation>>>();
+
+/** Coalesce concurrent requests per account, including requests from different clients. */
+export async function createConversation(ctx: Context, db: Database, principal: AuthenticatedPrincipal): Promise<Conversation> {
+  let accounts = creations.get(db);
+  if (accounts === undefined) { accounts = new Map(); creations.set(db, accounts); }
+  const pending = accounts.get(principal.id);
+  if (pending !== undefined) return pending;
+  const attempt = resolveConversation(ctx, db, principal).finally(() => { accounts.delete(principal.id); });
+  accounts.set(principal.id, attempt);
+  return attempt;
+}
+
 /** Create only server-generated identities and claim ownership before publishing the Session. */
-export async function createConversation(ctx: Context, db: Database, principal: AuthenticatedPrincipal): Promise<{ sessionId: SessionId; cwd: string }> {
+async function resolveConversation(ctx: Context, db: Database, principal: AuthenticatedPrincipal): Promise<Conversation> {
   const root = await ctx.managedUserWorkspace.resolve(principal);
   if (root === undefined || db.getPermissions(Number(principal.id))?.banned) throw new Error('active account required');
   const workspace = await ctx.workspaceRegistry.resolveByPath(root)
     ?? await ctx.workspaceRegistry.create(root, principal.username);
+  const { items } = await ctx.sessionController.list({}, new AbortController().signal);
+  const reusable = items.find(session => {
+    const values = session.projections?.values;
+    if (values === undefined) return false;
+    const inbox = values.inbox;
+    return session.blank && !session.running && session.cwd === root
+      && db.getSessionOwner(session.sessionId) === Number(principal.id)
+      && isConversationSession(db, session.sessionId)
+      && !ctx.workspaceRegistry.archivedSessionIds.includes(session.sessionId)
+      && !values.title && !values.subagent && (values.subagentCatalog === undefined || (Array.isArray(values.subagentCatalog) && values.subagentCatalog.length === 0))
+      && (!inbox || Object.values(inbox).every(queue => queue.length === 0));
+  });
+  if (reusable !== undefined) return { sessionId: reusable.sessionId, cwd: root };
   const sessionId = `session-${randomUUID()}` as SessionId;
   db.claimSessionOwner(sessionId, Number(principal.id));
   db.setSetting(key(sessionId), 'chat');

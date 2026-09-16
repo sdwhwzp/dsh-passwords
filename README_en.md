@@ -14,7 +14,7 @@ Listed in [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek
 
 ## Development and chat modes
 
-Choose **Development** in the sidebar to use workspaces, terminals and the editor. Choose **Chat** to ask questions without selecting a workspace. **New chat** starts another topic and reuses an existing unasked chat. History belongs to the signed-in account and can be resumed later.
+Choose **Development** in the sidebar to use workspaces, terminals and the editor. Choose **Chat** to ask questions without selecting a workspace. **New chat** reuses an unasked chat on the server per account, including concurrent requests from multiple windows. History shows only the selected blank chat. Messages, running work, queued input, archived chats and named chats are preserved. History belongs to the signed-in account and can be resumed later.
 
 Chat keeps model selection, streamed replies and history. All tools authorized for the account are available, including knowledge retrieval, GenUI, files, shell commands and subagents. The account workspace is attached automatically; account permissions, sandbox rules and account isolation match development mode. See the [implementation and maintenance notes (Chinese)](docs/2026-09-14-conversation-mode.md).
 
