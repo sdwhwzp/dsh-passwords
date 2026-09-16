@@ -10,7 +10,7 @@ test('chat navigation creates through the account API, opens a created Session d
   const dataset: Record<string, string> = {};
   Object.defineProperty(globalThis, 'document', { configurable: true, value: { documentElement: { dataset } } });
   let renderer: ReactTestRenderer;
-  let state = { current: undefined as string | undefined, ids: [] as string[], byId: {} as Record<string, { title: string; blank?: boolean }>, phase: 'ready' };
+  let state = { current: undefined as string | undefined, ids: [] as string[], byId: {} as Record<string, { title: string; blank?: boolean; origin?: 'subagent' }>, phase: 'ready' };
   const listeners = new Set<() => void>();
   const publish = () => { state = { ...state }; for (const listener of listeners) listener(); };
   const ids: string[] = [];
@@ -42,6 +42,13 @@ test('chat navigation creates through the account API, opens a created Session d
   await act(async () => button(zh.conversationMode).props.onClick());
   assert.equal(created, 2); assert.equal(state.current, 'chat-1');
   assert.equal(renderer.root.findByType('nav').findAllByType('button').length, 1, 'non-current blank stays out of history');
+  ids.push('child-chat'); state.ids.unshift('child-chat'); state.byId['child-chat'] = { title: '', blank: false, origin: 'subagent' };
+  await act(async () => { state.current = 'child-chat'; publish(); });
+  assert.equal(state.current, 'chat-1', 'legacy root link to a child recovers to a normal chat');
+  assert.equal(renderer.root.findByType('nav').findAllByType('button').length, 1, 'child chats are not untitled root rows');
+  await act(async () => button(zh.developmentMode).props.onClick());
+  await act(async () => button(zh.conversationMode).props.onClick());
+  assert.equal(state.current, 'chat-1', 'mode entry skips newer children');
   ids.push('loading-chat'); state.ids.push('loading-chat');
   await act(async () => publish());
   assert.equal(renderer.root.findByType('nav').findAllByType('button').length, 1, 'missing summaries must not become fake new chats');

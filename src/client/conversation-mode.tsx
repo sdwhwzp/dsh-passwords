@@ -21,6 +21,7 @@ export function ConversationModeControls({ sessions, layout, client, t }: Conver
   const [busy, setBusy] = useState(false);
   const creating = useRef(false);
   const [error, setError] = useState('');
+  const rootIds = state.ids.filter(id => ids.includes(id) && state.byId[id] !== undefined && state.byId[id]!.origin !== 'subagent');
   const chat = state.current !== undefined && ids.includes(state.current);
   useEffect(() => {
     let active = true;
@@ -38,9 +39,17 @@ export function ConversationModeControls({ sessions, layout, client, t }: Conver
     return () => { delete document.documentElement.dataset.dshpwConversationMode; };
   }, [chat, layout]);
 
+  useEffect(() => {
+    if (!chat || state.current === undefined || state.byId[state.current]?.origin !== 'subagent' || state.currentAddress !== undefined) return;
+    // Legacy chat links carry no parent address; never resume them as root agents.
+    const root = rootIds[0];
+    if (root === undefined) sessions.clear();
+    else sessions.open(root);
+  }, [chat, state, ids, sessions]);
+
   async function create() {
     if (creating.current) return;
-    const blank = state.ids.find(id => ids.includes(id) && state.byId[id]?.blank);
+    const blank = rootIds.find(id => state.byId[id]?.blank);
     if (blank !== undefined) { sessions.open(blank); layout.selectPanel(null); return; }
     creating.current = true;
     setBusy(true); setError('');
@@ -59,7 +68,7 @@ export function ConversationModeControls({ sessions, layout, client, t }: Conver
     layout.selectPanel(null);
   }
   function openChat() {
-    const existing = state.ids.find(id => ids.includes(id));
+    const existing = rootIds[0];
     if (existing === undefined) void create();
     else { sessions.open(existing); layout.selectPanel(null); }
   }
@@ -73,7 +82,7 @@ export function ConversationModeControls({ sessions, layout, client, t }: Conver
       <button type="button" disabled={busy} onClick={() => { void create(); }}>{busy ? t('conversationCreating') : t('conversationNew')}</button>
       <p>{t('conversationModeHint')}</p>
       <nav aria-label={t('conversationHistory')} className="dshpw-mode-history">
-        {state.ids.filter(id => ids.includes(id) && state.byId[id] !== undefined && (id === state.current || state.byId[id]!.blank === false)).map(id => <button type="button" key={id} aria-current={id === state.current ? 'page' : undefined}
+        {rootIds.filter(id => id === state.current || state.byId[id]!.blank === false).map(id => <button type="button" key={id} aria-current={id === state.current ? 'page' : undefined}
           onClick={() => { sessions.open(id); layout.selectPanel(null); }}>{state.byId[id]?.title || t('conversationUntitled')}</button>)}
       </nav>
     </>}
