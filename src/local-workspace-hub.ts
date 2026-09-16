@@ -821,7 +821,31 @@ export class LocalWorkspaceHub {
     // off for almost all of them. Shell stays a per-request check inside bash.
     const tools = remoteToolDefinitions(agent.ctx, workspace, (operation, args, signal, timeoutMs) =>
       this.request(workspace.id, operation, args, signal, timeoutMs));
-    for (const tool of tools) agent.ctx.tools.register(tool);
+    // An Agent preset mounts its own read/write/edit/glob/grep/bash into this
+    // same scope before this runs, and the registry rejects a repeated name
+    // there rather than shadowing it. A rejected name leaves the Host-side tool
+    // in place, pointed at the empty placeholder directory this Host keeps for
+    // the paired folder — so the failure is recorded and reported to the model
+    // instead of letting it operate the server while believing it operates the
+    // user's computer.
+    const displaced: string[] = [];
+    for (const tool of tools) {
+      try {
+        agent.ctx.tools.register(tool);
+      } catch (error) {
+        displaced.push(tool.name);
+        console.error(
+          `[dsh-passwords] 本机工作区 ${workspace.id} 的 ${tool.name} 工具未能注册，`
+          + `该名字已被当前 Agent 预设占用：${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    if (displaced.length > 0) {
+      console.error(
+        `[dsh-passwords] ⚠ 本机工作区 ${workspace.id} 有 ${String(displaced.length)} 个工具被预设覆盖`
+        + `（${displaced.join('、')}）；这些调用会作用于服务器而不是用户电脑。`,
+      );
+    }
     agent.ctx.systemPrompt.section({
       name: 'remote-local-workspace',
       order: 95,
@@ -830,21 +854,28 @@ export class LocalWorkspaceHub {
     agent.ctx.systemPrompt.context({
       name: 'local-workspace-capabilities',
       order: 116,
-      text: () => this.capabilityContext(workspace.id),
+      text: () => this.capabilityContext(workspace.id, displaced),
     });
   }
 
-  /** Resolve the active handshake for each model request, including existing agents after reconnect. */
-  private capabilityContext(workspaceId: string): string {
+  /**
+   * Resolve the active handshake for each model request, including existing agents after reconnect.
+   * @param workspaceId - the paired folder this Agent was started in.
+   * @param displaced - tool names the Agent preset had already taken, which
+   *   therefore still operate this Host rather than the paired computer.
+   * @returns the connection, permission, and tool-ownership facts for this request.
+   */
+  private capabilityContext(workspaceId: string, displaced: readonly string[] = []): string {
+    const warning = displacedToolWarning(displaced);
     const connection = this.connections.get(workspaceId);
     if (connection === undefined || connection.socket.readyState !== WebSocket.OPEN) {
-      return 'Local workspace connection: offline. File and terminal operations are unavailable until the user reconnects this folder in the desktop app or local companion.';
+      return `Local workspace connection: offline. File and terminal operations are unavailable until the user reconnects this folder in the desktop app or local companion.${warning}`;
     }
     if (!connection.workspace.shell_enabled) {
-      return `Local workspace connection: online. Shell permission: disabled. File tools remain available. To run commands, the user must reconnect with Shell enabled; the command-line companion requires --allow-shell. ${this.desktopContext(connection.workspace)}`;
+      return `Local workspace connection: online. Shell permission: disabled. File tools remain available. To run commands, the user must reconnect with Shell enabled; the command-line companion requires --allow-shell. ${this.desktopContext(connection.workspace)}${warning}`;
     }
     const shell = connection.workspace.platform === 'win32' ? 'PowerShell on Windows' : 'Bash';
-    return `Local workspace connection: online. Shell permission: enabled. The bash tool runs ${shell} in the selected local folder as the current operating-system user. Terminal operations are already authorized; no --allow-shell startup step is needed for this connection. Each call starts a fresh shell. Operating-system permissions still apply; this does not grant administrator or root privileges. ${this.desktopContext(connection.workspace)}`;
+    return `Local workspace connection: online. Shell permission: enabled. The bash tool runs ${shell} in the selected local folder as the current operating-system user. Terminal operations are already authorized; no --allow-shell startup step is needed for this connection. Each call starts a fresh shell. Operating-system permissions still apply; this does not grant administrator or root privileges. ${this.desktopContext(connection.workspace)}${warning}`;
   }
 
   /**
@@ -1153,6 +1184,25 @@ export function commandForPlatform(argv: readonly string[], platform: string): s
   return platform === 'win32'
     ? `$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); & ${invocation}; exit $LASTEXITCODE`
     : invocation;
+}
+
+/**
+ * Warn the model that named tools still operate this Host, not the paired computer.
+ *
+ * The Host-side directory behind a paired folder is an empty placeholder by
+ * construction, so a displaced `read` or `bash` neither finds the user's files
+ * nor fails loudly: it quietly succeeds against the wrong machine. Naming the
+ * tools is the only thing that keeps the model from trusting them.
+ * @param displaced - tool names an Agent preset had already registered.
+ * @returns the warning sentence, or an empty string when nothing was displaced.
+ */
+function displacedToolWarning(displaced: readonly string[]): string {
+  if (displaced.length === 0) return '';
+  return ` WARNING: ${displaced.join(', ')} could not be attached to the paired computer because this Agent preset already provides `
+    + `${displaced.length > 1 ? 'those names' : 'that name'}. ${displaced.length > 1 ? 'They run' : 'It runs'} on the DSH server, whose directory for this `
+    + `folder is empty by construction — results from ${displaced.length > 1 ? 'them' : 'it'} describe the server, not the user's computer. `
+    + `Do not use ${displaced.join(', ')} to inspect or change the user's files, do not conclude from ${displaced.length > 1 ? 'their' : 'its'} output that the files are missing, `
+    + `and tell the user that this folder needs an Agent preset that does not provide ${displaced.join(', ')}.`;
 }
 
 export function localWorkspacePrincipalAllowed(
