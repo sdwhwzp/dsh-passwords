@@ -240,9 +240,28 @@ export class LocalWorkspaceHub {
 
     this.ctx.on('agent/created', ({ agent }): undefined => {
       const cwd = agent.session.header.cwd;
-      if (cwd === undefined) return undefined;
-      const workspace = this.workspaceForPlaceholder(cwd);
-      if (workspace !== null) this.installAgentTools(agent, workspace);
+      if (cwd === undefined) {
+        console.log('[dsh-passwords] paired-tools skip=no-cwd');
+        return undefined;
+      }
+      let workspace: LocalWorkspaceRow | null = null;
+      try {
+        workspace = this.workspaceForPlaceholder(cwd);
+      } catch (error) {
+        // A lookup failure here used to disappear into the event dispatcher and
+        // leave the Session operating this Host while believing otherwise.
+        console.error(`[dsh-passwords] paired-tools lookup-failed cwd=${cwd} error=${error instanceof Error ? error.message : String(error)}`);
+        return undefined;
+      }
+      if (workspace === null) {
+        console.log(`[dsh-passwords] paired-tools skip=not-paired cwd=${cwd} known=${String(this.db.listLocalWorkspaces().length)}`);
+        return undefined;
+      }
+      try {
+        this.installAgentTools(agent, workspace);
+      } catch (error) {
+        console.error(`[dsh-passwords] paired-tools install-threw ws=${workspace.id} error=${error instanceof Error ? error.stack ?? error.message : String(error)}`);
+      }
       return undefined;
     });
   }
@@ -835,17 +854,20 @@ export class LocalWorkspaceHub {
     const registry = agent.ctx.tools as typeof agent.ctx.tools & {
       readonly override?: (definition: ToolDefinition) => () => void;
     };
+    const scoped = typeof registry.override === 'function';
+    const attached: string[] = [];
     const displaced: string[] = [];
     for (const tool of tools) {
       // Replacement first, plain registration second. `override` refuses an
       // unscoped context, which an SDK or headless composition can produce, and
       // registration is enough there because no preset claimed the name.
       let failure: unknown;
-      for (const attach of [registry.override, registry.register]) {
+      for (const [label, attach] of [['override', registry.override], ['register', registry.register]] as const) {
         if (attach === undefined) continue;
         try {
           attach.call(registry, tool);
           failure = undefined;
+          attached.push(`${tool.name}:${label}`);
           break;
         } catch (error) {
           failure = error;
@@ -864,6 +886,21 @@ export class LocalWorkspaceHub {
         + `（${displaced.join('、')}）；这些调用会作用于服务器而不是用户电脑。`,
       );
     }
+    // One greppable line per Session start. Reading each name back from the
+    // registry is the only report that distinguishes "attached" from "attached
+    // and then resolved to someone else's tool", which is the difference
+    // between operating the user's computer and operating this Host.
+    const resolved = tools.map((tool) => {
+      // The Agent is its own scope key; without it `get` reads the global
+      // view, where an agent-scoped replacement is invisible by design.
+      const live = agent.ctx.tools.get(tool.name, agent);
+      return `${tool.name}=${live === undefined ? 'missing' : live === tool ? 'paired' : 'other'}`;
+    }).join(',');
+    console.log(
+      `[dsh-passwords] paired-tools ws=${workspace.id} cwd=${agent.session.header.cwd ?? '?'}`
+      + ` scoped=${String(scoped)} attached=${String(attached.join(','))} displaced=${String(displaced.join(',') || 'none')}`
+      + ` resolved=${resolved}`,
+    );
     agent.ctx.systemPrompt.section({
       name: 'remote-local-workspace',
       order: 95,
