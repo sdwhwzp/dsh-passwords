@@ -822,23 +822,41 @@ export class LocalWorkspaceHub {
     const tools = remoteToolDefinitions(agent.ctx, workspace, (operation, args, signal, timeoutMs) =>
       this.request(workspace.id, operation, args, signal, timeoutMs));
     // An Agent preset mounts its own read/write/edit/glob/grep/bash into this
-    // same scope before this runs, and the registry rejects a repeated name
-    // there rather than shadowing it. A rejected name leaves the Host-side tool
-    // in place, pointed at the empty placeholder directory this Host keeps for
-    // the paired folder — so the failure is recorded and reported to the model
-    // instead of letting it operate the server while believing it operates the
-    // user's computer.
+    // same scope before this runs. `tools.override()` is the path for a Session
+    // whose workspace decides where those names must execute: it takes the name
+    // for this Agent only and restores the previous owner when the Session ends.
+    //
+    // A profile whose harness predates that method falls back to plain
+    // registration, which the registry refuses for a name the preset already
+    // holds. The refusal leaves the Host-side tool in place, pointed at the
+    // empty placeholder directory this Host keeps for the paired folder, so it
+    // succeeds against the wrong machine instead of failing. Those names are
+    // recorded and reported to the model rather than silently trusted.
+    const registry = agent.ctx.tools as typeof agent.ctx.tools & {
+      readonly override?: (definition: ToolDefinition) => () => void;
+    };
     const displaced: string[] = [];
     for (const tool of tools) {
-      try {
-        agent.ctx.tools.register(tool);
-      } catch (error) {
-        displaced.push(tool.name);
-        console.error(
-          `[dsh-passwords] 本机工作区 ${workspace.id} 的 ${tool.name} 工具未能注册，`
-          + `该名字已被当前 Agent 预设占用：${error instanceof Error ? error.message : String(error)}`,
-        );
+      // Replacement first, plain registration second. `override` refuses an
+      // unscoped context, which an SDK or headless composition can produce, and
+      // registration is enough there because no preset claimed the name.
+      let failure: unknown;
+      for (const attach of [registry.override, registry.register]) {
+        if (attach === undefined) continue;
+        try {
+          attach.call(registry, tool);
+          failure = undefined;
+          break;
+        } catch (error) {
+          failure = error;
+        }
       }
+      if (failure === undefined) continue;
+      displaced.push(tool.name);
+      console.error(
+        `[dsh-passwords] 本机工作区 ${workspace.id} 的 ${tool.name} 工具未能注册，`
+        + `该名字已被当前 Agent 预设占用：${failure instanceof Error ? failure.message : String(failure)}`,
+      );
     }
     if (displaced.length > 0) {
       console.error(
