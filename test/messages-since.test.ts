@@ -93,7 +93,7 @@ before(async () => {
     jwtSecret: 'test-secret',
     internalSecret: 'test-internal',
     patch: { dshRoot: '', restartService: '' },
-    webSocket: { sshEndpoints: [] },
+    endpointRules: [],
   };
 
   const auth = new AuthService(config, db);

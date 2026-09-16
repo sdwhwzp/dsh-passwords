@@ -29,6 +29,8 @@ import { DshPasswordsCard } from './card';
 import { DshPasswordsSection } from './section';
 import { ChatLauncher } from './chat';
 import { TokenReporter } from './token';
+import { startPickerDelete } from './picker-delete';
+import { startFileDownload } from './file-download';
 import { zh, en } from './locales';
 
 /** 卡片样式：全部使用 dsh 设计令牌（--dsw-alias-*），颜色/主题与官方 PluginCard 完全一致 */
@@ -36,7 +38,7 @@ const CSS = `
 /* 共享缓动令牌（iOS 风格）：--dshpw-ease 柔和标准曲线（无回弹，面板/状态切换），
    --dshpw-spring 轻微过冲弹簧（开关、按钮、贴纸等可按压元素）。
    动画只动 transform/opacity/box-shadow（合成器线程，不掉帧），并尊重 prefers-reduced-motion。 */
-.dshpw-card{--dshpw-ease:cubic-bezier(.22,1,.36,1);--dshpw-spring:cubic-bezier(.34,1.4,.64,1);--dshpw-accent:var(--dsw-alias-brand-primary,#14b8a6);--dshpw-ink:var(--dsw-alias-label-primary,#172026);--dshpw-inverted:var(--dsw-alias-label-primary-inverted,#fff);--dshpw-muted:var(--dsw-alias-label-tertiary,#74808a);--dshpw-line:var(--dsw-alias-border-l2,#e3e7e9);--dshpw-surface:var(--dsw-alias-bg-layer-2,#f8fafb);--dshpw-layer:var(--dsw-alias-bg-layer-3,#fff);--dshpw-success:var(--dsw-alias-semantic-success,#10b981);--dshpw-warning:var(--dsw-alias-semantic-warning,#f59e0b);--dshpw-danger:var(--dsw-alias-semantic-danger,#ef4444);display:flex;flex-direction:column;border:1px solid var(--dshpw-line);border-radius:14px;background:var(--dshpw-layer);box-shadow:0 8px 24px rgb(0 0 0 / 8%);transition:border-color .28s var(--dshpw-ease),box-shadow .28s var(--dshpw-ease);font-size:13px;line-height:1.5;overflow:hidden;color:var(--dshpw-ink);animation:dshpwCardIn .5s var(--dshpw-ease) both}
+.dshpw-card{--dshpw-ease:cubic-bezier(.22,1,.36,1);--dshpw-spring:cubic-bezier(.34,1.4,.64,1);--dshpw-accent:var(--dsw-alias-brand-primary,#14b8a6);--dshpw-ink:var(--dsw-alias-label-primary,#172026);--dshpw-inverted:var(--dsw-alias-label-primary-inverted,#fff);--dshpw-muted:var(--dsw-alias-label-tertiary,#74808a);--dshpw-line:var(--dsw-alias-border-l2,#e3e7e9);--dshpw-surface:var(--dsw-alias-bg-layer-2,#f8fafb);--dshpw-layer:var(--dsw-alias-bg-layer-3,#fff);--dshpw-success:var(--dsw-alias-state-success-primary,#10b981);--dshpw-warning:var(--dsw-alias-state-warn-primary,#f59e0b);--dshpw-danger:var(--dsw-alias-state-error-primary,#ef4444);display:flex;flex-direction:column;border:1px solid var(--dshpw-line);border-radius:14px;background:var(--dshpw-layer);box-shadow:0 8px 24px rgb(0 0 0 / 8%);transition:border-color .28s var(--dshpw-ease),box-shadow .28s var(--dshpw-ease);font-size:13px;line-height:1.5;overflow:hidden;color:var(--dshpw-ink);animation:dshpwCardIn .5s var(--dshpw-ease) both}
 .dshpw-card:hover{border-color:color-mix(in srgb,var(--dshpw-accent) 35%,var(--dshpw-line));box-shadow:0 14px 34px rgb(0 0 0 / 13%)}
 @keyframes dshpwCardIn{from{opacity:0;transform:translateY(14px) scale(.985)}to{opacity:1;transform:none}}
 .dshpw-body{display:flex;flex-direction:column;gap:0;padding:10px 20px 24px}
@@ -128,6 +130,12 @@ const CSS = `
 .dshpw-session-check span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dshpw-check{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--dshpw-muted);cursor:pointer;border-radius:6px;transition:color .18s var(--dshpw-ease)}
 .dshpw-check:hover{color:var(--dshpw-ink)}
+.dshpw-check span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dshpw-check small{font-size:11px;color:var(--dshpw-muted);opacity:.8}
+.dshpw-check input:disabled{cursor:not-allowed}
+/* 模型 allowlist：可滚动的多选清单（目录可能很长）*/
+.dshpw-model-list{display:flex;flex-direction:column;gap:4px;max-height:220px;overflow-y:auto;padding:8px 10px;border:1px solid var(--dshpw-line);border-radius:9px;background:var(--dshpw-layer);animation:dshpwFadeSlideIn .28s var(--dshpw-ease) both;scrollbar-width:thin}
+.dshpw-model-list .dshpw-check{min-height:26px}
 select.dshpw-input{height:auto;min-height:38px;cursor:pointer}
 .dshpw-badge{font-size:11px;padding:3px 8px;border-radius:999px;border:1px solid color-mix(in srgb,var(--dshpw-accent) 45%,transparent);color:var(--dshpw-success);background:color-mix(in srgb,var(--dshpw-success) 14%,transparent);margin-left:6px;white-space:nowrap;animation:dshpwFadeSlideIn .28s var(--dshpw-ease) both}
 .dshpw-badge.admin{border-color:color-mix(in srgb,var(--dshpw-warning) 55%,transparent);color:var(--dshpw-warning);background:color-mix(in srgb,var(--dshpw-warning) 16%,transparent)}
@@ -138,13 +146,21 @@ select.dshpw-input{height:auto;min-height:38px;cursor:pointer}
 .dshpw-perms-content{display:flex;flex-direction:column;gap:12px;min-width:0}
 @keyframes dshpwFadeSlideIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
 @keyframes dshpwShakeIn{0%{opacity:0;transform:translateX(0)}20%{opacity:1;transform:translateX(-4px)}40%{transform:translateX(4px)}60%{transform:translateX(-2px)}80%{transform:translateX(2px)}100%{transform:translateX(0)}}
-@media (prefers-reduced-motion:reduce){.dshpw-card,.dshpw-body>.dshpw-section,.dshpw-body>.dshpw-profile,.dshpw-avatar,.dshpw-status,.dshpw-user,.dshpw-perm,.dshpw-session-list,.dshpw-badge,.dshpw-error,.dshpw-ok,.dshpw-empty-state,.dshpw-btn,.dshpw-switch,.dshpw-switch-track,.dshpw-switch-thumb,.dshpw-input,.dshpw-progress-fill,.dshpw-session-check,.dshpw-check,.dshpw-spinner{transition:none!important;animation:none!important}}
+@media (prefers-reduced-motion:reduce){.dshpw-card,.dshpw-body>.dshpw-section,.dshpw-body>.dshpw-profile,.dshpw-avatar,.dshpw-status,.dshpw-user,.dshpw-perm,.dshpw-session-list,.dshpw-model-list,.dshpw-badge,.dshpw-error,.dshpw-ok,.dshpw-empty-state,.dshpw-btn,.dshpw-switch,.dshpw-switch-track,.dshpw-switch-thumb,.dshpw-input,.dshpw-progress-fill,.dshpw-session-check,.dshpw-check,.dshpw-spinner{transition:none!important;animation:none!important}}
 @media (max-width:560px){.dshpw-body{padding:6px 14px 18px}.dshpw-section{padding:16px 0}.dshpw-action-row{align-items:stretch}.dshpw-action-row .dshpw-btn{width:100%}.dshpw-patch-actions .dshpw-btn{width:100%}.dshpw-signout{width:auto!important}.dshpw-section-head{align-items:flex-start;flex-direction:column;gap:7px}.dshpw-status{max-width:100%;white-space:normal}.dshpw-profile{align-items:flex-start}.dshpw-profile .dshpw-signout{margin-left:auto}}
 `;
 
 export const inject = ['slots', 'locale'] as const;
 
 export function apply(ctx: ClientContext): void {
+  // 目录选择器删除按钮（仅主用户）：角色由模块内部探测，非主用户零副作用；
+  // 授权由网关 requireAdmin 兜底。这里 fire-and-forget，不阻塞插件加载。
+  startPickerDelete();
+
+  // 右侧栏文件下载按钮（主用户/已授权子用户）：权限由模块内部探测（fail-closed），
+  // 授权由网关下载端点兜底。同样 fire-and-forget。
+  startFileDownload();
+
   ctx.effect(() => {
     if (typeof document === 'undefined') return () => {};
     const existing = document.querySelector('style[data-dshpw-style="1"]');

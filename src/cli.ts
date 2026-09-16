@@ -138,7 +138,9 @@ function requiresCookieBridge(dshRoot: string): boolean {
 /** 补丁管理命令：node dist/cli.js patch [status]（补丁强制启用；无参数=立即重载） */
 function runPatch(argv: string[]): void {
   const action = argv[0];
-  const config = loadConfig();
+  // patch 只负责管理 DSH 文件补丁；卸载流程需要在 .env/SETUP_KEY
+  // 已被移除后仍能回滚补丁，因此不应触发网关密钥的启动门禁。
+  const config = loadConfig({ requireSetupKey: false });
   const root = findDshRoot(config.patch.dshRoot);
   if (!root) {
     console.error(`[dsh-passwords] ${tr('cli.noDshRoot')}`);
@@ -176,6 +178,10 @@ function runPatch(argv: string[]): void {
   if (action === undefined || action === 'on' || action === 'reload') {
     const result = applyRemotePatch(root);
     console.log(`  ${tr('cli.result')}: ${result}`);
+    if (result === 'missing') {
+      console.error(`[dsh-passwords] ${tr('cli.patchTargetMissing')}`);
+      process.exit(EXIT_ALPHA3_SETTINGS_UNAVAILABLE);
+    }
     if (result === 'applied' && config.patch.restartService) {
       console.log(`  ${tr('cli.restarting', { service: config.patch.restartService })}`);
       // CLI 进程跑完就退出，不能用延迟定时器（unref 定时器会被丢弃）；直接同步重启

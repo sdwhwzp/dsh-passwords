@@ -66,7 +66,7 @@ async function mountCard(t: TestContext, overrides: Record<string, () => Respons
   const me = { id: 1, username: 'test-admin', role: 'admin' };
   const payloads: Record<string, unknown> = {
     '/api/dsh-passwords/state': { me, users: [] },
-    '/gateway/api/overview': { me, users: [], sshWebSocketEndpoints: [] },
+    '/gateway/api/overview': { me, users: [], },
     '/api/dsh-passwords/workspaces': { workspaces: [] },
     '/api/dsh-passwords/patch/status': {
       status: { settingsHostMode: true, workspaceSearch: true, bindAll: true, connectionCookieBridge: 'patched' },
@@ -114,7 +114,6 @@ test('settings card synchronizes the SSH permission beside upload and save API',
   }, {
     '/gateway/api/overview': {
       me: { id: 1, username: 'test-admin', role: 'admin' },
-      sshWebSocketEndpoints: [],
       users: [{
         id: 2,
         username: 'subuser',
@@ -156,7 +155,6 @@ test('settings card synchronizes the large request body permission to the visibl
   }, {
     '/gateway/api/overview': {
       me: { id: 1, username: 'test-admin', role: 'admin' },
-      sshWebSocketEndpoints: [],
       users: [{
         id: 2,
         username: 'subuser',
@@ -198,7 +196,6 @@ test('settings card shows Agent preset registry failure instead of hiding the pe
   }, {
     '/gateway/api/overview': {
       me: { id: 1, username: 'test-admin', role: 'admin' },
-      sshWebSocketEndpoints: [],
       users: [{ id: 2, username: 'subuser', role: 'user', permissions: { allowedFolders: [], hourlyTokenLimit: null, dailyMinutesLimit: null, allowUpload: true, allowGitDownload: false, allowWorkspaceCreate: false, allowedAgentPresets: [], banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: [] }, usage: null }],
     },
   });

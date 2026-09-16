@@ -16,8 +16,127 @@ export interface ChatMessage {
   content: string;
   tags: string[];
   created_at: string;
+  /** 服务端投影：消息附件（旧服务端不返回时为 undefined） */
+  media?: ChatMedia[] | null;
   /** 本地乐观发送的临时消息（服务器未确认）：渲染发送中状态 */
   pending?: boolean;
+}
+
+/** 服务端媒体类型（与网关 media_assets.media_kind 一致） */
+export type ChatMediaKind = 'sticker' | 'image' | 'video';
+
+/**
+ * 消息附件投影。字段全部按白名单读取：服务端可能返回额外内部字段，
+ * 但渲染层只使用下列值，且不把任何服务端字符串当 HTML 使用。
+ */
+export interface ChatMedia {
+  id: string;
+  kind: ChatMediaKind;
+  /** 由服务端确定，仅用于缩略图尺寸提示，不参与拼接 URL */
+  mime_type?: string;
+  byte_size?: number;
+  width?: number | null;
+  height?: number | null;
+  duration_ms?: number | null;
+  original_name?: string;
+}
+
+/** 客户端上传任务状态机 */
+type MediaUploadState = 'queued' | 'uploading' | 'ready' | 'failed' | 'canceled';
+
+interface MediaUpload {
+  /** 本地 ID（仅用于 key 与查找；永远不发给服务端） */
+  localId: string;
+  file: File;
+  kind: ChatMediaKind;
+  state: MediaUploadState;
+  /** 0-100；服务端未提供进度信息时为 null（不假装知道） */
+  percent: number | null;
+  /** 服务端返回的不透明媒体 ID（ready 后才有） */
+  mediaId: string | null;
+  /** 本地 object URL，供上传前预览；移除时 revoke */
+  previewUrl: string | null;
+  /** 失败原因（已本地化） */
+  error: string;
+  /** 取消/重试用的控制器，同时用于中止 XHR 与网关 PUT */
+  controller: AbortController | null;
+}
+
+/**
+ * 单条消息附件上限（与网关 MAX_MEDIA_PER_MESSAGE 一致；最终由服务端决定）
+ */
+const MAX_MEDIA_PER_MESSAGE = 10;
+
+/**
+ * 允许的 MIME → kind 映射。必须与服务端 MEDIA_POLICY 一致的白名单，
+ * 不能用 `image/*` 前缀匹配：SVG 属于 image/*，但设计明确禁止 SVG
+ * （可携带脚本与外部引用，是存储型 XSS 载体），必须先在此拦住。
+ */
+const MEDIA_MIME_KIND: Record<string, ChatMediaKind> = {
+  'image/png': 'sticker',
+  'image/jpeg': 'sticker',
+  'image/webp': 'sticker',
+  'image/gif': 'sticker',
+  'video/mp4': 'video',
+  'video/webm': 'video',
+};
+
+/** 并发上传上限：避免一次性把几十个大文件同时推向网关 */
+const MAX_PARALLEL_UPLOADS = 3;
+
+/**
+ * accept 与服务端策略一致的白名单（网关仍会重校验魔数与 MIME）。
+ * 默认媒体权限关闭时不会读取文件内容，也不会发起上传。
+ */
+const MEDIA_ACCEPT = Object.keys(MEDIA_MIME_KIND).join(',');
+
+const mediaFileKey = (file: File): string => `${file.name}:${file.size}:${file.lastModified}`;
+
+/**
+ * 由浏览器提供的 MIME 判定草稿类型；空/不支持的类型返回 null。
+ * 仅接受与服务端一致的白名单（排除 SVG 等 image/* 下的危险格式）。
+ */
+export function mediaKindOf(file: { type: string }): ChatMediaKind | null {
+  // 去掉 charset 等参数："image/png;charset=utf-8" 也应识别为 image/png
+  const mime = (file.type || '').split(';')[0].trim().toLowerCase();
+  return MEDIA_MIME_KIND[mime] ?? null;
+}
+
+/**
+ * 从任意 JSON 值里安全读取附件数组。
+ * 只接受已知 kind 与字符串 id；其余条目直接丢弃（不渲染未知结构，
+ * 也不把服务端字段拼进 URL 或 HTML）。
+ */
+export function readMessageMedia(raw: unknown): ChatMedia[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const media: ChatMedia[] = [];
+  for (const item of raw) {
+    if (typeof item !== 'object' || item === null) continue;
+    const row = item as Record<string, unknown>;
+    const id = row.id;
+    const kind = row.kind;
+    if (typeof id !== 'string' || id === '') continue;
+    if (kind !== 'sticker' && kind !== 'image' && kind !== 'video') continue;
+    media.push({
+      id,
+      kind,
+      ...(typeof row.mime_type === 'string' ? { mime_type: row.mime_type } : {}),
+      ...(typeof row.byte_size === 'number' ? { byte_size: row.byte_size } : {}),
+      ...(typeof row.width === 'number' || row.width === null ? { width: row.width as number | null } : {}),
+      ...(typeof row.height === 'number' || row.height === null ? { height: row.height as number | null } : {}),
+      ...(typeof row.duration_ms === 'number' || row.duration_ms === null
+        ? { duration_ms: row.duration_ms as number | null }
+        : {}),
+      ...(typeof row.original_name === 'string' ? { original_name: row.original_name } : {}),
+    });
+  }
+  return media;
+}
+
+/** 媒体访问路径：不透明 ID 经 encodeURIComponent 后拼入服务端约定路由。
+ *  服务端每次按消息可见性重新鉴权，这里不发永久公开 URL。 */
+export function mediaSrc(media: Pick<ChatMedia, 'id'>): string {
+  return `/gateway/api/message-media/${encodeURIComponent(media.id)}`;
 }
 
 interface Me {
@@ -52,13 +171,50 @@ function chatErrText(
   d: { error?: string; code?: string },
   fallback: string,
   tr: (key: string) => string,
+  /** 媒体上下文：把“媒体专用”的复用的通用 code 映射到准确文案。
+   *  网关发送路由在媒体未授权时回 FORBIDDEN、纯媒体为空时回 INVALID，
+   *  这两个 code 在聊天里另有含义，直接复用会给出误导文案。 */
+  mediaContext = false,
 ): string {
   if (d.code) {
-    const key = `err.${d.code}`;
+    const code = mediaContext && d.code === 'FORBIDDEN' ? 'FORBIDDEN_MEDIA' : d.code;
+    const key = `err.${code}`;
     const localized = tr(key);
     if (localized !== key && !localized.includes('{')) return localized;
   }
   return d.error ?? fallback;
+}
+
+/** 把服务端消息归一化：白名单读取 media，供 mergeById 去重后统一渲染 */
+function normalizeMessage(raw: unknown): ChatMessage | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const m = raw as Record<string, unknown>;
+  if (typeof m.id !== 'number') return null;
+  return {
+    id: m.id,
+    sender_id: typeof m.sender_id === 'number' ? m.sender_id : 0,
+    sender_name: typeof m.sender_name === 'string' ? m.sender_name : '',
+    recipient_id: typeof m.recipient_id === 'number' ? m.recipient_id : null,
+    content: typeof m.content === 'string' ? m.content : '',
+    tags: Array.isArray(m.tags) ? m.tags.filter((tag): tag is string => typeof tag === 'string') : [],
+    created_at: typeof m.created_at === 'string' ? m.created_at : new Date().toISOString(),
+    media: readMessageMedia(m.media),
+  };
+}
+
+/** XHR 响应体安全解析：非 JSON（如反代登录页）时不抛错，交给调用方走通用文案 */
+function parseJson(raw: string): { error?: string; code?: string } {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null) return {};
+    const row = parsed as Record<string, unknown>;
+    return {
+      ...(typeof row.error === 'string' ? { error: row.error } : {}),
+      ...(typeof row.code === 'string' ? { code: row.code } : {}),
+    };
+  } catch {
+    return {};
+  }
 }
 
 /** 头像色板：按用户名哈希取固定色（同一个人颜色稳定） */
@@ -129,6 +285,16 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
   const [error, setError] = useState('');
   const [unread, setUnread] = useState(0);
   const [shaking, setShaking] = useState(false);
+  // 聊天媒体权限：服务端 phase 返回 mediaEnabled；未返回时按关闭处理（fail-closed，
+  // 与服务端默认值 allow_chat_media=false 一致）。授权仍由网关强制执行。
+  const [mediaEnabled, setMediaEnabled] = useState(false);
+  const [uploads, setUploads] = useState<MediaUpload[]>([]);
+  const [dragActive, setDragActive] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  // 上传状态在异步回调里需要读最新值；用 ref 避免把陈旧闭包写回 state
+  const uploadsRef = useRef<MediaUpload[]>([]);
+  const uploadSeq = useRef(0);
+  const dragDepth = useRef(0);
   // 账号级偏好异步读取：加载期间不闪现 FAB；请求失败时默认显示，避免 API 暂时异常把聊天永久隐藏。
   const [chatEntry, setChatEntry] = useState<'loading' | 'on' | 'off'>('loading');
   // 主用户收件人选择（Discussion #6）：'broadcast' | 用户 id；子用户无需选择（服务端默认私信主用户）
@@ -168,6 +334,7 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
       .then(async (res) => {
         const data = (await res.json().catch(() => ({}))) as {
           chatEnabled?: unknown;
+          mediaEnabled?: unknown;
           users?: Array<{ id: number; username: string; role: string }>;
         };
         if (disposed) return;
@@ -179,6 +346,8 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
         if (chatEntryOverrideRef.current === null) {
           setChatEntry(res.ok && data.chatEnabled === false ? 'off' : 'on');
         }
+        // 媒体开关是权限字段（允许媒体 = true 才打开）；未知/失败一律按关闭。
+        setMediaEnabled(res.ok && data.mediaEnabled === true);
       })
       .catch(() => {
         if (!disposed && chatEntryOverrideRef.current === null) setChatEntry('on');
@@ -356,9 +525,11 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
           if (disposed) return;
           if (res.ok && d.ok) {
             failStreak = 0;
-            const incoming = (Array.isArray(d.messages) ? d.messages : []) as ChatMessage[];
+            const incoming = (Array.isArray(d.messages) ? d.messages : [])
+              .map(normalizeMessage)
+              .filter((m: ChatMessage | null): m is ChatMessage => m !== null);
             // 服务端返回 id DESC（新在前），这里统一成旧在前、新在后
-            incoming.sort((a, b) => a.id - b.id);
+            incoming.sort((a: ChatMessage, b: ChatMessage) => a.id - b.id);
             const nextMe = (d.me ?? null) as Me | null;
             setMe(nextMe);
             const maxId = incoming.length > 0 ? incoming[incoming.length - 1].id : 0;
@@ -370,7 +541,7 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
             const cursorReset = d.reset === true || isCursorReset(sinceBefore, incoming);
             if (!cursorReset && nextMe && initializedRef.current && maxId > sinceBefore) {
               const fresh = incoming.filter(
-                (m) => m.sender_id !== nextMe.id && m.id > sinceBefore,
+                (m: ChatMessage) => m.sender_id !== nextMe.id && m.id > sinceBefore,
               ).length;
               if (fresh > 0 && !openRef.current) setUnread((u) => u + fresh);
             }
@@ -380,8 +551,9 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
             initializedRef.current = true;
             setMessages((prev) => (cursorReset ? incoming : mergeById(prev, incoming)));
             setError('');
-          } else if (!res.ok) {
-            // HTTP 错误同样计入退避：连续 5xx/401 时拉长轮询间隔，避免失败请求风暴
+          } else {
+            // 反向代理可能把登录页/其他 HTML 以 200 返回；只看状态码会让轮询
+            // 静默空转，必须把协议层 ok=false/缺失也纳入退避。
             failStreak++;
             setError(chatErrText(d, t('chat.loadFailed'), tr));
           }
@@ -445,17 +617,218 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
     refreshContacts();
   };
 
+  const updateUpload = (localId: string, patch: Partial<MediaUpload>) => {
+    const next = uploadsRef.current.map((u) => (u.localId === localId ? { ...u, ...patch } : u));
+    uploadsRef.current = next;
+    setUploads(next);
+  };
+
+  /**
+   * 单文件上传：init（取 uploadId/mediaId/token）→ PUT（流式传文件本体）。
+   * 全程使用 File/XHR 直传：不把文件读入内存，也不 base64。
+   * 用 XHR 而非 fetch：需要真实上传进度（fetch 无上传进度事件）。
+   */
+  const uploadOne = async (localId: string, file: File, kind: ChatMediaKind) => {
+    const controller = new AbortController();
+    updateUpload(localId, { state: 'uploading', percent: null, error: '', controller });
+    try {
+      const res = await fetch('/gateway/api/message-media/init', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        signal: controller.signal,
+        body: JSON.stringify({
+          kind,
+          mimeType: file.type,
+          byteSize: file.size,
+          // 服务端字段名是 fileName（仅作展示元数据，不参与落盘路径）
+          fileName: file.name,
+        }),
+      });
+      const d = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        uploadId?: unknown;
+        mediaId?: unknown;
+        token?: unknown;
+        error?: string;
+        code?: string;
+      };
+      if (!res.ok || d.ok !== true) throw new Error(chatErrText(d, t('chat.mediaFailed'), tr, true));
+      const mediaId = typeof d.mediaId === 'string' && d.mediaId !== '' ? d.mediaId : null;
+      if (mediaId === null) throw new Error(t('chat.mediaFailed'));
+      const uploadId = typeof d.uploadId === 'string' && d.uploadId !== '' ? d.uploadId : mediaId;
+      const token = typeof d.token === 'string' ? d.token : '';
+      // PUT 路径与服务端约定一致：/gateway/api/message-media/:id
+      const putUrl = `/gateway/api/message-media/${encodeURIComponent(uploadId)}`;
+      await new Promise<void>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('PUT', putUrl, true);
+        xhr.withCredentials = true;
+        xhr.setRequestHeader('content-type', file.type || 'application/octet-stream');
+        if (token !== '') xhr.setRequestHeader('x-dshpw-media-token', token);
+        xhr.upload.onprogress = (event) => {
+          if (!event.lengthComputable || event.total <= 0) return;
+          // 100% 留给“服务端校验通过”那一刻：传输完成不等于 ready
+          const percent = Math.min(99, Math.round((event.loaded / event.total) * 100));
+          updateUpload(localId, { percent });
+        };
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) resolve();
+          else reject(new Error(chatErrText(parseJson(xhr.responseText), t('chat.mediaFailed'), tr, true)));
+        };
+        xhr.onerror = () => reject(new Error(t('chat.mediaFailed')));
+        xhr.onabort = () => reject(Object.assign(new Error(t('chat.mediaCanceled')), { aborted: true }));
+        controller.signal.addEventListener('abort', () => xhr.abort(), { once: true });
+        xhr.send(file);
+      });
+      updateUpload(localId, { state: 'ready', percent: 100, mediaId, controller: null });
+    } catch (e) {
+      const err = e as Error & { aborted?: boolean };
+      // 取消不当作错误：不弹红字，只标记状态让用户可移除/重试
+      if (err?.aborted) {
+        updateUpload(localId, { state: 'canceled', percent: null, controller: null, error: '' });
+      } else {
+        updateUpload(localId, { state: 'failed', percent: null, controller: null, error: err.message });
+      }
+    } finally {
+      // 任一上传结束都会释放并发槽位；立即补位，防止第 4 个及之后的附件永久停在 queued。
+      promoteQueued();
+    }
+  };
+
+  /** 选中/拖拽/粘贴入口：先本地校验，再排队上传（并发上限由 MAX_PARALLEL_UPLOADS 控制） */
+  const addFiles = (files: FileList | File[] | null) => {
+    if (!files) return;
+    if (!mediaEnabled) {
+      setError(t('chat.attachDisabled'));
+      return;
+    }
+    const accepted: MediaUpload[] = [];
+    for (const file of Array.from(files)) {
+      // 重复选择同一文件时直接忽略，避免占用配额与上传名额
+      if (uploadsRef.current.some((u) => mediaFileKey(u.file) === mediaFileKey(file))) continue;
+      const kind = mediaKindOf(file);
+      if (kind === null) {
+        // 未知/不支持的类型：交给服务端拒绝不现实（不会上传），这里直接提示
+        setError(t('chat.mediaUnsupported'));
+        continue;
+      }
+      const previewUrl = kind === 'video' ? null : URL.createObjectURL(file);
+      accepted.push({
+        localId: `m${++uploadSeq.current}`,
+        file,
+        kind,
+        state: 'queued',
+        percent: null,
+        mediaId: null,
+        previewUrl,
+        error: '',
+        controller: null,
+      });
+    }
+    if (accepted.length === 0) return;
+    const total = uploadsRef.current.length + accepted.length;
+    if (total > MAX_MEDIA_PER_MESSAGE) {
+      // 超出上限的部分不入队：避免发送时才发现“附件过多”
+      for (const item of accepted) revokePreview(item);
+      setError(t('chat.mediaTooMany', { count: MAX_MEDIA_PER_MESSAGE }));
+      return;
+    }
+    const next = [...uploadsRef.current, ...accepted];
+    uploadsRef.current = next;
+    setUploads(next);
+    setError('');
+    // 排队启动：只保留 MAX_PARALLEL_UPLOADS 个 in-flight
+    const running = next.filter((u) => u.state === 'uploading').length;
+    let slots = MAX_PARALLEL_UPLOADS - running;
+    for (const item of accepted) {
+      if (slots <= 0) break;
+      slots--;
+      uploadOne(item.localId, item.file, item.kind);
+    }
+  };
+
+  const revokePreview = (item: MediaUpload) => {
+    if (item.previewUrl !== null) URL.revokeObjectURL(item.previewUrl);
+  };
+
+  const promoteQueued = () => {
+    let slots = MAX_PARALLEL_UPLOADS - uploadsRef.current.filter((u) => u.state === 'uploading').length;
+    for (const item of uploadsRef.current) {
+      if (slots <= 0) break;
+      if (item.state !== 'queued') continue;
+      slots--;
+      uploadOne(item.localId, item.file, item.kind);
+    }
+  };
+
+  /** 移除附件：中止上传、释放 object URL，不影响其他附件 */
+  const removeUpload = (localId: string) => {
+    const item = uploadsRef.current.find((u) => u.localId === localId);
+    if (!item) return;
+    item.controller?.abort();
+    revokePreview(item);
+    const next = uploadsRef.current.filter((u) => u.localId !== localId);
+    uploadsRef.current = next;
+    setUploads(next);
+    // 有名额空出：把排在后面的 queued 文件推上去
+    promoteQueued();
+  };
+
+  /** 取消正在上传的附件（保留在列表里，可重试） */
+  const cancelUpload = (localId: string) => {
+    haptic();
+    uploadsRef.current.find((u) => u.localId === localId)?.controller?.abort();
+  };
+
+  /** 重试失败/取消的附件 */
+  const retryUpload = (localId: string) => {
+    const item = uploadsRef.current.find((u) => u.localId === localId);
+    if (!item) return;
+    haptic();
+    // 先回到队列，由统一调度器决定是否有并发槽位，避免重试绕过上限。
+    updateUpload(item.localId, { state: 'queued', percent: null, error: '' });
+    promoteQueued();
+  };
+
+  // 卸载时中止在途上传并释放 object URL：避免离开页面后仍占着网络与内存
+  useEffect(() => {
+    return () => {
+      for (const item of uploadsRef.current) {
+        item.controller?.abort();
+        if (item.previewUrl !== null) URL.revokeObjectURL(item.previewUrl);
+      }
+      uploadsRef.current = [];
+    };
+  }, []);
+
   const send = () => {
     const content = draft.trim();
-    // me 未加载（首轮 messages 响应未返回）时禁用发送：此时无法确定身份/收件人口径，
-    // 主用户会被服务端 400、临时消息也会因 sender_id=0 渲染到错误一侧
-    if (!content || busy || me === null) return;
+    // 已就绪的附件才能随消息提交；在途/失败/取消的附件不进 payload。
+    const readyMedia = uploads.filter((u) => u.state === 'ready' && u.mediaId !== null);
+    const mediaIds = readyMedia.map((u) => u.mediaId as string);
+    const inFlight = uploads.some((u) => u.state === 'uploading' || u.state === 'queued');
+    // 纯媒体消息允许发送（服务端接受空正文 + 至少一个附件）；
+    // 文本为空且没有就绪附件时才无意义。
+    if ((!content && mediaIds.length === 0) || busy || me === null) return;
+    // 还有附件在传输中：直接拦住（而不是先发文本再把在途附件默默丢掉）。
+    // 文本能力本身不回归：“没有任何附件时的纯文本发送”永远是直发路径。
+    if (inFlight) {
+      setError(t('chat.uploading', { percent: 0 }));
+      return;
+    }
     haptic();
     // 乐观更新：立即把临时消息放进列表（微信式即时发送手感），
     // 服务器确认后用真实消息替换；失败回滚（移除临时 + 恢复草稿 + 报错）。
     // 临时 id 用 Date.now()（远大于自增 id，不会被 mergeById 的 200 条截断丢出列表）。
     const sendRevision = draftRevisionRef.current;
     const tempId = Date.now();
+    const tempMedia: ChatMedia[] = readyMedia.map((u) => ({
+      id: u.mediaId as string,
+      kind: u.kind,
+      ...(u.file.type ? { mime_type: u.file.type } : {}),
+      byte_size: u.file.size,
+      original_name: u.file.name,
+    }));
     const temp: ChatMessage = {
       id: tempId,
       sender_id: me?.id ?? 0,
@@ -464,6 +837,7 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
       content,
       tags,
       created_at: new Date().toISOString(),
+      media: tempMedia,
       pending: true,
     };
     setDraft('');
@@ -475,6 +849,7 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
     // 投递口径（Discussion #6）：主用户显式选择广播或收件人；
     // 子用户不携带收件人字段，服务端默认私信主用户。
     const payload: Record<string, unknown> = { content, tags };
+    if (mediaIds.length > 0) payload.mediaIds = mediaIds;
     if (me?.role === 'admin') {
       if (to === 'broadcast') payload.broadcast = true;
       else payload.recipientId = to;
@@ -487,18 +862,24 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
       .then(async (res) => {
         const d = await res.json().catch(() => ({}));
         if (res.ok && d.ok) {
-          const m = (d.message ?? null) as ChatMessage | null;
+          const m = normalizeMessage(d.message ?? null);
           setMessages((prev) => {
             const base = prev.filter((p) => p.id !== tempId);
             return m ? mergeById(base, [m]) : base;
           });
+          // 附件已随消息提交：清空本地列表并释放预览 URL
+          for (const item of readyMedia) revokePreview(item);
+          const next = uploadsRef.current.filter((u) => u.state !== 'ready');
+          uploadsRef.current = next;
+          setUploads(next);
         } else {
           setMessages((prev) => prev.filter((p) => p.id !== tempId));
           if (draftRevisionRef.current === sendRevision) {
             setDraft(content);
             setTags(tags);
           }
-          setError(chatErrText(d, t('chat.sendFailed'), tr));
+          // 发送失败：媒体未授权时网关回 FORBIDDEN（媒体上下文口径）
+          setError(chatErrText(d, t('chat.sendFailed'), tr, mediaIds.length > 0));
         }
       })
       .catch(() => {
@@ -595,7 +976,46 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
                         <span className="dshpw-chat-time">{fmtTime(m.created_at)}</span>
                       </div>
                       <div className="dshpw-chat-bubble">
-                        <div className="dshpw-chat-content">{m.content}</div>
+                        {/* 附件渲染：仅 img/video，src 一律由不透明媒体 ID 拼成；
+                            绝不用 dangerouslySetInnerHTML，也不渲染 SVG/HTML。 */}
+                        {(m.media ?? []).length > 0 && (
+                          <div className="dshpw-chat-media">
+                            {(m.media ?? []).map((media) => (
+                              <a
+                                key={media.id}
+                                className={'dshpw-chat-media-item ' + media.kind}
+                                href={mediaSrc(media)}
+                                target="_blank"
+                                rel="noreferrer noopener"
+                                title={media.original_name || t('chat.mediaPreviewAlt')}
+                              >
+                                {media.kind === 'video' ? (
+                                  <video
+                                    className="dshpw-chat-media-el"
+                                    src={mediaSrc(media)}
+                                    controls
+                                    preload="metadata"
+                                    playsInline
+                                    aria-label={media.original_name || t('chat.mediaVideo')}
+                                  />
+                                ) : (
+                                  <img
+                                    className="dshpw-chat-media-el"
+                                    src={mediaSrc(media)}
+                                    alt={media.original_name || t('chat.mediaPreviewAlt')}
+                                    loading="lazy"
+                                    decoding="async"
+                                    {...(media.width && media.height
+                                      ? { width: media.width, height: media.height }
+                                      : {})}
+                                  />
+                                )}
+                              </a>
+                            ))}
+                          </div>
+                        )}
+                        {/* 纯媒体消息：content 为空时不渲染空文本行 */}
+                        {m.content !== '' && <div className="dshpw-chat-content">{m.content}</div>}
                         {m.tags.length > 0 && (
                           <div className="dshpw-chat-tags">
                             {m.tags.map((tag) => (
@@ -619,7 +1039,104 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
               })}
             </div>
 
-            <div className="dshpw-chat-composer">
+            <div
+              className={'dshpw-chat-composer' + (dragActive ? ' drag-active' : '')}
+              onDragEnter={(e) => {
+                if (!mediaEnabled || !e.dataTransfer?.types?.includes('Files')) return;
+                e.preventDefault();
+                dragDepth.current += 1;
+                setDragActive(true);
+              }}
+              onDragOver={(e) => {
+                // 必须 preventDefault 才能在 onDrop 里拿到文件（浏览器默认行为是打开文件）
+                if (!mediaEnabled || !e.dataTransfer?.types?.includes('Files')) return;
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'copy';
+              }}
+              onDragLeave={() => {
+                if (!dragActive) return;
+                // 子元素之间移动也会触发 dragleave：用计数避免闪烁
+                dragDepth.current = Math.max(0, dragDepth.current - 1);
+                if (dragDepth.current === 0) setDragActive(false);
+              }}
+              onDrop={(e) => {
+                dragDepth.current = 0;
+                setDragActive(false);
+                if (!mediaEnabled) return;
+                const files = Array.from(e.dataTransfer?.files ?? []);
+                if (files.length === 0) return;
+                e.preventDefault();
+                addFiles(files);
+              }}
+            >
+              {/* 待发送附件：预览 + 进度 + 取消/重试/移除 */}
+              {uploads.length > 0 && (
+                <div className="dshpw-chat-attachments">
+                  {uploads.map((u) => (
+                    <div className={'dshpw-chat-attachment ' + u.state} key={u.localId}>
+                      <div className="dshpw-chat-thumb">
+                        {u.previewUrl !== null ? (
+                          <img src={u.previewUrl} alt={u.file.name} />
+                        ) : (
+                          <span className="dshpw-chat-thumb-video" aria-hidden="true">▶</span>
+                        )}
+                        {u.state === 'uploading' && u.percent !== null && (
+                          <span className="dshpw-chat-thumb-progress" style={{ width: `${u.percent}%` }} />
+                        )}
+                      </div>
+                      <div className="dshpw-chat-attachment-main">
+                        <span className="dshpw-chat-attachment-name" title={u.file.name}>
+                          {u.file.name}
+                        </span>
+                        <span className="dshpw-chat-attachment-state">
+                          {u.state === 'queued'
+                            ? t('chat.uploadQueued')
+                            : u.state === 'uploading'
+                              ? t('chat.uploading', { percent: u.percent ?? 0 })
+                              : u.state === 'ready'
+                                ? t('chat.uploadDone')
+                                : u.state === 'canceled'
+                                  ? t('chat.mediaCanceled')
+                                  : u.error || t('chat.mediaFailed')}
+                        </span>
+                      </div>
+                      <div className="dshpw-chat-attachment-actions">
+                        {u.state === 'uploading' && (
+                          <button
+                            type="button"
+                            className="dshpw-chat-attachment-btn"
+                            onClick={() => cancelUpload(u.localId)}
+                            aria-label={t('chat.uploadCancel')}
+                            title={t('chat.uploadCancel')}
+                          >
+                            ×
+                          </button>
+                        )}
+                        {(u.state === 'failed' || u.state === 'canceled') && (
+                          <button
+                            type="button"
+                            className="dshpw-chat-attachment-btn"
+                            onClick={() => retryUpload(u.localId)}
+                            aria-label={t('chat.uploadRetry')}
+                            title={t('chat.uploadRetry')}
+                          >
+                            ↻
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="dshpw-chat-attachment-btn"
+                          onClick={() => removeUpload(u.localId)}
+                          aria-label={t('chat.uploadRemove')}
+                          title={t('chat.uploadRemove')}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
               <div className="dshpw-chat-tags">
                 {PRESET_TAGS.map((tag) => (
                   <button
@@ -663,6 +1180,15 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
                     draftRevisionRef.current += 1;
                     setDraft(e.target.value);
                   }}
+                  onPaste={(e) => {
+                    // 粘贴图片/视频（最多见的表情包入口）：仅当媒体权限开启时才接手，
+                    // 权限关闭时保留默认文本粘贴行为。
+                    if (!mediaEnabled) return;
+                    const files = Array.from(e.clipboardData?.files ?? []);
+                    if (files.length === 0) return;
+                    e.preventDefault();
+                    addFiles(files);
+                  }}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();
@@ -670,13 +1196,49 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
                     }
                   }}
                 />
+                {/* 媒体入口：权限关闭时保持可见但禁用，并给出原因 */}
+                <button
+                  type="button"
+                  className="dshpw-chat-attach"
+                  disabled={!mediaEnabled || busy}
+                  onClick={() => fileInputRef.current?.click()}
+                  aria-label={mediaEnabled ? t('chat.attach') : t('chat.attachDisabled')}
+                  title={mediaEnabled ? t('chat.attach') : t('chat.attachDisabled')}
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path
+                      d="M12 5v14M5 12h14"
+                      stroke="currentColor"
+                      strokeWidth="1.8"
+                      strokeLinecap="round"
+                    />
+                  </svg>
+                </button>
+                <input
+                  ref={fileInputRef}
+                  className="dshpw-chat-file"
+                  type="file"
+                  accept={MEDIA_ACCEPT}
+                  multiple
+                  tabIndex={-1}
+                  aria-hidden="true"
+                  onChange={(e) => {
+                    addFiles(e.target.files);
+                    // 清空 value：同一文件再次选择也能触发 change
+                    e.target.value = '';
+                  }}
+                />
                 <button
                   type="button"
                   className="dshpw-chat-send"
-                  disabled={busy || !draft.trim() || me === null}
+                  disabled={busy || (!draft.trim() && uploads.every((u) => u.state !== 'ready')) || me === null}
                   onClick={send}
                   aria-label={t('chat.send')}
-                  title={t('chat.send')}
+                  title={
+                    !draft.trim() && uploads.every((u) => u.state !== 'ready')
+                      ? t('chat.mediaOnlySend')
+                      : t('chat.send')
+                  }
                 >
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                     <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" fill="currentColor" />
@@ -757,6 +1319,37 @@ const CHAT_CSS = `
 .dshpw-chat-to-label{font-size:12px;color:var(--dsw-alias-label-tertiary);flex-shrink:0}
 .dshpw-chat-to-select{flex:1;min-width:0;height:30px;padding:0 8px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-primary);font-size:13px;outline:none;cursor:pointer;transition:border-color .15s}
 .dshpw-chat-to-select:focus{border-color:var(--dsw-alias-brand-primary)}
+/* 消息附件：表情包/图片/视频。纯媒体消息不渲染空文本行。 */
+.dshpw-chat-media{display:flex;flex-direction:column;gap:6px;margin-bottom:4px}
+.dshpw-chat-media:last-child{margin-bottom:0}
+.dshpw-chat-media-item{display:block;line-height:0;border-radius:10px;overflow:hidden;background:rgba(0,0,0,.04);text-decoration:none}
+.dshpw-chat-media-el{display:block;max-width:220px;max-height:260px;width:auto;height:auto;border-radius:10px;object-fit:contain}
+/* 表情包按内联尺寸渲染，避免小图被拉大变形 */
+.dshpw-chat-media-item.sticker .dshpw-chat-media-el{max-width:120px;max-height:120px}
+.dshpw-chat-media-item.video .dshpw-chat-media-el{max-width:260px;background:#000}
+.dshpw-chat-media-item:hover .dshpw-chat-media-el{filter:brightness(1.04)}
+/* 待发送附件栏 */
+.dshpw-chat-attachments{display:flex;flex-direction:column;gap:6px;max-height:168px;overflow-y:auto;padding:8px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-3);scrollbar-width:thin;animation:dshpwErrIn .22s ease}
+.dshpw-chat-attachment{display:flex;align-items:center;gap:8px;min-width:0}
+.dshpw-chat-thumb{position:relative;flex-shrink:0;width:34px;height:34px;border-radius:8px;overflow:hidden;background:var(--dsw-alias-bg-layer-1);display:flex;align-items:center;justify-content:center}
+.dshpw-chat-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.dshpw-chat-thumb-video{font-size:12px;color:var(--dsw-alias-label-tertiary)}
+.dshpw-chat-thumb-progress{position:absolute;left:0;bottom:0;height:3px;background:var(--dsw-alias-brand-primary);transition:width .18s ease}
+.dshpw-chat-attachment-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.dshpw-chat-attachment-name{font-size:12px;color:var(--dsw-alias-label-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dshpw-chat-attachment-state{font-size:11px;color:var(--dsw-alias-label-tertiary)}
+.dshpw-chat-attachment.failed .dshpw-chat-attachment-state{color:var(--dsw-alias-state-error-primary,#ef4444)}
+.dshpw-chat-attachment-actions{display:flex;gap:2px;flex-shrink:0}
+.dshpw-chat-attachment-btn{appearance:none;border:0;width:22px;height:22px;border-radius:6px;background:none;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:1;cursor:pointer;transition:background .15s,color .15s}
+.dshpw-chat-attachment-btn:hover{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary)}
+/* 拖拽落区提示 */
+.dshpw-chat-composer.drag-active{outline:2px dashed var(--dsw-alias-brand-primary);outline-offset:-4px}
+.dshpw-chat-attach{appearance:none;border:1px solid var(--dsw-alias-border-l2);width:34px;height:34px;flex-shrink:0;border-radius:50%;display:flex;align-items:center;justify-content:center;background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-secondary);cursor:pointer;transition:transform .2s cubic-bezier(.34,1.56,.64,1),background .15s,color .15s,opacity .15s}
+.dshpw-chat-attach:hover:not(:disabled){transform:scale(1.08);color:var(--dsw-alias-brand-primary);border-color:var(--dsw-alias-brand-primary)}
+.dshpw-chat-attach:active:not(:disabled){transform:scale(.85)}
+.dshpw-chat-attach:disabled{opacity:.35;cursor:not-allowed}
+/* 原生 file input 只作为触发器（无样式、不可聚焦、屏幕阅读器隐藏——由按钮代理） */
+.dshpw-chat-file{position:absolute;width:0;height:0;opacity:0;pointer-events:none}
 /* 圆形纸飞机发送按钮 */
 .dshpw-chat-send{appearance:none;border:0;width:34px;height:34px;flex-shrink:0;border-radius:50%;display:flex;align-items:center;justify-content:center;background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-primary-inverted,#fff);cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.15);transition:transform .2s cubic-bezier(.34,1.56,.64,1),filter .15s,opacity .15s,box-shadow .15s}
 .dshpw-chat-send svg{display:block;transition:transform .2s cubic-bezier(.34,1.56,.64,1)}
@@ -775,7 +1368,7 @@ const CHAT_CSS = `
 @keyframes dshpwTagPop{0%{transform:scale(1)}50%{transform:scale(1.18)}100%{transform:scale(1)}}
 @keyframes dshpwErrIn{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:none}}
 @keyframes dshpwShake{0%,100%{transform:translateX(0)}20%{transform:translateX(-4px)}40%{transform:translateX(4px)}60%{transform:translateX(-3px)}80%{transform:translateX(3px)}}
-@media (prefers-reduced-motion:reduce){.dshpw-chat-fab,.dshpw-chat-panel,.dshpw-chat-backdrop,.dshpw-chat-msg,.dshpw-chat-badge,.dshpw-chat-pending i,.dshpw-chat-send,.dshpw-chat-tagbtn,.dshpw-chat-avatar,.dshpw-chat-close,.dshpw-chat-error{animation:none!important;transition:none!important}}
+@media (prefers-reduced-motion:reduce){.dshpw-chat-fab,.dshpw-chat-panel,.dshpw-chat-backdrop,.dshpw-chat-msg,.dshpw-chat-badge,.dshpw-chat-pending i,.dshpw-chat-send,.dshpw-chat-attach,.dshpw-chat-attachments,.dshpw-chat-thumb-progress,.dshpw-chat-tagbtn,.dshpw-chat-avatar,.dshpw-chat-close,.dshpw-chat-error{animation:none!important;transition:none!important}}
 `;
 
 if (typeof document !== 'undefined') {

@@ -34,10 +34,8 @@ const WORKSPACE = `packages:
 nodeLinker: hoisted
 
 allowBuilds:
-  cpu-features: true
   node-pty: true
   protobufjs: true
-  ssh2: true
 `;
 
 mkdirSync(profileDir, { recursive: true });

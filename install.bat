@@ -111,7 +111,7 @@ if not errorlevel 1 goto dsh_ok
 echo [dsh-passwords] dsh (DeepSeek Harness) not found, installing...
 rem dsh needs native builds; newer npm blocks install scripts, allow them first
 call npm config set allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user
-call npm install -g @deepseek-ai/dsh@0.1.5-rc.2
+call npm install -g @deepseek-ai/dsh@0.1.6-alpha.1
 if errorlevel 1 goto dsh_manual
 where dsh >nul 2>nul
 if errorlevel 1 (
@@ -126,7 +126,7 @@ goto prepare_dest
 
 :dsh_manual
 echo [dsh-passwords] dsh auto-install failed. Run it manually:
-echo [dsh-passwords]   npm install -g @deepseek-ai/dsh@0.1.5-rc.2
+echo [dsh-passwords]   npm install -g @deepseek-ai/dsh@0.1.6-alpha.1
 echo [dsh-passwords] then verify with: DEEPSEEK_API_KEY=sk-your-key dsh web
 echo [dsh-passwords] and run this installer again.
 exit /b 1
@@ -135,9 +135,17 @@ exit /b 1
 rem -- 4. Install directory (DSH_PASSWORDS_DIR overrides the default) --
 set "DEST=%USERPROFILE%\dsh-passwords"
 if defined DSH_PASSWORDS_DIR set "DEST=%DSH_PASSWORDS_DIR%"
+for %%I in ("%DEST%") do set "DEST=%%~fI"
 if exist "%DEST%" (
-  echo [dsh-passwords] Target directory already exists: %DEST%
-  echo [dsh-passwords] To reinstall, delete it first (back up .env and data\ inside).
+  if exist "%DEST%\package.json" (
+    findstr /c:"\"name\": \"dsh-passwords\"" "%DEST%\package.json" >nul 2>nul
+    if not errorlevel 1 (
+      echo [dsh-passwords] Existing dsh-passwords install found; resuming the idempotent installer...
+      set "SCRIPT_DIR=%DEST%\"
+      goto run
+    )
+  )
+  echo [dsh-passwords] Target directory already exists and is not dsh-passwords: %DEST%
   exit /b 1
 )
 

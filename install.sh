@@ -19,14 +19,14 @@ say() { printf "${CYAN}[dsh-passwords]${RESET} %s\n" "$*"; }
 ok()  { printf "${GREEN}[dsh-passwords]${RESET} %s\n" "$*"; }
 err() { printf "${RED}[dsh-passwords]${RESET} %s\n" "$*" >&2; }
 
-# ── 0. 已在 clone 的项目目录里：直接执行安装 ──
-# 从任意 cwd 运行已 clone 的 install.sh 都能定位到自身所在目录。
-# curl | bash 时 BASH_SOURCE 是管道而不是落盘文件，自动走下面的 clone 分支。
+# ── 0. 已 clone 源码定位 ──
+# clone 安装与 curl 安装共用下面的 Node/git/dsh 预检，避免同一入口存在两套行为。
 SCRIPT_SOURCE="${BASH_SOURCE[0]:-$0}"
+SOURCE_DIR=""
 if [ -f "$SCRIPT_SOURCE" ]; then
   SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$SCRIPT_SOURCE")" && pwd)"
   if [ -f "$SCRIPT_DIR/scripts/install.mjs" ]; then
-    exec node "$SCRIPT_DIR/scripts/install.mjs"
+    SOURCE_DIR="$SCRIPT_DIR"
   fi
 fi
 
@@ -105,22 +105,36 @@ else
   say "未找到 dsh（DeepSeek Harness），正在自动安装…"
   # dsh 依赖原生构建，npm 新版会拦截脚本，先放行再装
   npm config set allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user || true
-  npm install -g @deepseek-ai/dsh@0.1.5-rc.2 || {
-    err "dsh 自动安装失败，请手动执行：npm install -g @deepseek-ai/dsh@0.1.5-rc.2"
+  npm install -g @deepseek-ai/dsh@0.1.6-alpha.1 || {
+    err "dsh 自动安装失败，请手动执行：npm install -g @deepseek-ai/dsh@0.1.6-alpha.1"
     err "然后用 DEEPSEEK_API_KEY=sk-你的key dsh web 先跑一次确认能用，再重跑本脚本。"
     exit 1; }
   ok "dsh ✓"
 fi
 
-# ── 4. 安装目录（DSH_PASSWORDS_DIR 可自定义） ──
-if [ "$(id -u)" = "0" ]; then
-  DEST="${DSH_PASSWORDS_DIR:-/opt/dsh-passwords}"
-else
-  DEST="${DSH_PASSWORDS_DIR:-$HOME/dsh-passwords}"
+# ── 4. 首次安装权限与目标目录 ──
+# 非 root 仅能重跑已有 .env 的显式 HTTP/反代部署；首次自动 HTTPS 必须监听 80/443。
+if [ -n "$SOURCE_DIR" ]; then
+  if [ "$(id -u)" != "0" ] && [ ! -f "$SOURCE_DIR/.env" ]; then
+    err "首次安装需要 root 权限（自动 HTTPS 会监听 80/443）；请使用 sudo bash install.sh。"
+    err "非特权部署请先创建 .env，显式关闭自动 HTTPS 并配置高位端口后再重跑。"
+    exit 1
+  fi
+  exec node "$SOURCE_DIR/scripts/install.mjs"
 fi
+
+if [ "$(id -u)" != "0" ]; then
+  err "首次安装需要 root 权限（自动 HTTPS 会监听 80/443）；请使用 curl ... | sudo bash。"
+  err "非特权部署请先 clone 源码，创建 .env，关闭自动 HTTPS 并配置高位端口后再运行安装器。"
+  exit 1
+fi
+DEST="${DSH_PASSWORDS_DIR:-/opt/dsh-passwords}"
 if [ -d "$DEST" ]; then
-  err "目标目录已存在：$DEST"
-  err "重装请先手动删除该目录（注意备份里面的 .env 和 data/）。"
+  if [ -f "$DEST/package.json" ] && grep -q '"name": "dsh-passwords"' "$DEST/package.json"; then
+    say "检测到已有 dsh-passwords 安装，就地执行幂等安装…"
+    exec node "$DEST/scripts/install.mjs"
+  fi
+  err "目标目录已存在且不是 dsh-passwords 安装：$DEST"
   exit 1
 fi
 
@@ -128,9 +142,7 @@ fi
 say "下载项目到 $DEST …"
 git clone --depth 1 https://github.com/slywalker2006/dsh-passwords.git "$DEST" || {
   err "项目下载失败，请检查网络后重跑。"; exit 1; }
-cd "$DEST"
-say "开始安装：装依赖 → 编译 → 生成 SETUP_KEY → 注册插件 → 应用补丁…"
-node scripts/install.mjs
+exec node "$DEST/scripts/install.mjs"
 
 say ""
 ok  "安装完成！"

@@ -23,7 +23,7 @@ function config(dbPath: string, restartService = 'dsh-web'): PlatformConfig {
   return {
     setupKey: 'test-setup-key', dbPath, dbEncKey: '', jwtSecret: 'test-jwt-secret', internalSecret: 'test-internal-secret',
     gateway: { host: '127.0.0.1', port: 9443, upstream: 'http://127.0.0.1:3080', tls: null, redirectPort: null, publicHost: '', domain: 'localhost', autoTls: false, acmeEmail: '', acmeStaging: false },
-    patch: { dshRoot: '', restartService }, webSocket: { sshEndpoints: [] },
+    patch: { dshRoot: '', restartService }, endpointRules: [],
   };
 }
 
@@ -163,8 +163,9 @@ test('update apply maps NOT_READY to an actionable 422 instead of HTTP 409', () 
 
 test('test package flow targets the current package version from a 2.6.4 baseline', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
-  assert.match(pkg.version, /^2\.7\.\d+$/);
-  assert.equal(compareVersions(pkg.version, '2.6.4'), 1);
+  assert.match(pkg.version, /^2\.7\.\d+(?:-[0-9A-Za-z.-]+)?$/);
+  // compareVersions 只接受 X.Y.Z；预发布标记（-pre）不参与数值比较。
+  assert.equal(compareVersions(pkg.version.replace(/-.*$/, ''), '2.6.4'), 1);
 });
 
 test('source archives without .git still use the npm update runtime', () => {

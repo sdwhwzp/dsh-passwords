@@ -12,6 +12,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -21,7 +22,10 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { WebSocketServer, WebSocket: NodeWebSocket } = require('ws') as {
   WebSocketServer: new (options?: { noServer?: boolean }) => any;
-  WebSocket: new (url: string, options?: { headers?: Record<string, string> }) => any;
+  WebSocket: {
+    new (url: string, options?: { headers?: Record<string, string> }): any;
+    OPEN: number;
+  };
 };
 
 import { createGatewayServer } from '../src/gateway.js';
@@ -267,12 +271,72 @@ function startMockUpstream(): Promise<http.Server> {
         res.writeHead(sandboxStatusCode, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ ok: sandboxStatusCode >= 200 && sandboxStatusCode < 300 }));
       } else if (/^\/api\/workspace(?:\.|\/)create(?:[?]|$)/.test(req.url ?? '')) {
-        const workspacePath = workspaceCreateMakesNewWorkspace ? '/workspaces/owned' : '/workspaces/visible';
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ result: { ok: true, value: {
-          workspace: { workspaceId: workspaceCreateMakesNewWorkspace ? 'workspace-owned' : 'workspace-visible', path: workspacePath, title: 'Visible workspace', sessionIds: [] },
-          created: workspaceCreateMakesNewWorkspace,
-        } } }));
+        const chunks: Buffer[] = [];
+        req.on('data', (chunk: Buffer) => chunks.push(chunk));
+        req.on('end', () => {
+          let requestedPath = workspaceCreateMakesNewWorkspace ? '/workspaces/owned' : '/workspaces/visible';
+          try {
+            const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
+            const args = (parsed as { payload?: { args?: { request?: { path?: unknown } } } }).payload?.args?.request;
+            if (typeof args?.path === 'string' && args.path.length > 0) requestedPath = args.path;
+            else if (typeof (parsed as { path?: unknown }).path === 'string') requestedPath = (parsed as { path: string }).path;
+          } catch {
+            // keep default mock path
+          }
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ result: { ok: true, value: {
+            workspace: { workspaceId: `ws-${requestedPath.replace(/[^A-Za-z0-9]+/g, '-')}`, path: requestedPath, title: 'Mock workspace', sessionIds: [] },
+            created: workspaceCreateMakesNewWorkspace,
+          } } }));
+        });
+      } else if (/^\/api\/(?:directoryPicker(?:\.|\/)createDirectory|host(?:\.|\/)createDirectory)(?:[?]|$)/.test(req.url ?? '')) {
+        const chunks: Buffer[] = [];
+        req.on('data', (chunk: Buffer) => chunks.push(chunk));
+        req.on('end', () => {
+          let parent = '';
+          let name = 'child';
+          try {
+            const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
+            const args = (parsed as { payload?: { args?: { path?: unknown; name?: unknown } } }).payload?.args;
+            if (typeof args?.path === 'string') parent = args.path;
+            else if (typeof (parsed as { path?: unknown }).path === 'string') parent = (parsed as { path: string }).path;
+            if (typeof args?.name === 'string') name = args.name;
+            else if (typeof (parsed as { name?: unknown }).name === 'string') name = (parsed as { name: string }).name;
+          } catch {
+            // fall through with defaults
+          }
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ result: { ok: true, value: `${parent.replace(/\/+$/, '')}/${name}` } }));
+        });
+      } else if (/^\/api\/(?:directoryPicker(?:\.|\/)list|host(?:\.|\/)listDirectory)(?:[?]|$)/.test(req.url ?? '')) {
+        const chunks: Buffer[] = [];
+        req.on('data', (chunk: Buffer) => chunks.push(chunk));
+        req.on('end', () => {
+          let requested = '/root';
+          try {
+            const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
+            const args = (parsed as { payload?: { args?: { path?: unknown } } }).payload?.args;
+            if (typeof args?.path === 'string' && args.path.length > 0) requested = args.path;
+          } catch {
+            // default home listing
+          }
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ result: { ok: true, value: {
+            path: requested,
+            home: '/root',
+            crumbs: [
+              { name: '/', path: '/', hidden: false },
+              { name: 'root', path: '/root', hidden: false },
+            ],
+            entries: [
+              { name: '33', path: '/root/33', hidden: false },
+              { name: 'other-user', path: '/root/other-user', hidden: false },
+              { name: 'visible', path: '/workspaces/visible', hidden: false },
+              { name: 'other', path: '/workspaces/other', hidden: false },
+            ],
+            truncated: false,
+          } } }));
+        });
       } else if ((req.url ?? '').startsWith('/api/dsh-passwords/internal/assignable-resources')) {
         res.writeHead(assignableResourcesUnavailable ? 503 : 200, { 'content-type': 'application/json' });
         res.end(assignableResourcesUnavailable ? JSON.stringify({ ok: false }) : JSON.stringify({ ok: true, ...assignableResources }));
@@ -343,6 +407,18 @@ function startMockUpstream(): Promise<http.Server> {
           }
           res.writeHead(200, { 'content-type': 'application/json' });
           res.end(JSON.stringify({ result: { ok: true, value: { accepted: true } } }));
+        });
+      } else if ((req.url ?? '').startsWith('/api/ssh-http/inspect')) {
+        const chunks: Buffer[] = [];
+        req.on('data', (chunk: Buffer) => chunks.push(chunk));
+        req.on('end', () => {
+          try {
+            lastScopedRequestBody = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
+          } catch {
+            lastScopedRequestBody = null;
+          }
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, reached: true }));
         });
       } else if ((req.url ?? '').startsWith('/api/dsh-ssh/hosts')) {
         const chunks: Buffer[] = [];
@@ -561,9 +637,20 @@ before(async () => {
     jwtSecret: 'test-secret',
     internalSecret: 'test-internal',
     patch: { dshRoot: '', restartService: '' },
-    webSocket: {
-      sshEndpoints: ['/api/dsh-ssh/terminal', '/plugins/ssh-b/terminal', '/plugins/ssh-wild/*'],
-    },
+    // 端点登记表：无前缀 = HTTP 与 WS 两条通道都放行；`ws:` / `http:` 前缀限定
+    // 只在该通道生效；`owner:` 前缀 = 仅主用户（优先于 ssh）。代码不含插件路径。
+    endpointRules: [
+      '/api/dsh-ssh/terminal',
+      '/plugins/ssh-b/terminal',
+      '/plugins/ssh-wild/*',
+      '/api/ssh-http/inspect',
+      'ws:/api/ssh-ws-only/terminal',
+      'http:/api/ssh-http-only/inspect',
+      // 同一路径同时以两种能力登记：用于验证 owner: 优先于 ssh（两条通道一致）
+      '/api/ssh-owner-only/hosts',
+      'owner:/api/ssh-owner-only/hosts',
+    ],
+    pluginCompat: false,
   };
 
   auth = new AuthService(config, db);
@@ -809,9 +896,10 @@ test('Issue #25：alpha.3 Remote workspace 基线可解析 workspaceId 创建会
           payload: { args: { request: { path: '/workspaces/owned' } } },
         }),
       );
-      assert.equal(newWorkspace.status, 200, newWorkspace.body);
-      assert.equal(db.listUserWorkspacePaths(subUser.id).includes('/workspaces/owned'), true);
-      assert.equal(db.getPermissions(subUser.id)?.allowed_folders.includes('/workspaces/owned'), true);
+      // D1 收紧：预存在且未分配给该子用户的目录不得登记为工作区。
+      assert.equal(newWorkspace.status, 403, newWorkspace.body);
+      assert.equal(db.listUserWorkspacePaths(subUser.id).includes('/workspaces/owned'), false);
+      assert.equal(db.getPermissions(subUser.id)?.allowed_folders.includes('/workspaces/owned'), false);
     } finally {
       workspaceCreateMakesNewWorkspace = false;
     }
@@ -846,6 +934,265 @@ test('Issue #25：alpha.3 Remote workspace 基线可解析 workspaceId 创建会
   } finally {
     cookie = originalCookie;
     connection.client.close();
+  }
+});
+
+test('D1 工作流：刚创建目录可登记、精确分配可登记、预存在未分配拒绝、登记后立即可建会话', async () => {
+  const subUser = db.createUser('d1-workflow-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: true,
+    allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [],
+  });
+  db.markSessionGrantsSeeded(subUser.id);
+  const subCookie = `dsh_gateway_token=${jwt.sign({ sub: String(subUser.id), username: subUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' })}`;
+  const originalCookie = cookie;
+  cookie = subCookie;
+  const json = { 'content-type': 'application/json' };
+  const workspaceCreateBody = (path: string, rpcId: string) => JSON.stringify({
+    type: 'client-request', rpcId, method: 'workspace/create',
+    payload: { args: { request: { path } } },
+  });
+  try {
+    // 1) 预存在且未分配（即使上游回 created:true）→ 403，且不写任何授权。
+    workspaceCreateMakesNewWorkspace = true;
+    let response = await gatewayReq('POST', '/api/workspace/create', json, workspaceCreateBody('/workspaces/preexisting', 'd1-preexisting'));
+    assert.equal(response.status, 403, response.body);
+    assert.equal(db.listUserWorkspacePaths(subUser.id).includes('/workspaces/preexisting'), false);
+    assert.equal(db.getPermissions(subUser.id)?.allowed_folders.includes('/workspaces/preexisting'), false);
+
+    // 2) 主用户显式分配的精确目录 → 200（created:false 解析既有工作区，不登记所有权）。
+    workspaceCreateMakesNewWorkspace = false;
+    response = await gatewayReq('POST', '/api/workspace/create', json, workspaceCreateBody('/workspaces/visible', 'd1-exact'));
+    assert.equal(response.status, 200, response.body);
+    assert.equal(db.listUserWorkspacePaths(subUser.id).includes('/workspaces/visible'), false);
+
+    // 3) 刚通过目录选择器创建的目录 → 登记成功，原子写入所有权与白名单。
+    const mkdir = await gatewayReq('POST', '/api/directoryPicker/createDirectory', json, JSON.stringify({
+      type: 'client-request', rpcId: 'd1-mkdir', method: 'directoryPicker/createDirectory',
+      payload: { args: { path: '/workspaces/visible', name: 'fresh-dir' } },
+    }));
+    assert.equal(mkdir.status, 200, mkdir.body);
+    workspaceCreateMakesNewWorkspace = true;
+    const register = await gatewayReq('POST', '/api/workspace/create', json, workspaceCreateBody('/workspaces/visible/fresh-dir', 'd1-register'));
+    assert.equal(register.status, 200, register.body);
+    const registerValue = (JSON.parse(register.body) as { result?: { value?: { workspace?: { workspaceId?: unknown } } } }).result?.value;
+    const workspaceId = registerValue?.workspace?.workspaceId;
+    assert.equal(typeof workspaceId, 'string', '登记响应必须带 workspaceId 供后续 session.create 解析');
+    assert.equal(db.listUserWorkspacePaths(subUser.id).includes('/workspaces/visible/fresh-dir'), true);
+    assert.equal(db.getPermissions(subUser.id)?.allowed_folders.includes('/workspaces/visible/fresh-dir'), true);
+
+    // 4) 登记后立即用 workspaceId 新建会话 → 200（映射已同步，不再被 403）。
+    const sessionCreate = await gatewayReq('POST', '/api/session.create', json, JSON.stringify({
+      type: 'client-request', rpcId: 'd1-session', method: 'session/create',
+      payload: { args: { request: { workspaceId } } },
+    }));
+    assert.equal(sessionCreate.status, 200, sessionCreate.body);
+    const createdSessionId = (JSON.parse(sessionCreate.body) as { result?: { value?: { sessionId?: unknown } } }).result?.value?.sessionId;
+    assert.equal(typeof createdSessionId, 'string');
+    assert.equal(db.listUserSessionGrants(subUser.id).includes(createdSessionId as string), true, '新会话必须进入该子用户的显式授权');
+
+    // 5) 另一子用户不能用别人的 pending 目录登记，也不得伸进他人子树。
+    const other = db.createUser('d1-other-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+    db.setPermissions(other.id, {
+      allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+      allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: true,
+      allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [],
+    });
+    cookie = `dsh_gateway_token=${jwt.sign({ sub: String(other.id), username: other.username, cv: 0 }, 'test-secret', { expiresIn: '12h' })}`;
+    const otherRegister = await gatewayReq('POST', '/api/workspace/create', json, workspaceCreateBody('/workspaces/visible/fresh-dir', 'd1-other-register'));
+    assert.equal(otherRegister.status, 403, 'pending 目录与所有权子树均按用户隔离');
+    const otherMkdirInside = await gatewayReq('POST', '/api/directoryPicker/createDirectory', json, JSON.stringify({
+      type: 'client-request', rpcId: 'd1-other-mkdir', method: 'directoryPicker/createDirectory',
+      payload: { args: { path: '/workspaces/visible/fresh-dir', name: 'nested' } },
+    }));
+    assert.equal(otherMkdirInside.status, 403, '不得在另一子用户创建的工作区子树内建目录');
+    const otherMkdirSibling = await gatewayReq('POST', '/api/directoryPicker/createDirectory', json, JSON.stringify({
+      type: 'client-request', rpcId: 'd1-other-sibling', method: 'directoryPicker/createDirectory',
+      payload: { args: { path: '/workspaces/visible', name: 'sibling-dir' } },
+    }));
+    assert.equal(otherMkdirSibling.status, 200, '共享分配根下建兄弟目录不受他人子树影响');
+  } finally {
+    workspaceCreateMakesNewWorkspace = false;
+    cookie = originalCookie;
+  }
+});
+
+test('D1 工作流：孤儿所有权行（已删除用户残留）不阻断分配目录的可见性与登记', async () => {
+  const subUser = db.createUser('d1-orphan-owner-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: true,
+    allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [],
+  });
+  db.markSessionGrantsSeeded(subUser.id);
+  // 模拟 112233 事故：已删除用户的残留所有权行指向同一目录。
+  (db as unknown as { db: import('node:sqlite').DatabaseSync }).db.exec(
+    "INSERT INTO user_workspaces (user_id, path) VALUES (424242, '/workspaces/visible')",
+  );
+  const subCookie = `dsh_gateway_token=${jwt.sign({ sub: String(subUser.id), username: subUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' })}`;
+  const originalCookie = cookie;
+  cookie = subCookie;
+  const json = { 'content-type': 'application/json' };
+  try {
+    // 1) Remote baseline：孤儿行不得把已分配工作区过滤掉（事故症状：侧边栏“暂无会话”）。
+    const connection = await openRemoteMux({ cookie: subCookie, origin: 'http://127.0.0.1', host: '127.0.0.1' });
+    try {
+      connection.client.send(JSON.stringify({
+        type: 'open', streamId: 'orphan-baseline', endpoint: 'workspace/follow', payload: { args: {} },
+      }));
+      const frame = await connection.nextFrame();
+      const baseline = (frame as { value?: { value?: { items?: Array<{ path?: string }> } } }).value?.value;
+      const paths = (baseline?.items ?? []).map((item) => item.path);
+      assert.ok(paths.includes('/workspaces/visible'), '孤儿所有权行不得隐藏已分配工作区');
+    } finally {
+      connection.client.close();
+    }
+
+    // 2) workspace/create：孤儿行不得阻断对已分配目录的登记（事故症状：HTTP 403）。
+    workspaceCreateMakesNewWorkspace = false;
+    const register = await gatewayReq('POST', '/api/workspace/create', json, JSON.stringify({
+      type: 'client-request', rpcId: 'orphan-register', method: 'workspace/create',
+      payload: { args: { request: { path: '/workspaces/visible' } } },
+    }));
+    assert.equal(register.status, 200, register.body);
+
+    // 3) directoryPicker/createDirectory：孤儿行不得阻断在已分配根下建目录。
+    const mkdir = await gatewayReq('POST', '/api/directoryPicker/createDirectory', json, JSON.stringify({
+      type: 'client-request', rpcId: 'orphan-mkdir', method: 'directoryPicker/createDirectory',
+      payload: { args: { path: '/workspaces/visible', name: 'orphan-sibling' } },
+    }));
+    assert.equal(mkdir.status, 200, mkdir.body);
+  } finally {
+    workspaceCreateMakesNewWorkspace = false;
+    cookie = originalCookie;
+    (db as unknown as { db: import('node:sqlite').DatabaseSync }).db.exec(
+      "DELETE FROM user_workspaces WHERE user_id = 424242",
+    );
+  }
+});
+
+test('D1 工作流：directoryPicker/list 目录浏览按授权根过滤与拦截', async () => {
+  const subUser = db.createUser('d1-list-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
+    allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [],
+  });
+  const originalCookie = cookie;
+  cookie = `dsh_gateway_token=${jwt.sign({ sub: String(subUser.id), username: subUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' })}`;
+  const json = { 'content-type': 'application/json' };
+  const listBody = (requestPath: string | null, rpcId: string) => JSON.stringify({
+    type: 'client-request', rpcId, method: 'directoryPicker/list',
+    payload: { args: requestPath === null ? {} : { path: requestPath } },
+  });
+  const entryPaths = (body: string): string[] => {
+    const value = (JSON.parse(body) as { result?: { value?: { entries?: Array<{ path?: unknown }> } } }).result?.value;
+    return (value?.entries ?? []).map((entry) => String(entry.path));
+  };
+  try {
+    // 1) 授权子树内 → 完整列表（不过滤）。
+    const inside = await gatewayReq('POST', '/api/directoryPicker/list', json, listBody('/workspaces/visible', 'd1-list-inside'));
+    assert.equal(inside.status, 200, inside.body);
+    assert.equal(entryPaths(inside.body).length, 4, '授权子树内的列表保持原样');
+
+    // 2) 祖先导航 → 只保留通往授权根的条目，其余目录名隐藏。
+    const ancestor = await gatewayReq('POST', '/api/directoryPicker/list', json, listBody('/workspaces', 'd1-list-ancestor'));
+    assert.equal(ancestor.status, 200, ancestor.body);
+    assert.deepEqual(entryPaths(ancestor.body).sort(), ['/workspaces/visible'], '祖先层只保留通往授权根的路径');
+
+    // 3) 白名单外且非祖先 → 403。
+    const outside = await gatewayReq('POST', '/api/directoryPicker/list', json, listBody('/etc', 'd1-list-outside'));
+    assert.equal(outside.status, 403, outside.body);
+
+    // 4) 无 path（默认 home）且 home 不通往任何授权根 → 403（fail-closed）。
+    const home = await gatewayReq('POST', '/api/directoryPicker/list', json, listBody(null, 'd1-list-home'));
+    assert.equal(home.status, 403, '默认 home 不通往任何授权根时拒绝浏览');
+  } finally {
+    cookie = originalCookie;
+  }
+});
+
+test('D1 工作流：主目录可直接新建文件夹并登记；__deny__ 不开放任何创建通道', async () => {
+  const home = os.homedir().replace(/\\/g, '/').replace(/\/+$/, '');
+  const newDir = `${home}/d1-home-e2e-dir`;
+  // 与网关 normalizePath 同口径（盘符小写）比较 DB 内的路径。
+  const norm = (p: string) => p.replace(/^([A-Za-z]):/, (m) => m.toLowerCase());
+  const subUser = db.createUser('d1-home-flow-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: true,
+    allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [],
+  });
+  const subCookie = `dsh_gateway_token=${jwt.sign({ sub: String(subUser.id), username: subUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' })}`;
+  const originalCookie = cookie;
+  cookie = subCookie;
+  const json = { 'content-type': 'application/json' };
+  try {
+    // 1) 主目录新建文件夹（picker 落点，D1 工作流第一步）。
+    const mkdir = await gatewayReq('POST', '/api/directoryPicker/createDirectory', json, JSON.stringify({
+      type: 'client-request', rpcId: 'd1h-mkdir', method: 'directoryPicker/createDirectory',
+      payload: { args: { path: home, name: 'd1-home-e2e-dir' } },
+    }));
+    assert.equal(mkdir.status, 200, mkdir.body);
+
+    // 2) 刚创建的目录可列出（选择新文件夹必需）且可登记为工作区。
+    const listNew = await gatewayReq('POST', '/api/directoryPicker/list', json, JSON.stringify({
+      type: 'client-request', rpcId: 'd1h-list-new', method: 'directoryPicker/list',
+      payload: { args: { path: newDir } },
+    }));
+    assert.equal(listNew.status, 200, '刚创建的目录必须立即可进入');
+    workspaceCreateMakesNewWorkspace = true;
+    const register = await gatewayReq('POST', '/api/workspace/create', json, JSON.stringify({
+      type: 'client-request', rpcId: 'd1h-register', method: 'workspace/create',
+      payload: { args: { request: { path: newDir } } },
+    }));
+    assert.equal(register.status, 200, register.body);
+    assert.equal(
+      db.listUserWorkspacePaths(subUser.id).some((entry) => norm(entry) === norm(newDir)),
+      true,
+    );
+    assert.equal(
+      (db.getPermissions(subUser.id)?.allowed_folders ?? []).some((entry) => norm(entry) === norm(newDir)),
+      true,
+    );
+
+    // 3) 根目录（'/'）不是主目录，仍拒绝创建。
+    const mkdirRoot = await gatewayReq('POST', '/api/directoryPicker/createDirectory', json, JSON.stringify({
+      type: 'client-request', rpcId: 'd1h-mkdir-root', method: 'directoryPicker/createDirectory',
+      payload: { args: { path: '/', name: 'should-deny' } },
+    }));
+    assert.equal(mkdirRoot.status, 403, '文件系统根不是创建父目录');
+  } finally {
+    workspaceCreateMakesNewWorkspace = false;
+    cookie = originalCookie;
+  }
+});
+
+test('D1 工作流：__deny__ 子用户不开放主目录创建与登记', async () => {
+  const home = os.homedir().replace(/\\/g, '/').replace(/\/+$/, '');
+  const denyUser = db.createUser('d1-deny-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(denyUser.id, {
+    allowedFolders: ['__deny__'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: true,
+    allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [],
+  });
+  const originalCookie = cookie;
+  cookie = `dsh_gateway_token=${jwt.sign({ sub: String(denyUser.id), username: denyUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' })}`;
+  const json = { 'content-type': 'application/json' };
+  try {
+    const mkdir = await gatewayReq('POST', '/api/directoryPicker/createDirectory', json, JSON.stringify({
+      type: 'client-request', rpcId: 'd1d-mkdir', method: 'directoryPicker/createDirectory',
+      payload: { args: { path: home, name: 'deny-dir' } },
+    }));
+    assert.equal(mkdir.status, 403, '禁止所有工作区的子用户不得在主目录创建');
+    const register = await gatewayReq('POST', '/api/workspace/create', json, JSON.stringify({
+      type: 'client-request', rpcId: 'd1d-register', method: 'workspace/create',
+      payload: { args: { request: { path: `${home}/deny-dir` } } },
+    }));
+    assert.equal(register.status, 403, '禁止所有工作区的子用户不得登记任何工作区');
+  } finally {
+    cookie = originalCookie;
   }
 });
 
@@ -1130,11 +1477,11 @@ test('rc.1 session.search 成功响应结构异常时 fail-closed，不透传原
   }
 });
 
-test('SSH 插件 HTTP 运维端点对子用户在到达上游前拒绝', async () => {
-  const subUser = db.createUser('ssh-denied-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+test('未登记的第三方 HTTP 路径对子用户默认拒绝（即使已开启 SSH 开关）', async () => {
+  const subUser = db.createUser('third-party-denied-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
     allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
-    allowUpload: true, allowGitDownload: true, allowWorkspaceCreate: false, allowSsh: false,
+    allowUpload: true, allowGitDownload: true, allowWorkspaceCreate: false, allowSsh: true,
     allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: [],
   });
   const subCookie = `dsh_gateway_token=${jwt.sign({ sub: String(subUser.id), username: subUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' })}`;
@@ -1142,6 +1489,7 @@ test('SSH 插件 HTTP 运维端点对子用户在到达上游前拒绝', async (
   const originalCookie = cookie;
   cookie = subCookie;
   try {
+    // 允许开关只对“已登记”端点生效；未登记的第三方路径一律拒绝（配置是另一把钥匙）
     const response = await gatewayReq(
       'POST',
       '/api/dsh-ssh/hosts',
@@ -1149,46 +1497,147 @@ test('SSH 插件 HTTP 运维端点对子用户在到达上游前拒绝', async (
       JSON.stringify({ alias: 'must-not-reach-upstream', host: '203.0.113.10' }),
     );
     assert.equal(response.status, 403, response.body);
-    assert.equal(lastUpstreamUrl, upstreamUrlBefore, '子用户 SSH 运维请求不得到达 dsh');
+    assert.equal(lastUpstreamUrl, upstreamUrlBefore, '未登记第三方请求不得到达 dsh');
   } finally {
     cookie = originalCookie;
   }
 });
 
-test('SSH 插件：主用户配置的主机可供开启 SSH 的子用户读取，子用户不能改主机配置', async () => {
-  const subUser = db.createUser('ssh-shared-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
-  const otherUser = db.createUser('ssh-shared-other-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
-  for (const user of [subUser, otherUser]) {
-    db.setPermissions(user.id, {
-      allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
-      allowUpload: true, allowGitDownload: true, allowWorkspaceCreate: false, allowSsh: true,
-      allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: [],
-    });
-  }
-  const subCookie = `dsh_gateway_token=${jwt.sign({ sub: String(subUser.id), username: subUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' })}`;
-  const otherCookie = `dsh_gateway_token=${jwt.sign({ sub: String(otherUser.id), username: otherUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' })}`;
+test('SSH HTTP 端点：主用户登记 + 子用户勾选，缺一不可', async () => {
+  const offUser = db.createUser('ssh-two-key-off', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  const onUser = db.createUser('ssh-two-key-on', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(offUser.id, {
+    allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: true, allowGitDownload: true, allowWorkspaceCreate: false, allowSsh: false,
+    allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: [],
+  });
+  db.setPermissions(onUser.id, {
+    allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: true, allowGitDownload: true, allowWorkspaceCreate: false, allowSsh: true,
+    allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: [],
+  });
+  const offCookie = `dsh_gateway_token=${jwt.sign({ sub: String(offUser.id), username: offUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' })}`;
+  const onCookie = `dsh_gateway_token=${jwt.sign({ sub: String(onUser.id), username: onUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' })}`;
   const originalCookie = cookie;
-  const originalHosts = mockSshHosts;
-  mockSshHosts = [{ alias: 'admin-host', host: '198.51.100.10' }];
   try {
-    cookie = subCookie;
-    const beforeCreate = await gatewayReq('GET', '/api/dsh-ssh/hosts');
-    assert.equal(beforeCreate.status, 200, beforeCreate.body);
-    assert.deepEqual(JSON.parse(beforeCreate.body).hosts, [{ alias: 'admin-host', host: '198.51.100.10' }]);
+    // 钥匙一已具备（端点已在 MCP_GATEWAY_SSH_ENDPOINTS 登记），
+    // 缺钥匙二（未勾选 SSH）→ 拒绝
+    cookie = offCookie;
+    const offUpstreamBefore = lastUpstreamUrl;
+    const off = await gatewayReq('POST', '/api/ssh-http/inspect', { 'content-type': 'application/json' }, '{}');
+    assert.equal(off.status, 403, off.body);
+    assert.equal(lastUpstreamUrl, offUpstreamBefore, '开关未勾选时不得到达上游');
 
-    const create = await gatewayReq(
-      'POST', '/api/dsh-ssh/hosts', { 'content-type': 'application/json' },
-      JSON.stringify({ alias: 'child-host', host: '203.0.113.10' }),
-    );
-    assert.equal(create.status, 403, '子用户不能改变主用户维护的 SSH 主机配置');
-    assert.equal(db.getSshHostOwner('child-host'), null, '共享模型不创建子用户 host claim');
+    // 两把钥匙齐备 → 放行到上游
+    cookie = onCookie;
+    const on = await gatewayReq('POST', '/api/ssh-http/inspect', { 'content-type': 'application/json' }, '{}');
+    assert.equal(on.status, 200, on.body);
 
-    cookie = otherCookie;
-    const otherList = await gatewayReq('GET', '/api/dsh-ssh/hosts');
-    assert.equal(otherList.status, 200, otherList.body);
-    assert.deepEqual(JSON.parse(otherList.body).hosts, [{ alias: 'admin-host', host: '198.51.100.10' }]);
+    // 主用户不受两把钥匙限制，也不需要登记（originalCookie 即管理员会话）
+    cookie = originalCookie;
+    const adminResponse = await gatewayReq('POST', '/api/ssh-http/inspect', { 'content-type': 'application/json' }, '{}');
+    assert.equal(adminResponse.status, 200, adminResponse.body);
   } finally {
-    mockSshHosts = originalHosts;
+    cookie = originalCookie;
+  }
+});
+
+test('传输前缀：ws: 规则只在 WebSocket 通道生效，http: 规则只在 HTTP 通道生效', async () => {
+  const subUser = db.createUser('ssh-transport-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: true, allowGitDownload: true, allowWorkspaceCreate: false, allowSsh: true,
+    allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: [],
+  });
+  const subCookie = `dsh_gateway_token=${jwt.sign({ sub: String(subUser.id), username: subUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' })}`;
+  const originalCookie = cookie;
+  cookie = subCookie;
+  try {
+    // ws: 规则 → WebSocket 通道放行
+    const wsAllowed = await websocketHandshake('/api/ssh-ws-only/terminal', {
+      cookie: subCookie, origin: 'http://127.0.0.1', host: '127.0.0.1',
+    });
+    assert.match(wsAllowed.statusLine, /101/, 'ws: 规则应在 WebSocket 通道放行');
+
+    // ws: 规则 → HTTP 通道不放行（不命中 SSH 分类 → 未登记第三方 → 默认拒绝）
+    const wsRuleOverHttp = await gatewayReq(
+      'POST', '/api/ssh-ws-only/terminal', { 'content-type': 'application/json' }, '{}',
+    );
+    assert.equal(wsRuleOverHttp.status, 403, 'ws: 规则不应在 HTTP 通道放行');
+
+    // http: 规则 → HTTP 通道放行
+    const httpAllowed = await gatewayReq(
+      'POST', '/api/ssh-http-only/inspect', { 'content-type': 'application/json' }, '{}',
+    );
+    assert.equal(httpAllowed.status, 200, `http: 规则应在 HTTP 通道放行: ${httpAllowed.body}`);
+
+    // http: 规则 → WebSocket 通道不放行（落到默认 fail-closed）
+    const httpRuleOverWs = await websocketHandshake('/api/ssh-http-only/inspect', {
+      cookie: subCookie, origin: 'http://127.0.0.1', host: '127.0.0.1',
+    });
+    assert.match(httpRuleOverWs.statusLine, /404/, 'http: 规则不应在 WebSocket 通道放行');
+  } finally {
+    cookie = originalCookie;
+  }
+});
+
+test('owner-only 表在两条通道都生效（WebSocket 侧不被 SSH 登记绕过）', async () => {
+  const subUser = db.createUser('ssh-owner-only-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: true, allowGitDownload: true, allowWorkspaceCreate: false,
+    // 已勾选 SSH：该路径同时在 SSH 表里，owner-only 必须仍然优先
+    allowSsh: true,
+    allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: [],
+  });
+  const subCookie = `dsh_gateway_token=${jwt.sign({ sub: String(subUser.id), username: subUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' })}`;
+  const originalCookie = cookie;
+  cookie = subCookie;
+  try {
+    const overHttp = await gatewayReq(
+      'POST', '/api/ssh-owner-only/hosts', { 'content-type': 'application/json' }, '{}',
+    );
+    assert.equal(overHttp.status, 403, 'owner-only 应优先于 SSH 登记（HTTP）');
+
+    const overWs = await websocketHandshake('/api/ssh-owner-only/hosts', {
+      cookie: subCookie, origin: 'http://127.0.0.1', host: '127.0.0.1',
+    });
+    assert.match(overWs.statusLine, /403/, 'owner-only 应优先于 SSH 登记（WS，修复前这里会被放过）');
+  } finally {
+    cookie = originalCookie;
+  }
+});
+
+test('已登记 SSH 端点：body.host 为私网被 SSRF 拦截，公网放行且钉死 DNS', async () => {
+  const subUser = db.createUser('ssh-ssrf-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: true, allowGitDownload: true, allowWorkspaceCreate: false, allowSsh: true,
+    allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: [],
+  });
+  const subCookie = `dsh_gateway_token=${jwt.sign({ sub: String(subUser.id), username: subUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' })}`;
+  const originalCookie = cookie;
+  cookie = subCookie;
+  try {
+    for (const host of ['127.0.0.1', '0177.0.0.1', '169.254.169.254', '::ffff:127.0.0.1']) {
+      const blocked = await gatewayReq(
+        'POST', '/api/ssh-http/inspect', { 'content-type': 'application/json' },
+        JSON.stringify({ host }),
+      );
+      assert.equal(blocked.status, 403, `${host} 应被拦截: ${blocked.body}`);
+    }
+    // 公网 IP 字面量：通过校验，并改写为已验证地址（DNS 钉死）
+    const allowed = await gatewayReq(
+      'POST', '/api/ssh-http/inspect', { 'content-type': 'application/json' },
+      JSON.stringify({ host: '8.8.8.8' }),
+    );
+    assert.equal(allowed.status, 200, allowed.body);
+    assert.equal(
+      (lastScopedRequestBody as { host?: unknown } | null)?.host,
+      '8.8.8.8',
+      '校验通过后 host 应被改写为已验证的 IP 字面量',
+    );
+  } finally {
     cookie = originalCookie;
   }
 });
@@ -1209,7 +1658,7 @@ test('SSH 终端 WebSocket 升级对子用户拒绝', async () => {
   assert.match(handshake.statusLine, /403/);
 });
 
-test('SSH 终端：开启 SSH 的子用户可连接主用户配置的 alias', async () => {
+test('SSH 终端：开启 SSH 的子用户可连接已登记的终端端点', async () => {
   const subUser = db.createUser('ssh-terminal-shared-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
     allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
@@ -1220,7 +1669,7 @@ test('SSH 终端：开启 SSH 的子用户可连接主用户配置的 alias', as
   const allowed = await websocketHandshake('/api/dsh-ssh/terminal?alias=admin-host', {
     cookie: `dsh_gateway_token=${subToken}`, origin: 'http://127.0.0.1', host: '127.0.0.1',
   });
-  assert.match(allowed.statusLine, /101/, '拥有 SSH 权限的子用户应可连接主用户配置的 alias');
+  assert.match(allowed.statusLine, /101/, '拥有 SSH 权限的子用户应可连接已登记的终端端点');
 });
 
 test('多 SSH WebSocket 端点：子用户只需勾选 SSH 总开关即可使用全部已登记端点', async () => {
@@ -1536,16 +1985,44 @@ test('Issue #25：alpha.3 只允许子用户订阅被明确授予的 session/fol
   } finally {
     connection.client.close();
   }
-  const forbidden = await new Promise<{ code: number; reason: string }>((resolve, reject) => {
-    const client = new NodeWebSocket(`ws://127.0.0.1:${String(gatewayPort)}/api/remote.mux`, { headers });
-    client.once('error', reject);
-    client.once('open', () => client.send(JSON.stringify({
-      type: 'open', streamId: 'follow-hidden', endpoint: 'session/follow',
-      payload: { args: { request: { address: { kind: 'session', sessionId: 'session-hidden' } } } },
-    })));
-    client.once('close', (code: number, reason: Buffer) => resolve({ code, reason: reason.toString() }));
-  });
-  assert.deepEqual(forbidden, { code: 1008, reason: 'Remote session not available for this user' });
+  const client = new NodeWebSocket(`ws://127.0.0.1:${String(gatewayPort)}/api/remote.mux`, { headers });
+  try {
+    const forbidden = await new Promise<Record<string, unknown>>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        client.terminate();
+        reject(new Error('Remote mux logical error timeout'));
+      }, 3000);
+      client.once('error', (error: Error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+      client.once('open', () => client.send(JSON.stringify({
+        type: 'open', streamId: 'follow-hidden', endpoint: 'session/follow',
+        payload: { args: { request: { address: { kind: 'session', sessionId: 'session-hidden' } } } },
+      })));
+      client.once('message', (data: Buffer) => {
+        clearTimeout(timer);
+        try {
+          resolve(JSON.parse(data.toString()) as Record<string, unknown>);
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+    assert.deepEqual(forbidden, {
+      type: 'error',
+      streamId: 'follow-hidden',
+      error: {
+        code: 'gateway/forbidden',
+        message: 'Remote session not available for this user',
+        details: {},
+      },
+    });
+    assert.equal(client.readyState, NodeWebSocket.OPEN, '逻辑流拒绝不得关闭物理 mux');
+    assert.deepEqual(remoteMuxOpenEndpoints, ['workspace/follow', 'session/follow'], '被拒绝的 session/follow 不得转发到 DSH');
+  } finally {
+    client.terminate();
+  }
 });
 
 test('RC.1 子代理 session/follow 沿用 parent 授权并原样保留地址与连续字段', async () => {
@@ -1707,7 +2184,7 @@ test('RC.1 未授权 parent 的子代理地址在到达 DSH 前被拒绝', async
   }
 });
 
-test('Issue #25：Remote session/follow 不能只凭数据库 grant 绕过当前工作区基线', async () => {
+test('Issue #25：Remote session/follow 拒绝只结束逻辑流，不摧毁同一 mux', async () => {
   const subUser = db.createUser('issue-25-follow-folder-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
     allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
@@ -1729,18 +2206,97 @@ test('Issue #25：Remote session/follow 不能只凭数据库 grant 绕过当前
     const baseline = await connection.nextFrame();
     assert.equal(baseline.streamId, 'follow-folder-baseline');
 
-    const closed = new Promise<{ code: number; reason: string }>((resolve) => {
-      connection.client.once('close', (code: number, reason: Buffer) => resolve({ code, reason: reason.toString() }));
-    });
     connection.client.send(JSON.stringify({
       type: 'open', streamId: 'follow-hidden-folder', endpoint: 'session/follow',
       payload: { args: { request: { address: { kind: 'session', sessionId: 'session-hidden' } } } },
     }));
-    assert.deepEqual(await closed, { code: 1008, reason: 'Remote session not available for this user' });
+    assert.deepEqual(await connection.nextFrame(), {
+      type: 'error',
+      streamId: 'follow-hidden-folder',
+      error: {
+        code: 'gateway/forbidden',
+        message: 'Remote session not available for this user',
+        details: {},
+      },
+    });
+    assert.equal(connection.client.readyState, NodeWebSocket.OPEN, '逻辑流拒绝不得关闭物理 mux');
     assert.deepEqual(remoteMuxOpenEndpoints, ['workspace/follow'], '不可见工作区的 session/follow 不得到达 DSH');
+
+    // The same carrier must still be able to open another official stream.
+    connection.client.send(JSON.stringify({
+      type: 'open', streamId: 'control-after-denial', endpoint: 'session/control', payload: { args: {} },
+    }));
+    const control = await connection.nextFrame();
+    assert.equal(control.streamId, 'control-after-denial');
+    assert.equal(control.type, 'item');
+    assert.deepEqual((control.value as { value?: { queues?: Record<string, unknown> } }).value?.queues, {});
+    assert.deepEqual(remoteMuxOpenEndpoints, ['workspace/follow', 'session/control']);
   } finally {
     connection.client.close();
   }
+});
+
+test('官方 open-in-app 路由对子用户可读，但启动路径必须属于已授权工作区', async () => {
+  const subUser = db.createUser('official-open-in-app-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
+    allowSsh: false, allowedAgentPresets: null, banned: false, sandboxMode: null,
+    disabledSessions: [], allowedSessionIds: ['session-visible'],
+  });
+  db.markSessionGrantsSeeded(subUser.id);
+  const subCookie = `dsh_gateway_token=${jwt.sign({ sub: String(subUser.id), username: subUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' })}`;
+  const originalCookie = cookie;
+  cookie = subCookie;
+  const connection = await openRemoteMux({ cookie: subCookie, origin: 'http://127.0.0.1', host: '127.0.0.1' });
+  try {
+    const apps = await gatewayReq('GET', '/open-in-app/apps');
+    assert.equal(apps.status, 200, '官方目录读取不应被第三方 fail-closed 误拦');
+
+    const denied = await gatewayReq(
+      'POST', '/open-in-app/open', { 'content-type': 'application/json' },
+      JSON.stringify({ app: 'vscode', path: '/tmp' }),
+    );
+    assert.equal(denied.status, 403, '子用户不能让官方启动器打开未授权目录');
+
+    connection.client.send(JSON.stringify({
+      type: 'open', streamId: 'open-in-app-workspace', endpoint: 'workspace/follow', payload: { args: {} },
+    }));
+    assert.equal((await connection.nextFrame()).streamId, 'open-in-app-workspace');
+    const allowed = await gatewayReq(
+      'POST', '/open-in-app/open', { 'content-type': 'application/json' },
+      JSON.stringify({ app: 'vscode', path: '/workspaces/visible' }),
+    );
+    assert.equal(allowed.status, 200, allowed.body);
+  } finally {
+    connection.client.close();
+    cookie = originalCookie;
+  }
+});
+
+test('权限保存：仅更新 SSH 开关不初始化或清空会话授权集合', async () => {
+  const subUser = db.createUser('ssh-partial-save-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.replaceUserSessionGrants(subUser.id, ['session-visible']);
+  assert.equal(db.isSessionGrantsSeeded(subUser.id), false);
+  const payload = JSON.stringify({
+    userId: subUser.id,
+    allowedFolders: ['__deny__'],
+    allowSsh: true,
+    allowUpload: false,
+    allowGitDownload: false,
+    allowWorkspaceCreate: false,
+    banned: false,
+    sandboxMode: null,
+    disabledSessions: [],
+  });
+  const response = await gatewayReq(
+    'POST', '/gateway/api/permissions',
+    { 'content-type': 'application/json', 'content-length': String(Buffer.byteLength(payload)) },
+    payload,
+  );
+  assert.equal(response.status, 200, response.body);
+  assert.deepEqual(db.listUserSessionGrants(subUser.id), ['session-visible']);
+  assert.equal(db.isSessionGrantsSeeded(subUser.id), false, '省略 allowedSessionIds 不得冻结一次性种子状态');
 });
 
 test('Issue #25：session/control 在 workspace 基线确认前不使用无 cwd 的临时授权', async () => {
@@ -1799,7 +2355,7 @@ test('Issue #25：session/control 在 workspace 基线确认前不使用无 cwd 
   }
 });
 
-test('Issue #25：主用户保存权限后强制子用户 Remote mux 重连以刷新工作区基线', async () => {
+test('权限同值保存不触发子用户 Remote mux 重连', async () => {
   const subUser = db.createUser('issue-25-live-refresh', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
     allowedFolders: ['/workspaces/visible'],
@@ -1831,9 +2387,8 @@ test('Issue #25：主用户保存权限后强制子用户 Remote mux 重连以�
     }));
     const baseline = await connection.nextFrame();
     assert.equal(baseline.streamId, 'live-refresh-workspace');
-    const closed = new Promise<{ code: number; reason: string }>((resolve) => {
-      connection.client.once('close', (code: number, reason: Buffer) => resolve({ code, reason: reason.toString() }));
-    });
+    let closed = false;
+    connection.client.once('close', () => { closed = true; });
     const permissionPayload = JSON.stringify({
       userId: subUser.id,
       allowedFolders: ['/workspaces/visible'],
@@ -1853,6 +2408,59 @@ test('Issue #25：主用户保存权限后强制子用户 Remote mux 重连以�
       '/gateway/api/permissions',
       { 'content-type': 'application/json', 'content-length': String(Buffer.byteLength(permissionPayload)) },
       permissionPayload,
+    );
+    assert.equal(saved.status, 200, saved.body);
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    assert.equal(closed, false, '权限语义未变化时不应关闭物理 mux');
+  } finally {
+    connection.client.close();
+  }
+});
+
+test('Issue #25：真实权限收紧仍触发一次子用户 Remote mux 刷新', async () => {
+  const subUser = db.createUser('issue-25-live-revoke', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
+    allowSsh: false, allowedAgentPresets: null, banned: false, sandboxMode: null,
+    disabledSessions: [], allowedSessionIds: ['session-visible'],
+  });
+  db.markSessionGrantsSeeded(subUser.id);
+  const subToken = jwt.sign(
+    { sub: String(subUser.id), username: subUser.username, cv: 0 },
+    'test-secret',
+    { expiresIn: '12h' },
+  );
+  const connection = await openRemoteMux({
+    cookie: `dsh_gateway_token=${subToken}`,
+    origin: 'http://127.0.0.1',
+    host: '127.0.0.1',
+  });
+  try {
+    connection.client.send(JSON.stringify({
+      type: 'open', streamId: 'revoke-workspace', endpoint: 'workspace/follow', payload: { args: {} },
+    }));
+    assert.equal((await connection.nextFrame()).streamId, 'revoke-workspace');
+    const closed = new Promise<{ code: number; reason: string }>((resolve) => {
+      connection.client.once('close', (code: number, reason: Buffer) => resolve({ code, reason: reason.toString() }));
+    });
+    const payload = JSON.stringify({
+      userId: subUser.id,
+      allowedFolders: ['__deny__'],
+      allowUpload: false,
+      allowGitDownload: false,
+      allowWorkspaceCreate: false,
+      allowSsh: false,
+      allowedAgentPresets: null,
+      banned: false,
+      sandboxMode: null,
+      disabledSessions: [],
+      allowedSessionIds: ['session-visible'],
+    });
+    const saved = await gatewayReq(
+      'POST', '/gateway/api/permissions',
+      { 'content-type': 'application/json', 'content-length': String(Buffer.byteLength(payload)) },
+      payload,
     );
     assert.equal(saved.status, 200, saved.body);
     assert.deepEqual(await closed, { code: 1012, reason: 'Permissions changed' });
@@ -2278,7 +2886,7 @@ test('权限：已上报的 token 用量达到上限后阻断后续代理请求'
   }
 });
 
-test('未知第三方 HTTP 路径不因 WebSocket 注册而获得特殊放行', async () => {
+test('未知第三方根级路径对子用户 fail-closed：注册 WS 通道不改变 HTTP 判定', async () => {
   const subUser = db.createUser('plugin-http-denied', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
     allowedFolders: [], hourlyTokenLimit: null, dailyMinutesLimit: null,
@@ -2290,7 +2898,7 @@ test('未知第三方 HTTP 路径不因 WebSocket 注册而获得特殊放行', 
   cookie = `dsh_gateway_token=${subToken}`;
   try {
     const response = await gatewayReq('POST', '/plugin/ws/run', { origin: 'http://127.0.0.1' }, '{}');
-    assert.equal(response.status, 200, 'HTTP remains governed by the upstream/plugin contract; only the WebSocket path is registered');
+    assert.equal(response.status, 403, '未登记的第三方根级路径 HTTP 对子用户 fail-closed（与 WS 通道登记无关）');
   } finally {
     cookie = originalCookie;
   }
@@ -2361,6 +2969,94 @@ test('跨源第三方 WebSocket 在升级前被拒绝', async () => {
   assert.match(denied.statusLine, /403/);
 });
 
+// ── F-30：畸形 WebSocket 帧不得终止网关进程 ───────────────────────
+// 根因：ws 的 Receiver 在协议错误（如客户端帧未加掩码）时 emit('error')；
+// EventEmitter 无 'error' 监听会把异常升级为 uncaughtException 终止进程，
+// 任何已登录用户发一帧就能让密码门崩溃并进入重启循环。
+// 契约：错误只断开该连接；网关继续服务其它请求。
+
+/** 用原始 socket 完成真实 Upgrade 并保留可写句柄（websocketHandshake 会立即销毁）。 */
+function rawUpgradeSocket(
+  pathname: string,
+  headers: Record<string, string>,
+): Promise<{ socket: net.Socket; statusLine: string }> {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect({ host: '127.0.0.1', port: gatewayPort });
+    const timer = setTimeout(() => {
+      socket.destroy();
+      reject(new Error('raw WebSocket upgrade timeout'));
+    }, 4000);
+    socket.once('connect', () => {
+      const lines = [
+        `GET ${pathname} HTTP/1.1`,
+        'Upgrade: websocket',
+        'Connection: Upgrade',
+        'Sec-WebSocket-Version: 13',
+        'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==',
+        // Host/Origin 由调用方传入（与 websocketHandshake 同口径，避免重复 Host 被判跨源）
+        ...Object.entries(headers).map(([name, value]) => `${name}: ${value}`),
+        '',
+        '',
+      ];
+      socket.write(lines.join('\r\n'));
+    });
+    let received = '';
+    const onData = (chunk: Buffer): void => {
+      received += chunk.toString('latin1');
+      if (!received.includes('\r\n\r\n')) return;
+      socket.off('data', onData);
+      clearTimeout(timer);
+      resolve({ socket, statusLine: received.slice(0, received.indexOf('\r\n')) });
+    };
+    socket.on('data', onData);
+    socket.once('error', reject);
+  });
+}
+
+/** 发送未加掩码文本帧，断言连接断开且网关仍能应答健康检查。 */
+async function malformedFrameProbe(pathname: string, headers: Record<string, string>): Promise<void> {
+  const { socket, statusLine } = await rawUpgradeSocket(pathname, headers);
+  assert.match(statusLine, /101/, `${pathname} 应完成升级，实际：${statusLine}`);
+  const closed = new Promise<void>((resolve) => {
+    socket.once('close', () => resolve());
+    socket.once('error', () => resolve()); // RST 也算断开
+  });
+  // 0x81 = FIN+text，0x02 = 长度 2 但掩码位为 0（客户端帧必须掩码，服务端应报协议错误）
+  socket.write(Buffer.from([0x81, 0x02, 0x68, 0x69]));
+  await Promise.race([closed, new Promise<void>((resolve) => setTimeout(resolve, 2000))]);
+  socket.destroy();
+  // 决定性断言：进程若因 uncaughtException 退出，这里会连接被拒
+  const health = await gatewayReq('GET', '/gateway/healthz');
+  assert.equal(health.status, 200, `网关进程必须存活，实际 status=${String(health.status)}`);
+}
+
+test('F-30：/api/remote.mux 收到未加掩码帧只断开该连接，网关进程存活', async () => {
+  await malformedFrameProbe('/api/remote.mux', {
+    cookie,
+    origin: 'http://127.0.0.1',
+    host: '127.0.0.1',
+  });
+});
+
+test('F-30：子用户 /api/events.host 收到未加掩码帧只断开该连接，网关进程存活', async () => {
+  const subUser = db.createUser('ws-malformed-subuser', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
+    disabledSessions: [], banned: false, sandboxMode: null,
+  });
+  const subCookie = `dsh_gateway_token=${jwt.sign(
+    { sub: String(subUser.id), username: subUser.username, cv: 0 },
+    'test-secret',
+    { expiresIn: '12h' },
+  )}`;
+  await malformedFrameProbe('/api/events.host', {
+    cookie: subCookie,
+    origin: 'http://127.0.0.1',
+    host: '127.0.0.1',
+  });
+});
+
 test('子用户第三方 WebSocket：除内置事件与已配置 SSH 端点外一律拒绝', async () => {
   const subUser = db.createUser('plugin-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
@@ -2400,10 +3096,21 @@ test('子用户第三方 WebSocket：除内置事件与已配置 SSH 端点外�
     const overview = await gatewayReq('GET', '/gateway/api/overview');
     assert.equal(overview.status, 200);
     const overviewBody = JSON.parse(overview.body) as {
-      sshWebSocketEndpoints: string[];
+      endpoints: string[];
+      pluginCompat: boolean;
       users: Array<{ id: number; permissions: { allowSsh: boolean } }>;
     };
-    assert.deepEqual(overviewBody.sshWebSocketEndpoints, ['/api/dsh-ssh/terminal', '/plugins/ssh-b/terminal', '/plugins/ssh-wild/*']);
+    assert.deepEqual(overviewBody.endpoints, [
+      '/api/dsh-ssh/terminal',
+      '/plugins/ssh-b/terminal',
+      '/plugins/ssh-wild/*',
+      '/api/ssh-http/inspect',
+      'ws:/api/ssh-ws-only/terminal',
+      'http:/api/ssh-http-only/inspect',
+      '/api/ssh-owner-only/hosts',
+      'owner:/api/ssh-owner-only/hosts',
+    ]);
+    assert.equal(overviewBody.pluginCompat, false, '默认关闭第三方插件兼容层');
 
     const afterGrant = await websocketHandshake('/plugin/ws/run', {
       cookie: subCookie,
@@ -2727,7 +3434,7 @@ test('网关 owner 探针：仅正确 internal secret 返回 parent PID，错误
   assert.equal(body.parentPid, null, '测试网关未设置 parent PID 时必须返回 null，而不是伪造 PID');
 });
 
- test('Cookie Chaos 加固（P3）：Unicode 空白前缀的会话 cookie 不再被归一化匹配 → 未认证', async () => {
+test('Cookie Chaos 加固（P3）：Unicode 空白前缀的会话 cookie 不再被归一化匹配 → 未认证', async () => {
   const locationOf = (rh: string[]): string => {
     const i = rh.findIndex((v, idx) => idx % 2 === 0 && v.toLowerCase() === 'location');
     return i >= 0 ? rh[i + 1] ?? '' : '';
@@ -2743,4 +3450,20 @@ test('网关 owner 探针：仅正确 internal secret 返回 parent PID，错误
   // 对照：正常 cookie 认证通过（U+00A0 精确匹配不被干扰）
   const ok = await gatewayReq('GET', '/html', { cookie: `dsh_gateway_token=${tokenValue}` });
   assert.equal(ok.status, 200, '正常会话 cookie 应认证通过');
+});
+
+test('未认证根路径重定向到登录页时不把 next 参数甩到地址栏（登录后仍回首页）', async () => {
+  const locationOf = (rh: string[]): string => {
+    const i = rh.findIndex((v, idx) => idx % 2 === 0 && v.toLowerCase() === 'location');
+    return i >= 0 ? rh[i + 1] ?? '' : '';
+  };
+  // 显式空 cookie 覆盖测试夹具的模块级会话 cookie，确保走未认证分支
+  const root = await gatewayReq('GET', '/', { cookie: '' });
+  assert.equal(root.status, 302, '未认证访问根路径应重定向登录页');
+  assert.equal(locationOf(root.rawHeaders), '/gateway/login', '根路径重定向不带 next 参数');
+
+  // 深层路径仍需保留 next，登录后能跳回原页面
+  const deep = await gatewayReq('GET', '/settings/general', { cookie: '' });
+  assert.equal(deep.status, 302);
+  assert.match(locationOf(deep.rawHeaders), /^\/gateway\/login\?next=/);
 });

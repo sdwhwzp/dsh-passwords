@@ -17,7 +17,7 @@
   &nbsp;
   <a href="https://github.com/slywalker2006/dsh-passwords/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/slywalker2006/dsh-passwords/ci.yml?style=flat-square&label=CI" alt="CI"></a>
   &nbsp;
-  <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/DSH-0.1.5-4c6ef5?style=flat-square&labelColor=454a54" alt="DSH"></a>
+  <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/DSH-0.1.6--alpha.1-4c6ef5?style=flat-square&labelColor=454a54" alt="DSH"></a>
   &nbsp;
   <img src="https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square" alt="License">
   &nbsp;
@@ -74,7 +74,7 @@
 
 ### Prerequisites
 
-Host installs need Node.js 22.19+ or 24+, a working dsh installation, and git. Keep this plugin on the same Node major line as the dsh host; every DSH `0.1.5` release (alpha.1 / alpha.2 / rc.1 / rc.2) is verified, with `0.1.5-rc.2` as the current host baseline, while the compatibility layer retains the tested `0.1.2` and `0.1.3` API boundaries. Docker installs only need Docker Engine or Docker Desktop and a DeepSeek API key.
+Host installs need Node.js 22.19+ or 24+, a working dsh installation, and git. Keep this plugin on the same Node major line as the dsh host; the current verification baseline is DSH `0.1.6-alpha.1`, while the compatibility target retains every `0.1.5` release and the `0.1.2` / `0.1.3` API boundaries. Docker installs only need Docker Engine or Docker Desktop and a DeepSeek API key.
 
 ### Install
 
@@ -82,11 +82,11 @@ Five install methods, pick one. Host installs automatically install dependencies
 
 ```bash
 # 1. Linux / macOS one-liner
-curl -fsSL https://raw.githubusercontent.com/slywalker2006/dsh-passwords/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/slywalker2006/dsh-passwords/main/install.sh | sudo bash
 
 # 2. Clone first, then install
 git clone https://github.com/slywalker2006/dsh-passwords && cd dsh-passwords
-bash install.sh
+sudo bash install.sh
 
 # 3. npm global install, works on any platform
 npm install -g dsh-passwords
@@ -104,14 +104,14 @@ docker run -d \
   -p 127.0.0.1:3088:3088 \
   -v dsh-home:/data/dsh \
   -v dsh-passwords-state:/data/dsh-passwords \
-  skywalker237234/dsh-passwords:2.7.1
+  skywalker237234/dsh-passwords:2.7.2
 ```
 
-`.env` needs at least `DEEPSEEK_API_KEY`. Set `MCP_GATEWAY_PUBLIC_HOST` to the domain you actually use. The container listens on loopback 3088 only; terminate TLS on nginx or Caddy for public access. Initialization is complete once the log shows `dsh patch applied; starting dsh`.
+`.env` needs at least `DEEPSEEK_API_KEY`. Set `MCP_GATEWAY_PUBLIC_HOST` to the domain you actually use. The host publishes port `127.0.0.1:3088` only while the container listens on `0.0.0.0:3088`; terminate TLS on nginx or Caddy for public access. The image bundles DSH `0.1.6-alpha.1`; initialization is complete when healthz and readyz both return `ok:true`.
 
 Notes:
 
-- Host installs default to `/opt/dsh-passwords` or `$HOME/dsh-passwords`; override with `DSH_PASSWORDS_DIR`. An existing target directory aborts the installer
+- Host installs default to `/opt/dsh-passwords`; override with `DSH_PASSWORDS_DIR`. A recognized existing dsh-passwords directory resumes the idempotent installer in place; another existing target aborts
 - The SETUP_KEY is printed when the install finishes and written to `setup-key.txt` in the install directory
 - The two Docker volumes hold the dsh profile and the `.env`, database and certificates; deleting them deletes your data
 - For split-container deployments set `MCP_DSH_PATCH_ALLOW_BIND_ALL=1` on the dsh container so the gateway container can reach dsh web
@@ -208,7 +208,8 @@ Passwords require at least 12 characters with upper, lower, digit and symbol.
 | `MCP_DB_ENC_KEY` | empty | Field encryption key; cannot be changed once set. Back up the database together with `.env` |
 | `MCP_GATEWAY_HOST` / `MCP_GATEWAY_PORT` | `0.0.0.0` / `443` | Gateway listen address and port |
 | `MCP_GATEWAY_UPSTREAM` | `http://127.0.0.1:3080` | dsh web address, pointed automatically |
-| `MCP_GATEWAY_SSH_WS_ENDPOINTS` | empty | Third-party SSH WebSocket endpoints (comma-separated, exact paths and `/*` wildcards). Once the owner configures them, subusers only need the SSH permission toggle; unchecked requests are rejected and the owner is unrestricted. No plugin-specific auto-detection is performed. |
+| `MCP_GATEWAY_SSH_ENDPOINTS` | empty | Third-party endpoint registry (comma-separated; one variable for both transports and both capabilities). **Writing a path is the registration itself**: a rule is `[owner:][ws:\|http:]path` (prefixes optional, order-agnostic). `owner:` rules are owner-only (subusers get 403 on both transports); any other rule requires BOTH the owner registration and the subuser's SSH-endpoint toggle in the permissions panel — neither alone grants access. `ws:`/`http:` restrict a rule to one transport; a bare path applies to both. Paths match exactly, or a trailing `/*` matches direct child paths only. Unregistered third-party paths (`/api/*` and root-level plugin routes) are denied for subusers. When `DSH_PASSWORDS_ENV_FILE` is set, the gateway polls that `.env` every 5 seconds and applies valid changes without a restart; otherwise restart the gateway after editing `.env`. No plugin-specific auto-detection is performed. |
+| `MCP_GATEWAY_PLUGIN_COMPAT` | `off` | Third-party plugin compat layer: `off` (default; unregistered third-party paths stay fail-closed) or `on` to enable fine-grained adapters for known plugins (file-tree whitelisting, upload/download gating, content sanitising). |
 | `MCP_GATEWAY_REDIRECT_PORT` | `80` | ACME validation and 301 redirect port |
 | `MCP_GATEWAY_DOMAIN` | empty | Custom domain; empty uses `<public IP>.sslip.io` |
 | `MCP_GATEWAY_AUTO_TLS` | on | `0` disables automatic HTTPS |
@@ -316,7 +317,7 @@ The bottleneck is usually the network path to the server.
 
 ## Manual install
 
-> The v2.7.1 compatibility layer covers every DSH `0.1.5` release (`alpha.1`, `alpha.2`, `rc.1`, `rc.2`) API and runtime boundaries, retaining the `0.1.2` and `0.1.3` interface boundaries; the host installer and bundled Docker ship DSH `0.1.5-rc.2`. The installers strictly require Node.js `22.19+` or `24+`, register the plugin, detect the dsh installation and apply the compatibility patch. Automatic updates and settings-page patch reload use the same patch path.
+> v2.7.2 currently uses DSH `0.1.6-alpha.1` as its verification baseline, while retaining compatibility targets for every `0.1.5` release and the `0.1.2` / `0.1.3` API boundaries. The installer requires Node.js `22.19+` or `24+`, registers the plugin, detects dsh, and applies the compatibility patch.
 
 1. `git clone https://github.com/slywalker2006/dsh-passwords && cd dsh-passwords`
 2. `npm install && npm run build`
@@ -343,7 +344,7 @@ The UI is bilingual zh/en and follows the dsh language setting. The login page h
 
 ## Version compatibility
 
-Current version: 2.7.1. Compatible with every DSH `0.1.5` release (`alpha.1`, `alpha.2`, `rc.1`, `rc.2`) API and runtime boundaries, retaining compatibility with the `0.1.2` and `0.1.3` interface boundaries; the host installer and bundled Docker ship DSH `0.1.5-rc.2`. The npm package ships prebuilt dist, TypeScript sources, and all scripts; Docker and npm are built from the same source revision.
+Current version: 2.7.2. The current verification baseline is DSH `0.1.6-alpha.1`; compatibility targets also retain every DSH `0.1.5` release and the `0.1.2` / `0.1.3` API boundaries. The npm package ships prebuilt dist, TypeScript sources, and all scripts; Docker and npm are built from the same source revision.
 
 ## Contributing
 

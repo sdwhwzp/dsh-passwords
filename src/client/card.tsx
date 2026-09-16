@@ -84,6 +84,20 @@ export interface UpdateInfo {
 export interface PermOverview {
   me: { id: number; username: string; role: 'admin' | 'user' };
   sshWebSocketEndpoints?: string[];
+  /**
+   * DSH LLM 注册表投影（`session/modelCatalog`），由网关按当前主用户过滤后透传。
+   * 模型稳定 ID 为 `provider/model`。旧服务端不返回时视为“目录不可用”，
+   * 前端保留已保存的 allowlist 并标为失效项，不静默放宽。
+   */
+  modelCatalog?: {
+    default?: { provider: string; model: string };
+    groups?: Array<{
+      id: string;
+      name?: string;
+      models?: Array<{ id: string; name?: string; description?: string }>;
+    }>;
+    failures?: Array<{ id: string; name?: string; message?: string }>;
+  } | null;
   users: Array<{
     id: number;
     username: string;
@@ -97,6 +111,10 @@ export interface PermOverview {
       allowWorkspaceCreate: boolean;
       allowSsh?: boolean;
       allowedAgentPresets: string[] | null;
+      /** NULL = 不限；[] = 禁止全部 provider/model；非空 = 仅允许这些稳定 ID */
+      allowedModels?: string[] | null;
+      /** 聊天媒体（表情包/图片/视频）开关；默认 false */
+      allowChatMedia?: boolean;
       banned: boolean;
       sandboxMode: string | null;
       disabledSessions: string[];
@@ -125,6 +143,9 @@ interface PermDraft {
   disabledSessions: string[];
   allowedSessionIds: string[];
   agentPresets: string[] | null;
+  /** NULL = 不限；[] = 禁用全部；非空 = allowlist（均为 provider/model 稳定 ID） */
+  models: string[] | null;
+  chatMedia: boolean;
 }
 
 interface AgentPresetInfo {
@@ -140,6 +161,56 @@ interface WorkspaceInfo {
   path: string;
   title: string;
   sessions: Array<{ id: string; title: string }>;
+}
+
+/** 展平后的模型目录项：`id` 为提交给网关的稳定 ID（provider/model） */
+export interface ModelCatalogEntry {
+  id: string;
+  provider: string;
+  providerName: string;
+  model: string;
+  name: string;
+}
+
+/** 稳定 ID 口径与网关/数据库一致：`provider/model`；provider 无斜杠，
+ *  model 允许含 `/`（官方 openrouter/baseten 等目录的模型 ID 普遍含斜杠） */
+const MODEL_ID_RE = /^[^/\s]{1,100}\/[^\s]{1,200}$/;
+
+/** 模型目录可用状态：unavailable = 服务端未返回目录（不能据此清空 allowlist） */
+export type ModelCatalogStatus = 'ready' | 'unavailable';
+
+/**
+ * 展平 overview 里的模型目录为可勾选列表。
+ * 非法 ID（缺 provider/model、含空白）直接跳过：它不可能被网关接受，
+ * 也不应出现在选择列表里；已保存的旧 ID 由 stale 逻辑单独保留。
+ */
+export function readModelCatalog(overview: PermOverview | null): {
+  entries: ModelCatalogEntry[];
+  status: ModelCatalogStatus;
+} {
+  const catalog = overview?.modelCatalog;
+  const groups = catalog?.groups;
+  if (!Array.isArray(groups)) return { entries: [], status: 'unavailable' };
+  const entries: ModelCatalogEntry[] = [];
+  const seen = new Set<string>();
+  for (const group of groups) {
+    if (typeof group?.id !== 'string' || !Array.isArray(group.models)) continue;
+    const providerName = typeof group.name === 'string' && group.name !== '' ? group.name : group.id;
+    for (const model of group.models) {
+      if (typeof model?.id !== 'string') continue;
+      const id = `${group.id}/${model.id}`;
+      if (!MODEL_ID_RE.test(id) || seen.has(id)) continue;
+      seen.add(id);
+      entries.push({
+        id,
+        provider: group.id,
+        providerName,
+        model: model.id,
+        name: typeof model.name === 'string' && model.name !== '' ? model.name : model.id,
+      });
+    }
+  }
+  return { entries, status: 'ready' };
 }
 
 /** 与 host 侧一致的最小密码策略（本机提示用，最终以服务端校验为准） */
@@ -234,6 +305,9 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
   const [permsNotice, setPermsNotice] = useState<Record<number, string>>({});
   const [agentPresets, setAgentPresets] = useState<AgentPresetInfo[]>([]);
   const [agentPresetStatus, setAgentPresetStatus] = useState<'loading' | 'ready' | 'unavailable'>('loading');
+  // 模型目录（来自 overview，随每次权限刷新同步）
+  const [modelCatalog, setModelCatalog] = useState<ModelCatalogEntry[]>([]);
+  const [modelCatalogStatus, setModelCatalogStatus] = useState<ModelCatalogStatus>('unavailable');
 
   const [workspaces, setWorkspaces] = useState<WorkspaceInfo[]>([]);
   // 正在编辑中的子用户草稿：dirty 时 30s 自动刷新不覆盖本地未保存的修改
@@ -259,6 +333,10 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
         return api<PermOverview>('/gateway/api/overview')
           .then((o) => {
             setOverview(o);
+            // 模型目录与权限同一个快照：一次刷新内两者口径一致
+            const catalog = readModelCatalog(o);
+            setModelCatalog(catalog.entries);
+            setModelCatalogStatus(catalog.status);
             // 草稿同步：新用户初始化；未在编辑（dirty）中的草稿用服务端最新值覆盖
             // （注释承诺的“主用户在别处修改后页面自动同步最新状态”真正生效）；
             // 已删除的用户清草稿；正在编辑的用户保留本地未保存修改。
@@ -278,6 +356,10 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
                   ssh: u.permissions.allowSsh === true,
                   banned: u.permissions.banned,
                   agentPresets: u.permissions.allowedAgentPresets === null ? null : [...u.permissions.allowedAgentPresets],
+                  models: u.permissions.allowedModels === null || u.permissions.allowedModels === undefined
+                    ? null
+                    : [...u.permissions.allowedModels],
+                  chatMedia: u.permissions.allowChatMedia === true,
                   sandbox: u.permissions.sandboxMode ?? '',
                   disabledSessions: [...(u.permissions.disabledSessions ?? [])],
                   allowedSessionIds: [...(u.permissions.allowedSessionIds ?? [])],
@@ -319,7 +401,12 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
                 }
               });
           })
-          .catch(() => setOverview(null));
+          .catch(() => {
+            setOverview(null);
+            // 目录随 overview 失败：不能沿用上一次快照把已下架的模型当成仍可勾选
+            setModelCatalog([]);
+            setModelCatalogStatus('unavailable');
+          });
       })
       .catch((e) => setError(errText(e, trErr)))
       .finally(() => {
@@ -628,6 +715,28 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
     setDraft(userId, { allowedSessionIds: [...allowed], disabledSessions: [...disabled] });
   };
 
+  /** 某个子用户草稿里仍然启用、但已不在当前目录中的模型 ID（失效项）。
+   *  这些 ID 必须保留并显示为禁用项：静默剔除会在下次保存时把“受限”变成
+   *  “不限”/缩小 allowlist，用户看不出权限被改过。 */
+  const staleModels = (draft: PermDraft): string[] => {
+    if (draft.models === null) return [];
+    const known = new Set(modelCatalog.map((entry) => entry.id));
+    return draft.models.filter((id) => !known.has(id));
+  };
+
+  /** 切换单个模型：从 NULL（不限）进入逐项选择时，以当前目录为初始集合，
+   *  避免主用户一取消“不限制”就把子用户的全部模型静默清空。 */
+  const toggleModel = (userId: number, modelId: string, enabled: boolean) => {
+    const draft = permDrafts[userId];
+    if (!draft) return;
+    const current = draft.models === null
+      ? new Set(modelCatalog.map((entry) => entry.id))
+      : new Set(draft.models);
+    if (enabled) current.add(modelId);
+    else current.delete(modelId);
+    setDraft(userId, { models: [...current] });
+  };
+
   const savePermissions = (userId: number) => {
     const d = permDrafts[userId];
     if (!d) return;
@@ -659,6 +768,9 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
           allowWorkspaceCreate: d.workspaceCreate,
           allowSsh: d.ssh,
           allowedAgentPresets: d.agentPresets,
+          // NULL = 不限；[] = 禁用全部；非空 = allowlist。保持三态语义原样提交。
+          allowedModels: d.models,
+          allowChatMedia: d.chatMedia,
           banned: d.banned,
           sandboxMode: d.sandbox === '' ? null : d.sandbox,
           disabledSessions: d.disabledSessions,
@@ -1159,6 +1271,83 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
                         )),
                   )
                 : null,
+              // ── 可用模型 allowlist（NULL=不限 / []=禁用全部 / 非空=白名单）──
+              // 目录来自 overview；失败或缺失时保留草稿并标为不可用，
+              // 绝不因为“看不到目录”而把已有 allowlist 显示成“不限制”。
+              h(
+                'div',
+                { className: 'dshpw-row' },
+                h('div', { className: 'dshpw-label' }, t('permsModels')),
+                modelCatalogStatus === 'unavailable'
+                  ? h('div', { className: 'dshpw-hint' }, t('permsModelsUnavailable'))
+                  : null,
+                h(
+                  'label',
+                  { className: 'dshpw-check' },
+                  h('input', {
+                    type: 'checkbox',
+                    checked: d.models === null,
+                    disabled: busy || modelCatalogStatus === 'unavailable',
+                    onChange: (e: { target: { checked: boolean } }) => {
+                      // 取消“不限制”时以现有行为为准：目录可用则默认全选（
+                      // 至少可预期），目录不可用则给出空白名单（=禁用全部），
+                      // 两种情况都在 UI 上显式可见，不静默放宽。
+                      setDraft(u.id, {
+                        models: e.target.checked
+                          ? null
+                          : modelCatalog.map((entry) => entry.id),
+                      });
+                    },
+                  }),
+                  t('permsModelsUnrestricted'),
+                ),
+                d.models === null
+                  ? null
+                  : h('div', { className: 'dshpw-hint' }, t('permsModelsHint')),
+                d.models !== null && d.models.length === 0
+                  ? h('div', { className: 'dshpw-hint' }, t('permsModelsDenyAll'))
+                  : null,
+                d.models === null || modelCatalogStatus === 'unavailable'
+                  ? null
+                  : h(
+                      'div',
+                      { className: 'dshpw-model-list' },
+                      ...modelCatalog.map((entry) =>
+                        h(
+                          'label',
+                          { className: 'dshpw-check', key: entry.id },
+                          h('input', {
+                            type: 'checkbox',
+                            checked: (d.models ?? []).includes(entry.id),
+                            disabled: busy,
+                            onChange: (e: { target: { checked: boolean } }) =>
+                              toggleModel(u.id, entry.id, e.target.checked),
+                          }),
+                          h(
+                            'span',
+                            null,
+                            `${entry.name} · ${entry.providerName}`,
+                            h('small', { className: 'dshpw-hint' }, ` ${entry.id}`),
+                          ),
+                        ),
+                      ),
+                    ),
+                // 失效项：仍启用但已不在目录中。保留勾选状态并禁用，
+                // 保存时原样提交（服务端会拒绝/保留，由此主用户知道需要处理）。
+                ...(modelCatalogStatus === 'ready' && d.models !== null && staleModels(d).length > 0
+                  ? [
+                      h('div', { className: 'dshpw-hint', key: 'stale-hint' }, t('permsModelsStale')),
+                      ...staleModels(d).map((id) =>
+                        h(
+                          'label',
+                          { className: 'dshpw-check', key: id },
+                          h('input', { type: 'checkbox', checked: true, disabled: true, readOnly: true }),
+                          h('span', null, id, ` (${t('permsModelsRetired')})`),
+                        ),
+                      ),
+                    ]
+                  : []),
+              ),
               h(
                 'select',
                 {
@@ -1241,6 +1430,18 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
                     onChange: (e: { target: { checked: boolean } }) => setDraft(u.id, { workspaceCreate: e.target.checked }),
                   }),
                   t('permsWorkspaceCreate'),
+                ),
+                h(
+                  'label',
+                  { className: 'dshpw-check' },
+                  h('input', {
+                    type: 'checkbox',
+                    checked: d.chatMedia,
+                    disabled: busy,
+                    onChange: (e: { target: { checked: boolean } }) => setDraft(u.id, { chatMedia: e.target.checked }),
+                    'aria-label': t('permsChatMediaDesc'),
+                  }),
+                  t('permsChatMedia'),
                 ),
                 h(
                   'label',

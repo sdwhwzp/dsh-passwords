@@ -11,3 +11,7 @@ dist
 coverage
 npm-debug.log*
 docker/.env
+docs
+test
+alpha1-observation
+.github

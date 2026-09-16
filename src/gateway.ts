@@ -5,7 +5,10 @@
 import http, { type IncomingMessage, type IncomingHttpHeaders } from 'node:http';
 import https from 'node:https';
 import { createSecureContext, connect as tlsConnect } from 'node:tls';
-import { readFileSync, createReadStream, realpathSync, openSync, fstatSync, closeSync, constants as fsConstants } from 'node:fs';
+import {
+  readFileSync, createReadStream, createWriteStream, realpathSync, openSync, fstatSync, closeSync,
+  mkdirSync, renameSync, statSync, unlinkSync, readdirSync, rmSync, constants as fsConstants,
+} from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -38,30 +41,25 @@ const WebSocket = require('ws') as {
   };
 };
 import type { PlatformConfig } from './config.js';
-import { hardenSecretsAfterSetup } from './config.js';
+import { hardenSecretsAfterSetup, readEndpointRuntimeConfig } from './config.js';
 import { AuthService, AuthError, type RequestMeta } from './auth.js';
-import { Database, type UserPermissionsRow, type MessageRow } from './db.js';
+import { Database, MediaError, MEDIA_IN_USE, type UserPermissionsRow, type MessageRow } from './db.js';
 import {
   folderAllowed,
   normalizePath,
   isWorkspaceRestricted,
   isUploadRequest,
   isGitRequest,
-  isAdminOnlyPluginEndpoint,
-  isSshPluginEndpoint,
-  isUnscopedSshEndpoint,
-  isSshAliasQueryEndpoint,
-  isSshAliasBodyEndpoint,
-  isSshTerminalEndpoint,
-  isSshPublicAssetEndpoint,
-  isAionuiFileRead,
-  isAionuiFileWrite,
-  isAionuiPanel,
-  aionuiRootFrom,
+  classifySubuserPath,
+  endpointAllowed,
   isWorkspaceWrite,
   isWorkspaceCreate,
   isWorkspaceDirectoryCreate,
   isWorkspaceDeleteOrRename,
+  isDirectoryListRequest,
+  pathWithin,
+  workspaceRegistrationAllowed,
+  directoryEntryVisible,
   extractWorkspaceRenamePaths,
   isStaticAsset,
   isPollingRequest,
@@ -80,7 +78,6 @@ import {
   collectSessionIds,
   collectAuthorizedSessionIds,
   parseSessionAddress,
-  webSocketPathAllowed,
   clientConnectionArgs,
   replaceArchivedSessionSnapshot,
   collectArchivedSessionIds,
@@ -100,6 +97,7 @@ import {
   sanitizeHiddenUnicode,
   todayLocal,
 } from './permissions.js';
+import { createPluginCompat } from './plugin-compat.js';
 import { findDshRoot, applyRemotePatch, restartDshWeb } from './patch.js';
 import { t, resolveGatewayLang, type Lang } from './i18n.js';
 import type { UpdateEngine } from './update.js';
@@ -124,6 +122,10 @@ type Req = Request & {
   dshpwSelectedSessionId?: string;
   /** Preallocated session identity used to bridge the create/follow race. */
   dshpwCreatedSessionId?: string;
+  /** session/selectModel 已通过白名单校验的会话 ID；响应回调用它登记会话有效模型。 */
+  dshpwModelSessionId?: string;
+  /** directoryPicker/list 响应过滤：ancestors 模式只保留通往授权根的条目。 */
+  dshpwDirListFilter?: { mode: 'ancestors'; roots: string[] };
 
 };
 
@@ -131,10 +133,9 @@ const AGENT_PRESET_SELECT_RE = /^\/api\/agentPresets?[.\/]select$/;
 const AGENT_PRESET_LIST_RE = /^\/api\/agentPresets?[.\/]list$/;
 const AGENT_PRESET_MUTATION_RE = /^\/api\/agentPresets?[.\/](?:copy|openDocument|remove|read|deletePreset)$/;
 
-/** SSH alias is a plugin-global key; keep it opaque but exclude path/control syntax. */
-function isSafeSshAlias(value: string): boolean {
-  return value.length > 0 && value.length <= 256 && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value);
-}
+/** `/api/terminal/list`（点号/斜杠两种写法）：子用户恢复终端流程的唯一只读 RPC。
+ *  命中时对子用户回伪造空成功（见下方中间件），其余 terminal RPC 一律 fail-closed。 */
+const TERMINAL_LIST_RE = /^\/api\/terminal[.\/]list$/;
 
 function rpcRequestPayload(value: unknown): Record<string, unknown> | null {
   const args = clientConnectionArgs(value);
@@ -173,6 +174,189 @@ function hasImageAttachment(value: unknown): boolean {
     return Object.values(row).some((item) => visit(item, depth + 1));
   };
   return visit(value, 0);
+}
+
+// ── 子用户模型白名单（allowed_models）────────────────────────────────
+// DSH 0.1.6-alpha.1 官方协议（只用官方字段，不信任请求里随手加的模型字段）：
+//   · session/modelCatalog 无参数，结果 ModelCatalog =
+//     { default: {provider,model,reasoningEffort?}, routableProviders,
+//       groups: [{id,name,models:[{id,name,...}]}], failures: [{id,name,message}] }
+//     provider 身份在 group.id / failure.id，**不在** model 对象里。
+//   · session/selectModel 请求 { sessionId, provider, model, reasoningEffort? }。
+//   · session/create { workspaceId?|cwd?, sessionId?, agentPreset? }、
+//     session/fork { sessionId, atSeq? }、session/prompt { requestId, sessionId, ... }
+//     都**没有**模型字段——模型由 Host 从会话投影/默认选择解析。
+// 因此网关必须自己记住每个会话的有效模型（见 sessionModelSelection），
+// 并在 create/fork/prompt 前用该状态做二次校验。
+
+/** `/api/session/modelCatalog`（点号/斜杠两种写法）；它不在 SESSION_SCOPED_RE 里
+ * （无 sessionId，不是会话作用域 RPC），必须单独判定才能做响应过滤。 */
+const MODEL_CATALOG_RE = /^\/api\/session[.\/]modelCatalog$/;
+
+/** 规范化后的 `provider/model` 允许项：provider 无斜杠/空白；model 允许含 `/`
+ *  （DSH 官方目录 795/1354 个模型 ID 含斜杠，如 openrouter/anthropic/claude-…、
+ *  baseten/deepseek-ai/…，自定义模型名同样不受字符集限制），只禁空白。 */
+type AllowedModelSpec = { readonly provider: string; readonly model: string };
+
+/**
+ * 解析一条 allowlist 记录。允许列表由主用户在权限页保存，必须能在网关侧
+ * 单独判定合法性，不能依赖上游（`session/model-unavailable`）报错才发现越权。
+ * 分隔符是第一个 `/`：provider 段禁止斜杠（UI 与预设路由恒满足），剩余全部归 model。
+ */
+function parseAllowedModelSpec(value: unknown): AllowedModelSpec | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (trimmed.length === 0 || trimmed.length > 300) return null;
+  const separator = trimmed.indexOf('/');
+  if (separator <= 0 || separator === trimmed.length - 1) return null;
+  const provider = trimmed.slice(0, separator);
+  const model = trimmed.slice(separator + 1);
+  if (!/^[^/\s]{1,100}$/.test(provider) || !/^[^\s]{1,200}$/.test(model)) return null;
+  return { provider, model };
+}
+
+/** 规范化并去重 allowlist（保持提交顺序，模型选择器的收敛结果可预测）。 */
+function normalizeAllowedModels(value: readonly string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    const spec = parseAllowedModelSpec(entry);
+    if (spec === null) continue;
+    const canonical = `${spec.provider}/${spec.model}`;
+    if (seen.has(canonical)) continue;
+    seen.add(canonical);
+    out.push(canonical);
+    if (out.length >= 512) break;
+  }
+  return out;
+}
+
+/** 精确 `provider/model` 匹配：同时校验 provider 与 model，不做通配或前缀放宽。 */
+function allowedModelSet(allowed: readonly string[] | null): Set<string> | null {
+  if (allowed === null) return null;
+  const set = new Set<string>();
+  for (const entry of allowed) {
+    const spec = parseAllowedModelSpec(entry);
+    if (spec !== null) set.add(`${spec.provider}/${spec.model}`);
+  }
+  return set;
+}
+
+function modelPairAllowed(allowed: Set<string> | null, provider: unknown, model: unknown): boolean {
+  if (allowed === null) return true;
+  if (typeof provider !== 'string' || typeof model !== 'string') return false;
+  return allowed.has(`${provider}/${model}`);
+}
+
+/** 从官方形状里读取一个模型选择：ModelCatalog.default / ModelSelectionProjection.next
+ * / model/selection 事件 data。字段名必须完全一致，避免把任意请求字段当成模型依据。 */
+function modelSelectionFrom(value: unknown): AllowedModelSpec | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  if (typeof row.provider !== 'string' || typeof row.model !== 'string') return null;
+  return parseAllowedModelSpec(`${row.provider}/${row.model}`);
+}
+
+/** 按 allowlist 过滤官方 modelCatalog 值；主用户（allowed === null）原样返回。 */
+function filterModelCatalogValue(value: unknown, allowed: readonly string[] | null): unknown {
+  const allowedSet = allowedModelSet(allowed);
+  if (allowedSet === null) return value;
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return value;
+  const catalog = value as Record<string, unknown>;
+  const groups: Record<string, unknown>[] = [];
+  if (Array.isArray(catalog.groups)) {
+    for (const group of catalog.groups) {
+      if (group === null || typeof group !== 'object' || Array.isArray(group)) continue;
+      const row = group as Record<string, unknown>;
+      // provider 身份只在 group.id；model 里没有 provider 字段，不能按 model 反推。
+      if (typeof row.id !== 'string' || !Array.isArray(row.models)) continue;
+      const models = row.models.filter((model): boolean => {
+        if (model === null || typeof model !== 'object' || Array.isArray(model)) return false;
+        return modelPairAllowed(allowedSet, row.id, (model as Record<string, unknown>).id);
+      });
+      if (models.length === 0) continue;
+      groups.push({ ...row, models });
+    }
+  }
+  const routable = new Set<string>();
+  for (const group of groups) if (typeof group.id === 'string') routable.add(group.id);
+  // failures 只带 provider id/name/message；无法可靠关联到允许 provider 时清空，
+  // 不能把其它 provider 的名字/错误信息泄露给受限用户。
+  const failures = Array.isArray(catalog.failures)
+    ? catalog.failures.filter((failure): boolean => {
+        if (failure === null || typeof failure !== 'object' || Array.isArray(failure)) return false;
+        return typeof (failure as Record<string, unknown>).id === 'string' &&
+          routable.has((failure as Record<string, unknown>).id as string);
+      })
+    : [];
+  // 默认模型只允许出现在 allowlist 内；否则按 group 顺序收敛到第一个允许模型，
+  // 都没有则为 null（`[]` = 禁止全部），绝不把不可用的 Host 默认暴露给受限用户。
+  const upstreamDefault = modelSelectionFrom(catalog.default);
+  const converged = upstreamDefault !== null && modelPairAllowed(allowedSet, upstreamDefault.provider, upstreamDefault.model)
+    ? catalog.default
+    : firstAllowedCatalogModel(groups, allowedSet);
+  return {
+    ...catalog,
+    default: converged,
+    routableProviders: Array.isArray(catalog.routableProviders)
+      ? catalog.routableProviders.filter((provider): boolean => typeof provider === 'string' && routable.has(provider))
+      : [...routable],
+    groups,
+    failures,
+  };
+}
+
+/** 收敛用默认模型：按过滤后的 group/model 顺序取第一个允许项（保持 provider+model 成对）。 */
+function firstAllowedCatalogModel(
+  groups: readonly Record<string, unknown>[],
+  allowed: Set<string>,
+): AllowedModelSpec | null {
+  for (const group of groups) {
+    if (typeof group.id !== 'string' || !Array.isArray(group.models)) continue;
+    for (const model of group.models) {
+      if (model === null || typeof model !== 'object' || Array.isArray(model)) continue;
+      const id = (model as Record<string, unknown>).id;
+      if (typeof id !== 'string') continue;
+      const spec = parseAllowedModelSpec(`${group.id}/${id}`);
+      if (spec !== null && allowed.has(`${spec.provider}/${spec.model}`)) return spec;
+    }
+  }
+  return null;
+}
+
+/**
+ * 从官方会话数据里收集 `model/selection` 事件（session/follow 的 snapshot.records 与
+ * 后续 event 帧、session/page 与 session/history 的 records）。按 seq 取最新一条，
+ * 与 DSH 的 ModelSelectionProjection（lastUsed / pending→next）语义一致。
+ */
+function latestModelSelectionInRecords(value: unknown, depth = 0): { spec: AllowedModelSpec; seq: number } | null {
+  if (depth > 6 || value === null || typeof value !== 'object') return null;
+  if (Array.isArray(value)) {
+    let best: { spec: AllowedModelSpec; seq: number } | null = null;
+    for (const item of value) {
+      const found = latestModelSelectionInRecords(item, depth + 1);
+      if (found === null) continue;
+      if (best === null || found.seq >= best.seq) best = found;
+    }
+    return best;
+  }
+  const row = value as Record<string, unknown>;
+  // 事件形状：{ type: 'model/selection', seq, time, data: {provider, model, ...} }
+  if (row.type === 'model/selection') {
+    const data = modelSelectionFrom(row.data);
+    if (data !== null) {
+      const seq = typeof row.seq === 'number' && Number.isSafeInteger(row.seq) ? row.seq : -1;
+      return { spec: data, seq };
+    }
+  }
+  let found: { spec: AllowedModelSpec; seq: number } | null = null;
+  for (const key of ['records', 'event', 'events', 'items']) {
+    if (!Object.hasOwn(row, key)) continue;
+    const nested = latestModelSelectionInRecords(row[key], depth + 1);
+    if (nested === null) continue;
+    if (found === null || nested.seq >= found.seq) found = nested;
+  }
+  return found;
 }
 
 const COOKIE_NAME = 'dsh_gateway_token';
@@ -704,7 +888,7 @@ function renderSetupPage(params: { lang: Lang; error?: string; csrf: string }): 
 }
 
 /**
- * F-A2 隐藏 Unicode 清洗的字节级流（aionui-panel/raw 文本内容用）：
+ * F-A2 隐藏 Unicode 清洗的字节级流（插件面板流式文本内容用）：
  * 按 UTF-8 字节模式剥离零宽/bidi 等隐形字符序列，跨 chunk 安全。
  * 用 latin1 做 1:1 字节映射，正则匹配字节序列，不破坏任何非目标字节。
  *
@@ -800,7 +984,7 @@ function sanitizeHiddenUnicodeJson(value: unknown, depth = 0): unknown {
 }
 
 /**
- * dsh-ssh host SSRF 判定（F-28/F-29，异步版）：
+ * 已登记 SSH 端点的 host 字段 SSRF 判定（F-28/F-29，异步版）：
  *   - IP 字面量（含八进制/十六进制/简写段/映射形态）→ isPrivateHost 立即判
  *   - hostname（如 127.0.0.1.nip.io、sslip.io 通配）→ DNS 全量解析后逐地址判定，
  *     任一解析结果命中私网/回环 → 拦截；全部公网 → 返回首个解析 IP 供请求体改写，
@@ -808,9 +992,11 @@ function sanitizeHiddenUnicodeJson(value: unknown, depth = 0): unknown {
  *     DNS 重绑定 TOCTOU 窗口。
  *   - 3 秒超时防 DNS 卡死；解析失败/超时一律 fail-closed（返回 null = 拦截）：
  *     无法验证的目标不允许经网关连接，绝不"解析失败即放行"。
+ * 触发条件与任何具体插件无关：只要路径命中主用户登记的 SSH HTTP 端点且
+ * 请求体带 host 字段（见 MCP_GATEWAY_SSH_ENDPOINTS 的 `http:` 规则）。
  * 返回：'private' = 拦截；IP 字符串 = 校验通过、按它改写 host；null = 解析失败拦截。
  */
-function resolveSshHostSafe(host: string): Promise<'private' | string | null> {
+function resolveUpstreamHostSafe(host: string): Promise<'private' | string | null> {
   const h = host.trim().toLowerCase();
   if (isPrivateHost(h)) return Promise.resolve('private');
   const lookup = dns.promises
@@ -835,14 +1021,23 @@ export function createGatewayServer(
   auth: AuthService,
   db: Database,
   updateEngine?: UpdateEngine,
+  options: { envFile?: string; endpointReloadIntervalMs?: number } = {},
 ): http.Server {
   const app = express();
-  // SSH endpoints come exclusively from the owner's MCP_GATEWAY_SSH_WS_ENDPOINTS
-  // configuration — no plugin-specific auto-detection. Subusers reach them
-  // only through the single SSH permission toggle. Administrators are
-  // unrestricted. All other third-party WebSocket paths stay fail-closed
-  // for subusers (official event channels are handled separately below).
-  const sshWebSocketEndpoints = new Set(config.webSocket.sshEndpoints ?? []);
+  // 测试服务器由本机反向代理转发；只信任 loopback，恢复按真实客户端
+  // X-Forwarded-For 计算的 req.ip，同时避免信任公网伪造的代理头。
+  app.set('trust proxy', 'loopback');
+  // ── 端点登记表（全部由主用户显式配置；代码不内置任何插件路径）──
+  // 一张表同时管两条通道与两种能力：owner: 前缀 = 仅主用户；其余规则 = 子用户
+  // 需 allow_ssh（两把钥匙）。未登记的第三方路径（/api 与根级插件路由）对子
+  // 用户一律 fail-closed；插件兼容层（默认关）仅用于已知插件的细粒度适配。
+  //
+  // 运行态可变：部署 .env 变更后由文件尾部的热更新定时器就地替换（无需重启
+  // 网关）；未显式指定部署环境文件（DSH_PASSWORDS_ENV_FILE）时不做热更新。
+  let endpointRules = config.endpointRules ?? [];
+  let compat = createPluginCompat(config.pluginCompat === true);
+  /** 经端点登记表授权的子用户 WebSocket：规则收紧时用于立即撤销。 */
+  const registryAuthorizedSockets = new Set<Duplex>();
   // 不泄露框架信息
   app.disable('x-powered-by');
   // 仅解析 /gateway 表单请求；代理请求的 body 必须原样透传给上游
@@ -977,6 +1172,29 @@ export function createGatewayServer(
     const value = process.env.DSH_UPSTREAM_AUTH_COOKIE?.trim() ?? '';
     return /^[A-Za-z0-9_-]+=[A-Za-z0-9._~-]+$/.test(value) ? value : '';
   })();
+  /**
+   * 登录页内嵌的 dsh-auth cookie 派生公式（与 dsh 自己的 cookieName() 逐字节
+   * 一致：`dsh-auth-` + base64url(sha256(authority))）。网关只把它交给浏览器
+   * 侧 js 计算本 authority 的 cookie 名，用来判断浏览器是否已直接持有一份可用
+   * 的 dsh-auth cookie（官方 Web UI / API / WS 的正规凭据，与网关登录态无关）。
+   * 任意参数都能返回一个字符串，泄露面为零。
+   */
+  const GATEWAY_UPSTREAM_AUTH_COOKIE_NAME = (
+    connection: { authenticatedCookie?: unknown } | null | undefined,
+    authority: unknown,
+  ) => {
+    if (typeof connection?.authenticatedCookie !== 'function') return null;
+    try {
+      const url = new URL(`http://${String(authority)}`);
+      if (url.host !== String(authority)) return null;
+      const cookie = String((connection.authenticatedCookie as (base: string) => unknown)(`http://${url.host}/`));
+      const name = cookie.split('=', 1)[0];
+      return /^dsh-auth-[A-Za-z0-9_-]+$/.test(name) ? name : null;
+    } catch {
+      return null;
+    }
+  };
+
   const upstreamTransport = upstreamIsHttps ? https : http;
   // 限制在 loopback，远程拓扑必须自行提供已兑换 Cookie。
   const upstreamAgent = upstreamIsHttps
@@ -1066,6 +1284,35 @@ export function createGatewayServer(
     const pending = pendingCreatedSessions.get(userId);
     pending?.delete(sessionId);
     if (pending?.size === 0) pendingCreatedSessions.delete(userId);
+  };
+  // 子用户刚通过目录选择器成功创建、可登记为工作区的目录（带过期）。
+  // workspace/create 只接受「显式分配的精确目录 / 自己创建的工作区子树 / 本表命中」，
+  // 杜绝把任意预存在目录登记进自己的白名单（D1 工作流收紧）。
+  const pendingCreatedDirectories = new Map<number, Map<string, { expiresAt: number }>>();
+  const PENDING_DIRECTORY_TTL_MS = 30 * 60 * 1000;
+  const recordPendingCreatedDirectory = (userId: number, canonicalPath: string): void => {
+    let pending = pendingCreatedDirectories.get(userId);
+    if (pending === undefined) {
+      pending = new Map();
+      pendingCreatedDirectories.set(userId, pending);
+    }
+    if (pending.size >= 256 && !pending.has(canonicalPath)) {
+      const oldest = pending.keys().next().value;
+      if (typeof oldest === 'string') pending.delete(oldest);
+    }
+    pending.set(canonicalPath, { expiresAt: Date.now() + PENDING_DIRECTORY_TTL_MS });
+  };
+  const pendingCreatedDirectoryPaths = (userId: number): string[] => {
+    const pending = pendingCreatedDirectories.get(userId);
+    if (pending === undefined) return [];
+    const now = Date.now();
+    const out: string[] = [];
+    for (const [dir, marker] of pending) {
+      if (marker.expiresAt > now) out.push(dir);
+      else pending.delete(dir);
+    }
+    if (pending.size === 0) pendingCreatedDirectories.delete(userId);
+    return out;
   };
   const userSessionAccessWaiters = new Map<number, Set<() => void>>();
   const notifyUserSessionAccessWaiters = (userId: number): void => {
@@ -1183,20 +1430,130 @@ export function createGatewayServer(
     for (const child of Object.values(row)) collectSessionAgentPresets(child, target, depth + 1);
   };
 
+  // ── 会话有效模型状态（网关侧授权依据）─────────────────────────────
+  // DSH 的 create/fork/prompt 请求体里没有模型字段（模型由 Host 从会话投影或
+  // agentDefaultModel 解析），所以网关必须自己维护「这个会话接下来会用哪个
+  // provider/model」才能在权限收紧后拦住旧会话。状态只来自官方来源：
+  //   1. session/selectModel 成功响应的 result.value.selected（官方规范化结果）
+  //   2. session/follow 的 snapshot.projections.values.modelSelection（next）
+  //   3. session/follow 事件流 / session.page / session/history 里的
+  //      model/selection 事件（按 seq 取最新一条）
+  // `default` 表示已观测到「该会话没有任何模型选择」——此时 Host 用共享默认模型，
+  // 因此要与最近一次观测到的 modelCatalog.default 比对。
+  type SessionModelState = { kind: 'selection'; provider: string; model: string } | { kind: 'default' };
+  const sessionModelById = new Map<string, SessionModelState>();
+  const SESSION_MODEL_STATE_MAX = 20_000;
+  const recordSessionModelSelection = (sessionId: string, selection: AllowedModelSpec | null): void => {
+    if (sessionId.length === 0 || sessionId.length > 200) return;
+    if (selection === null) {
+      // 明确观测到「无选择」时才写 default；无法判读时保留旧状态（不能把
+      // 旧会话的已知选择降级成更宽松的 default）。
+      sessionModelById.set(sessionId, { kind: 'default' });
+    } else {
+      sessionModelById.set(sessionId, { kind: 'selection', provider: selection.provider, model: selection.model });
+    }
+    if (sessionModelById.size > SESSION_MODEL_STATE_MAX) {
+      const oldest = sessionModelById.keys().next().value;
+      if (typeof oldest === 'string') sessionModelById.delete(oldest);
+    }
+  };
+  /**
+   * 从 session/follow 帧读取官方模型状态：
+   *   · snapshot：projections.values.modelSelection.next（null = 无选择 → Host 默认）
+   *   · 后续帧：model/selection 事件（event.data 就是完整 ModelSelection）
+   * 只在能明确读到时才写入；形状不符（旧版/异常）不篡改已有状态。
+   */
+  const recordSessionFollowModelSelection = (sessionId: string, value: unknown): void => {
+    if (!isPlainJsonRecord(value)) return;
+    if (value.type === 'snapshot') {
+      const projections = value.projections;
+      if (!isPlainJsonRecord(projections)) return;
+      const values = projections.values;
+      if (!isPlainJsonRecord(values) || !Object.hasOwn(values, 'modelSelection')) return;
+      const projection = values.modelSelection;
+      if (!isPlainJsonRecord(projection) || !Object.hasOwn(projection, 'next')) return;
+      // next 为空（null）= 该会话没有模型选择，Host 用共享默认。
+      recordSessionModelSelection(sessionId, modelSelectionFrom(projection.next));
+      return;
+    }
+    const latest = latestModelSelectionInRecords(value);
+    if (latest !== null) recordSessionModelSelection(sessionId, latest.spec);
+  };
+  // Host 共享默认模型：只在网关保存权限前用得上（受限用户的 prompt 校验），
+  // 因此只记录真实观测到的 modelCatalog.default，不做任何推测。
+  let hostDefaultModel: AllowedModelSpec | null = null;
+  let hostDefaultModelKnown = false;
+  // 最近一次官方 modelCatalog 原样快照，仅供主用户权限页展示可选模型。
+  // 子用户收到的目录仍在代理响应处按 allowed_models 过滤；此快照不参与子用户授权。
+  let hostModelCatalog: Record<string, unknown> | null = null;
+  const recordHostDefaultModel = (catalog: unknown): void => {
+    if (catalog === null || typeof catalog !== 'object' || Array.isArray(catalog)) return;
+    hostModelCatalog = { ...(catalog as Record<string, unknown>) };
+    hostDefaultModel = modelSelectionFrom((catalog as Record<string, unknown>).default);
+    hostDefaultModelKnown = true;
+  };
+  /**
+   * 解析会话的有效模型：已记录的显式选择 → 观测到无选择时的 Host 默认模型 →
+   * null（未知）。返回 null 时调用方必须 fail-closed，不能把未知当作「不限制」。
+   */
+  const effectiveSessionModel = (sessionId: string): AllowedModelSpec | null => {
+    const state = sessionModelById.get(sessionId);
+    if (state === undefined) return null;
+    if (state.kind === 'selection') return { provider: state.provider, model: state.model };
+    return hostDefaultModelKnown ? hostDefaultModel : null;
+  };
+  /**
+   * 受限子用户的模型白名单判定（所有模型入口共用的唯一判定）。
+   * 返回 'allow' | 'deny'；unknown（会话模型不可解析 / Host 默认未知）按 deny。
+   */
+  const modelChoiceVerdict = (
+    allowed: readonly string[] | null,
+    selection: AllowedModelSpec | null,
+  ): { ok: boolean; reason: 'unrestricted' | 'allowed' | 'denied' | 'unknown' | 'empty' } => {
+    if (allowed === null) return { ok: true, reason: 'unrestricted' };
+    const set = allowedModelSet(allowed);
+    if (set === null || set.size === 0) return { ok: false, reason: 'empty' };
+    if (selection === null) return { ok: false, reason: 'unknown' };
+    return set.has(`${selection.provider}/${selection.model}`)
+      ? { ok: true, reason: 'allowed' }
+      : { ok: false, reason: 'denied' };
+  };
+
   // user_workspaces records subuser-created private workspaces and historical
-  // administrator workspaces. Administrators are trusted sharers; another
-  // subuser (or an orphaned record) remains an ownership conflict.
+  // administrator workspaces. Administrators are trusted sharers. An ownership
+  // row whose user no longer exists is an orphan from a deleted account: no
+  // live tenant remains to protect, and treating it as a conflict would hide
+  // the folder from baseline and 403 every registration for it.
   const workspaceOwnedByAnotherSubuser = (userId: number, workspacePath: string): boolean => {
     const normalizedPath = normalizePath(workspacePath);
     return db.listWorkspaceOwners().some((owner) =>
       owner.userId !== userId &&
-      normalizePath(owner.path) === normalizedPath &&
-      db.getUserById(owner.userId)?.role !== 'admin',
+      db.getUserById(owner.userId)?.role === 'user' &&
+      normalizePath(owner.path) === normalizedPath,
     );
   };
   const workspaceOwnedByUser = (userId: number, workspacePath: string): boolean => {
     const normalizedPath = normalizePath(workspacePath);
     return db.listUserWorkspacePaths(userId).some((ownedPath) => normalizePath(ownedPath) === normalizedPath);
+  };
+  /** 尽力规范化：优先文件系统真实路径（解析符号链接），失败退回字符串归一。 */
+  const canonicalizePathBestEffort = (candidate: string): string => {
+    try {
+      return normalizePath(realpathSync(candidate));
+    } catch {
+      return normalizePath(candidate);
+    }
+  };
+  /** candidate 是否落在另一子用户（存在且非主用户）创建的工作区子树内（含相等）。
+ *  单向判定：共享的分配根下创建兄弟目录不受影响，只有伸进他人子树才拦；
+ *  物主已被删除的孤儿行不构成冲突（无存活租户可保护）。 */
+  const workspaceSubtreeOverlap = (userId: number, workspacePath: string): boolean => {
+    const candidate = canonicalizePathBestEffort(workspacePath);
+    return db.listWorkspaceOwners().some((owner) =>
+      owner.userId !== userId &&
+      db.getUserById(owner.userId)?.role === 'user' &&
+      pathWithin(candidate, canonicalizePathBestEffort(owner.path)),
+    );
   };
 
   /** 子用户 host SSE 事件按 workspace.list 建立的快照过滤；快照缺失时敏感事件一律丢弃。 */
@@ -1476,6 +1833,7 @@ export function createGatewayServer(
   type RemoteMuxUserConnection = {
     socket: any;
     publishSessionAttachment: (sessionId: string, cwd: string) => void;
+    publishWorkspaceUpsert: (workspace: Record<string, unknown>) => void;
   };
   type RemoteEventOwnership = {
     userId: number;
@@ -1655,6 +2013,15 @@ export function createGatewayServer(
       if (!state.followSnapshotSeen) {
         if (!sessionFollowSnapshotMatches(address, value)) return null;
         state.followSnapshotSeen = true;
+      }
+      // 官方模型状态来源（授权依据，只读不写）：
+      //   · snapshot.projections.values.modelSelection.next：DSH 权威的“下一个请求
+      //     将使用的选择”，null 表示没有选择（用 Host 共享默认）。
+      //   · 后续 event 帧里的 model/selection 事件（含 data: {provider, model}）。
+      // 子代理流不对应一个普通会话，不写入（其授权按父会话走）。
+      if (address.kind === 'session') {
+        const target = sessionFollowTargetId(address);
+        recordSessionFollowModelSelection(target, value);
       }
       return value;
     }
@@ -1988,7 +2355,9 @@ export function createGatewayServer(
         allow_workspace_create: false,
         allow_ssh: false,
         allowed_agent_presets: [],
-        // F-12 残余：新子用户默认禁 git 下载（含 dsh-uploads/download 等外带通道），
+        allowed_models: null,
+        allow_chat_media: false,
+        // F-12 残余: 新子用户默认禁 git 下载（含插件下载等外带通道），
         // 主用户需要时按需开启；已有权限行的子用户不受影响
         allow_git_download: false,
         banned: false,
@@ -2413,6 +2782,10 @@ export function createGatewayServer(
           allowWorkspaceCreate: perms.allow_workspace_create,
           allowSsh: perms.allow_ssh,
           allowedAgentPresets: perms.allowed_agent_presets,
+          // NULL = 不限模型；[] = 禁止全部；非空 = 严格 provider/model allowlist。
+          // 归一化后回显，让权限卡与数据库语义一致（失效/非法项不会留到前端）。
+          allowedModels: perms.allowed_models === null ? null : normalizeAllowedModels(perms.allowed_models),
+          allowChatMedia: perms.allow_chat_media,
           banned: perms.banned,
           sandboxMode: perms.sandbox_mode,
           disabledSessions: perms.disabled_sessions,
@@ -2432,10 +2805,50 @@ export function createGatewayServer(
     res.json({
       ok: true,
       me: { id: me.userId, username: me.username, role: me.role },
-      sshWebSocketEndpoints: [...sshWebSocketEndpoints],
+      // 端点登记表（运维可见性）：规则带 [owner:][ws:|http:] 前缀。
+      endpoints: [...endpointRules],
+      // 第三方插件兼容层是否开启（默认关闭）。
+      pluginCompat: compat.enabled,
+      // 最近一次官方 session/modelCatalog 快照；仅主用户 overview 可见。
+      // 尚未观测到上游目录时返回 null，前端必须保持 fail-closed。
+      modelCatalog: hostModelCatalog,
       users,
     });
   });
+
+  // ── 敏感目录基列表（下载与目录删除共用）────────────────────
+  // 部署根（盖 .env/dist/scripts）、数据库及其 data/ 父两级、DSH 安装根、
+  // DSH 家目录（会话/设置/凭据）、本机 SSH 凭据、OS 系统目录。
+  const sensitivePathBases = (): string[] => {
+    const dbReal = (() => {
+      try {
+        return realpathSync(config.dbPath);
+      } catch {
+        return path.resolve(config.dbPath);
+      }
+    })();
+    const home = os.homedir();
+    const dshHome = process.env.DSH_HOME !== undefined && process.env.DSH_HOME !== ''
+      ? path.resolve(process.env.DSH_HOME)
+      : path.join(home, '.dsh');
+    // dsh 安装根：显式配置或自动探测（npm root -g/@deepseek-ai/dsh）；
+    // 用 findDshRoot 而不是直接读 config.patch.dshRoot，因为它可能是空（自动探测）
+    const resolvedDshRoot = findDshRoot(config.patch.dshRoot);
+    return [
+      gatewayRoot,
+      configuredRoot,
+      dbReal,
+      path.dirname(dbReal),
+      // 部署目录（dbPath 的 data/ 再上一级）：盖住 .env / dist / scripts
+      path.dirname(path.dirname(dbReal)),
+      resolvedDshRoot !== null ? resolvedDshRoot : '',
+      dshHome,
+      path.join(home, '.ssh'),
+      ...(process.platform === 'win32' ? [] : ['/etc', '/proc', '/sys', '/dev', '/boot']),
+    ].filter((p) => p !== '');
+  };
+  const isSensitivePath = (p: string): boolean =>
+    sensitivePathBases().some((base) => p === base || p.startsWith(base + path.sep));
 
   // ── 远程文件下载（Issue #4）──────────────────────────────────
   // 经网关远程访问时，点击对话里的“生成文件”标签不再在服务器容器里执行
@@ -2483,35 +2896,7 @@ export function createGatewayServer(
 
     // 4) 敏感路径屏蔽：DSH_HOME（会话/设置/凭据）、数据库、部署目录（盖 .env/data/dist）、
     //    本机 SSH 凭据、OS 系统目录（/etc /proc /sys /dev —— 永不会是工作区文件）
-    const dbReal = (() => {
-      try {
-        return realpathSync(config.dbPath);
-      } catch {
-        return path.resolve(config.dbPath);
-      }
-    })();
-    const home = os.homedir();
-    const dshHome = process.env.DSH_HOME !== undefined && process.env.DSH_HOME !== ''
-      ? path.resolve(process.env.DSH_HOME)
-      : path.join(home, '.dsh');
-    // dsh 安装根：显式配置或自动探测（npm root -g/@deepseek-ai/dsh）；
-    // 用 findDshRoot 而不是直接读 config.patch.dshRoot，因为它可能是空（自动探测）
-    const resolvedDshRoot = findDshRoot(config.patch.dshRoot);
-    const sensitiveBases: string[] = [
-      gatewayRoot,
-      configuredRoot,
-      dbReal,
-      path.dirname(dbReal),
-      // 部署目录（dbPath 的 data/ 再上一级）：盖住 .env / dist / scripts
-      path.dirname(path.dirname(dbReal)),
-      resolvedDshRoot !== null ? resolvedDshRoot : '',
-      dshHome,
-      path.join(home, '.ssh'),
-      ...(process.platform === 'win32' ? [] : ['/etc', '/proc', '/sys', '/dev', '/boot']),
-    ].filter((p) => p !== '');
-    const isSensitive = (p: string): boolean =>
-      sensitiveBases.some((base) => p === base || p.startsWith(base + path.sep));
-    if (isSensitive(real)) {
+    if (isSensitivePath(real)) {
       res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '敏感文件不可下载' });
       return;
     }
@@ -2553,6 +2938,97 @@ export function createGatewayServer(
       else res.destroy();
     });
     stream.pipe(res);
+  });
+
+  // ── 删除文件系统目录（仅主用户；目录选择器删除按钮的后端）────
+  // 用途：主用户在「选择工作区目录」弹窗里清理服务器上的文件夹（含隐藏目录）。
+  // 安全约束（按顺序）：
+  //  1. 仅主用户（apiAuth requireAdmin）——后端强制，前端隐藏不是授权边界
+  //  2. 规范化 + realpath 后再校验（防 ../ 与符号链接逃逸）
+  //  3. 必须是真实目录（非 Windows 用 O_DIRECTORY|O_NOFOLLOW 锁 fd 后 fstat，
+  //     Windows 上 openSync 目录会报错，退化为 statSync）
+  //  4. 敏感目录屏蔽（与 /gateway/api/download 同一套基列表）及其一切子路径
+  //  5. 文件系统根与用户主目录本身不可删
+  //  6. 递归删除 + 审计日志
+  const fsDeleteRate = new Map<number, number[]>();
+  app.post('/gateway/api/fs/delete-directory', jsonBody, (req, res) => {
+    const me = apiAuth(req, res, true);
+    if (!me) return;
+    const now = Date.now();
+    const recent = (fsDeleteRate.get(me.userId) ?? []).filter((t) => now - t < 60_000);
+    if (recent.length >= 30) {
+      fsDeleteRate.set(me.userId, recent);
+      res.status(429).json({ ok: false, code: 'RATE_LIMITED', error: '删除过于频繁，请稍后再试' });
+      return;
+    }
+    recent.push(now);
+    fsDeleteRate.set(me.userId, recent);
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const rawPath = typeof body.path === 'string' ? body.path : '';
+    if (rawPath === '' || rawPath.length > 4096) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: 'path 无效' });
+      return;
+    }
+    const abs = path.resolve(rawPath);
+    let real: string;
+    try {
+      real = realpathSync(abs);
+    } catch {
+      res.status(404).json({ ok: false, code: 'NOT_FOUND', error: '目录不存在' });
+      return;
+    }
+    let isDir: boolean;
+    if (process.platform === 'win32') {
+      try {
+        isDir = statSync(real).isDirectory();
+      } catch {
+        res.status(404).json({ ok: false, code: 'NOT_FOUND', error: '目录不存在' });
+        return;
+      }
+    } else {
+      // 锁 fd 后再判定目录类型，缩短 realpath 与删除之间的替换窗口。
+      // ENOTDIR = 路径存在但不是目录（400）；其它打开失败（不存在/权限）统一 404。
+      let fd: number | undefined;
+      let st;
+      try {
+        fd = openSync(real, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | (fsConstants.O_NOFOLLOW ?? 0));
+        st = fstatSync(fd);
+      } catch (error) {
+        const code = (error as { code?: string }).code;
+        if (fd !== undefined) closeSync(fd);
+        if (code === 'ENOTDIR') {
+          res.status(400).json({ ok: false, code: 'INVALID', error: '只能删除目录' });
+        } else {
+          res.status(404).json({ ok: false, code: 'NOT_FOUND', error: '目录不存在' });
+        }
+        return;
+      }
+      closeSync(fd);
+      isDir = st.isDirectory();
+    }
+    if (!isDir) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: '只能删除目录' });
+      return;
+    }
+    const fsRoot = path.parse(real).root;
+    if (real === fsRoot || real === os.homedir() || isSensitivePath(real)) {
+      res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '敏感目录不可删除' });
+      return;
+    }
+    try {
+      rmSync(real, { recursive: true, maxRetries: 3, retryDelay: 100 });
+    } catch (error) {
+      console.warn('[dsh-passwords] 目录删除失败:', String(error));
+      res.status(500).json({ ok: false, code: 'INTERNAL', error: '删除失败' });
+      return;
+    }
+    db.audit('fs_directory_deleted', {
+      username: me.username,
+      ip: req.ip,
+      userAgent: req.headers['user-agent'] ?? null,
+      detail: real,
+    });
+    res.json({ ok: true, deleted: real });
   });
 
   // ── 更新某子用户权限（仅主用户） ─────────────────────────────
@@ -2625,6 +3101,30 @@ export function createGatewayServer(
     if (allowSsh === null) return;
     const banned = readBooleanPermission('banned', body.banned, currentPermissions.banned);
     if (banned === null) return;
+    // 聊天媒体（sticker/image/video）开关：独立于 allowUpload（后者只管 DSH 大请求体/
+    // 官方上传档位），默认关闭。文本消息不受影响；省略字段时保留当前值。
+    const allowChatMedia = readBooleanPermission('allowChatMedia', body.allowChatMedia, currentPermissions.allow_chat_media);
+    if (allowChatMedia === null) return;
+    // 模型白名单：null = 不限，[] = 禁止全部，非空 = 严格 provider/model。
+    // 与 allowedAgentPresets 一致的部分更新语义；保存前正向校验每条记录，
+    // 非法项直接 400（不能静默丢弃后让管理员以为已生效）。
+    const submittedModels = body.allowedModels;
+    if (submittedModels !== undefined && submittedModels !== null && !Array.isArray(submittedModels)) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: '模型权限必须是数组或 null' });
+      return;
+    }
+    if (
+      Array.isArray(submittedModels) &&
+      (submittedModels.length > 512 || submittedModels.some((entry) => parseAllowedModelSpec(entry) === null))
+    ) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: '模型权限列表无效，必须是 provider/model' });
+      return;
+    }
+    const allowedModels = submittedModels === undefined
+      ? currentPermissions.allowed_models
+      : submittedModels === null
+        ? null
+        : normalizeAllowedModels(submittedModels as string[]);
     let sandboxMode: 'read-only' | 'workspace-write' | 'danger-full-access' | null;
     if (body.sandboxMode === undefined) {
       // 权限卡片/旧客户端可能只提交部分字段；省略沙盒字段必须保留既有
@@ -2693,10 +3193,11 @@ export function createGatewayServer(
       res.status(400).json({ ok: false, code: 'INVALID', error: '允许的会话列表无效' });
       return;
     }
+    const sessionAssignmentSubmitted = body.allowedSessionIds !== undefined;
     const previousAllowedSessionIds = db.listUserSessionGrants(userId);
-    let allowedSessionIds = body.allowedSessionIds === undefined
-      ? previousAllowedSessionIds
-      : [...new Set(body.allowedSessionIds as string[])];
+    let allowedSessionIds = sessionAssignmentSubmitted
+      ? [...new Set(body.allowedSessionIds as string[])]
+      : previousAllowedSessionIds;
     // Explicit assignment is a security-sensitive write. The DSH plugin owns
     // the live registry and archive state, so a gateway cache or client draft
     // cannot authorize a deleted/archived session. A missing authority is a
@@ -2732,6 +3233,36 @@ export function createGatewayServer(
     const prevPerms = effectivePermissions(userId);
     const quotaChanged =
       prevPerms.hourly_token_limit !== hourlyTokenLimit || prevPerms.daily_minutes_limit !== dailyMinutesLimit;
+    const sameStringSet = (left: readonly string[], right: readonly string[]): boolean => {
+      if (left.length !== right.length) return false;
+      const a = new Set(left);
+      return right.every((value) => a.has(value));
+    };
+    const sameFolderSet = (left: readonly string[], right: readonly string[]): boolean => {
+      const normalize = (value: string): string => value === '__deny__' ? value : normalizePath(value);
+      return sameStringSet(left.map(normalize), right.map(normalize));
+    };
+    const sameNullableStringSet = (left: readonly string[] | null, right: readonly string[] | null): boolean => {
+      if (left === null || right === null) return left === right;
+      return sameStringSet(left, right);
+    };
+    const foldersChanged = !sameFolderSet(prevPerms.allowed_folders, allowedFolders);
+    const disabledSessionsChanged = !sameStringSet(prevPerms.disabled_sessions, disabledSessions);
+    const sessionGrantsChanged = sessionAssignmentSubmitted && !sameStringSet(previousAllowedSessionIds, allowedSessionIds);
+    const sshChanged = prevPerms.allow_ssh !== allowSsh;
+    const sandboxChanged = prevPerms.sandbox_mode !== sandboxMode;
+    const modelsChanged = !sameNullableStringSet(prevPerms.allowed_models, allowedModels);
+    const mediaChanged = prevPerms.allow_chat_media !== allowChatMedia;
+    const accessChanged = foldersChanged || disabledSessionsChanged || sessionGrantsChanged || prevPerms.banned !== banned || sandboxChanged;
+    const otherPermissionChanged =
+      quotaChanged ||
+      prevPerms.allow_upload !== allowUpload ||
+      prevPerms.allow_git_download !== allowGitDownload ||
+      prevPerms.allow_workspace_create !== allowWorkspaceCreate ||
+      sshChanged ||
+      mediaChanged ||
+      modelsChanged ||
+      !sameNullableStringSet(prevPerms.allowed_agent_presets, allowedAgentPresets);
     db.setPermissions(userId, {
       allowedFolders,
       hourlyTokenLimit,
@@ -2741,10 +3272,12 @@ export function createGatewayServer(
       allowWorkspaceCreate,
       allowSsh,
       allowedAgentPresets,
+      allowedModels,
+      allowChatMedia,
       banned,
       sandboxMode,
       disabledSessions,
-      allowedSessionIds,
+      ...(sessionAssignmentSubmitted ? { allowedSessionIds } : {}),
     });
     // alpha.3 在每次工具执行时从 session log 的 sandbox/mode 折叠真实策略。
     // 只在确定为收紧时改写已有会话，绝不由权限保存隐式提升旧 session。
@@ -2769,18 +3302,20 @@ export function createGatewayServer(
         db.replaceUserSessionGrants(userId, allowedSessionIds.filter((id) => !revoked.has(id)));
       }
     }
-    // 权限行与显式 grant 已在数据库层同一事务提交成功后，才失效旧访问快照。
-    // 管理员显式保存（含故意置空=回收全部）后标记已初始化，避免后续被重新种子化。
-    db.markSessionGrantsSeeded(userId);
-    // 工作区白名单、禁用会话、显式 grant 或封禁状态变化后，旧会话授权快照不能继续生效；
-    // 递增全局请求序号，让在此之前发出的 workspace.list 响应也不能恢复旧授权。
-    invalidateUserSessionAccess(userId, ++workspaceListRequestRevision);
-    // Remote mux 的 workspace/session baseline 不会在数据库变更后自动刷新。关闭旧
-    // 订阅令 DSH 重新连接并建立新快照，避免子用户停留在授权前的“无工作区”状态。
-    closeUserRemoteMuxClients(userId);
-    // 统一撤销 legacy events 与获授权第三方 WebSocket；Remote mux 另有 1012
-    // 语义关闭，避免将其作为原始 socket 直接销毁。
-    closeUserWebSocketClients(userId);
+    // 只有显式提交会话集合时才完成一次性旧数据迁移/初始化。仅修改 SSH
+    // 开关或其它权限字段不能把“尚未建立会话授权快照”的用户永久冻结为空集合。
+    if (sessionAssignmentSubmitted) db.markSessionGrantsSeeded(userId);
+    // 仅在实际影响会话可见性的权限变化后失效旧快照；同值保存必须是 no-op，
+    // 否则设置页的重复提交会反复撕裂 Remote mux 并触发 DSH 无限重连。
+    if (accessChanged) {
+      invalidateUserSessionAccess(userId, ++workspaceListRequestRevision);
+      // Remote mux 的 workspace/session baseline 不会在数据库变更后自动刷新。关闭旧
+      // 订阅令 DSH 重新连接并建立新快照，避免子用户停留在授权前的旧状态。
+      closeUserRemoteMuxClients(userId);
+    }
+    // SSH 开关变化、封禁或其它实际权限变化都要撤销旧的 legacy/登记 WS；
+    // 没有实际变化时不触碰连接。
+    if (accessChanged || otherPermissionChanged) closeUserWebSocketClients(userId);
     if (quotaChanged) {
       db.resetUsage(userId);
       // 清掉内存节流缓存：否则 15 秒节流可能跳过新记录的创建，配额暂时不生效
@@ -2798,6 +3333,9 @@ export function createGatewayServer(
         allowWorkspaceCreate,
         allowSsh,
         allowedAgentPresets,
+        // 审计白名单本身（不是密钥/请求内容），便于事后核查授权变更
+        allowedModels,
+        allowChatMedia,
         banned,
         sandboxMode,
         disabledSessions,
@@ -2810,6 +3348,9 @@ export function createGatewayServer(
       allowedSessionIds: db.listUserSessionGrants(userId),
       disabledSessions,
       sandboxRevokedSessionIds,
+      // 回显规范化后的值：管理员看到的就是实际生效的白名单
+      allowedModels,
+      allowChatMedia,
     });
   });
 
@@ -2841,6 +3382,635 @@ export function createGatewayServer(
     db.addTokens(me.userId, todayLocal(), rounded, new Date().toISOString());
     res.json({ ok: true });
   });
+
+  // ── 聊天媒体（sticker / image / video）─────────────────────────
+  // 三步上传协议（见 docs/plans/2026-09-15-model-restrictions-chat-media-design.md）：
+  //   1. POST /gateway/api/message-media/init  签发不透明 uploadId（DB 行置 pending）
+  //   2. PUT  /gateway/api/message-media/:id   流式接收二进制 → 魔数校验 → 原子转正
+  //   3. POST /gateway/api/messages            带 mediaIds 绑定到消息（同事务）
+  // 文件本体写在 data/message-media/ 私有目录，文件名恒为随机 storage key，
+  // 绝不使用用户提供的路径/文件名（原始名只进 DB 作展示元数据）。
+  //
+  // 权限：主用户不受 allow_chat_media 限制；子用户默认关闭（effectivePermissions
+  // 的缺省行已给 false），且每个上传/下载都要重新判定，不缓存授权结果。
+  type ChatMediaKind = 'sticker' | 'image' | 'video';
+
+  /** 每种类型的允许 MIME → 允许的魔数族（按字节前缀判定，不看声明头） */
+  const MEDIA_POLICY: Record<ChatMediaKind, { maxBytes: number; mimes: readonly string[] }> = {
+    // sticker 通常是透明小图：PNG/JPEG/WebP/GIF 都允许（设计稿「必要时 GIF」）
+    sticker: { maxBytes: 2 * 1024 * 1024, mimes: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'] },
+    image: {
+      maxBytes: 10 * 1024 * 1024,
+      mimes: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'],
+    },
+    video: { maxBytes: 100 * 1024 * 1024, mimes: ['video/mp4', 'video/webm'] },
+  };
+
+  /** 上传会话有效期：未 PUT 完成的上传由清理器回收（转 failed + 删文件） */
+  const MEDIA_UPLOAD_TTL_MS = 30 * 60_000;
+  /** 服务端解包后的媒体过期时间：过期且未被消息占用的资产由 pruneMedia 回收 */
+  const MEDIA_ASSET_TTL_MS = 30 * 24 * 3600_000;
+  /** 并发上限：同一用户同时打开的 PUT 上传数（防单账号霸占磁盘/连接） */
+  const MEDIA_MAX_CONCURRENT_UPLOADS = 3;
+  /** 每用户未绑定（ready 但仍未挂到消息上）的资产上限：防“只上传不发送”刷盘 */
+  const MEDIA_MAX_PENDING_ASSETS_PER_USER = 20;
+  /** 每用户 1 小时内的 init 次数上限 */
+  const MEDIA_MAX_INITS_PER_HOUR = 60;
+  /** 单次 PUT 最长接收时间：慢速上传占着连接不放（服务端 requestTimeout 管整体） */
+  const MEDIA_UPLOAD_TIMEOUT_MS = 10 * 60_000;
+
+  /**
+   * 媒体私有目录：与 SQLite 同锚（dbPath 的 data/ 下），不是工作区、永远不可代理。
+   * 目录权限收紧到 0700（Windows 上忽略 mode，依赖父目录 ACL）。
+   */
+  const mediaRoot = path.join(path.dirname(config.dbPath), 'message-media');
+  const mediaObjectsDir = path.join(mediaRoot, 'objects');
+  const mediaTempDir = path.join(mediaRoot, 'tmp');
+  for (const dir of [mediaRoot, mediaObjectsDir, mediaTempDir]) {
+    try {
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+    } catch (error) {
+      console.warn('[dsh-passwords] 聊天媒体目录创建失败:', String(error));
+    }
+  }
+
+  /**
+   * storage key 的最终落盘路径。key 只由服务端随机生成（`o_<hex>` / `t_<hex>`），
+   * 这里仍做一次白名单校验：任何含分隔符/点段/非白名单字符的键都拒绝，
+   * 保证「随机 ID 决定路径」这条不变量在数据被污染时也不会被绕过。
+   */
+  const MEDIA_KEY_RE = /^[A-Za-z0-9_-]{8,128}$/;
+  function mediaFilePath(key: string, subdir: 'objects' | 'tmp'): string {
+    if (!MEDIA_KEY_RE.test(key)) throw new MediaError('存储键非法', 'INVALID_MEDIA');
+    const base = subdir === 'objects' ? mediaObjectsDir : mediaTempDir;
+    const full = path.join(base, key);
+    // 纵深防御：拼接结果必须仍在目标目录内（key 白名单下恒成立）
+    if (path.dirname(path.resolve(full)) !== path.resolve(base)) {
+      throw new MediaError('存储键越界', 'INVALID_MEDIA');
+    }
+    return full;
+  }
+
+  function newMediaKey(prefix: string): string {
+    return `${prefix}${randomBytes(16).toString('hex')}`;
+  }
+
+  function mediaKindOf(value: unknown): ChatMediaKind | null {
+    return value === 'sticker' || value === 'image' || value === 'video' ? value : null;
+  }
+
+  /**
+   * 魔数判定：只认文件真实内容，不认 Content-Type 声明（两者不符即拒绝）。
+   * 覆盖设计稿允许的全部格式，并显式拒绝 SVG/HTML/XML/压缩包/可执行文件——
+   * 它们要么魔数不匹配、要么（SVG/HTML/XML）被 isDangerousUploadName 拦下。
+   */
+  function sniffMediaType(head: Buffer): string | null {
+    if (head.length < 12) return null;
+    // JPEG: FF D8 FF
+    if (head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return 'image/jpeg';
+    // PNG: 89 50 4E 47 0D 0A 1A 0A
+    if (head.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+      return 'image/png';
+    }
+    // GIF87a / GIF89a
+    const gif = head.subarray(0, 6).toString('latin1');
+    if (gif === 'GIF87a' || gif === 'GIF89a') return 'image/gif';
+    // WebP: 'RIFF' + 4 字节长度 + 'WEBP'
+    if (head.subarray(0, 4).toString('latin1') === 'RIFF' && head.subarray(8, 12).toString('latin1') === 'WEBP') {
+      return 'image/webp';
+    }
+    // WebM: EBML 头 1A 45 DF A3（不进一步解析 DocType，见下方 MP4 注释）
+    if (head[0] === 0x1a && head[1] === 0x45 && head[2] === 0xdf && head[3] === 0xa3) return 'video/webm';
+    // MP4/MOV 家族: box size(4) + 'ftyp'。只做容器识别，不解析 codec——
+    // 这里的目标是「不是图片/脚本/压缩包」，不是内容审核。
+    if (head.subarray(4, 8).toString('latin1') === 'ftyp') return 'video/mp4';
+    return null;
+  }
+
+  /**
+   * 上传超时/放弃后的清理：临时文件立即删除，DB 行转 failed（保留元数据供排障，
+   * 但绝不再是 ready，无法被 /messages 绑定）。storage key 占位符由之后
+   * pruneMedia 的 pending 分支回收。
+   */
+  function failMediaUpload(mediaId: string, tempKey: string | null): void {
+    if (tempKey !== null) {
+      try {
+        unlinkSync(mediaFilePath(tempKey, 'tmp'));
+      } catch {
+        /* 已删除或从未创建 */
+      }
+    }
+    try {
+      db.markMediaFailed(mediaId);
+    } catch (error) {
+      console.warn('[dsh-passwords] 媒体上传失败标记丢失:', String(error));
+    }
+  }
+
+  /** 删除一批 storage keys 对应的文件本体（清理钩子用；失败只告警不阻断） */
+  function unlinkMediaFiles(keys: readonly string[], subdir: 'objects' | 'tmp' = 'objects'): void {
+    for (const key of keys) {
+      if (key === '') continue;
+      try {
+        unlinkSync(mediaFilePath(key, subdir));
+      } catch {
+        /* 文件不存在（重复清理）或键非法：忽略 */
+      }
+    }
+  }
+
+  /**
+   * 回收未被 DB 引用的临时上传文件：进程崩溃/重启会留下 tmp 文件（来不及 unlink），
+   * DB 里已无对应行可参考，只能按 mtime 判断。保守取 4 倍上传 TTL，
+   * 避免误删重启后仍可能被恢复的上传。
+   */
+  function pruneStaleMediaTemps(now: number): void {
+    const cutoff = now - MEDIA_UPLOAD_TTL_MS * 4;
+    let names: string[];
+    try {
+      names = readdirSync(mediaTempDir);
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      if (!MEDIA_KEY_RE.test(name)) continue;
+      const full = path.join(mediaTempDir, name);
+      try {
+        if (statSync(full).mtimeMs < cutoff) unlinkSync(full);
+      } catch {
+        /* 已被其他清理路径删除 */
+      }
+    }
+  }
+
+  /** init 限流：每用户滑动窗口（内存面与活跃用户数成正比，由 sweep 周期裁剪） */
+  const mediaInitRate = new Map<number, number[]>();
+  /** 每用户正在进行的 PUT 上传数 */
+  const mediaActiveUploads = new Map<number, number>();
+
+  /** 子用户是否有聊天媒体权限（默认拒绝；主用户不受限） */
+  function chatMediaAllowed(role: 'admin' | 'user', userId: number): boolean {
+    if (role === 'admin') return true;
+    return effectivePermissions(userId).allow_chat_media === true;
+  }
+
+  /** 标题式错误响应（所有媒体端点统一形状：{ ok:false, code, error }） */
+  function mediaError(res: Response, status: number, code: string, message: string): void {
+    res.status(status).json({ ok: false, code, error: message });
+  }
+
+  /**
+   * 上传端点的提前拒绝：在未读完整请求体时就回响应会让 Node 直接断开连接
+   * （客户端看到 ECONNRESET 而非我们的 4xx/JSON）。先把请求体排空再响应，
+   * 保证错误能完整送达；排空是丢弃性的，不再写入磁盘。
+   * 同时清理临时文件并把 DB 行转 failed，不留下 ready 的半成品。
+   */
+  function rejectUpload(
+    req: Request,
+    res: Response,
+    mediaId: string | null,
+    tempKey: string | null,
+    status: number,
+    code: string,
+    message: string,
+  ): void {
+    if (mediaId !== null) failMediaUpload(mediaId, tempKey);
+    req.resume();
+    // 'end' 在收到完整请求体（或被 aborted）后触发；'close' 兼容中断场景。
+    let done = false;
+    const respond = (): void => {
+      if (done) return;
+      done = true;
+      mediaError(res, status, code, message);
+    };
+    req.once('end', respond);
+    req.once('close', respond);
+    // 兜底：客户端声明了 Content-Length 却迟迟不发（或已发送完毕但事件已错过）时
+    // 不能永远挂着；短延迟后直接响应，此时连接已可安全关闭。
+    const timer = setTimeout(respond, 1000);
+    timer.unref();
+  }
+
+  /**
+   * 签发上传：校验权限/类型/文件名/配额，落一行 pending 资产并返回不透明 IDs。
+   * 只要客户端不提交 PUT，就不会占用磁盘（仅占一行元数据，由清理器回收）。
+   */
+  app.post('/gateway/api/message-media/init', jsonBody, (req, res) => {
+    const me = apiAuth(req, res);
+    if (!me) return;
+    if (!chatMediaAllowed(me.role, me.userId)) {
+      mediaError(res, 403, 'FORBIDDEN', '未开启聊天媒体权限');
+      return;
+    }
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const kind = mediaKindOf(body.kind);
+    if (kind === null) {
+      mediaError(res, 400, 'INVALID_KIND', 'kind 必须是 sticker/image/video');
+      return;
+    }
+    // 文件名只作展示元数据，从不参与落盘路径；仍拒绝危险名（.. 与可执行/脚本/
+    // SVG 后缀）以避免展示层/下载层对原始名的二次消费被利用。
+    const rawName = typeof body.fileName === 'string' ? body.fileName : '';
+    if (rawName !== '' && (rawName.length > 255 || isDangerousUploadName(rawName))) {
+      mediaError(res, 400, 'INVALID_NAME', '文件名非法');
+      return;
+    }
+    const policy = MEDIA_POLICY[kind];
+    const declaredMime = typeof body.mimeType === 'string' ? body.mimeType.trim().toLowerCase() : '';
+    if (declaredMime !== '' && !policy.mimes.includes(declaredMime)) {
+      mediaError(res, 400, 'INVALID_MIME', '该类型不允许此 MIME');
+      return;
+    }
+    const declaredSize = body.byteSize === undefined ? null : Number(body.byteSize);
+    if (declaredSize !== null && (!Number.isSafeInteger(declaredSize) || declaredSize <= 0 || declaredSize > policy.maxBytes)) {
+      mediaError(res, 400, 'TOO_LARGE', '文件过大');
+      return;
+    }
+    // 限流：防脚本化刷 init 制造大量 pending 行
+    const now = Date.now();
+    const recent = (mediaInitRate.get(me.userId) ?? []).filter((t) => now - t < 3600_000);
+    if (recent.length >= MEDIA_MAX_INITS_PER_HOUR) {
+      mediaInitRate.set(me.userId, recent);
+      mediaError(res, 429, 'RATE_LIMITED', '上传过于频繁，请稍后再试');
+      return;
+    }
+    recent.push(now);
+    mediaInitRate.set(me.userId, recent);
+    // 配额：未绑定到消息的 ready 资产数量（防止只 init/上传不发消息把磁盘刷满）
+    const unbound = db.listMediaForUser(me.userId);
+    if (unbound.length >= MEDIA_MAX_PENDING_ASSETS_PER_USER) {
+      mediaError(res, 429, 'MEDIA_QUOTA', '未发送的媒体过多，请先发送或等待过期');
+      return;
+    }
+    if ((mediaActiveUploads.get(me.userId) ?? 0) >= MEDIA_MAX_CONCURRENT_UPLOADS) {
+      mediaError(res, 429, 'MEDIA_BUSY', '并发上传过多，请稍后再试');
+      return;
+    }
+    const mediaId = newMediaKey('m_');
+    const expiresAt = new Date(now + MEDIA_UPLOAD_TTL_MS);
+    try {
+      const created = db.addMediaAsset({
+        id: mediaId,
+        ownerId: me.userId,
+        // pending 阶段不落盘：storage key 留空，由数据层写入占位键
+        storageKey: '',
+        originalName: rawName,
+        kind,
+        mimeType: declaredMime === '' ? policy.mimes[0] : declaredMime,
+        byteSize: declaredSize ?? policy.maxBytes,
+        sha256: '',
+        state: 'pending',
+        expiresAt,
+      });
+      if (!created.created) {
+        mediaError(res, 409, 'MEDIA_CONFLICT', '上传标识冲突，请重试');
+        return;
+      }
+    } catch (error) {
+      console.warn('[dsh-passwords] 媒体元数据创建失败:', String(error));
+      mediaError(res, 500, 'INTERNAL', '上传初始化失败');
+      return;
+    }
+    res.json({
+      ok: true,
+      // uploadId 与 mediaId 当前同值：前者用于 PUT，后者用于消息绑定；
+      // 分开给出是为将来把上传令牌与媒体身份解耦留口子，客户端不应假设二者不同。
+      uploadId: mediaId,
+      mediaId,
+      kind,
+      maxBytes: policy.maxBytes,
+      allowedMimeTypes: policy.mimes,
+      expiresAt: expiresAt.toISOString(),
+    });
+  });
+
+  /**
+   * 接收媒体二进制（流式落地，不经过 express JSON 解析）。
+   * 安全要点（按顺序）：
+   *   1. 鉴权 + 媒体权限；只有自己的 pending 资产可写；
+   *   2. Content-Length 提前拒绝（不读一个字节）；实际字节数再按上限二次封口；
+   *   3. 写入 temp 目录的随机文件名（绝不使用客户端提供的键/名），边写边算 sha256；
+   *   4. 只有首块前 64 字节做魔数嗅探，与声明 MIME 必须一致；
+   *   5. 全部通过才 rename 进 objects/ 并 finalizeMediaAsset；任何失败清理临时文件
+   *      并把 DB 行转 failed（不留下 ready 的半成品）。
+   */
+  app.put('/gateway/api/message-media/:id', (req, res) => {
+    const me = apiAuth(req, res);
+    if (!me) return;
+    const mediaId = typeof req.params.id === 'string' ? req.params.id : '';
+    // 必须先做形状校验再入 DB：非法 ID 直接 404（不暴露“是否存在”的差异）
+    if (!/^[A-Za-z0-9_-]{8,128}$/.test(mediaId)) {
+      mediaError(res, 404, 'NOT_FOUND', '媒体不存在');
+      return;
+    }
+    // 该 ID 必须是本用户的 pending 资产；否则一律 404（IDOR 防护：他人 ID 与
+    // 不存在的 ID 返回同一个响应，不泄露媒体存在性）
+    const asset = db.getMediaAssetFile(mediaId);
+    if (!asset || asset.owner_id !== me.userId || asset.state !== 'pending') {
+      mediaError(res, 404, 'NOT_FOUND', '媒体不存在');
+      return;
+    }
+    // 权限在 PUT 时重判：init 后权限被收紧也要立即失效
+    if (!chatMediaAllowed(me.role, me.userId)) {
+      rejectUpload(req, res, mediaId, null, 403, 'FORBIDDEN', '未开启聊天媒体权限');
+      return;
+    }
+    const kind = mediaKindOf(asset.kind);
+    if (kind === null) {
+      rejectUpload(req, res, mediaId, null, 400, 'INVALID_KIND', '媒体类型非法');
+      return;
+    }
+    const policy = MEDIA_POLICY[kind];
+    const declaredLength = Number(req.headers['content-length']);
+    if (Number.isFinite(declaredLength) && declaredLength > policy.maxBytes) {
+      rejectUpload(req, res, mediaId, null, 413, 'TOO_LARGE', '文件过大');
+      return;
+    }
+    // Content-Type 若给出必须属于该类型白名单；空则由魔数决定
+    const contentType = String(req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase();
+    if (contentType !== '' && !policy.mimes.includes(contentType)) {
+      rejectUpload(req, res, mediaId, null, 415, 'INVALID_MIME', '该类型不允许此 MIME');
+      return;
+    }
+    const tempKey = newMediaKey('u_');
+    let tempPath: string;
+    try {
+      tempPath = mediaFilePath(tempKey, 'tmp');
+    } catch {
+      rejectUpload(req, res, mediaId, null, 500, 'INTERNAL', '上传初始化失败');
+      return;
+    }
+    const hash = createHash('sha256');
+    const out = createWriteStream(tempPath, { flags: 'wx', mode: 0o600 });
+    let received = 0;
+    let head: Buffer = Buffer.alloc(0);
+    let settled = false;
+    mediaActiveUploads.set(me.userId, (mediaActiveUploads.get(me.userId) ?? 0) + 1);
+    const releaseSlot = (): void => {
+      const current = (mediaActiveUploads.get(me.userId) ?? 1) - 1;
+      if (current > 0) mediaActiveUploads.set(me.userId, current);
+      else mediaActiveUploads.delete(me.userId);
+    };
+    const finishFailure = (status: number, code: string, message: string): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(uploadTimeout);
+      releaseSlot();
+      req.unpipe(out);
+      out.destroy();
+      failMediaUpload(mediaId, tempKey);
+      if (!res.headersSent) {
+        // 不 destroy 连接：排空剩余请求体后再回 4xx，让客户端能完整收到错误
+        // （直接断开会把错误响应变成 ECONNRESET，客户端看不到原因）。
+        // 数据事件已通过 settled 短路，字节不再落盘。
+        rejectUpload(req, res, null, null, status, code, message);
+        return;
+      }
+      req.resume();
+    };
+    const finishSuccess = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(uploadTimeout);
+      releaseSlot();
+      const objectKey = newMediaKey('o_');
+      let objectPath: string;
+      try {
+        objectPath = mediaFilePath(objectKey, 'objects');
+        // 原子转正：先把临时文件重命名进私有对象目录，再更新 DB。
+        // 顺序保证「DB 说 ready」时文件必然已就位（反过来会留下不可读的 ready 记录）。
+        renameSync(tempPath, objectPath);
+      } catch (error) {
+        console.warn('[dsh-passwords] 媒体转正失败:', String(error));
+        failMediaUpload(mediaId, tempKey);
+        mediaError(res, 500, 'INTERNAL', '媒体写入失败');
+        return;
+      }
+      let finalized = null;
+      try {
+        finalized = db.finalizeMediaAsset(mediaId, {
+          storageKey: objectKey,
+          sha256: hash.digest('hex'),
+          byteSize: received,
+          mimeType: sniffed ?? asset.mime_type,
+          expiresAt: new Date(Date.now() + MEDIA_ASSET_TTL_MS),
+        });
+      } catch (error) {
+        console.warn('[dsh-passwords] 媒体元数据提交失败:', String(error));
+      }
+      if (finalized === null) {
+        // 元数据没转正（并发/过期/已失败）：对象文件立即回收，不能留下无主文件
+        try {
+          unlinkSync(objectPath);
+        } catch {
+          /* 已删除 */
+        }
+        mediaError(res, 409, 'MEDIA_STATE', '上传状态已失效，请重新上传');
+        return;
+      }
+      res.json({
+        ok: true,
+        mediaId,
+        kind,
+        mimeType: sniffed ?? asset.mime_type,
+        byteSize: received,
+        expiresAt: finalized.expires_at,
+      });
+    };
+    let sniffed: string | null = null;
+    const uploadTimeout = setTimeout(() => finishFailure(408, 'UPLOAD_TIMEOUT', '上传超时'), MEDIA_UPLOAD_TIMEOUT_MS);
+    uploadTimeout.unref();
+    out.on('error', () => finishFailure(500, 'INTERNAL', '媒体写入失败'));
+    req.on('aborted', () => finishFailure(499, 'UPLOAD_ABORTED', '上传已中断'));
+    // ⚠ 不用 req.pipe(out)：本处理器已自行消费 data 事件（计数/嗅探/哈希）。
+    // 同时 pipe 会让每个块被写两次（文件变成两倍大，且大小校验形同虚设）。
+    req.on('data', (chunk: Buffer) => {
+      if (settled) return;
+      received += chunk.length;
+      if (received > policy.maxBytes) {
+        finishFailure(413, 'TOO_LARGE', '文件过大');
+        return;
+      }
+      if (head.length < 64) {
+        head = head.length === 0 ? Buffer.from(chunk) : Buffer.concat([head, chunk]);
+      }
+      hash.update(chunk);
+      // 首块到达即校验魔数：不匹配立刻中断，不为伪造内容写完整文件
+      if (sniffed === null && head.length >= 12) {
+        sniffed = sniffMediaType(head);
+        if (sniffed === null || !policy.mimes.includes(sniffed)) {
+          finishFailure(415, 'INVALID_CONTENT', '文件内容与类型不符');
+          return;
+        }
+      }
+      if (!out.write(chunk)) req.pause();
+    });
+    out.on('drain', () => {
+      if (!settled) req.resume();
+    });
+    req.on('end', () => {
+      if (settled) return;
+      // 空文件 / 未达嗅探门槛：一律拒绝（没有可识别的媒体内容）
+      if (received === 0) {
+        finishFailure(400, 'EMPTY_UPLOAD', '上传内容为空');
+        return;
+      }
+      if (sniffed === null) sniffed = sniffMediaType(head);
+      if (sniffed === null || !policy.mimes.includes(sniffed)) {
+        finishFailure(415, 'INVALID_CONTENT', '文件内容与类型不符');
+        return;
+      }
+      out.end(() => finishSuccess());
+    });
+    req.on('error', () => finishFailure(500, 'INTERNAL', '上传失败'));
+  });
+
+  /**
+   * 媒体读取：鉴权链 = 不透明媒体 ID → 占用它的消息 → 当前用户是否可见该消息
+   * （getMessageMediaForUser）。**不按媒体 owner 放行**——主用户/上传者如果看不到
+   * 那条消息（例如子用户给第三人发的私信），同样 404，避免用 owner 身份绕过。
+   * 文件侧：realpath + 敏感目录屏蔽 + O_NOFOLLOW + fstat 锁 fd（与 /api/download 同口径）。
+   */
+  function serveMessageMedia(req: Request, res: Response): void {
+    const me = apiAuth(req, res);
+    if (!me) return;
+    const mediaId = typeof req.params.id === 'string' ? req.params.id : '';
+    if (!/^[A-Za-z0-9_-]{8,128}$/.test(mediaId)) {
+      mediaError(res, 404, 'NOT_FOUND', '媒体不存在');
+      return;
+    }
+    // 消息可见性鉴权：拿不到就是不存在的媒体（不区分“无权限”与“不存在”）
+    const visible = db.getMessageMediaForUser(mediaId, me.userId);
+    if (!visible) {
+      mediaError(res, 404, 'NOT_FOUND', '媒体不存在');
+      return;
+    }
+    const internal = db.getMediaAssetFile(mediaId);
+    if (!internal || internal.state !== 'ready') {
+      mediaError(res, 404, 'NOT_FOUND', '媒体不存在');
+      return;
+    }
+    const kind = mediaKindOf(internal.kind);
+    if (kind === null) {
+      mediaError(res, 404, 'NOT_FOUND', '媒体不存在');
+      return;
+    }
+    let expectedPath: string;
+    try {
+      expectedPath = mediaFilePath(internal.storage_key, 'objects');
+    } catch {
+      mediaError(res, 404, 'NOT_FOUND', '媒体不存在');
+      return;
+    }
+    // realpath 后再比对：防 storage_key 被替换成指向媒体目录之外的符号链接
+    let real: string;
+    try {
+      real = realpathSync(expectedPath);
+    } catch {
+      mediaError(res, 404, 'NOT_FOUND', '媒体不存在');
+      return;
+    }
+    const mediaRootReal = (() => {
+      try {
+        return realpathSync(mediaObjectsDir);
+      } catch {
+        return path.resolve(mediaObjectsDir);
+      }
+    })();
+    if (real !== expectedPath && !real.startsWith(mediaRootReal + path.sep)) {
+      mediaError(res, 403, 'FORBIDDEN', '媒体路径非法');
+      return;
+    }
+    // 锁定 fd：后续 Range/HEAD/GET 都从同一 fd 读取，避免 stat 与打开之间被替换
+    let fd: number;
+    let st;
+    try {
+      const noFollow = process.platform === 'win32' ? 0 : (fsConstants.O_NOFOLLOW ?? 0);
+      fd = openSync(real, fsConstants.O_RDONLY | noFollow);
+      st = fstatSync(fd);
+    } catch {
+      mediaError(res, 404, 'NOT_FOUND', '媒体不存在');
+      return;
+    }
+    if (!st.isFile()) {
+      closeSync(fd);
+      mediaError(res, 404, 'NOT_FOUND', '媒体不存在');
+      return;
+    }
+    const size = st.size;
+    res.setHeader('Content-Type', internal.mime_type);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('Accept-Ranges', 'bytes');
+    // inline：媒体要在消息气泡里直接渲染；文件名不参与（不输出原始名）
+    res.setHeader('Content-Disposition', 'inline');
+    const rangeHeader = typeof req.headers.range === 'string' ? req.headers.range : '';
+    // Range 只对视频开放（图片/表情包不需要断点续传，少一条攻击面）
+    if (kind === 'video' && rangeHeader !== '') {
+      const match = /^bytes=([0-9]*)-([0-9]*)$/.exec(rangeHeader.trim());
+      const invalid = (): void => {
+        res.setHeader('Content-Range', `bytes */${size}`);
+        closeSync(fd);
+        res.status(416).end();
+      };
+      if (match === null) {
+        invalid();
+        return;
+      }
+      const startRaw = match[1];
+      const endRaw = match[2];
+      let start: number;
+      let end: number;
+      if (startRaw === '') {
+        // 后缀范围 `bytes=-N`：取末尾 N 字节
+        const suffix = endRaw === '' ? NaN : Number(endRaw);
+        if (!Number.isSafeInteger(suffix) || suffix <= 0) {
+          invalid();
+          return;
+        }
+        start = Math.max(0, size - suffix);
+        end = size - 1;
+      } else {
+        start = Number(startRaw);
+        end = endRaw === '' ? size - 1 : Number(endRaw);
+      }
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end || start >= size) {
+        invalid();
+        return;
+      }
+      if (end >= size) end = size - 1;
+      res.status(206);
+      res.setHeader('Content-Range', `bytes ${start}-${end}/${size}`);
+      res.setHeader('Content-Length', String(end - start + 1));
+      if (req.method === 'HEAD') {
+        closeSync(fd);
+        res.end();
+        return;
+      }
+      const stream = createReadStream(real, { fd, autoClose: true, start, end });
+      stream.on('error', () => {
+        if (!res.headersSent) mediaError(res, 500, 'INTERNAL', '读取失败');
+        else res.destroy();
+      });
+      stream.pipe(res);
+      return;
+    }
+    res.setHeader('Content-Length', String(size));
+    if (req.method === 'HEAD') {
+      closeSync(fd);
+      res.end();
+      return;
+    }
+    const stream = createReadStream(real, { fd, autoClose: true });
+    stream.on('error', () => {
+      if (!res.headersSent) mediaError(res, 500, 'INTERNAL', '读取失败');
+      else res.destroy();
+    });
+    stream.pipe(res);
+  }
+
+  app.get('/gateway/api/message-media/:id', serveMessageMedia);
+  app.head('/gateway/api/message-media/:id', serveMessageMedia);
 
   // ── 留言列表（所有登录用户；可见性在 SQL 层按用户过滤） ─────
   // 支持 ?since=<id> 增量拉取（客户端轮询只取新增消息，避免每次全量下载）。
@@ -2883,9 +4053,44 @@ export function createGatewayServer(
     const body = (req.body ?? {}) as Record<string, unknown>;
     // 服务端净化（#3）：剥离 HTML/CSS 结构后入库——防存储型注入 + AI agent 间接提示注入
     const content = sanitizeText(typeof body.content === 'string' ? body.content : '');
-    if (content === '') {
-      res.status(400).json({ ok: false, code: 'INVALID', error: '内容不能为空' });
+    // 媒体附件：纯媒体消息允许 content 为空，但必须至少有一个合法媒体
+    // （见下方「必需条件」判定）。mediaIds 是客户端拿到的不透明 ID 数组。
+    const rawMediaIds = Array.isArray(body.mediaIds) ? body.mediaIds : [];
+    if (
+      rawMediaIds.length > 10 ||
+      rawMediaIds.some((id) => typeof id !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(id))
+    ) {
+      res.status(400).json({ ok: false, code: 'INVALID_MEDIA_ID', error: '媒体 ID 非法' });
       return;
+    }
+    const mediaIds = [...new Set(rawMediaIds as string[])];
+    if (mediaIds.length > 0 && !chatMediaAllowed(me.role, me.userId)) {
+      res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '未开启聊天媒体权限' });
+      return;
+    }
+    const rawCaptions = Array.isArray(body.captions) ? body.captions : [];
+    if (rawCaptions.some((caption) => caption !== null && typeof caption !== 'string')) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: 'captions 必须是字符串数组' });
+      return;
+    }
+    // 发布前的预检（与数据层的绑定校验同口径）：失败在写库前给出明确 4xx，
+    // 数据层仍在事务内重复校验（并发下它是唯一可信边界）。
+    for (const mediaId of mediaIds) {
+      if (!db.mediaOwnedByUser(mediaId, me.userId)) {
+        res.status(403).json({ ok: false, code: 'MEDIA_NOT_OWNED', error: '媒体不属于当前用户或未就绪' });
+        return;
+      }
+      if (db.mediaAttachedToAnyMessage(mediaId)) {
+        res.status(409).json({ ok: false, code: 'MEDIA_IN_USE', error: '媒体已被其他消息占用' });
+        return;
+      }
+    }
+    if (content === '') {
+      // 纯媒体消息：内容可以为空串，但必须有媒体；两者都缺仍按旧行为拒绝
+      if (mediaIds.length === 0) {
+        res.status(400).json({ ok: false, code: 'INVALID', error: '内容不能为空' });
+        return;
+      }
     }
     if (content.length > 4000) {
       res.status(400).json({ ok: false, code: 'INVALID', error: '内容过长' });
@@ -2944,7 +4149,43 @@ export function createGatewayServer(
       .map((tag) => tag.trim())
       .filter((tag) => tag.length > 0 && tag.length <= 64)
       .slice(0, 8);
-    const msg = db.addMessage(me.userId, recipientId, content, tags);
+    // captions 与 mediaIds 同序（数据层按索引写入 sort_order 对应的 caption）
+    const mediaCaptions = mediaIds.map((_, index) => {
+      const raw = rawCaptions[index];
+      if (typeof raw !== 'string') return null;
+      // caption 也是可渲染的展示文本：与 content 同口径净化
+      const caption = sanitizeText(raw).trim();
+      return caption === '' ? null : caption.slice(0, 500);
+    });
+    let msg: MessageRow;
+    try {
+      // 同一事务写入消息与媒体关系（媒体校验失败则消息不落库）
+      msg = db.addMessageWithMedia({
+        senderId: me.userId,
+        recipientId,
+        content,
+        tags,
+        mediaIds,
+        mediaCaptions,
+      });
+    } catch (error) {
+      if (error instanceof MediaError) {
+        const status =
+          error.code === 'MEDIA_NOT_OWNED' || error.code === 'MEDIA_NOT_READY' || error.code === 'MEDIA_EXPIRED'
+            ? 403
+            : error.code === MEDIA_IN_USE
+              ? 409
+              : error.code === 'MEDIA_NOT_FOUND' || error.code === 'INVALID_MEDIA_ID'
+                ? 404
+                : 400;
+        res.status(status).json({ ok: false, code: error.code, error: '媒体附件无效' });
+        return;
+      }
+      // 写库失败（磁盘/锁）：不能返回一个并不存在的消息
+      console.warn('[dsh-passwords] 留言写入失败:', String(error));
+      res.status(500).json({ ok: false, code: 'INTERNAL', error: '消息发送失败' });
+      return;
+    }
     broadcastMessage(msg);
     res.json({ ok: true, message: msg });
   });
@@ -3048,7 +4289,7 @@ export function createGatewayServer(
         updateEngine.bumpActivity();
       }
       // /gateway 精确路径与 /gateway/* 都视为网关自有前缀——但只放行已知路由，
-      // 未知子路径（如 /gateway/api/dsh-ssh/hosts 误拼接）直接 404，
+      // 未知子路径（如 /gateway/api/xxx/yyy 误拼接）直接 404，
       // 不透传到上游 dsh（否则未登录也返回 SPA 壳，泄露 window.__DSH_BOOT__ 插件清单）
       if (gatePath === '/gateway' || gatePath.startsWith('/gateway/')) {
         // F-1：编码/压扁变形（/gateway%2Fapi%2Foverview、/gateway//login）——
@@ -3073,8 +4314,13 @@ export function createGatewayServer(
           return;
         }
         // 精确白名单：只放行网关自有路由。
-        // /gateway/api/* 不能整段放行——/gateway/api/dsh-ssh/hosts 之类误拼接路径
+        // /gateway/api/* 不能整段放行——与插件子路径误拼接的路径
         // 会透传到上游 dsh 返回 SPA 壳（泄露 window.__DSH_BOOT__ 插件清单）。
+        // 聊天媒体：只放行精确的 init 路径与「合法形状的媒体 ID」子路径——
+        // 相机错误拼接、编码变形与带斜杠/点段的路径都 404（不落到代理层）。
+        const mediaRouteAllowed =
+          gatePath === '/gateway/api/message-media/init' ||
+          /^\/gateway\/api\/message-media\/[A-Za-z0-9_-]{8,128}$/.test(gatePath);
         const knownGatewayRoute =
           gatePath === '/gateway' ||
           gatePath === '/gateway/' ||
@@ -3084,8 +4330,10 @@ export function createGatewayServer(
           gatePath === '/gateway/api/overview' ||
           gatePath === '/gateway/api/permissions' ||
           gatePath === '/gateway/api/usage/report' ||
+          gatePath === '/gateway/api/fs/delete-directory' ||
           gatePath === '/gateway/api/messages' ||
           gatePath.startsWith('/gateway/api/messages/') ||
+          mediaRouteAllowed ||
           gatePath.startsWith('/gateway/internal/');
         if (!knownGatewayRoute) {
           res.status(404).type('text/plain').send('404 Not Found');
@@ -3101,14 +4349,19 @@ export function createGatewayServer(
       }
       const user = sessionOf(req);
       if (!user) {
-        // 重定向兼容层：记录原始 URL，登录后跳回
-        const nextUrl = encodeURIComponent(req.originalUrl);
-        res.redirect(302, `/gateway/login?next=${nextUrl}`);
+        // 重定向兼容层：记录原始 URL，登录后跳回。根路径是默认落点，
+        // 不在地址栏附带 next 参数（不把内部路由目标甩到公开 URL 上）；
+        // 登录成功后 safeNext 缺省回首页。
+        const original = req.originalUrl;
+        const target = original === '/' ? '/gateway/login' : `/gateway/login?next=${encodeURIComponent(original)}`;
+        res.redirect(302, target);
         return;
       }
       const row = db.getUserById(user.userId);
       if (!row) {
-        res.redirect(302, `/gateway/login?next=${encodeURIComponent(req.originalUrl)}`);
+        const original = req.originalUrl;
+        const target = original === '/' ? '/gateway/login' : `/gateway/login?next=${encodeURIComponent(original)}`;
+        res.redirect(302, target);
         return;
       }
       // 所有路径型授权必须使用与上游转发完全相同的规范化路径。若使用 WHATWG
@@ -3135,7 +4388,7 @@ export function createGatewayServer(
         }
       }
       // 记录所有登录用户（含主用户）的用户 id：供 session.create/fork 响应回调
-      // 登记 sessionId→cwd 缓存与 dsh-ssh 主机 SSRF 校验使用；权限行仍只挂子用户
+      // 登记 sessionId→cwd 缓存与已登记 SSH 端点的 SSRF 校验使用；权限行仍只挂子用户
       (req as Req).dshpwUser = user.userId;
       (req as Req).dshpwIsAdmin = row.role === 'admin';
       if (row.role !== 'admin') {
@@ -3145,51 +4398,82 @@ export function createGatewayServer(
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.banned')));
           return;
         }
-        // SSH 由主用户统一配置主机，子用户只获得“使用已配置主机”的权限。
-        // 子用户不能新增/导入/修改/删除主机，也不能使用无 alias 归属的
-        // cluster/tunnel 管理面；主机摘要不包含 password/passphrase/private key。
-        if (isSshPluginEndpoint(requestPath)) {
-          const publicAsset = isSshPublicAssetEndpoint(req.method, requestPath);
-          const hostsList = req.method === 'GET' && requestPath === '/api/dsh-ssh/hosts';
-          const aliasQueryOperation = isSshAliasQueryEndpoint(requestPath);
-          const aliasBodyOperation = isSshAliasBodyEndpoint(requestPath);
-          if (
-            !perms.allow_ssh ||
-            isUnscopedSshEndpoint(requestPath) ||
-            (!publicAsset && !hostsList && !aliasQueryOperation && !aliasBodyOperation)
-          ) {
-            res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.adminOnly')));
-            return;
-          }
-          // POST/PATCH/DELETE /hosts 与 import 不属于子用户使用面；只有主用户
-          // 可以改变共享的 SSH 配置。alias 操作只允许访问已配置的 alias，
-          // 未知 alias 由 dsh-ssh 上游返回错误，不通过网关扩大主机清单。
-          if (requestPath === '/api/dsh-ssh/hosts' && req.method !== 'GET') {
-            res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.adminOnly')));
-            return;
-          }
-          if (aliasQueryOperation || isSshTerminalEndpoint(requestPath)) {
-            const alias = parsed.searchParams.get('alias');
-            if (alias === null || !isSafeSshAlias(alias)) {
-              res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.adminOnly')));
-              return;
-            }
-          }
+        // ── 端点分类（网关唯一的路由分类入口，代码不含任何插件专属路径）──
+        //   owner: 登记 → 403；其余登记 → 需 allow_ssh（主用户登记 + 子用户勾选，
+        //   缺一不可）；官方面 → 继续走下面的细粒度权限逻辑；其余（未登记的
+        //   第三方 /api 或根级插件路由）→ fail-closed，仅插件兼容层接管的
+        //   插件面板除外。
+        const pathClass = classifySubuserPath(requestPath, {
+          endpointRules,
+          transport: 'http',
+        });
+        if (pathClass === 'owner-only') {
+          res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.adminOnly')));
+          return;
         }
-        // Third-party HTTP APIs remain plugin-specific. This gateway no longer
-        // carries a special better-sidebar policy; unsupported plugin HTTP
-        // operation surfaces stay owner-only through their own registration or
-        // generic plugin controls.
-        if (isAdminOnlyPluginEndpoint(req.method, requestPath)) {
+        if (pathClass === 'ssh') {
+          if (!perms.allow_ssh) {
+            res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.adminOnly')));
+            return;
+          }
+        } else if (pathClass === 'third-party' && !compat.claimsRootPath(requestPath)) {
+          // ── terminal/list 空成功伪装（Issue：子用户顶栏「重试恢复终端」）──────
+          // 官方客户端会话头部 TerminalRecovery 组件挂载时调 terminal/list 恢复
+          // 终端；子用户被 403 → restore() reject → 顶栏常驻重试按钮且反复重发。
+          // terminal 命名空间对子用户必须 fail-closed（create/follow/write =
+          // 服务器远程 shell，可达即沙箱逃逸），但 list 是唯一只读且安全的例外：
+          // 回一个「空终端列表」的成功响应（value 必须是裸数组，rpcId 原样回显）
+          // ——客户端据此认为没有可恢复的终端，横幅消失，不会自动打开任何 tab。
+          // 子用户永远无法创建终端（create 仍 403），因此空列表恒为真，无信息泄露。
+          if (req.method === 'POST' && TERMINAL_LIST_RE.test(requestPath)) {
+            const chunks: Buffer[] = [];
+            let size = 0;
+            let failed = false;
+            req.on('data', (chunk: Buffer) => {
+              if (failed) return;
+              size += chunk.length;
+              if (size > 64 * 1024) {
+                failed = true;
+                return;
+              }
+              chunks.push(chunk);
+            });
+            req.on('end', () => {
+              if (failed || res.writableEnded) return;
+              let rpcId = '';
+              try {
+                const parsedBody = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { rpcId?: unknown };
+                if (typeof parsedBody.rpcId === 'string' && parsedBody.rpcId.length <= 200) rpcId = parsedBody.rpcId;
+              } catch {
+                /* 形状不符：回退到常规 403 */
+              }
+              if (rpcId === '') {
+                res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.adminOnly')));
+                return;
+              }
+              res.status(200).type('application/json').send(
+                JSON.stringify({ type: 'server-response', rpcId, result: { ok: true, value: [] } }),
+              );
+            });
+            req.on('error', () => {
+              if (!res.writableEnded) res.destroy();
+            });
+            return;
+          }
+          // 未登记的第三方路径：fail-closed。打印一行日志，便于主用户发现漏登记的端点。
+          console.warn(
+            `[dsh-passwords] 拒绝未登记的第三方路径 method=${req.method} path=${requestPath} user=${user.userId}`,
+          );
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.adminOnly')));
           return;
         }
 
-        if (!perms.allow_upload && (isUploadRequest(req.method, requestPath) || isAionuiFileWrite(req.method, requestPath))) {
+        if (!perms.allow_upload && (isUploadRequest(req.method, requestPath) || compat.isFileWrite(req.method, requestPath))) {
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.noUpload')));
           return;
         }
-        if (!perms.allow_git_download && (isGitRequest(requestPath) || isAionuiFileRead(req.method, requestPath))) {
+        if (!perms.allow_git_download &&
+            (isGitRequest(requestPath) || compat.isFileRead(req.method, requestPath) || compat.isExfilEndpoint(req.method, requestPath))) {
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.noGit')));
           return;
         }
@@ -3208,22 +4492,22 @@ export function createGatewayServer(
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.workspaceDenied')));
           return;
         }
-        // aionui-panel 文件树：GET/HEAD 的 root 在 query 里，直接校验白名单（拦截目录浏览/下载）
-        // ⚠ 只对 aionui-panel 路径做此检查——aionuiRootFrom 对非 aionui-panel 路径返回 null，
-        //  若用 null 判 fail-closed 会把普通 GET/HEAD（state/messages/页面资源等）全部 403
+        // 插件面板文件树（兼容层接管）：GET/HEAD 的 root 在 query 里，直接校验白名单
+        // （拦截目录浏览/下载）。⚠ 只对兼容层声明的面板路径做此检查——提取函数对
+        // 其他路径返回 null，若用 null 判 fail-closed 会把普通 GET/HEAD 全部 403。
         if (
           isWorkspaceRestricted(perms.allowed_folders) &&
           (req.method === 'GET' || req.method === 'HEAD') &&
-          isAionuiPanel(requestPath)
+          compat.isPanelPath(requestPath)
         ) {
-          const aionuiRoot = aionuiRootFrom(req.method, requestPath, parsed.searchParams, null);
+          const panelRoot = compat.folderRootFrom(req.method, requestPath, parsed.searchParams, null);
           // 提取不到 root 时也 fail-closed（之前直接放行→白名单外的目录可被下载）
-          if (aionuiRoot === null || !folderAllowed(aionuiRoot, perms.allowed_folders)) {
+          if (panelRoot === null || !folderAllowed(panelRoot, perms.allowed_folders)) {
             res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
             return;
           }
         }
-        if (!isStaticAsset(requestPath) && !isPollingRequest(requestPath)) {
+        if (!isStaticAsset(requestPath) && !isPollingRequest(requestPath) && !compat.isPollingEndpoint(requestPath)) {
           // 配额计时从子用户“说第一句话”（发消息锚点）才开始：
           // 未使用过的子用户（无当日记录且非锚点请求）不创建记录、不受配额限制
           const day = todayLocal();
@@ -3244,12 +4528,11 @@ export function createGatewayServer(
         // 附上权限，供后续文件夹限制中间件 / 代理 token 计量使用
         (req as Req).dshpwPerms = perms;
       }
-      // ── 第三方插件纵深防御（所有登录用户，含主用户） ──
-      // dsh-uploads 上传：高危 Web 可解释扩展名（.php/.jsp/.svg 等）拒绝——
+      // ── 插件兼容层纵深防御（仅兼容层开启时生效） ──
+      // 已知上传插件：高危 Web 可解释扩展名（.php/.jsp/.svg 等）拒绝——
       // 插件本身不限制类型，网关先拦一层（上传目录若被 Web 面暴露即 RCE 面）
       if (
-        req.method === 'POST' &&
-        gatePath === '/api/dsh-uploads' &&
+        compat.isDangerousUploadRequest(req.method ?? 'GET', gatePath) &&
         isDangerousUploadName(String(req.headers['x-file-name'] ?? ''))
       ) {
         const lang = langOf(req);
@@ -3592,10 +4875,10 @@ export function createGatewayServer(
           return;
         }
 
-        // ── F-A2：aionui-panel/read（POST JSON 读文件内容）——缓冲 + 递归清洗隐藏
+        // ── F-A2：插件面板 JSON 读文件端点（兼容层声明）——缓冲 + 递归清洗隐藏
         // Unicode（零宽/bidi 等）。文件内容进 AI 模型前必经网关代理，在这里补偿清洗，
         // 不必等供应商（dsh）修复；对全部登录用户生效（主用户同样可能被诱导读恶意文件）。
-        if (req.method === 'POST' && proxyPath === '/aionui-panel/read') {
+        if (compat.responseSanitizeKind(req.method, proxyPath) === 'json') {
           bufferUpstream(upstreamRes, res, (raw) => {
             try {
               let body = raw;
@@ -3622,41 +4905,6 @@ export function createGatewayServer(
           return;
         }
 
-        // ── dsh-ssh 主机响应：子用户可读取主用户配置的安全摘要 ──
-        if (reqAs.dshpwUser !== undefined && reqAs.dshpwIsAdmin !== true &&
-            req.method === 'GET' && proxyPath === '/api/dsh-ssh/hosts') {
-          bufferUpstream(upstreamRes, res, (raw) => {
-            try {
-              const status = upstreamRes.statusCode ?? 500;
-              if (status < 200 || status >= 300) {
-                const respHeaders = headersForStreaming(upstreamRes.headers);
-                if (!res.headersSent) res.writeHead(status, respHeaders);
-                if (!res.writableEnded) res.end(raw);
-                return;
-              }
-              const decoded = decodeUpstreamBody(raw, String(upstreamRes.headers['content-encoding'] ?? ''));
-              const parsed: unknown = JSON.parse(decoded.toString('utf8'));
-              if (!isPlainJsonRecord(parsed) || !Array.isArray(parsed.hosts)) {
-                if (!res.headersSent) res.status(502).type('text/plain').send('502 SSH host response unprocessable');
-                return;
-              }
-              // dsh-ssh 返回的是 SshHostSummary，不含 password/passphrase/key 内容；
-              // 子用户只读取主用户已经配置的安全摘要。
-              const hosts = parsed.hosts.filter((host): host is Record<string, unknown> =>
-                isPlainJsonRecord(host) && typeof host.alias === 'string' && isSafeSshAlias(host.alias),
-              );
-              const out = Buffer.from(JSON.stringify({ ...parsed, hosts }), 'utf8');
-              const respHeaders = headersForRewrittenBody(upstreamRes.headers);
-              respHeaders['content-length'] = String(out.length);
-              if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
-              if (!res.writableEnded) res.end(out);
-            } catch {
-              if (!res.headersSent) res.status(502).type('text/plain').send('502 SSH host response unprocessable');
-            }
-          });
-          return;
-        }
-
         // ── workspace 管理响应：成功后同步工作区登记 ──
         // DSH Remote business failures also use HTTP 200. In particular,
         // workspace/create reports { created: false } when resolving an existing
@@ -3667,6 +4915,8 @@ export function createGatewayServer(
             let businessOk = false;
             let created = false;
             let createdPath: string | null = null;
+            let createdWorkspaceId: string | null = null;
+            let createdWorkspaceRow: Record<string, unknown> | null = null;
             try {
               const body = decodeUpstreamBody(raw, String(upstreamRes.headers['content-encoding'] ?? ''));
               const parsed = JSON.parse(body.toString('utf8')) as Record<string, unknown>;
@@ -3677,6 +4927,8 @@ export function createGatewayServer(
                 if (isPlainJsonRecord(value) && value.created === true && isPlainJsonRecord(value.workspace) && typeof value.workspace.path === 'string') {
                   created = true;
                   createdPath = value.workspace.path;
+                  createdWorkspaceRow = value.workspace;
+                  if (typeof value.workspace.workspaceId === 'string') createdWorkspaceId = value.workspace.workspaceId;
                 }
               }
             } catch {
@@ -3687,6 +4939,18 @@ export function createGatewayServer(
                 if (created && createdPath !== null && normalizePath(createdPath) === reqAs.dshpwWorkspacePath) {
                   db.addUserWorkspace(reqAs.dshpwUser!, reqAs.dshpwWorkspacePath);
                   db.addAllowedFolder(reqAs.dshpwUser!, reqAs.dshpwWorkspacePath);
+                  // 立即更新该用户的 workspaceId→path 映射并向已建立的 Remote mux
+                  // 连接补发过滤后的 upsert：否则紧随其后的 session.create（带
+                  // workspaceId）会因映射缺失被 403，早到的上游 upsert 也已被丢弃。
+                  if (createdWorkspaceId !== null && createdWorkspaceRow !== null) {
+                    const revision = userAccessRevisionFor(reqAs.dshpwUser!);
+                    const paths = new Map(userWorkspacePaths.get(reqAs.dshpwUser!) ?? []);
+                    paths.set(createdWorkspaceId, createdPath);
+                    replaceUserWorkspacePaths(reqAs.dshpwUser!, paths, revision);
+                    for (const muxConnection of remoteMuxClientsByUser.get(reqAs.dshpwUser!) ?? []) {
+                      muxConnection.publishWorkspaceUpsert(createdWorkspaceRow);
+                    }
+                  }
                 }
               } else if (reqAs.dshpwWorkspaceOldPath !== undefined && reqAs.dshpwWorkspaceNewPath !== undefined) {
                 db.renameUserWorkspace(reqAs.dshpwUser!, reqAs.dshpwWorkspaceOldPath, reqAs.dshpwWorkspaceNewPath);
@@ -3697,6 +4961,62 @@ export function createGatewayServer(
             const respHeaders = headersForStreaming(upstreamRes.headers);
             if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
             if (!res.writableEnded) res.end(raw);
+          });
+          return;
+        }
+
+        // ── directoryPicker/createDirectory 成功记账（子用户）：把 DSH 返回的新目录
+        // 写入 pending 表，供后续 workspace/create 的「刚创建目录」登记通道使用。
+        // 解析失败只影响记账（登记变得更严格），响应本身原样透传。
+        if (reqAs.dshpwUser !== undefined && reqAs.dshpwIsAdmin !== true &&
+          req.method === 'POST' && isWorkspaceDirectoryCreate(proxyPath)) {
+          bufferUpstream(upstreamRes, res, (raw) => {
+            try {
+              const body = decodeUpstreamBody(raw, String(upstreamRes.headers['content-encoding'] ?? ''));
+              const parsed = JSON.parse(body.toString('utf8')) as Record<string, unknown>;
+              const result = parsed.result;
+              if (isPlainJsonRecord(result) && result.ok === true && typeof result.value === 'string' && result.value.length > 0) {
+                // __deny__（禁止所有工作区）下不记账：哨兵用户不应获得可登记凭据。
+                if (!effectivePermissions(reqAs.dshpwUser!).allowed_folders.includes('__deny__')) {
+                  recordPendingCreatedDirectory(reqAs.dshpwUser!, canonicalizePathBestEffort(result.value));
+                }
+              }
+            } catch {
+              // 记账失败 fail-safe：后续登记会因不在 pending 表而被拒绝。
+            }
+            const respHeaders = headersForStreaming(upstreamRes.headers);
+            if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+            if (!res.writableEnded) res.end(raw);
+          });
+          return;
+        }
+
+        // ── directoryPicker/list 响应过滤（子用户祖先导航模式）：只保留通往授权根的
+        // 条目，隐藏无关目录名；无法解析时 fail-closed，不回放未过滤清单。
+        if (reqAs.dshpwDirListFilter !== undefined && reqAs.dshpwUser !== undefined) {
+          const filter = reqAs.dshpwDirListFilter;
+          bufferUpstream(upstreamRes, res, (raw) => {
+            try {
+              const body = decodeUpstreamBody(raw, String(upstreamRes.headers['content-encoding'] ?? ''));
+              const parsed = JSON.parse(body.toString('utf8')) as Record<string, unknown>;
+              const result = parsed.result;
+              if (isPlainJsonRecord(result) && result.ok === true && isPlainJsonRecord(result.value) && Array.isArray(result.value.entries)) {
+                result.value.entries = (result.value.entries as unknown[]).filter((entry) =>
+                  isPlainJsonRecord(entry) && typeof entry.path === 'string' && directoryEntryVisible(entry.path, filter.roots),
+                );
+              }
+              const out = Buffer.from(JSON.stringify(parsed), 'utf8');
+              const respHeaders = headersForRewrittenBody(upstreamRes.headers);
+              respHeaders['content-length'] = String(out.length);
+              if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+              if (!res.writableEnded) res.end(out);
+            } catch (error) {
+              if (error instanceof OversizeResponseError) {
+                if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response too large');
+                return;
+              }
+              if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response unprocessable');
+            }
           });
           return;
         }
@@ -3729,7 +5049,10 @@ export function createGatewayServer(
                 if (reqAs.dshpwUser === undefined || reqAs.dshpwIsAdmin === true) return true;
                 return !workspaceOwnedByAnotherSubuser(reqAs.dshpwUser, candidate);
               };
-              const outBody = reqAs.dshpwUser !== undefined
+              // Only a restricted child needs the recursive path projection. The
+              // administrator must receive the exact DSH response: recursive copying
+              // can turn deeply nested official workspace metadata into null values.
+              const outBody = reqAs.dshpwPerms !== undefined
                 ? filterByPathFieldWithPredicate(parsed, 'path', workspaceVisible)
                 : parsed;
               // F-25/#16：子用户只能看到被授权的会话。dsh rc.8 保留归档会话在
@@ -3834,6 +5157,11 @@ export function createGatewayServer(
                 return;
               }
               if (sessionId !== null && reqAs.dshpwUser !== undefined) {
+                // dsh create/fork 都用 agentDefaultModel.currentSelection() 给新会话
+                // 配模型（fork 不继承源会话模型），所以新会话的初始有效模型就是 Host
+                // 共享默认。这里记为 'default'（而不是把它当成未知）：后续 prompt 时
+                // 与白名单比对，默认不在允许列表就会 fail-closed，用户选一个允许模型后即可。
+                recordSessionModelSelection(sessionId, null);
                 // 沙盒必须先确认，再建立子用户的 session grant/access 快照。
                 // 若注入失败，不能留下一个可由该子用户继续访问的默认 workspace-write 会话。
                 if (reqAs.dshpwPerms !== undefined && reqAs.dshpwPerms.sandbox_mode !== null) {
@@ -3889,8 +5217,20 @@ export function createGatewayServer(
                 return;
               }
               if (reqAs.dshpwUser !== undefined && reqAs.dshpwCreatedSessionId !== undefined) {
+                // 诊断：上游状态/编码/首字节与解析错误一并落日志，便于定位真机差异。
+                console.error(
+                  `[dsh-passwords] session.create/fork 响应不可解析: status=${String(upstreamRes.statusCode)} encoding=${String(upstreamRes.headers['content-encoding'] ?? '')} type=${String(upstreamRes.headers['content-type'] ?? '')} bytes=${String(raw.length)} head=${JSON.stringify(raw.subarray(0, 120).toString('utf8'))} error=${error instanceof Error ? error.message : String(error)}`,
+                );
                 clearPendingCreatedSession(reqAs.dshpwUser, reqAs.dshpwCreatedSessionId);
                 closeUserRemoteMuxClients(reqAs.dshpwUser!);
+                // 上游 4xx/5xx 的非 JSON 响应原样透传（如 404 not found）：伪装成 502
+                // 会误导排障；只有上游 2xx 却解析失败才是网关侧不可处理。
+                if ((upstreamRes.statusCode ?? 502) >= 400) {
+                  const passthrough = headersForStreaming(upstreamRes.headers);
+                  if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 502, passthrough);
+                  if (!res.writableEnded) res.end(raw);
+                  return;
+                }
                 if (!res.headersSent) res.status(502).type('text/plain').send('502 DSH session response unprocessable');
                 return;
               }
@@ -4084,6 +5424,35 @@ export function createGatewayServer(
           return;
         }
 
+        // ── session/selectModel 成功响应后登记会话有效模型（所有用户）──
+        // 只认官方 SessionSelectModelValue.selected（上游规范化后的 provider/model）。
+        // 对受限子用户，这个状态就是 prompt/fork 后续校验的授权依据；业务失败
+        // （result.ok === false）绝不变更状态，防止借异常响应把状态写成允许值。
+        if (req.method === 'POST' && /^\/api\/session[.\/]selectModel$/.test(proxyPath)) {
+          bufferUpstream(upstreamRes, res, (raw) => {
+            try {
+              const body = decodeUpstreamBody(raw, String(upstreamRes.headers['content-encoding'] ?? ''));
+              const parsed = JSON.parse(body.toString('utf8')) as Record<string, unknown>;
+              const result = isPlainJsonRecord(parsed) && isPlainJsonRecord(parsed.result) ? parsed.result : null;
+              if (result !== null && result.ok === true && isPlainJsonRecord(result.value)) {
+                const selected = modelSelectionFrom(result.value.selected);
+                // 会话 ID 来自同一次请求已校验过的 RPC 参数（selectModel 响应不带
+                // sessionId），不允许从响应体里“随手”取字段当授权依据。
+                const sessionId = reqAs.dshpwModelSessionId;
+                if (selected !== null && sessionId !== undefined) {
+                  recordSessionModelSelection(sessionId, selected);
+                }
+              }
+            } catch {
+              // 登记失败只影响后续严格校验（prompt 会 fail-closed），响应原样回放。
+            }
+            const respHeaders = headersForStreaming(upstreamRes.headers);
+            if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+            if (!res.writableEnded) res.end(raw);
+          });
+          return;
+        }
+
         // ── Agent preset 成功响应后登记会话当前 preset ──
         // DSH RPC 的业务失败可以使用 HTTP 200，因此必须解析 result.ok，不能只看状态码。
         if (req.method === 'POST' && AGENT_PRESET_SELECT_RE.test(proxyPath) && reqAs.dshpwAgentPreset !== undefined) {
@@ -4123,6 +5492,14 @@ export function createGatewayServer(
               const enc = String(upstreamRes.headers['content-encoding'] ?? '');
               if (enc.includes('gzip')) body = gunzipBounded(body);
               const parsed = JSON.parse(body.toString('utf8'));
+              if (reqAs.dshpwPerms !== undefined && reqAs.dshpwPerms.allowed_models !== null) {
+                // 受限子用户：a) 从会话 log 采最新 model/selection 事件作为有效模型；
+                // b) 若 log 里根本没有选择事件，则明确标记为 Host 默认（rather than 留成
+                // 未知而让 prompt 在无法判定时放行）。
+                const sessionIdForHistory = collectSessionIds(parsed);
+                const latest = latestModelSelectionInRecords(parsed);
+                for (const id of sessionIdForHistory) recordSessionModelSelection(id, latest === null ? null : latest.spec);
+              }
               if (reqAs.dshpwPerms !== undefined && reqAs.dshpwPerms.sandbox_mode !== null) {
                 void clampSessionHistorySandbox(
                   parsed,
@@ -4144,6 +5521,90 @@ export function createGatewayServer(
               const respHeaders = headersForStreaming(upstreamRes.headers);
               if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
               if (!res.writableEnded) res.end(raw);
+            }
+          });
+          return;
+        }
+
+        // ── session/page 响应：受限子用户采模型状态 + 隐藏 Unicode 清洗 ──
+        // page 返回与 follow 同源的事件记录（含 model/selection），是另一个官方可观测
+        // 渠道；只读采集，不改写语义（除统一的隐藏 Unicode 清洗）。
+        if (req.method === 'POST' && /^\/api\/session[.\/]page$/.test(proxyPath)) {
+          bufferUpstream(upstreamRes, res, (raw) => {
+            try {
+              const parsed = JSON.parse(
+                decodeUpstreamBody(raw, String(upstreamRes.headers['content-encoding'] ?? '')).toString('utf8'),
+              ) as unknown;
+              if (reqAs.dshpwPerms !== undefined && reqAs.dshpwPerms.allowed_models !== null) {
+                const sessionIds = collectSessionIds(parsed);
+                const result = isPlainJsonRecord(parsed) && isPlainJsonRecord(parsed.result) ? parsed.result : null;
+                const latest = latestModelSelectionInRecords(result === null ? null : result.value);
+                for (const id of sessionIds) recordSessionModelSelection(id, latest === null ? null : latest.spec);
+              }
+              const cleaned = sanitizeHiddenUnicodeJson(parsed);
+              const out = Buffer.from(JSON.stringify(cleaned), 'utf8');
+              const respHeaders = headersForRewrittenBody(upstreamRes.headers);
+              respHeaders['content-length'] = String(out.length);
+              if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+              if (!res.writableEnded) res.end(out);
+            } catch (error) {
+              if (error instanceof OversizeResponseError) {
+                if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response too large');
+                return;
+              }
+              // 采集/清洗失败不影响会话读取本身，原样透传（不因此放行任何请求）。
+              const respHeaders = headersForStreaming(upstreamRes.headers);
+              if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+              if (!res.writableEnded) res.end(raw);
+            }
+          });
+          return;
+        }
+        // ── session/modelCatalog 响应过滤（受限子用户）────────────────────
+        // 官方协议：modelCatalog 无参数，value = { default, routableProviders,
+        // groups: [{id,name,models}], failures }；provider 身份在 group.id，不在
+        // model 对象。modelCatalog 不在 SESSION_SCOPED_RE 里（无 sessionId），
+        // 必须用专用判定。
+        // 这里同时把未过滤的 Host 默认模型记入网关内存：受限用户的 prompt 校验在
+        // 会话没有显式选择时需要拿它与白名单比对（不能把共享默认暴露给子用户，
+        // 也不能用它当“未限制”的借口）。
+        if (req.method === 'POST' && MODEL_CATALOG_RE.test(proxyPath)) {
+          bufferUpstream(upstreamRes, res, (raw) => {
+            if (reqAs.dshpwPerms === undefined) {
+              const respHeaders = headersForStreaming(upstreamRes.headers);
+              if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+              if (!res.writableEnded) res.end(raw);
+              return;
+            }
+            try {
+              const body = decodeUpstreamBody(raw, String(upstreamRes.headers['content-encoding'] ?? ''));
+              const parsed = JSON.parse(body.toString('utf8')) as Record<string, unknown>;
+              const result = isPlainJsonRecord(parsed) && isPlainJsonRecord(parsed.result) ? parsed.result : null;
+              // 只有成功结果才携带目录；业务失败原样返回（不泄辟信息也不掩盖错误）。
+              if (result === null || result.ok !== true || !isPlainJsonRecord(result.value)) {
+                const respHeaders = headersForStreaming(upstreamRes.headers);
+                if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+                if (!res.writableEnded) res.end(raw);
+                return;
+              }
+              recordHostDefaultModel(result.value);
+              if (reqAs.dshpwPerms.allowed_models === null) {
+                const respHeaders = headersForStreaming(upstreamRes.headers);
+                if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+                if (!res.writableEnded) res.end(raw);
+                return;
+              }
+              // 过滤结果只改 value 内的官方字段（groups/models/routableProviders/
+              // failures/default），其它包层字段原样保留。
+              result.value = filterModelCatalogValue(result.value, reqAs.dshpwPerms.allowed_models);
+              const out = Buffer.from(JSON.stringify(parsed), 'utf8');
+              const respHeaders = headersForRewrittenBody(upstreamRes.headers);
+              respHeaders['content-length'] = String(out.length);
+              if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+              if (!res.writableEnded) res.end(out);
+            } catch {
+              // 受限用户的目录必须过滤：解析/解压失败不能回放未过滤的全量模型列表。
+              if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response unprocessable');
             }
           });
           return;
@@ -4206,9 +5667,9 @@ export function createGatewayServer(
           return;
         }
         res.writeHead(upstreamRes.statusCode ?? 502, respHeaders);
-        // F-A2：aionui-panel/raw（GET 流式读文件）文本类型 → 字节级流式清洗隐藏 Unicode
-        // （图片/二进制不洗，防损坏）。read（POST JSON）已在上面缓冲分支清洗。
-        if (req.method === 'GET' && proxyPath === '/aionui-panel/raw' && isTextContentType(contentType)) {
+        // F-A2：插件面板流式读文件端点（兼容层声明）文本类型 → 字节级流式清洗隐藏
+        // Unicode（图片/二进制不洗，防损坏）。JSON 读取已在上面缓冲分支清洗。
+        if (compat.responseSanitizeKind(req.method, proxyPath) === 'stream' && isTextContentType(contentType)) {
           upstreamRes.pipe(hiddenUnicodeStripStream()).pipe(res);
           upstreamRes.on('error', () => res.destroy());
           return;
@@ -4257,10 +5718,17 @@ export function createGatewayServer(
     //   2) 沙盒权限：settings.mutate 试图把 defaultPreset 切到高于授权级别 → 403
     const workspaceManagementRequest = isWorkspaceCreate(proxyPath) || isWorkspaceDeleteOrRename(proxyPath);
     const workspaceDirectoryCreateRequest = isWorkspaceDirectoryCreate(proxyPath);
+    // 子用户目录浏览（alpha.1 in-app picker / 旧 host.listDirectory）：请求路径必须
+    // 在授权子树内，或是通往某个授权根的祖先（此时响应条目按授权根过滤）。
+    const needsDirectoryListCheck =
+      reqAs.dshpwPerms !== undefined &&
+      reqAs.dshpwIsAdmin !== true &&
+      req.method === 'POST' &&
+      isDirectoryListRequest(proxyPath);
     const needsFolderCheck =
       reqAs.dshpwPerms !== undefined &&
-      (req.method === 'POST' || req.method === 'PUT' || (req.method === 'DELETE' && isAionuiPanel(proxyPath))) &&
-      (WORKSPACE_ENDPOINT_RE.test(proxyPath) || (isWorkspaceRestricted(reqAs.dshpwPerms.allowed_folders) && isAionuiPanel(proxyPath)) || workspaceManagementRequest || workspaceDirectoryCreateRequest);
+      (req.method === 'POST' || req.method === 'PUT' || (req.method === 'DELETE' && compat.isPanelPath(proxyPath))) &&
+      (WORKSPACE_ENDPOINT_RE.test(proxyPath) || (isWorkspaceRestricted(reqAs.dshpwPerms.allowed_folders) && compat.isPanelPath(proxyPath)) || workspaceManagementRequest || workspaceDirectoryCreateRequest);
     const needsSandboxCheck =
       reqAs.dshpwPerms !== undefined &&
       reqAs.dshpwPerms.sandbox_mode !== null &&
@@ -4288,11 +5756,11 @@ export function createGatewayServer(
       reqAs.dshpwPerms !== undefined &&
       (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH' || req.method === 'DELETE') &&
       (SESSION_SCOPED_RE.test(proxyPath) || AGENT_PRESET_SELECT_RE.test(proxyPath));
-    // ── 第三方插件纵深防御：dsh-ssh 创建/修改/测试主机时，host 为私网/回环地址
-    // 一律拒绝（SSRF 封堵——插件源码不在我们控制内，网关拦一层；
-    // 所有登录用户含主用户都拦，管理员同样可能被诱导连接内网）
-    // F-27：PATCH（修改主机）/PUT 同样要拦——之前只拦 POST，PATCH 可直接把
-    // 已有主机的 host 改成 127.0.0.1 等私网地址（实测可修改成功）
+    // ── 已登记 SSH 端点的 SSRF 纵深防御（与任何具体插件无关）──
+    // 命中已登记 SSH 端点（HTTP 通道）的写请求若带 host 字段：私网/回环
+    // 地址一律拒绝（插件源码不在我们控制内，网关拦一层；所有登录用户含主用户
+    // 都拦，管理员同样可能被诱导连接内网）。F-27：PATCH/PUT 同样要拦——只拦
+    // POST 时 PATCH 可直接把已有主机的 host 改成 127.0.0.1 等私网地址（实测可改）。
     const needsAgentPresetCheck =
       reqAs.dshpwPerms !== undefined &&
       reqAs.dshpwPerms.allowed_agent_presets !== null &&
@@ -4306,28 +5774,44 @@ export function createGatewayServer(
       !reqAs.dshpwPerms.allow_upload &&
       req.method === 'POST' &&
       /^\/api\/(?:session[.\/]prompt|commands[.\/]execute|subagents[.\/]prompt)$/.test(proxyPath);
+    // ── 模型白名单（allowed_models）请求侧强制 ──
+    // 受限子用户（allowed_models 非 null）的每个模型入口都要在转发前判定：
+    //   · session/selectModel：请求体带 {provider, model}，直接正向校验（绝不靠上游报错）
+    //   · session/create/fork/prompt：协议里**没有**模型字段，只能拿网关记录的会话
+    //     有效模型（官方 model/selection 投影 / selectModel 结果 / Host 默认）再校验，
+    //     这样权限收紧后旧会话也拿不到已撤销的模型。
+    const needsModelCheck =
+      reqAs.dshpwPerms !== undefined &&
+      reqAs.dshpwPerms.allowed_models !== null &&
+      req.method === 'POST' &&
+      (/^\/api\/session[.\/](selectModel|create|fork|prompt)$/.test(proxyPath) ||
+        /^\/api\/subagents[.\/]prompt$/.test(proxyPath));
     const agentPresetMutation = AGENT_PRESET_MUTATION_RE.test(proxyPath);
     if (reqAs.dshpwPerms !== undefined && reqAs.dshpwPerms.allowed_agent_presets !== null && agentPresetMutation) {
       res.status(403).type('html').send(forbiddenPage(langOf(req), t(langOf(req), 'gw.folderDenied')));
       return;
     }
-    const needsSshHostCheck =
+    const needsUpstreamHostCheck =
       reqAs.dshpwUser !== undefined &&
       (req.method === 'POST' || req.method === 'PATCH' || req.method === 'PUT') &&
-      /^\/api\/dsh-ssh[.\/](hosts|test)([.\/]|$)/.test(proxyPath);
-    const needsSshPermissionCheck =
-      reqAs.dshpwUser !== undefined &&
-      reqAs.dshpwIsAdmin !== true &&
-      (req.method === 'POST' || req.method === 'PATCH' || req.method === 'PUT') &&
-      (proxyPath === '/api/dsh-ssh/hosts' || isSshAliasBodyEndpoint(proxyPath));
+      endpointAllowed(proxyPath, endpointRules, { transport: 'http' });
     // A Remote waterfall result is a separate browser HTTP RPC. Restrict it to
     // the subuser, client generation, and authorized session that received it.
     const needsRemoteEventResultCheck =
       reqAs.dshpwPerms !== undefined &&
       req.method === 'POST' &&
       proxyPath === '/api/$events/result';
+    // The official open-in-app host route accepts an absolute directory path and
+    // launches a server-side application. For a child account, bind that path
+    // to a workspace already present in the child's filtered Remote baseline;
+    // allowed_folders alone must not turn this into an arbitrary directory launcher.
+    const needsOpenInAppCheck =
+      reqAs.dshpwPerms !== undefined &&
+      reqAs.dshpwIsAdmin !== true &&
+      req.method === 'POST' &&
+      proxyPath === '/open-in-app/open';
 
-    if (needsFolderCheck || needsSandboxCheck || needsCommandCheck || needsApprovalCheck || needsOwnershipCheck || needsAgentPresetCheck || needsImageAttachmentCheck || needsSshHostCheck || needsSshPermissionCheck || needsRemoteEventResultCheck) {
+    if (needsFolderCheck || needsSandboxCheck || needsCommandCheck || needsApprovalCheck || needsOwnershipCheck || needsAgentPresetCheck || needsImageAttachmentCheck || needsModelCheck || needsUpstreamHostCheck || needsRemoteEventResultCheck || needsOpenInAppCheck || needsDirectoryListCheck) {
       const chunks: Buffer[] = [];
       let size = 0;
       let settled = false;
@@ -4347,7 +5831,7 @@ export function createGatewayServer(
         size += chunk.length;
         if (size > bodyLimit) {
           if (reqAs.dshpwUser !== undefined && reqAs.dshpwCreatedSessionId !== undefined) clearPendingCreatedSession(reqAs.dshpwUser, reqAs.dshpwCreatedSessionId);
-          // F-17：超限一律 fail-closed（413）——之前 aionui 写超大 body 会
+          // F-17：超限一律 fail-closed（413）——之前插件写超大 body 会
           // 透传跳过白名单校验（fail-open），形成防御缺口
           settled = true;
           const lang = langOf(req);
@@ -4386,17 +5870,23 @@ export function createGatewayServer(
           return;
         }
 
-        if (needsSshPermissionCheck) {
-          const row = isPlainJsonRecord(bodyObj) ? bodyObj : null;
-          const alias = row?.alias;
-          if (typeof alias !== 'string' || !isSafeSshAlias(alias)) {
+        if (needsOpenInAppCheck) {
+          const requestedPath = isPlainJsonRecord(bodyObj) && typeof bodyObj.path === 'string'
+            ? bodyObj.path
+            : null;
+          const normalizedRequestedPath = requestedPath !== null && path.isAbsolute(requestedPath)
+            ? normalizePath(requestedPath)
+            : null;
+          const access = userSessionAccess.get(reqAs.dshpwUser!);
+          const authorizedWorkspace = normalizedRequestedPath !== null && access !== undefined &&
+            [...access.values()].some((workspacePath) => normalizePath(workspacePath) === normalizedRequestedPath) &&
+            folderAllowed(normalizedRequestedPath, reqAs.dshpwPerms!.allowed_folders) &&
+            !workspaceOwnedByAnotherSubuser(reqAs.dshpwUser!, normalizedRequestedPath);
+          if (!authorizedWorkspace) {
             upstreamReq.destroy();
-            res.status(400).type('text/plain').send('400 Invalid SSH alias');
+            res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
             return;
           }
-          // The host list is owner-configured and immutable for subusers; for
-          // execution/test operations allow_ssh plus a safe configured alias is
-          // the complete subuser gate. Secrets remain in dsh-ssh's host store.
         }
 
         if (needsRemoteEventResultCheck) {
@@ -4468,15 +5958,15 @@ export function createGatewayServer(
           }
         }
 
-        // dsh-ssh SSRF 封堵：创建/修改主机时 body.host 命中私网/回环 → 403。
-        // 只校验 host 字段存在的情况（test 请求用 alias 引用已创建主机，无 host 字段——
-        // 私网主机在创建时已被拦截，test 无从引用私网目标）。
+        // 已登记 SSH 端点的 SSRF 封堵：写请求 body.host 命中私网/回环 → 403。
+        // 只校验 host 字段存在的情况（无 host 字段的请求，如用别名引用已创建
+        // 目标的操作，在创建时已拦截）。
         // F-28：host 为 hostname（如 nip.io 通配）时 DNS 解析逐地址判定；校验通过后
         // 把请求体 host 改写为已验证的 IP 字面量，钉死 DNS 重绑定 TOCTOU。
-        if (needsSshHostCheck && bodyObj !== null && typeof bodyObj === 'object') {
+        if (needsUpstreamHostCheck && bodyObj !== null && typeof bodyObj === 'object') {
           const host = (bodyObj as Record<string, unknown>).host;
           if (typeof host === 'string') {
-            const verdict = await resolveSshHostSafe(host);
+            const verdict = await resolveUpstreamHostSafe(host);
             if (verdict === 'private' || verdict === null) {
               upstreamReq.destroy();
               res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
@@ -4489,11 +5979,44 @@ export function createGatewayServer(
           }
         }
 
+        // ── 目录浏览授权：请求路径在授权子树内（完整列表），或是通往某个授权根的
+        // 祖先（只保留通往授权根的条目）；其余一律 403（fail-closed）。
+        if (needsDirectoryListCheck) {
+          if (!isPlainJsonRecord(bodyObj)) {
+            upstreamReq.destroy();
+            res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+            return;
+          }
+          const requestedPath = extractPathFromBody(bodyObj) ?? os.homedir();
+          const canonical = canonicalizePathBestEffort(requestedPath);
+          const folders = reqAs.dshpwPerms!.allowed_folders;
+          // 刚创建的目录视作临时授权根：picker 里能立即看到并进入（选择新文件夹必需）。
+          const denyAll = folders.includes('__deny__');
+          const pendingDirs = denyAll ? [] : pendingCreatedDirectoryPaths(reqAs.dshpwUser!);
+          const withinPending = pendingDirs.some((entry) => pathWithin(canonical, entry));
+          if ((folderAllowed(requestedPath, folders) && folderAllowed(canonical, folders)) || withinPending) {
+            // 授权子树内 / 自己刚创建的目录内：完整列表，不过滤。
+          } else {
+            const roots = [
+              ...folders
+                .filter((entry) => entry !== '__deny__' && (entry.startsWith('/') || /^[A-Za-z]:\//.test(entry)))
+                .map((entry) => canonicalizePathBestEffort(entry)),
+              ...pendingDirs,
+            ].filter((entry) => pathWithin(entry, canonical));
+            if (roots.length === 0) {
+              upstreamReq.destroy();
+              res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+              return;
+            }
+            reqAs.dshpwDirListFilter = { mode: 'ancestors', roots };
+          }
+        }
+
         if (needsFolderCheck) {
           let targetPath: string | null = null;
-          if (isAionuiPanel(proxyPath)) {
-            // aionui-panel 文件树：root 是工作区路径，path 是 root 下的相对文件路径
-            targetPath = aionuiRootFrom(req.method, proxyPath, parsedUrl.searchParams, bodyObj);
+          if (compat.isPanelPath(proxyPath)) {
+            // 插件面板文件树：root 是工作区路径，path 是 root 下的相对文件路径
+            targetPath = compat.folderRootFrom(req.method, proxyPath, parsedUrl.searchParams, bodyObj);
             // F-17b：提取不到 root（DELETE 无 query/body、异常编码等）→ fail-closed，
             // 不能静默跳过白名单校验后透传
             if (targetPath === null) {
@@ -4537,12 +6060,49 @@ export function createGatewayServer(
             res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
             return;
           }
-          if (targetPath !== null && isWorkspaceDirectoryCreate(proxyPath) && !folderAllowed(targetPath, reqAs.dshpwPerms!.allowed_folders)) {
-            upstreamReq.destroy();
-            res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
-            return;
+          if (targetPath !== null && isWorkspaceDirectoryCreate(proxyPath)) {
+            // 创建父目录三类合法：授权子树内（原始串+真实路径双判定堵符号链接逃逸）、
+            // 主目录（picker 落点与工作区惯例父目录，D1 工作流第一步）、
+            // 自己刚创建的目录内（嵌套创建）；另不得落在另一子用户的工作区子树内。
+            const canonicalParent = canonicalizePathBestEffort(targetPath);
+            const folders = reqAs.dshpwPerms!.allowed_folders;
+            const denyAll = folders.includes('__deny__');
+            const pendingDirs = denyAll ? [] : pendingCreatedDirectoryPaths(reqAs.dshpwUser!);
+            const homeCanonical = canonicalizePathBestEffort(os.homedir());
+            const parentAllowed =
+              (folderAllowed(targetPath, folders) && folderAllowed(canonicalParent, folders)) ||
+              (!denyAll && canonicalParent === homeCanonical) ||
+              pendingDirs.some((entry) => pathWithin(canonicalParent, entry));
+            if (!parentAllowed || workspaceSubtreeOverlap(reqAs.dshpwUser!, canonicalParent)) {
+              upstreamReq.destroy();
+              res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+              return;
+            }
           }
           if (targetPath !== null && (isWorkspaceCreate(proxyPath) || isWorkspaceDeleteOrRename(proxyPath))) {
+            // ── 子用户登记新工作区（D1 收紧）：只接受主用户显式分配的精确目录、
+            // 自己创建的工作区子树、或刚通过目录选择器成功创建且未过期的目录；
+            // 其余一切预存在且未分配的目录一律 403，且不得与另一子用户的
+            // 工作区子树重叠（相等或父子嵌套）。
+            if (!reqAs.dshpwIsAdmin && isWorkspaceCreate(proxyPath)) {
+              const canonicalTarget = canonicalizePathBestEffort(targetPath);
+              // __deny__（禁止所有工作区）下不开放任何登记通道。
+              if (reqAs.dshpwPerms!.allowed_folders.includes('__deny__')) {
+                upstreamReq.destroy();
+                res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.workspaceDenied')));
+                return;
+              }
+              const assigned = reqAs.dshpwPerms!.allowed_folders
+                .filter((entry) => entry !== '__deny__')
+                .flatMap((entry) => [entry, canonicalizePathBestEffort(entry)]);
+              const owned = db.listUserWorkspacePaths(reqAs.dshpwUser!).flatMap((entry) => [entry, canonicalizePathBestEffort(entry)]);
+              if (!workspaceRegistrationAllowed(canonicalTarget, assigned, owned, pendingCreatedDirectoryPaths(reqAs.dshpwUser!)) ||
+                workspaceSubtreeOverlap(reqAs.dshpwUser!, canonicalTarget)) {
+                upstreamReq.destroy();
+                res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.workspaceDenied')));
+                return;
+              }
+            }
             const renamePaths = isWorkspaceDeleteOrRename(proxyPath) ? extractWorkspaceRenamePaths(bodyObj) : null;
             // alpha workspace/rename changes only the title and therefore carries
             // workspaceId + title rather than a path pair. Legacy workspace/update
@@ -4569,12 +6129,13 @@ export function createGatewayServer(
               res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.workspaceDenied')));
               return;
             }
-            if (newPath !== null && !folderAllowed(newPath, reqAs.dshpwPerms!.allowed_folders)) {
+            if (newPath !== null && (!folderAllowed(newPath, reqAs.dshpwPerms!.allowed_folders) ||
+              (!reqAs.dshpwIsAdmin && workspaceSubtreeOverlap(reqAs.dshpwUser!, newPath)))) {
               upstreamReq.destroy();
               res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
               return;
             }
-            reqAs.dshpwWorkspacePath = oldPath;
+            reqAs.dshpwWorkspacePath = isWorkspaceCreate(proxyPath) ? canonicalizePathBestEffort(oldPath) : oldPath;
             reqAs.dshpwWorkspaceCreate = isWorkspaceCreate(proxyPath);
             if (newPath !== null) {
               reqAs.dshpwWorkspaceOldPath = oldPath;
@@ -4651,6 +6212,76 @@ export function createGatewayServer(
             }
             reqAs.dshpwForkAuthorized = true;
             reqAs.dshpwSessionCwd = sourceCwd;
+          }
+        }
+
+        // ── 模型白名单：转发前判定（所有模型入口的唯一强制点）─────────────────
+        // 官方的这些 RPC 都无法只靠请求体判定真实模型（create/fork/prompt 没有模型
+        // 字段），所以只能：
+        //   · selectModel：对请求体里的 {provider, model} 做正向校验；
+        //   · 其余：用网关记录的会话有效模型（官方 modelSelection 投影 / selectModel
+        //     结果 / Host 默认）再校验，拿不到就 fail-closed。
+        // 受限用户创建的会话记录为 'default'（Host 共享默认），fork 新建会话同理
+        // （DSH fork 用 agentDefaultModel 而不是源会话模型，因此源模型与默认模型都要判）。
+        if (needsModelCheck) {
+          const allowed = reqAs.dshpwPerms!.allowed_models;
+          // selectModel 的模型字段只从官方 wire 位置读取：有 ClientConnection
+          // envelope 时只看 args.request（DSH 同源解码）；否则兼容直接顶层字段的
+          // 调用方。绝不允许顶层伪字段在 envelope 请求里“洗白”一个不同模型。
+          const requestEnvelope = clientConnectionArgs(bodyObj);
+          const requestPayload = rpcRequestPayload(bodyObj);
+          const selection = modelSelectionFrom(requestPayload) ??
+            (requestEnvelope === null ? modelSelectionFrom(bodyObj) : null);
+          const fail = (): void => {
+            upstreamReq.destroy();
+            res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+          };
+          if (/^\/api\/session[.\/]selectModel$/.test(proxyPath)) {
+            // 正向校验 provider+model 成对命中 allowlist；缺字段/格式非法同样拒绝
+            // （不能只靠上游 resolveCallConfig 报错）。
+            if (selection === null || !modelChoiceVerdict(allowed, selection).ok) {
+              fail();
+              return;
+            }
+            const requestedSessionIds = collectAuthorizedSessionIds(bodyObj);
+            const requestedSessionId = requestedSessionIds === null ? null : [...requestedSessionIds][0];
+            if (requestedSessionId !== null && requestedSessionId !== undefined) {
+              reqAs.dshpwModelSessionId = requestedSessionId;
+            }
+          } else if (/^\/api\/session[.\/]create$/.test(proxyPath)) {
+            // create 不带模型：新会话会用 Host 共享默认。若默认不在白名单（或尚未
+            // 观测到默认），仍允许创建——客户端拿到过滤后的 modelCatalog 后可以
+            // 选一个允许模型；真正的 prompt 会在模型未收敛时 fail-closed。
+            // 唯一提前拒绝的情况：白名单为空（[] = 禁止全部），建了也永远用不了。
+            const emptyAllowed = allowedModelSet(allowed)?.size === 0;
+            if (emptyAllowed) {
+              fail();
+              return;
+            }
+          } else {
+            // 用协议感知的会话地址解析（与所有权校验同源）：只认官方 RPC 的
+            // request/args/address/sessionId 结构，不扫描请求体里的任意字段。
+            const authorized = collectAuthorizedSessionIds(bodyObj);
+            const sessionIds = authorized === null ? [] : [...authorized];
+            if (sessionIds.length === 0) {
+              fail();
+              return;
+            }
+            // subagents/prompt 的模型同样来自 Host 默认（子代理没有自己的
+            // model/selection 状态），所以只能拿默认模型做判定。
+            const isSubagentPrompt = /^\/api\/subagents[.\/]prompt$/.test(proxyPath);
+            for (const sessionId of sessionIds) {
+              const effective = isSubagentPrompt ? null : effectiveSessionModel(sessionId);
+              // fork：DSH 新会话用 Host 默认模型，所以源会话模型与默认模型都要过白名单。
+              const candidates: (AllowedModelSpec | null)[] = [effective];
+              if (isSubagentPrompt || /^\/api\/session[.\/]fork$/.test(proxyPath)) {
+                candidates.push(hostDefaultModelKnown ? hostDefaultModel : null);
+              }
+              if (candidates.some((candidate) => !modelChoiceVerdict(allowed, candidate).ok)) {
+                fail();
+                return;
+              }
+            }
           }
         }
 
@@ -4799,6 +6430,11 @@ export function createGatewayServer(
       if (keep.length > 0) loginSuccessRate.set(k, keep);
       else loginSuccessRate.delete(k);
     }
+    for (const [userId, timestamps] of mediaInitRate) {
+      const keep = timestamps.filter((t) => now - t < 3600_000);
+      if (keep.length > 0) mediaInitRate.set(userId, keep);
+      else mediaInitRate.delete(userId);
+    }
     // 极端 token/IP 洪泛下，TTL 尚未到期的键也可能无界增长；保留最新一半，
     // 牺牲极端情况下的短期缓存命中而不牺牲进程可用性。
     // ⚠ revokedTokens 不参与裁剪：它是登出吊销语义（未过期条目=拒绝该 JWT），
@@ -4824,6 +6460,20 @@ export function createGatewayServer(
       db.pruneStaleSecurityRows();
     } catch (error) {
       console.warn('[dsh-passwords] 周期清理失败:', String(error));
+    }
+    // 聊天媒体周期回收：过期资产 + 长期未提交的 pending 上传（客户端 init 后
+    // 断网/取消会留下元数据行；DB 只删元数据，文件本体由网关按 storage key 删除）。
+    // pendingCutoff 取 2 倍上传 TTL，避免误删正在进行中的上传。
+    try {
+      const mediaPlan = db.pruneMedia({
+        now: new Date(now),
+        pendingCutoff: new Date(now - MEDIA_UPLOAD_TTL_MS * 2),
+      });
+      unlinkMediaFiles(mediaPlan.storage_keys);
+      // 意外中断的 PUT 留下的临时文件（进程崩溃时来不及清理）
+      pruneStaleMediaTemps(now);
+    } catch (error) {
+      console.warn('[dsh-passwords] 媒体清理失败:', String(error));
     }
   }, 10 * 60_000);
   sweep.unref();
@@ -4881,37 +6531,31 @@ export function createGatewayServer(
       socket.destroy();
       return;
     }
-    // A registered SSH WebSocket endpoint is governed by the single per-subuser
-    // SSH toggle. No per-path grant is required: the owner controls which paths
-    // are SSH endpoints through the environment registry.
-    const userSshEndpointPassed = userRole === 'user' && webSocketPathAllowed(gatePath, [...sshWebSocketEndpoints]);
+    // 与 HTTP 侧同一套分类（owner: → 403；其余登记 → 需 allow_ssh 开关），
+    // 两条通道的优先级因此天然一致；主用户不受登记表限制。
+    const wsPathClass = classifySubuserPath(gatePath, {
+      endpointRules,
+      transport: 'ws',
+    });
+    let userSshEndpointPassed = false;
+    if (userRole === 'user') {
+      if (wsPathClass === 'owner-only') {
+        socket.end('HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
+        return;
+      }
+      if (wsPathClass === 'ssh') {
+        const perms = authUserId === null ? null : effectivePermissions(authUserId);
+        if (perms === null || !perms.allow_ssh) {
+          socket.end('HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
+          return;
+        }
+        userSshEndpointPassed = true;
+      }
+    }
     if (userSshEndpointPassed) {
-      const perms = authUserId === null ? null : effectivePermissions(authUserId);
-      if (perms === null || !perms.allow_ssh) {
-        socket.end('HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
-        return;
-      }
-    }
-    // The standard dsh-ssh endpoint has a public query contract: enforce a safe
-    // alias in addition to the SSH toggle.
-    if (userRole === 'user' && isSshTerminalEndpoint(gatePath)) {
-      const terminalUrl = new URL(req.url ?? '/', `http://${firstHeader(req.headers.host) || 'localhost'}`);
-      const alias = terminalUrl.searchParams.get('alias');
-      const perms = authUserId === null ? null : effectivePermissions(authUserId);
-      if (perms === null || !perms.allow_ssh || alias === null || !isSafeSshAlias(alias)) {
-        socket.end('HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
-        return;
-      }
-    }
-    // Plugin-specific HTTP operation surfaces that have no resource-aware
-    // authorization model remain owner-only. WebSocket endpoints are governed
-    // separately by the owner registry below.
-    if (
-      userRole === 'user' &&
-      isAdminOnlyPluginEndpoint(req.method ?? 'GET', gatePath)
-    ) {
-      socket.end('HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
-      return;
+      // 登记表授权建立后纳入撤销集合：规则收紧（热更新）时立即断开，不遗留旧权限连接。
+      registryAuthorizedSockets.add(socket);
+      socket.once('close', () => { registryAuthorizedSockets.delete(socket); });
     }
     // RC.1's Remote streams share one physical /api/remote.mux carrier.
     // Keep the administrator path compatible with registered plugin streams;
@@ -4960,7 +6604,34 @@ export function createGatewayServer(
             }
           }
         };
-        const connection: RemoteMuxUserConnection = { socket: client, publishSessionAttachment };
+        const publishWorkspaceUpsert = (workspace: Record<string, unknown>): void => {
+          if (!isSubuser || client.readyState !== WebSocket.OPEN) return;
+          const workspaceId = typeof workspace.workspaceId === 'string' ? workspace.workspaceId : null;
+          const workspacePath = typeof workspace.path === 'string' ? workspace.path : null;
+          if (workspaceId === null || workspacePath === null) return;
+          const perms = effectivePermissions(authUserId!);
+          if (!folderAllowed(workspacePath, perms.allowed_folders) ||
+            workspaceOwnedByAnotherSubuser(authUserId!, workspacePath)) return;
+          for (const state of active.values()) {
+            if (state?.endpoint !== 'workspace/follow') continue;
+            const previous = state.visibleWorkspaceRows.get(workspaceId);
+            const previousIds = previous !== undefined && Array.isArray(previous.sessionIds)
+              ? previous.sessionIds.filter((id): id is string => typeof id === 'string')
+              : [];
+            const rowIds = Array.isArray(workspace.sessionIds)
+              ? workspace.sessionIds.filter((id): id is string => typeof id === 'string')
+              : [];
+            const row = { ...workspace, sessionIds: [...new Set([...rowIds, ...previousIds])] };
+            state.visibleWorkspaces.set(workspaceId, workspacePath);
+            state.visibleWorkspaceRows.set(workspaceId, row);
+            client.send(JSON.stringify({
+              type: 'item',
+              streamId: state.streamId,
+              value: { type: 'upsert', workspace: row },
+            }));
+          }
+        };
+        const connection: RemoteMuxUserConnection = { socket: client, publishSessionAttachment, publishWorkspaceUpsert };
         const registeredClients = isSubuser
           ? (remoteMuxClientsByUser.get(authUserId!) ?? new Set<RemoteMuxUserConnection>())
           : undefined;
@@ -4984,6 +6655,31 @@ export function createGatewayServer(
           stopHeartbeat();
           try { if (client.readyState === WebSocket.OPEN) client.close(code, reason); else client.terminate(); } catch {}
           try { if (upstreamWs.readyState === WebSocket.OPEN) upstreamWs.close(code, reason); else upstreamWs.terminate(); } catch {}
+        };
+        // A denied logical stream is an application-level Remote failure, not a
+        // carrier failure. Sending an error frame lets DSH stop retrying that
+        // stream while workspace/control/events streams on the same mux survive.
+        // ws emits protocol failures (for example an unmasked client frame) as
+        // EventEmitter 'error'. Handle it locally so malformed client traffic
+        // closes this carrier instead of terminating the gateway process.
+        // ws emits protocol failures (for example an unmasked client frame) as
+        // EventEmitter 'error'. Handle it locally so malformed client traffic
+        // closes this carrier instead of terminating the gateway process.
+        client.on('error', () => closeBoth(1002, 'client websocket error'));
+
+        const rejectLogicalStream = (streamId: string, code: string, message: string): void => {
+          pendingSessionStreams.delete(streamId);
+          active.delete(streamId);
+          if (client.readyState !== WebSocket.OPEN) return;
+          try {
+            client.send(JSON.stringify({
+              type: 'error',
+              streamId,
+              error: { code, message, details: {} },
+            }));
+          } catch {
+            // A concurrently closing client needs no secondary carrier failure.
+          }
         };
         const startHeartbeat = (): void => {
           if (heartbeat !== undefined) return;
@@ -5039,7 +6735,7 @@ export function createGatewayServer(
                 !folderAllowed(sessionPath, perms.allowed_folders) ||
                 workspaceOwnedByAnotherSubuser(authUserId!, sessionPath)
               ) {
-                closeBoth(1008, 'Remote session not available for this user');
+                rejectLogicalStream(streamId, 'gateway/forbidden', 'Remote session not available for this user');
                 return;
               }
             }
@@ -5073,7 +6769,7 @@ export function createGatewayServer(
                   !db.hasUserSessionGrant(authUserId!, authorizationSessionId) ||
                   sessionDeniedAfterBaseline
                 ) {
-                  closeBoth(1008, 'Remote session not available for this user');
+                  rejectLogicalStream(frame.streamId, 'gateway/forbidden', 'Remote session not available for this user');
                   return;
                 }
               } else if (!remoteMuxEmptyArgs(frame.payload)) {
@@ -5189,6 +6885,7 @@ export function createGatewayServer(
           close: () => { if (client.readyState === WebSocket.OPEN) client.close(1012, 'Permissions changed'); },
         });
         client.on('message', () => client.close(1008, 'downlink only'));
+        client.on('error', () => { unregisterClient(); try { upstreamWs.close(); } catch {} });
         client.on('close', () => { unregisterClient(); try { upstreamWs.close(); } catch {} });
         upstreamWs.on('open', () => {});
         upstreamWs.on('message', (data: Buffer) => {
@@ -5269,6 +6966,45 @@ export function createGatewayServer(
     socket.on('close', () => { unregisterRawUserWebSocket?.(); upstreamSocket.destroy(); });
     upstreamSocket.on('close', () => socket.destroy());
   });
+
+  // ── 端点登记表热更新（无需重启）──
+  // 定期读取部署 .env 并对比运行态：合法且变化则立即生效（规则收紧时同步断开经
+  // 登记表授权的子用户 WS）；文件缺失静默忽略；规则非法保留上一次有效快照并只
+  // 报错一次。仅在显式指定部署环境文件（DSH_PASSWORDS_ENV_FILE）时启用。
+  const reloadEnvFile = options.envFile ?? process.env.DSH_PASSWORDS_ENV_FILE?.trim() ?? '';
+  const endpointReloadIntervalMs = options.endpointReloadIntervalMs ?? 5000;
+  if (reloadEnvFile !== '' && endpointReloadIntervalMs > 0) {
+    let lastEndpointReloadError: string | null = null;
+    const applyEndpointRuntime = (): void => {
+      const read = readEndpointRuntimeConfig(reloadEnvFile);
+      if (read === null) return;
+      if (!read.ok) {
+        if (read.error !== lastEndpointReloadError) {
+          lastEndpointReloadError = read.error;
+          console.error(`[dsh-passwords] 端点登记表热更新失败（保留上一次有效规则）：${read.error}`);
+        }
+        return;
+      }
+      lastEndpointReloadError = null;
+      const changed =
+        read.pluginCompat !== compat.enabled ||
+        read.endpointRules.length !== endpointRules.length ||
+        read.endpointRules.some((rule, index) => rule !== endpointRules[index]);
+      if (!changed) return;
+      endpointRules = read.endpointRules;
+      compat = createPluginCompat(read.pluginCompat);
+      console.warn(
+        `[dsh-passwords] 端点登记表已热更新：${endpointRules.length} 条规则，插件兼容层 ${read.pluginCompat ? 'on' : 'off'}`,
+      );
+      for (const socket of registryAuthorizedSockets) {
+        try { socket.destroy(); } catch { /* 已断开 */ }
+      }
+      registryAuthorizedSockets.clear();
+    };
+    const reloadTimer = setInterval(applyEndpointRuntime, endpointReloadIntervalMs);
+    reloadTimer.unref();
+    server.once('close', () => { clearInterval(reloadTimer); });
+  }
 
   return server;
 }

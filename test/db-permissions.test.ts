@@ -39,34 +39,20 @@ test('Issue #19：显式会话 grant 原子持久化、隔离且拒绝非法 ID'
   }
 });
 
-test('SSH alias 认领按用户隔离、互斥并在重启后保留', () => {
+test('SSH alias 归属读写 API 已退役（表仅为旧库迁移保留）', () => {
   const tempDir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-ssh-owner-'));
   const dbPath = path.join(tempDir, 'owners.db');
   const crypto = createFieldCrypto('test-key', 'test-key');
   const db = new Database(dbPath, crypto);
   try {
     db.init();
-    const first = db.createUser('ssh-owner-first', '$2a$10$dummyhashdummyhashdummyhashdu');
-    const second = db.createUser('ssh-owner-second', '$2a$10$dummyhashdummyhashdummyhashdu');
-    assert.equal(db.claimSshHost('work-host', first.id), true);
-    assert.equal(db.claimSshHost('work-host', second.id), false, '同一 alias 不得跨子用户认领');
-    assert.equal(db.getSshHostOwner('work-host'), first.id);
-    assert.deepEqual(db.listSshHostAliases(first.id), ['work-host']);
-    db.releaseSshHost('work-host', second.id);
-    assert.equal(db.getSshHostOwner('work-host'), first.id, '非 owner 不得释放 alias');
-    db.close();
-
-    const reopened = new Database(dbPath, crypto);
-    try {
-      reopened.init();
-      assert.equal(reopened.getSshHostOwner('work-host'), first.id, '认领关系必须跨重启持久化');
-      reopened.releaseSshHost('work-host', first.id);
-      assert.equal(reopened.getSshHostOwner('work-host'), null);
-    } finally {
-      reopened.close();
-    }
+    // 退役后不得再暴露逐 alias 归属读写能力（改由主用户登记的端点表统一管）
+    assert.equal(typeof (db as unknown as Record<string, unknown>).claimSshHost, 'undefined');
+    assert.equal(typeof (db as unknown as Record<string, unknown>).getSshHostOwner, 'undefined');
+    assert.equal(typeof (db as unknown as Record<string, unknown>).listSshHostAliases, 'undefined');
+    assert.equal(typeof (db as unknown as Record<string, unknown>).releaseSshHost, 'undefined');
   } finally {
-    try { db.close(); } catch { /* closed for reopen assertion */ }
+    try { db.close(); } catch { /* already closed */ }
     rmSync(tempDir, { recursive: true, force: true });
   }
 });
@@ -101,7 +87,7 @@ test('极旧 user_permissions 表缺少上传与 git 列时会补齐并默认关
   }
 });
 
-test('旧 user_permissions 表会迁移 WebSocket 授权列，并保留现有权限', () => {
+test('旧 user_permissions 表会迁移缺失列，并保留现有权限', () => {
   const tempDir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-db-'));
   const dbPath = path.join(tempDir, 'legacy.db');
   const raw = new DatabaseSync(dbPath);
@@ -137,6 +123,8 @@ test('旧 user_permissions 表会迁移 WebSocket 授权列，并保留现有权
       allow_workspace_create: false,
       allow_ssh: false,
       allowed_agent_presets: null,
+      allowed_models: null,
+      allow_chat_media: false,
       banned: false,
       sandbox_mode: 'workspace-write',
       disabled_sessions: [],
@@ -215,6 +203,62 @@ test('旧 user_permissions 表会迁移 WebSocket 授权列，并保留现有权
     assert.deepEqual(db.getPermissions(7)?.disabled_sessions, ['disabled-session'], '省略 disabledSessions 不得恢复被禁用会话');
   } finally {
     db.close();
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('删除用户级联清理工作区所有权；启动迁移清除孤儿所有权行', () => {
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-orphan-ownership-'));
+  const dbPath = path.join(tempDir, 'orphan.db');
+  const crypto = createFieldCrypto('test-key', 'test-key');
+  const db = new Database(dbPath, crypto);
+  try {
+    db.init();
+    const gone = db.createUser('gone-user', '$2a$10$dummyhashdummyhashdummyhashdu');
+    const keeper = db.createUser('keeper-user', '$2a$10$dummyhashdummyhashdummyhashdu');
+    db.addUserWorkspace(gone.id, '/srv/gone-ws');
+    db.addUserWorkspace(keeper.id, '/srv/keeper-ws');
+    db.replaceUserSessionGrants(gone.id, ['s-gone']);
+    db.setPermissions(gone.id, {
+      allowedFolders: ['/srv/gone-ws'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+      allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
+      banned: false, sandboxMode: null, disabledSessions: [],
+    });
+
+    // deleteUser 必须带走所有权/授权/权限行：残留会被当作「另一子用户的所有权」
+    // 阻断 baseline 可见性与该目录的登记/创建（112233 事故根因）。
+    db.deleteUser(gone.id);
+    assert.deepEqual(db.listWorkspaceOwners().map((o) => o.path), ['/srv/keeper-ws'], '删除用户必须级联清理其所有权行');
+    assert.deepEqual(db.listUserSessionGrants(gone.id), []);
+    assert.equal(db.getPermissions(gone.id), null);
+
+    // 历史残留（旧版 deleteUser 未清理）由 init() 迁移幂等清除；权限/授权行
+    // 不在迁移清理范围（旧库可能先导权限行后建用户，不能误删）。
+    (db as unknown as { db: DatabaseSync }).db.exec(
+      "INSERT INTO user_workspaces (user_id, path) VALUES (9999, '/srv/legacy-orphan')",
+    );
+    (db as unknown as { db: DatabaseSync }).db.exec(
+      "INSERT INTO user_session_grants (user_id, session_id) VALUES (9999, 's-orphan')",
+    );
+    db.close();
+    const reopened = new Database(dbPath, crypto);
+    try {
+      reopened.init();
+      assert.deepEqual(
+        reopened.listWorkspaceOwners().map((o) => o.path).sort(),
+        ['/srv/keeper-ws'],
+        'init 迁移必须清除已删除用户残留的所有权行',
+      );
+      assert.deepEqual(
+        reopened.listUserSessionGrants(9999),
+        ['s-orphan'],
+        '迁移不得误删孤儿授权行（无害且可能来自旧库分步导入）',
+      );
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    try { db.close(); } catch { /* 用例内已关闭并重开 */ }
     rmSync(tempDir, { recursive: true, force: true });
   }
 });

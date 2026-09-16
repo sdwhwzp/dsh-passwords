@@ -29,3 +29,4 @@ ENV MCP_DSH_RESTART_SERVICE=
 
 EXPOSE 3088
 ENTRYPOINT ["dsh-passwords-entrypoint"]
+CMD ["node", "/opt/dsh-passwords/dist/cli.js", "serve-gateway"]

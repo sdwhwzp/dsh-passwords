@@ -1,6 +1,7 @@
 // SQLite 数据层：Node 内置 node:sqlite（零外部数据库依赖）
 // 表结构：users / platform_settings / audit_logs / login_attempts / ip_throttle /
-// user_permissions / user_usage / messages / user_workspaces / user_session_grants
+// user_permissions / user_usage / messages / user_workspaces / user_session_grants /
+// media_assets / message_media
 //
 // 静态加密（见 src/encrypt.ts）：
 //   - users.username         → AES-256-GCM 密文存储；username_hash（HMAC）做等值索引
@@ -11,6 +12,15 @@
 //
 // 性能：预处理语句按 SQL 文本缓存（每个代理请求都要查询会话，
 // 避免逐请求重复编译 SQL 的开销）。
+//
+// 聊天媒体元数据（media_assets / message_media）：
+//   - 文件本体由网关写在私有目录，DB 只保存元数据与 storage_key；
+//     storage_key / sha256 属于内部字段，绝不进入 MessageRow（消息投影只给
+//     不透明媒体 ID + 展示元数据）。
+//   - 生命周期：pending（已签发上传，文件未就绪）→ ready（校验通过）
+//     → 过期清理 / 删除；失败或放弃的 pending 由网关删除并回收 storage_key。
+//   - 一个媒体只能被一条消息占用（message_media.media_id 上有 UNIQUE 索引），
+//     绑定与消息创建在同一事务内完成，任一校验失败整体回滚。
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
@@ -59,8 +69,12 @@ export interface UserPermissionsRow {
   allow_git_download: boolean;
   allow_workspace_create: boolean;
   allow_ssh: boolean;
-  /** NULL = unrestricted; [] = no agent preset is allowed. */
+  /** NULL = 不限制；[] = 禁止全部 agent preset */
   allowed_agent_presets: string[] | null;
+  /** NULL = 不限制；[] = 禁止全部 provider/model */
+  allowed_models: string[] | null;
+  /** 聊天媒体（sticker/image/video）开关；默认关闭，文本消息不受影响 */
+  allow_chat_media: boolean;
   banned: boolean;
   sandbox_mode: string | null;
   disabled_sessions: string[];
@@ -78,7 +92,22 @@ interface UsageRow {
   hourly_tokens: number;
 }
 
-/** 留言/聊天消息（含发送者用户名，列表时联表带出） */
+/** 留言/聊天消息的媒体附件元数据（只输出安全字段，不含 storage_key/sha256/状态） */
+export interface MessageMediaRow {
+  id: string;
+  kind: 'sticker' | 'image' | 'video';
+  mime_type: string;
+  byte_size: number;
+  width: number | null;
+  height: number | null;
+  duration_ms: number | null;
+  /** 上传时提供的原始文件名（仅展示；文件本体始终以不透明 ID 落盘） */
+  original_name: string;
+  /** 同条消息内顺序（客户端按此排序渲染） */
+  sort_order: number;
+  caption: string | null;
+}
+
 export interface MessageRow {
   id: number;
   sender_id: number;
@@ -87,8 +116,103 @@ export interface MessageRow {
   content: string;
   tags: string[];
   created_at: string;
+  media: MessageMediaRow[];
 }
 
+/**
+ * 媒体对象的安全投影（网关上传/下载接口用）：包含 storage_key / sha256 等
+ * 内部字段的完整行只允许数据层内部或明确的网关切面读取。
+ */
+export interface MediaAssetRow {
+  id: string;
+  owner_id: number;
+  original_name: string;
+  /** 创建/上传者的数据库列名（内部行保持原始列名，避免批量映射时二次拷贝） */
+  kind: 'sticker' | 'image' | 'video';
+  mime_type: string;
+  byte_size: number;
+  width: number | null;
+  height: number | null;
+  duration_ms: number | null;
+  state: string;
+  expires_at: string | null;
+}
+
+/**
+ * 媒体对象（含 storage_key / sha256）。仅供数据层内部与网关的文件读写使用；
+ * 业务投影用 toMediaAssetRow()。
+ */
+export interface MediaAssetInternalRow extends MediaAssetRow {
+  storage_key: string;
+  sha256: string;
+}
+
+/** 可写入的媒体状态（pending = 已签发上传但文件未就绪） */
+export type MediaState = 'pending' | 'ready' | 'failed';
+
+export const MEDIA_KINDS = ['sticker', 'image', 'video'] as const;
+export const MEDIA_STATES = ['pending', 'ready', 'failed'] as const;
+
+/** 过期清理结果：调用方按 storageKeys 删除文件本体 */
+export interface MediaRemovalPlan {
+  media_ids: string[];
+  storage_keys: string[];
+}
+
+/** 已可用（ready 且未过期）媒体对象的安全投影 */
+export interface OwnedMediaRow {
+  id: string;
+  kind: 'sticker' | 'image' | 'video';
+  mime_type: string;
+  byte_size: number;
+  width: number | null;
+  height: number | null;
+  duration_ms: number | null;
+}
+
+/** 清理动作因「媒体已被消息占用」而无法执行时的稳定错误码 */
+export const MEDIA_IN_USE = 'MEDIA_IN_USE';
+/** 清理动作目标不存在时的稳定错误码 */
+export const MEDIA_NOT_FOUND = 'MEDIA_NOT_FOUND';
+
+export class MediaError extends Error {
+  constructor(message: string, readonly code: string) {
+    super(message);
+    this.name = 'MediaError';
+  }
+}
+
+const MEDIA_SELECT_SQL =
+  'SELECT id, owner_id, storage_key, original_name, media_kind AS kind, mime_type, byte_size, sha256, width, height, duration_ms, state, expires_at FROM media_assets';
+
+/** DB 行 → 安全投影（剔除 storage_key / sha256 与内部列） */
+function toMediaAssetRow(row: MediaAssetInternalRow): MediaAssetRow {
+  return {
+    id: row.id,
+    owner_id: row.owner_id,
+    original_name: row.original_name,
+    kind: row.kind,
+    mime_type: row.mime_type,
+    byte_size: Number(row.byte_size),
+    width: row.width === null ? null : Number(row.width),
+    height: row.height === null ? null : Number(row.height),
+    duration_ms: row.duration_ms === null ? null : Number(row.duration_ms),
+    state: String(row.state),
+    expires_at: row.expires_at,
+  };
+}
+
+/** 硬上限：防止异常调用方写入超大 ID/文件名拖爆单行（正常上传远低于此） */
+const MEDIA_ID_MAX = 128;
+const MEDIA_STORAGE_KEY_MAX = 512;
+const MEDIA_NAME_MAX = 255;
+const MEDIA_MIME_MAX = 128;
+const MEDIA_SHA256_MAX = 128;
+const MEDIA_BYTE_SIZE_MAX = 512 * 1024 * 1024;
+const MEDIA_DIMENSION_MAX = 100_000;
+const MEDIA_DURATION_MAX = 24 * 60 * 60 * 1000;
+/** datetime('now') 口径：24 小时内不会与其他行重名的存储键（同一 upload id 仍受 PK 约束） */
+const PLACEHOLDER_STORAGE_KEY_PREFIX = '__pending__:';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
@@ -139,20 +263,15 @@ CREATE TABLE IF NOT EXISTS user_permissions (
   allow_upload       INTEGER NOT NULL DEFAULT 0, -- 是否提升子用户请求体上限到 300 MiB
   allow_git_download INTEGER NOT NULL DEFAULT 0,
   allow_workspace_create INTEGER NOT NULL DEFAULT 0,
-  allow_ssh          INTEGER NOT NULL DEFAULT 0,       -- 子用户 SSH 开关；具体 alias 另按归属控制
-  allowed_websocket_paths TEXT NOT NULL DEFAULT '[]', -- 已退役（旧逐路径 WS 授权）；保留列维持老库兼容，恒为 '[]'
+  allow_ssh          INTEGER NOT NULL DEFAULT 0,       -- 子用户 SSH 端点开关（管已登记的 HTTP/WS 端点）
   allowed_agent_presets TEXT,                         -- NULL = unrestricted；JSON agent preset ID 白名单
+  allowed_models      TEXT,                         -- NULL = unrestricted；JSON provider/model allowlist
+  allow_chat_media    INTEGER NOT NULL DEFAULT 0,   -- 平台留言 sticker/image/video
   banned             INTEGER NOT NULL DEFAULT 0,
   sandbox_mode       TEXT,                          -- NULL = 不更改；read-only/workspace-write/danger-full-access
   disabled_sessions  TEXT NOT NULL DEFAULT '[]',    -- 已开启工作区内逐会话关闭的 sessionId JSON 数组
   updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
 );
-CREATE TABLE IF NOT EXISTS ssh_host_owners (
-  alias              TEXT PRIMARY KEY,
-  user_id            INTEGER NOT NULL,
-  created_at         TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE INDEX IF NOT EXISTS idx_ssh_host_owners_user ON ssh_host_owners(user_id);
 CREATE TABLE IF NOT EXISTS user_usage (
   user_id             INTEGER,
   day                 TEXT,                          -- YYYY-MM-DD（本地时区）
@@ -186,8 +305,68 @@ CREATE TABLE IF NOT EXISTS user_session_grants (
   PRIMARY KEY (user_id, session_id)
 );
 CREATE INDEX IF NOT EXISTS idx_user_session_grants_session ON user_session_grants(session_id);
+CREATE TABLE IF NOT EXISTS media_assets (
+  id              TEXT PRIMARY KEY,
+  owner_id        INTEGER NOT NULL,
+  storage_key     TEXT NOT NULL UNIQUE,
+  original_name   TEXT NOT NULL,
+  media_kind      TEXT NOT NULL,
+  mime_type       TEXT NOT NULL,
+  byte_size       INTEGER NOT NULL,
+  sha256          TEXT NOT NULL,
+  width           INTEGER,
+  height          INTEGER,
+  duration_ms     INTEGER,
+  state           TEXT NOT NULL DEFAULT 'ready',
+  created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+  expires_at      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_media_assets_owner ON media_assets(owner_id, created_at DESC);
+-- 生命周期/清理查询（owner + ready + 未过期、过期扫描、pending 扫描）走索引；
+-- 同时兜住旧库（索引此前缺失）的幂等补齐。
+CREATE INDEX IF NOT EXISTS idx_media_assets_state_expires ON media_assets(state, expires_at);
+CREATE INDEX IF NOT EXISTS idx_media_assets_owner_state ON media_assets(owner_id, state, created_at DESC);
+CREATE TABLE IF NOT EXISTS message_media (
+  message_id      INTEGER NOT NULL,
+  media_id        TEXT NOT NULL,
+  sort_order      INTEGER NOT NULL DEFAULT 0,
+  caption         TEXT,
+  PRIMARY KEY (message_id, media_id)
+);
+-- 一个媒体对象只能被一条消息占用：UNIQUE 是「重复占用」的最终防线
+-- （应用层先 SELECT 再 INSERT，并发下仍可能双写，靠索引拒绝第二条关系）。
+CREATE UNIQUE INDEX IF NOT EXISTS idx_message_media_media ON message_media(media_id);
 
 `;
+
+/**
+ * 旧库 message_media 去重迁移：历史索引非唯一，同一媒体可能已被多条消息引用。
+ * 每个 media_id 只保留最早的一条关系（其余行继续留在表中，但不再作为“占用”
+ * 依据，避免删除历史消息时误删仍被引用的关系行）；随后把索引升级为 UNIQUE。
+ * 幂等：索引已是 UNIQUE 时直接返回；此函数在 init() 里于 SCHEMA 之后执行，
+ * 因此新建库不会走到重建分支。
+ */
+function migrateMessageMediaUniqueness(db: DatabaseSync): void {
+  const indexes = db.prepare('PRAGMA index_list(message_media)').all() as {
+    name: string;
+    unique: number;
+  }[];
+  const occupied = indexes.find((idx) => idx.name === 'idx_message_media_media');
+  if (occupied?.unique === 1) return;
+  if (occupied) db.exec('DROP INDEX idx_message_media_media');
+  db.exec(`DELETE FROM message_media WHERE rowid NOT IN (
+    SELECT MIN(rowid) FROM message_media GROUP BY media_id
+  )`);
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_message_media_media ON message_media(media_id)');
+}
+
+/** SQLite 时间列归一：datetime('now') 返回 'YYYY-MM-DD HH:MM:SS'，统一为 ISO。 */
+function toIsoTimestamp(value: string | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  const raw = String(value).trim();
+  if (raw === '') return null;
+  return raw.includes('T') ? raw : `${raw.replace(' ', 'T')}Z`;
+}
 
 /** 安全解析 JSON 字符串数组（权限目录 / 留言标签）；损坏时返回空数组 */
 function parseJsonArray(raw: string | null): string[] {
@@ -286,8 +465,12 @@ export class Database {
     // 删除内容清零，防止已删除的明文残留在空闲页可被文件扫描恢复
     this.db.exec('PRAGMA secure_delete = ON');
     this.db.exec(SCHEMA);
+    // SCHEMA 里的 message_media 唯一索引对所有库无差别执行：旧库若已有同名
+    // 非唯一索引，CREATE INDEX IF NOT EXISTS 不会升级它，需显式重建（且去重）。
+    migrateMessageMediaUniqueness(this.db);
     this.migrateRoles();
     this.migratePermissions();
+    this.purgeOrphanOwnershipRows();
     const changedUsers = this.migrateUsers();
     const changedAudit = this.migrateAuditLogs();
     const changedAttempts = this.migrateLoginAttempts();
@@ -320,38 +503,62 @@ export class Database {
     }
   }
 
+  // ── 迁移：清理已删除用户残留的孤儿所有权行 ──────────────────────
+  // 历史 deleteUser 不清理 user_workspaces，残留行会被当作「另一子用户的
+  // 所有权」阻断 baseline 可见性与该目录的登记/创建。幂等：每次启动扫一次。
+  // 只清所有权：孤儿权限/授权行无人可读（无害），且旧库迁移场景可能存在
+ // 「先导权限行、后建用户」的历史数据，不能误删。
+  private purgeOrphanOwnershipRows(): void {
+    this.db.exec('DELETE FROM user_workspaces WHERE user_id NOT IN (SELECT id FROM users)');
+  }
+
   // ── 迁移：user_permissions 补 sandbox_mode / disabled_sessions 列 ─────────────────
   private migratePermissions(): void {
-    const cols = this.stmt('PRAGMA table_info(user_permissions)').all() as { name: string }[];
-    if (!cols.some((c) => c.name === 'allow_upload')) {
-      this.db.exec('ALTER TABLE user_permissions ADD COLUMN allow_upload INTEGER NOT NULL DEFAULT 0');
-    }
-    if (!cols.some((c) => c.name === 'allow_git_download')) {
-      this.db.exec('ALTER TABLE user_permissions ADD COLUMN allow_git_download INTEGER NOT NULL DEFAULT 0');
-    }
-    if (!cols.some((c) => c.name === 'sandbox_mode')) {
-      this.db.exec('ALTER TABLE user_permissions ADD COLUMN sandbox_mode TEXT');
-    }
-    if (!cols.some((c) => c.name === 'disabled_sessions')) {
-      this.db.exec("ALTER TABLE user_permissions ADD COLUMN disabled_sessions TEXT NOT NULL DEFAULT '[]'");
-    }
-    if (!cols.some((c) => c.name === 'allow_workspace_create')) {
-      this.db.exec('ALTER TABLE user_permissions ADD COLUMN allow_workspace_create INTEGER NOT NULL DEFAULT 0');
-    }
-    if (!cols.some((c) => c.name === 'allow_ssh')) {
-      this.db.exec('ALTER TABLE user_permissions ADD COLUMN allow_ssh INTEGER NOT NULL DEFAULT 0');
-    }
-    if (!cols.some((c) => c.name === 'allowed_websocket_paths')) {
-      this.db.exec("ALTER TABLE user_permissions ADD COLUMN allowed_websocket_paths TEXT NOT NULL DEFAULT '[]'");
-    }
-    if (!cols.some((c) => c.name === 'allowed_agent_presets')) {
-      this.db.exec('ALTER TABLE user_permissions ADD COLUMN allowed_agent_presets TEXT');
-    }
-    // Issue #19：显式会话授权上线前的旧数据迁移标记。字段缺失=未初始化；
+    // PRAGMA 只用于建列判定；不可缓存——语句缓存会让后续 ALTER 后的表结构误判
+    const before = new Set(
+      (this.db.prepare('PRAGMA table_info(user_permissions)').all() as { name: string }[]).map((c) => c.name),
+    );
+    const addColumn = (name: string, sql: string): void => {
+      // 逐个重新探测：ALTER TABLE 会让先前读到的列集合过期，
+      // 缓存旧集合会把已存在的列重复 ADD（SQLite 直接报错，启动失败）。
+      if (before.has(name)) return;
+      this.db.exec(sql);
+      before.add(name);
+    };
+    addColumn('allow_upload', 'ALTER TABLE user_permissions ADD COLUMN allow_upload INTEGER NOT NULL DEFAULT 0');
+    addColumn('allow_git_download', 'ALTER TABLE user_permissions ADD COLUMN allow_git_download INTEGER NOT NULL DEFAULT 0');
+    addColumn('sandbox_mode', 'ALTER TABLE user_permissions ADD COLUMN sandbox_mode TEXT');
+    addColumn(
+      'disabled_sessions',
+      "ALTER TABLE user_permissions ADD COLUMN disabled_sessions TEXT NOT NULL DEFAULT '[]'",
+    );
+    addColumn(
+      'allow_workspace_create',
+      'ALTER TABLE user_permissions ADD COLUMN allow_workspace_create INTEGER NOT NULL DEFAULT 0',
+    );
+    addColumn('allow_ssh', 'ALTER TABLE user_permissions ADD COLUMN allow_ssh INTEGER NOT NULL DEFAULT 0');
+    addColumn('allowed_agent_presets', 'ALTER TABLE user_permissions ADD COLUMN allowed_agent_presets TEXT');
+    // allowed_models：NULL = 不限制（新列 = 旧库全部用户保持现有行为），
+    // [] = 禁止全部模型（服务端白名单维护，绝不为旧库写入非 NULL 默认值）。
+    addColumn('allowed_models', 'ALTER TABLE user_permissions ADD COLUMN allowed_models TEXT');
+    // allow_chat_media：独立于 allow_upload 的聊天媒体开关，默认关闭。
+    addColumn('allow_chat_media', 'ALTER TABLE user_permissions ADD COLUMN allow_chat_media INTEGER NOT NULL DEFAULT 0');
+    // Issue #19：显式会话授权上线前的旧数据迁移标记。列缺失=未初始化；
     // 已初始化的用户不会因后续新会话自动加入授权。
-    if (!cols.some((c) => c.name === 'session_grants_seeded')) {
-      this.db.exec('ALTER TABLE user_permissions ADD COLUMN session_grants_seeded INTEGER NOT NULL DEFAULT 0');
-    }
+    addColumn(
+      'session_grants_seeded',
+      'ALTER TABLE user_permissions ADD COLUMN session_grants_seeded INTEGER NOT NULL DEFAULT 0',
+    );
+    this.normalizeMediaPermissionColumns();
+  }
+
+  /**
+   * allow_chat_media 归一：旧库/手工 SQL 可能留下 NULL（列由外部进程补加）或
+   * 0/1 之外的脏值。NULL 会让读取侧按“未授权”处理，但写入侧要与显式开关
+   * 区分，统一折叠为 0，保证 getPermissions 永远返回布尔值。
+   */
+  private normalizeMediaPermissionColumns(): void {
+    this.db.exec('UPDATE user_permissions SET allow_chat_media = 0 WHERE allow_chat_media IS NULL');
   }
 
   // ── 迁移：users.username 明文 → 密文 + username_hash ──────────
@@ -620,9 +827,20 @@ export class Database {
     ).run(passwordHash, id);
   }
 
+  /**
+   * 删除用户（级联）：权限、用量、工作区所有权、授权、登录失败记录、该用户
+   * 发出的/收到的消息关系与该用户拥有的媒体元数据。
+   *
+   * 文件本体归网关管：调用方要么先用 peekUserMediaRemoval(userId) 取待删
+   * storage keys（推荐，deleteUser 之后按键删文件），要么在删除后调用
+   * pruneMedia() 回收无主文件。
+   */
   deleteUser(id: number): void {
     // 无外键约束（SQLite 未开 FK），关联行需手动级联清理：
-    // 权限、用量、留言（发件人/收件人）以及登录失败记录。
+    // user_workspaces 必须一并清理：残留孤儿行会被当作「另一子用户的所有权」
+    // 阻断 baseline 可见性与该目录的登记/创建。
+    // 媒体：先删关系再删资产，否则 message_media 会留下指向已删资产的孤儿行
+    // （孤儿关系会让 mediaAttachedToAnyMessage 永远为真，永久阻断删除/GC）。
     const user = this.getUserById(id);
     this.db.exec('BEGIN IMMEDIATE');
     try {
@@ -631,16 +849,91 @@ export class Database {
       }
 
       this.stmt('DELETE FROM user_permissions WHERE user_id = ?').run(id);
-      this.stmt('DELETE FROM ssh_host_owners WHERE user_id = ?').run(id);
       this.stmt('DELETE FROM user_session_grants WHERE user_id = ?').run(id);
       this.stmt('DELETE FROM user_usage WHERE user_id = ?').run(id);
+      this.stmt('DELETE FROM user_workspaces WHERE user_id = ?').run(id);
+      this.deleteMediaRelationsOfUser(id);
       this.stmt('DELETE FROM messages WHERE sender_id = ? OR recipient_id = ?').run(id, id);
+      this.stmt('DELETE FROM media_assets WHERE owner_id = ?').run(id);
       this.stmt('DELETE FROM users WHERE id = ?').run(id);
       this.db.exec('COMMIT');
     } catch (error) {
       this.db.exec('ROLLBACK');
       throw error;
     }
+  }
+
+  /**
+   * 该用户拥有的媒体资产对应的待删除 storage keys（只读，不修改任何数据）。
+   * 网关删除用户前先取一次，deleteUser 成功后按返回值删文件（DB 层不删文件）。
+   */
+  peekUserMediaRemoval(userId: number): MediaRemovalPlan {
+    return this.collectMediaRemoval(
+      'SELECT id, storage_key FROM media_assets WHERE owner_id = ?',
+      userId,
+    );
+  }
+
+  /** 删除与该用户消息相关的关系行（含“我发的”与“发给我的”）。 */
+  private deleteMediaRelationsOfUser(userId: number): void {
+    this.stmt(
+      `DELETE FROM message_media WHERE message_id IN (
+         SELECT id FROM messages WHERE sender_id = ? OR recipient_id = ?
+       )`,
+    ).run(userId, userId);
+    this.stmt(
+      `DELETE FROM message_media WHERE media_id IN (SELECT id FROM media_assets WHERE owner_id = ?)`,
+    ).run(userId);
+  }
+
+  private collectMediaRemoval(sql: string, ...params: (string | number)[]): MediaRemovalPlan {
+    const rows = this.stmt(sql).all(...params) as { id: string; storage_key: string }[];
+    return {
+      media_ids: rows.map((row) => String(row.id)),
+      storage_keys: rows.map((row) => String(row.storage_key)).filter((key) => key !== ''),
+    };
+  }
+
+  /**
+   * 清理两类不再需要的媒体元数据（文件本体由调用方按返回的 storage keys 删除）：
+   *   1. 已过期且未被任何消息占用的资产（过期可含 pending）；
+   *   2. 早于 pendingCutoff 仍未完成上传的 pending 资产（未提交上传的清理）。
+   * now / pendingCutoff 省略时分别取当前时间 / 不清理 pending。
+   * 内部先删关系再删元数据，不会产生孤儿关系行。
+   */
+  pruneMedia(options: { pendingCutoff?: string | Date | null; now?: string | Date } = {}): MediaRemovalPlan {
+    const nowText = this.sqliteTime(options.now ?? new Date());
+    const pendingCutoff = this.sqliteTime(options.pendingCutoff);
+    const expired = this.stmt(
+      `SELECT id, storage_key FROM media_assets
+        WHERE expires_at IS NOT NULL AND expires_at <= ?
+          AND id NOT IN (SELECT media_id FROM message_media)`,
+    ).all(nowText) as { id: string; storage_key: string }[];
+    const stale = pendingCutoff === null
+      ? []
+      : (this.stmt(
+          `SELECT id, storage_key FROM media_assets
+            WHERE state = 'pending' AND created_at < ?
+              AND id NOT IN (SELECT media_id FROM message_media)`,
+        ).all(pendingCutoff) as { id: string; storage_key: string }[]);
+    const targets = new Map<string, string>();
+    for (const row of [...expired, ...stale]) targets.set(String(row.id), String(row.storage_key));
+    if (targets.size === 0) return { media_ids: [], storage_keys: [] };
+    const ids = [...targets.keys()];
+    const placeholders = ids.map(() => '?').join(', ');
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.stmt(`DELETE FROM message_media WHERE media_id IN (${placeholders})`).run(...ids);
+      this.stmt(`DELETE FROM media_assets WHERE id IN (${placeholders})`).run(...ids);
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+    return {
+      media_ids: ids,
+      storage_keys: [...targets.values()].filter((key) => key !== ''),
+    };
   }
 
   touchLogin(userId: number): void {
@@ -829,7 +1122,7 @@ export class Database {
   // ── 子用户权限（网关强制执行） ────────────────────────────
   getPermissions(userId: number): UserPermissionsRow | null {
     const row = this.stmt(
-      'SELECT user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, allow_upload, allow_git_download, allow_workspace_create, allow_ssh, allowed_agent_presets, banned, sandbox_mode, disabled_sessions, updated_at FROM user_permissions WHERE user_id = ?',
+      'SELECT user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, allow_upload, allow_git_download, allow_workspace_create, allow_ssh, allowed_agent_presets, allowed_models, allow_chat_media, banned, sandbox_mode, disabled_sessions, updated_at FROM user_permissions WHERE user_id = ?',
     ).get(userId) as
       | {
           user_id: number;
@@ -841,6 +1134,8 @@ export class Database {
           allow_workspace_create: number;
           allow_ssh: number;
           allowed_agent_presets: string | null;
+          allowed_models: string | null;
+          allow_chat_media: number;
           banned: number;
           sandbox_mode: string | null;
           disabled_sessions: string | null;
@@ -858,6 +1153,8 @@ export class Database {
       allow_workspace_create: row.allow_workspace_create === 1,
       allow_ssh: row.allow_ssh === 1,
       allowed_agent_presets: row.allowed_agent_presets === null ? null : parseJsonArray(row.allowed_agent_presets),
+      allowed_models: row.allowed_models === null ? null : parseJsonArray(row.allowed_models),
+      allow_chat_media: row.allow_chat_media === 1,
       banned: row.banned === 1,
       sandbox_mode: row.sandbox_mode,
       disabled_sessions: parseJsonArray(row.disabled_sessions),
@@ -876,6 +1173,8 @@ export class Database {
       allowWorkspaceCreate: boolean;
       allowSsh?: boolean;
       allowedAgentPresets?: string[] | null;
+      allowedModels?: string[] | null;
+      allowChatMedia?: boolean;
       banned: boolean;
       sandboxMode?: string | null;
       disabledSessions?: string[];
@@ -891,7 +1190,6 @@ export class Database {
         .filter((id) => typeof id === 'string' && id.length > 0 && id.length <= 200),
     )].slice(0, 2000);
     const sandboxMode = perms.sandboxMode === undefined ? current?.sandbox_mode ?? null : perms.sandboxMode;
-    // allowed_websocket_paths 列已退役：恒写 '[]'，不再保留任何逐路径授权。
     const allowedSessionIds = [...new Set(
       (perms.allowedSessionIds ?? []).filter((id) => typeof id === 'string' && id.length > 0 && id.length <= 200),
     )].slice(0, 2000);
@@ -901,11 +1199,17 @@ export class Database {
       : perms.allowedAgentPresets === null
         ? null
         : [...new Set(perms.allowedAgentPresets.filter((id) => typeof id === 'string' && id.length > 0 && id.length <= 200))].slice(0, 256);
+    const allowedModels = perms.allowedModels === undefined
+      ? current?.allowed_models ?? null
+      : perms.allowedModels === null
+        ? null
+        : [...new Set(perms.allowedModels.filter((id) => typeof id === 'string' && /^[^/\s]{1,100}\/[^\s]{1,200}$/.test(id)))].slice(0, 512);
+    const allowChatMedia = perms.allowChatMedia ?? current?.allow_chat_media ?? false;
     this.db.exec('BEGIN IMMEDIATE');
     try {
       this.stmt(
-      `INSERT INTO user_permissions (user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, allow_upload, allow_git_download, allow_workspace_create, allow_ssh, allowed_websocket_paths, allowed_agent_presets, banned, sandbox_mode, disabled_sessions)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO user_permissions (user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, allow_upload, allow_git_download, allow_workspace_create, allow_ssh, allowed_agent_presets, allowed_models, allow_chat_media, banned, sandbox_mode, disabled_sessions)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(user_id) DO UPDATE SET
          allowed_folders = excluded.allowed_folders,
          hourly_token_limit = excluded.hourly_token_limit,
@@ -914,8 +1218,9 @@ export class Database {
          allow_git_download = excluded.allow_git_download,
          allow_workspace_create = excluded.allow_workspace_create,
          allow_ssh = excluded.allow_ssh,
-         allowed_websocket_paths = excluded.allowed_websocket_paths,
          allowed_agent_presets = excluded.allowed_agent_presets,
+         allowed_models = excluded.allowed_models,
+         allow_chat_media = excluded.allow_chat_media,
          banned = excluded.banned,
          sandbox_mode = excluded.sandbox_mode,
          disabled_sessions = excluded.disabled_sessions,
@@ -929,8 +1234,9 @@ export class Database {
       perms.allowGitDownload ? 1 : 0,
       perms.allowWorkspaceCreate ? 1 : 0,
       allowSsh ? 1 : 0,
-      '[]',
       allowedAgentPresets === null ? null : JSON.stringify(allowedAgentPresets),
+      allowedModels === null ? null : JSON.stringify(allowedModels),
+      allowChatMedia ? 1 : 0,
       perms.banned ? 1 : 0,
       sandboxMode,
       JSON.stringify(disabledSessions),
@@ -945,27 +1251,6 @@ export class Database {
       this.db.exec('ROLLBACK');
       throw error;
     }
-  }
-
-  // ── SSH host alias 归属 ─────────────────────────
-  /** 未登记的 alias 属于历史/管理员全局配置，不自动对外共享。 */
-  getSshHostOwner(alias: string): number | null {
-    const row = this.stmt('SELECT user_id FROM ssh_host_owners WHERE alias = ?').get(alias) as { user_id: number } | undefined;
-    return row?.user_id ?? null;
-  }
-
-  listSshHostAliases(userId: number): string[] {
-    return (this.stmt('SELECT alias FROM ssh_host_owners WHERE user_id = ? ORDER BY alias').all(userId) as { alias: string }[]).map((row) => row.alias);
-  }
-
-  claimSshHost(alias: string, userId: number): boolean {
-    if (typeof alias !== 'string' || alias.length === 0 || alias.length > 256) return false;
-    this.stmt('INSERT OR IGNORE INTO ssh_host_owners (alias, user_id) VALUES (?, ?)').run(alias, userId);
-    return this.getSshHostOwner(alias) === userId;
-  }
-
-  releaseSshHost(alias: string, userId: number): void {
-    this.stmt('DELETE FROM ssh_host_owners WHERE alias = ? AND user_id = ?').run(alias, userId);
   }
 
   // ── 子用户显式会话授权 ──────────────────────────
@@ -1178,7 +1463,408 @@ export class Database {
       content: row.content,
       tags: parseJsonArray(row.tags),
       created_at: row.created_at,
+      media: this.listMessageMedia(row.id),
     }));
+  }
+
+  /**
+   * 消息媒体投影：只输出 ready 且未过期、且文件必须与消息同属一个所有者的资产。
+   * 过滤口径与绑定/下载一致，避免旧数据或状态被改写后消息仍引用不可用媒体
+   * （客户端会拿到永远 404/410 的 ID）。**不输出 storage_key / sha256 / state**，
+   * 访问媒体必须走「消息 ID → 不透明媒体 ID」的二次鉴权链路。
+   */
+  private listMessageMedia(messageId: number): MessageMediaRow[] {
+    return (
+      this.stmt(
+        `SELECT a.id, a.media_kind AS kind, a.mime_type, a.byte_size, a.width, a.height, a.duration_ms,
+                a.original_name, mm.sort_order, mm.caption
+           FROM message_media mm
+           JOIN media_assets a ON a.id = mm.media_id
+           JOIN messages m ON m.id = mm.message_id
+          WHERE mm.message_id = ?
+            AND a.owner_id = m.sender_id
+            AND a.state = 'ready'
+            AND (a.expires_at IS NULL OR a.expires_at > datetime('now'))
+          ORDER BY mm.sort_order ASC, a.id ASC`,
+      ).all(messageId) as unknown as MessageMediaRow[]
+    ).map((row) => ({
+      id: String(row.id),
+      kind: row.kind,
+      mime_type: String(row.mime_type),
+      byte_size: Number(row.byte_size),
+      width: row.width === null ? null : Number(row.width),
+      height: row.height === null ? null : Number(row.height),
+      duration_ms: row.duration_ms === null ? null : Number(row.duration_ms),
+      original_name: String(row.original_name),
+      sort_order: Number(row.sort_order),
+      caption: row.caption === null ? null : String(row.caption),
+    }));
+  }
+
+  // ── 媒体对象（聊天媒体上传/绑定/清理） ─────────────────────────
+
+  /** 可用的 storage key：非空且不含控制字符/NUL（会破坏文件路径与日志） */
+  private static assertStorageKey(storageKey: string): void {
+    if (
+      typeof storageKey !== 'string' ||
+      storageKey.length === 0 ||
+      storageKey.length > MEDIA_STORAGE_KEY_MAX ||
+      // eslint-disable-next-line no-control-regex
+      /[\u0000-\u001f\u007f]/.test(storageKey) ||
+      storageKey.includes('..')
+    ) {
+      throw new MediaError('存储键非法', 'INVALID_MEDIA');
+    }
+  }
+
+  /** 外部可控媒体 ID：长度受限且不得包含控制字符（直接拼进 URL/SQL 绑定参数） */
+  private static assertMediaId(id: string): void {
+    if (
+      typeof id !== 'string' ||
+      id.length === 0 ||
+      id.length > MEDIA_ID_MAX ||
+      // eslint-disable-next-line no-control-regex
+      /[\u0000-\u001f\u007f]/.test(id)
+    ) {
+      throw new MediaError('媒体 ID 非法', 'INVALID_MEDIA_ID');
+    }
+  }
+
+  private normalizeMediaKind(kind: string): 'sticker' | 'image' | 'video' {
+    if (kind === 'sticker' || kind === 'image' || kind === 'video') return kind;
+    throw new MediaError('不支持的媒体类型', 'INVALID_MEDIA_KIND');
+  }
+
+  private normalizeMediaMime(mimeType: string): string {
+    const mime = typeof mimeType === 'string' ? mimeType.trim().toLowerCase() : '';
+    if (mime === '' || mime.length > MEDIA_MIME_MAX || !/^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(mime)) {
+      throw new MediaError('媒体 MIME 非法', 'INVALID_MEDIA_MIME');
+    }
+    return mime;
+  }
+
+  private normalizeMediaSize(byteSize: number): number {
+    const size = Math.trunc(Number(byteSize));
+    if (!Number.isFinite(size) || size <= 0 || size > MEDIA_BYTE_SIZE_MAX) {
+      throw new MediaError('媒体大小非法', 'INVALID_MEDIA_SIZE');
+    }
+    return size;
+  }
+
+  private normalizeMediaDimension(value: number | null | undefined): number | null {
+    if (value === null || value === undefined) return null;
+    const n = Math.trunc(Number(value));
+    if (!Number.isFinite(n) || n <= 0 || n > MEDIA_DIMENSION_MAX) return null;
+    return n;
+  }
+
+  private normalizeMediaDuration(value: number | null | undefined): number | null {
+    if (value === null || value === undefined) return null;
+    const n = Math.trunc(Number(value));
+    if (!Number.isFinite(n) || n < 0 || n > MEDIA_DURATION_MAX) return null;
+    return n;
+  }
+
+  /** SQLite 文本时间：接受 Date / ISO / 'YYYY-MM-DD HH:MM:SS'，输出与 datetime('now') 可比的形式 */
+  private sqliteTime(value: string | Date | null | undefined): string | null {
+    if (value === null || value === undefined) return null;
+    if (typeof value === 'string') {
+      const raw = value.trim();
+      if (raw === '') return null;
+      // ISO 带毫秒/时区时截断到秒：'2026-09-15T10:00:00.123Z' → '2026-09-15 10:00:00'，
+      // 与 datetime('now') 文本可比；其他字面量（如 datetime('now', '-1 hour') 的
+      // 结果）原样使用。
+      return raw.includes('T') ? raw.slice(0, 19).replace('T', ' ') : raw;
+    }
+    const ms = value.getTime();
+    if (!Number.isFinite(ms)) return null;
+    return new Date(ms).toISOString().slice(0, 19).replace('T', ' ');
+  }
+
+  private normalizeMediaExpiry(expiresAt: string | Date | null | undefined): string | null {
+    return this.sqliteTime(expiresAt);
+  }
+
+  /** 内部完整行读取（含 storage_key/sha256）；不对外暴露 */
+  private selectMediaAsset(id: string): MediaAssetInternalRow | null {
+    const row = this.stmt(`${MEDIA_SELECT_SQL} WHERE id = ?`).get(id) as MediaAssetInternalRow | undefined;
+    return row ?? null;
+  }
+
+  /**
+   * 创建媒体资产元数据（幂等）：`id`/`storage_key` 任一已存在都不重复插入，
+   * 返回是否新建以及当前安全投影。保证同一 upload/media ID 不会被重复占用。
+   *
+   * state='pending' 表示已签发上传但文件尚未就绪（storageKey 允许为空，此时写入
+   * 占位键，待 finalizeMediaAsset 换成真实键）；state='ready' 时 storageKey 必填。
+   */
+  addMediaAsset(asset: {
+    id: string; ownerId: number; storageKey: string; originalName: string;
+    kind: 'sticker' | 'image' | 'video'; mimeType: string; byteSize: number; sha256: string;
+    width?: number | null; height?: number | null; durationMs?: number | null; expiresAt?: string | Date | null;
+    state?: MediaState;
+  }): { created: boolean; asset: MediaAssetRow | null } {
+    Database.assertMediaId(asset.id);
+    const existing = this.selectMediaAsset(asset.id);
+    if (existing) return { created: false, asset: toMediaAssetRow(existing) };
+    const state: MediaState = asset.state ?? 'ready';
+    if (!MEDIA_STATES.includes(state)) throw new MediaError('媒体状态非法', 'INVALID_MEDIA_STATE');
+    const storageKey = typeof asset.storageKey === 'string' ? asset.storageKey : '';
+    if (state === 'ready') Database.assertStorageKey(storageKey);
+    else if (storageKey !== '') Database.assertStorageKey(storageKey);
+    const kind = this.normalizeMediaKind(asset.kind);
+    const mime = this.normalizeMediaMime(asset.mimeType);
+    const size = this.normalizeMediaSize(asset.byteSize);
+    const originalName = (typeof asset.originalName === 'string' ? asset.originalName : '')
+      .replace(/[\u0000-\u001f\u007f]/g, '')
+      .trim()
+      .slice(0, MEDIA_NAME_MAX);
+    const sha256 = (typeof asset.sha256 === 'string' ? asset.sha256 : '').slice(0, MEDIA_SHA256_MAX);
+    const effectiveKey = storageKey === '' ? `${PLACEHOLDER_STORAGE_KEY_PREFIX}${asset.id}` : storageKey;
+    const result = this.stmt(
+      `INSERT INTO media_assets (id, owner_id, storage_key, original_name, media_kind, mime_type, byte_size, sha256, width, height, duration_ms, state, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT DO NOTHING`,
+    ).run(
+      asset.id, asset.ownerId, effectiveKey, originalName, kind, mime, size, sha256,
+      this.normalizeMediaDimension(asset.width), this.normalizeMediaDimension(asset.height),
+      this.normalizeMediaDuration(asset.durationMs), state, this.normalizeMediaExpiry(asset.expiresAt),
+    );
+    if (Number(result.changes) === 0) {
+      // 撞 id 或 storage_key（并发重复上传/重复签发同一 upload id）：绝不覆盖旧行
+      const current = this.selectMediaAsset(asset.id);
+      return { created: false, asset: current ? toMediaAssetRow(current) : null };
+    }
+    const created = this.selectMediaAsset(asset.id);
+    return { created: true, asset: created ? toMediaAssetRow(created) : null };
+  }
+
+  /** 创建一个「已上传完成」的媒体对象元数据（addMediaAsset 的兼容薄包裹） */
+  addReadyMediaAsset(asset: Parameters<Database['addMediaAsset']>[0]): { created: boolean; asset: MediaAssetRow | null } {
+    return this.addMediaAsset({ ...asset, state: 'ready' });
+  }
+
+  /**
+   * pending → ready：写入真实 storage key / 哈希 / 尺寸并置为 ready。
+   * 仅允许从 pending 迁移（防止已 ready 的资产被二次改写指向别的文件）。
+   * 返回是否迁移成功；false = 资产不存在或状态不对。
+   */
+  finalizeMediaAsset(
+    id: string,
+    update: {
+      storageKey: string; sha256: string; byteSize?: number; mimeType?: string;
+      width?: number | null; height?: number | null; durationMs?: number | null; expiresAt?: string | Date | null;
+    },
+  ): MediaAssetRow | null {
+    Database.assertMediaId(id);
+    Database.assertStorageKey(update.storageKey);
+    const row = this.selectMediaAsset(id);
+    if (!row || row.state !== 'pending') return null;
+    const size = update.byteSize === undefined ? Number(row.byte_size) : this.normalizeMediaSize(update.byteSize);
+    const mime = update.mimeType === undefined ? row.mime_type : this.normalizeMediaMime(update.mimeType);
+    const result = this.stmt(
+      `UPDATE media_assets
+          SET storage_key = ?, sha256 = ?, byte_size = ?, mime_type = ?, width = ?, height = ?, duration_ms = ?,
+              state = 'ready', expires_at = ?
+        WHERE id = ? AND state = 'pending'`,
+    ).run(
+      update.storageKey, (update.sha256 ?? '').slice(0, MEDIA_SHA256_MAX), size, mime,
+      this.normalizeMediaDimension(update.width ?? row.width),
+      this.normalizeMediaDimension(update.height ?? row.height),
+      this.normalizeMediaDuration(update.durationMs ?? row.duration_ms),
+      update.expiresAt === undefined ? row.expires_at : this.normalizeMediaExpiry(update.expiresAt),
+      id,
+    );
+    if (Number(result.changes) === 0) return null;
+    const updated = this.selectMediaAsset(id);
+    return updated ? toMediaAssetRow(updated) : null;
+  }
+
+  /**
+   * pending → failed：上传失败/被取消。元数据保留（便于排障与去重统计），
+   * 但不再是 ready，不能被绑定；文件由调用方按 storage key 删除。
+   */
+  markMediaFailed(id: string): MediaAssetRow | null {
+    Database.assertMediaId(id);
+    const result = this.stmt(
+      "UPDATE media_assets SET state = 'failed' WHERE id = ? AND state = 'pending'",
+    ).run(id);
+    if (Number(result.changes) === 0) return null;
+    const row = this.selectMediaAsset(id);
+    return row ? toMediaAssetRow(row) : null;
+  }
+
+  /** 删除媒体元数据与其关系（仅限尚未被任何消息占用）。返回待删 storage keys。 */
+  deleteMediaAsset(id: string): MediaRemovalPlan {
+    Database.assertMediaId(id);
+    if (this.mediaAttachedToAnyMessage(id)) {
+      throw new MediaError('媒体已被消息占用，无法删除', MEDIA_IN_USE);
+    }
+    const plan = this.collectMediaRemoval('SELECT id, storage_key FROM media_assets WHERE id = ?', id);
+    if (plan.media_ids.length === 0) throw new MediaError('媒体不存在', MEDIA_NOT_FOUND);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.stmt('DELETE FROM message_media WHERE media_id = ?').run(id);
+      this.stmt('DELETE FROM media_assets WHERE id = ?').run(id);
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+    return plan;
+  }
+
+  /** 媒体对象的安全投影（不含 storage_key/sha256）；不存在返回 null */
+  getMediaAsset(id: string): MediaAssetRow | null {
+    const row = this.selectMediaAsset(id);
+    return row ? toMediaAssetRow(row) : null;
+  }
+
+  /** 媒体对象完整内容（含 storage_key/sha256）：仅供网关文件读写与清理使用 */
+  getMediaAssetFile(id: string): MediaAssetInternalRow | null {
+    return this.selectMediaAsset(id);
+  }
+
+  /** 批量读取：网关拼装消息/预签名下载时避免 N 次查询（顺序与入参 ids 一致，缺失项为 null） */
+  getMediaAssets(ids: readonly string[]): (MediaAssetRow | null)[] {
+    return ids.map((id) => this.getMediaAsset(id));
+  }
+
+  /**
+   * 该用户当前可用（ready 且未过期）的媒体对象列表；
+   * 传入 kind 时按类型过滤（用于上传配额统计）。
+   */
+  listMediaForUser(userId: number, kind?: 'sticker' | 'image' | 'video'): OwnedMediaRow[] {
+    const params: (string | number)[] = [userId];
+    let sql = `SELECT id, media_kind, mime_type, byte_size, width, height, duration_ms
+                 FROM media_assets
+                WHERE owner_id = ? AND state = 'ready'
+                  AND (expires_at IS NULL OR expires_at > datetime('now'))`;
+    if (kind !== undefined) {
+      sql += ' AND media_kind = ?';
+      params.push(this.normalizeMediaKind(kind));
+    }
+    sql += ' ORDER BY created_at DESC, id DESC';
+    return (this.stmt(sql).all(...params) as unknown as OwnedMediaRow[]).map((row) => ({
+      id: String(row.id),
+      kind: row.kind,
+      mime_type: String(row.mime_type),
+      byte_size: Number(row.byte_size),
+      width: row.width === null ? null : Number(row.width),
+      height: row.height === null ? null : Number(row.height),
+      duration_ms: row.duration_ms === null ? null : Number(row.duration_ms),
+    }));
+  }
+
+  /** 该用户是否拥有一个可用（ready 且未过期）的媒体对象 */
+  mediaOwnedByUser(id: string, userId: number): boolean {
+    if (typeof id !== 'string' || id === '') return false;
+    return this.stmt(
+      `SELECT 1 FROM media_assets
+       WHERE id = ? AND owner_id = ? AND state = 'ready'
+         AND (expires_at IS NULL OR expires_at > datetime('now'))`,
+    ).get(id, userId) !== undefined;
+  }
+
+  /** 该媒体是否已被任何消息占用（含关系行中已失效的历史引用） */
+  mediaAttachedToAnyMessage(id: string): boolean {
+    if (typeof id !== 'string' || id === '') return false;
+    return this.stmt('SELECT 1 FROM message_media WHERE media_id = ? LIMIT 1').get(id) !== undefined;
+  }
+
+  /** 占用该媒体的消息 id（未被占用返回 null） */
+  mediaMessageId(id: string): number | null {
+    if (typeof id !== 'string' || id === '') return null;
+    const row = this.stmt('SELECT message_id FROM message_media WHERE media_id = ? LIMIT 1').get(id) as
+      | { message_id: number }
+      | undefined;
+    return row === undefined ? null : Number(row.message_id);
+  }
+
+  /** 某条消息当前绑定（仍在表内）的媒体 ID */
+  listMessageMediaIds(messageId: number): string[] {
+    return (
+      this.stmt('SELECT media_id FROM message_media WHERE message_id = ? ORDER BY sort_order ASC, media_id ASC').all(
+        messageId,
+      ) as { media_id: string }[]
+    ).map((row) => String(row.media_id));
+  }
+
+  /**
+   * 把已就绪的媒体绑定到已存在的消息上。
+   * 每个媒体都要满足：属于该消息发件人、ready、未过期、未被任何消息占用；
+   * 任一不满足则整体抛错回滚（不产生部分绑定）。
+   * 新业务请优先用 addMessageWithMedia（同一事务内建消息 + 绑定）。
+   */
+  attachMediaToMessage(messageId: number, mediaIds: readonly string[], ownerId?: number): void {
+    const ids = this.normalizeMediaIdList(mediaIds);
+    if (ids.length === 0) return;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const message = this.stmt('SELECT sender_id FROM messages WHERE id = ?').get(messageId) as
+        | { sender_id: number }
+        | undefined;
+      if (!message) throw new MediaError('消息不存在', 'NO_SUCH_MESSAGE');
+      this.attachMediaInTransaction(messageId, ids, ownerId ?? Number(message.sender_id));
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  /** 归一化媒体 ID 列表：去空、去重、限制单条消息附件数量 */
+  private static readonly MAX_MEDIA_PER_MESSAGE = 10;
+  private normalizeMediaIdList(mediaIds: readonly string[]): string[] {
+    const ids: string[] = [];
+    for (const raw of mediaIds) {
+      if (typeof raw !== 'string' || raw === '') throw new MediaError('媒体 ID 非法', 'INVALID_MEDIA_ID');
+      Database.assertMediaId(raw);
+      if (!ids.includes(raw)) ids.push(raw);
+    }
+    if (ids.length > Database.MAX_MEDIA_PER_MESSAGE) {
+      throw new MediaError('单条消息附件过多', 'TOO_MANY_MEDIA');
+    }
+    return ids;
+  }
+
+  /**
+   * 事务内绑定校验（调用方必须已开启事务）：
+   * 一个媒体必须同时满足「属于 ownerId」「ready」「未过期」「未被任何消息占用」。
+   * SELECT ... FOR UPDATE 不存在于 SQLite，改用 BEGIN IMMEDIATE 独占写锁 +
+   * idx_message_media_media 唯一索引，两者共同保证不会重复占用。
+   */
+  private attachMediaInTransaction(messageId: number, ids: readonly string[], ownerId: number): void {
+    const check = this.stmt(
+      `SELECT id, state, expires_at, owner_id FROM media_assets
+        WHERE id = ?`,
+    );
+    const occupied = this.stmt('SELECT message_id FROM message_media WHERE media_id = ? LIMIT 1');
+    const insert = this.stmt('INSERT INTO message_media (message_id, media_id, sort_order) VALUES (?, ?, ?)');
+    ids.forEach((id, index) => {
+      const asset = check.get(id) as
+        | { id: string; state: string; expires_at: string | null; owner_id: number }
+        | undefined;
+      if (!asset) throw new MediaError('媒体不存在', 'MEDIA_NOT_FOUND');
+      if (Number(asset.owner_id) !== ownerId) throw new MediaError('媒体不属于当前用户', 'MEDIA_NOT_OWNED');
+      if (asset.state !== 'ready') throw new MediaError('媒体尚未就绪', 'MEDIA_NOT_READY');
+      if (asset.expires_at !== null) {
+        const expiry = Date.parse(toIsoTimestamp(asset.expires_at) ?? '');
+        if (Number.isFinite(expiry) && expiry <= Date.now()) {
+          throw new MediaError('媒体已过期', 'MEDIA_EXPIRED');
+        }
+      }
+      const holder = occupied.get(id) as { message_id: number } | undefined;
+      if (holder && Number(holder.message_id) !== messageId) {
+        throw new MediaError('媒体已被其他消息占用', MEDIA_IN_USE);
+      }
+      try {
+        insert.run(messageId, id, index);
+      } catch (error) {
+        // 唯一索引拒绝：并发下另一条消息已占用该媒体
+        throw new MediaError(`媒体已被占用: ${String(error)}`, MEDIA_IN_USE);
+      }
+    });
   }
 
   /** 留言写入计数：每 100 条修剪一次最旧记录（留言表长期运行也会无限增长） */
@@ -1186,36 +1872,202 @@ export class Database {
   private static readonly MESSAGES_MAX_ROWS = 2_000;
   private static readonly MESSAGES_PRUNE_EVERY = 100;
 
+  /**
+   * 发送留言（兼容入口）：不携带媒体，语义与旧实现完全一致。
+   * 新代码需要附件时用 addMessageWithMedia（同一事务）。
+   */
   addMessage(senderId: number, recipientId: number | null, content: string, tags: string[]): MessageRow {
-    const result = this.stmt('INSERT INTO messages (sender_id, recipient_id, content, tags) VALUES (?, ?, ?, ?)').run(
-      senderId,
-      recipientId,
-      content,
-      JSON.stringify(tags),
-    );
-    this.messageInsertCount++;
-    if (this.messageInsertCount % Database.MESSAGES_PRUNE_EVERY === 0) {
-      try {
-        this.stmt('DELETE FROM messages WHERE id <= (SELECT MAX(id) - ? FROM messages)').run(
-          Database.MESSAGES_MAX_ROWS,
-        );
-      } catch (error) {
-        // 修剪失败（磁盘满/数据库锁）：记录告警——留言表会持续增长，不能静默
-        console.warn('[dsh-passwords] 留言修剪失败（表可能持续增长）:', String(error));
+    return this.addMessageWithMedia({ senderId, recipientId, content, tags });
+  }
+
+  /**
+   * 发送留言 + 媒体附件（单事务原子）：媒体绑定校验（owner/ready/未过期/未占用）
+   * 与消息插入同生共死，任一失败全部回滚，不会留下没有附件或没有消息的半成品。
+   *
+   * 返回的消息体是重新从库里读出的完整投影（含媒体元数据），可直接广播给客户端。
+   */
+  addMessageWithMedia(input: {
+    senderId: number;
+    recipientId: number | null;
+    content: string;
+    tags: string[];
+    mediaIds?: readonly string[];
+    mediaCaptions?: readonly (string | null)[];
+  }): MessageRow {
+    const mediaIds = this.normalizeMediaIdList(input.mediaIds ?? []);
+    const tags = Array.isArray(input.tags) ? input.tags.map((tag) => String(tag)) : [];
+    let messageId = 0;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const result = this.stmt(
+        'INSERT INTO messages (sender_id, recipient_id, content, tags) VALUES (?, ?, ?, ?)',
+      ).run(input.senderId, input.recipientId, input.content, JSON.stringify(tags));
+      messageId = Number(result.lastInsertRowid);
+      if (mediaIds.length > 0) {
+        this.attachMediaInTransaction(messageId, mediaIds, input.senderId);
+        this.setMediaCaptions(messageId, mediaIds, input.mediaCaptions);
       }
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
     }
-    const sender = this.getUserById(senderId);
+    this.maybePruneMessages();
+    const stored = this.getMessageForUser(messageId, input.senderId);
+    return (
+      stored ?? {
+        id: messageId,
+        sender_id: input.senderId,
+        sender_name: this.getUserById(input.senderId)?.username ?? '',
+        recipient_id: input.recipientId,
+        content: input.content,
+        tags,
+        created_at: new Date().toISOString(),
+        media: [],
+      }
+    );
+  }
+
+  /** 写入每条附件的可选说明（空串/非字符串折叠为 NULL） */
+  private setMediaCaptions(
+    messageId: number,
+    ids: readonly string[],
+    captions: readonly (string | null)[] | undefined,
+  ): void {
+    if (!captions) return;
+    const update = this.stmt('UPDATE message_media SET caption = ? WHERE message_id = ? AND media_id = ?');
+    ids.forEach((id, index) => {
+      const raw = captions[index];
+      const caption = typeof raw === 'string' ? raw.trim().slice(0, 500) : '';
+      update.run(caption === '' ? null : caption, messageId, id);
+    });
+  }
+
+  /** 单条消息（含媒体投影），并要求当前用户可见；否则 null（不泄露他人私信存在性） */
+  getMessageForUser(messageId: number, userId: number): MessageRow | null {
+    const rows = this.mapMessageRows(
+      this.stmt(
+        `SELECT m.id, m.sender_id, u.username, m.recipient_id, m.content, m.tags, m.created_at
+           FROM messages m JOIN users u ON u.id = m.sender_id
+          WHERE m.id = ? AND ${Database.MESSAGE_VISIBILITY_SQL}`,
+      ).all(messageId, userId, userId),
+    );
+    return rows[0] ?? null;
+  }
+
+  /**
+   * 媒体访问鉴权：媒体 ID → 占用它的消息 → 当前用户是否可见该消息。
+   * 请求方拿到的只是不透明媒体 ID，必须经过这里才能拿到文件（不存在/不可见
+   * 一律 null，调用方按 404 处理，不暴露“媒体是否存在”）。
+   */
+  getMessageMediaForUser(mediaId: string, userId: number): { message: MessageRow; media: MessageMediaRow } | null {
+    if (typeof mediaId !== 'string' || mediaId === '') return null;
+    const linked = this.stmt('SELECT message_id FROM message_media WHERE media_id = ? LIMIT 1').get(mediaId) as
+      | { message_id: number }
+      | undefined;
+    if (!linked) return null;
+    const message = this.getMessageForUser(Number(linked.message_id), userId);
+    if (!message) return null;
+    const media = message.media.find((item) => item.id === mediaId);
+    return media ? { message, media } : null;
+  }
+
+  /**
+   * 回收该消息上不再被引用的媒体元数据（回答“谁在删消息”的一致性问题）：
+   * 删除后返回待删 storage keys，调用方按需删除文件。
+   */
+  private releaseMessageMedia(messageIds: readonly number[]): MediaRemovalPlan {
+    if (messageIds.length === 0) return { media_ids: [], storage_keys: [] };
+    const placeholders = messageIds.map(() => '?').join(', ');
+    const rows = this.stmt(
+      `SELECT DISTINCT a.id, a.storage_key
+             FROM message_media mm JOIN media_assets a ON a.id = mm.media_id
+            WHERE mm.message_id IN (${placeholders})`,
+    ).all(...messageIds) as { id: string; storage_key: string }[];
+    this.stmt(`DELETE FROM message_media WHERE message_id IN (${placeholders})`).run(...messageIds);
+    const orphaned = rows.filter((row) => !this.mediaAttachedToAnyMessage(row.id));
+    for (const row of orphaned) this.stmt('DELETE FROM media_assets WHERE id = ?').run(row.id);
     return {
-      id: Number(result.lastInsertRowid),
-      sender_id: senderId,
-      sender_name: sender?.username ?? '',
-      recipient_id: recipientId,
-      content,
-      tags,
-      created_at: new Date().toISOString(),
+      media_ids: orphaned.map((row) => String(row.id)),
+      storage_keys: orphaned.map((row) => String(row.storage_key)).filter((key) => key !== ''),
     };
   }
 
+  /**
+   * 消息历史修剪：每 100 条修剪一次最旧记录，同时清理 message_media 关系与
+   * 不再被引用的媒体资产。返回本次需要删除的 storage keys（可忽略；
+   * 媒体访问按消息鉴权，残留文件不可寻址）。
+   *
+   * 删除集合用 OFFSET 取「第 2000 条之后的旧记录」而不是 `id <= MAX(id) - 2000`：
+   * 后者的前提是 id 连续，但消息 id 会因删除用户、手工整理而出现空洞，
+   * 一旦有空洞就会落到不存在的 id 上，导致修剪永久失效（表无界增长）。
+   */
+  private maybePruneMessages(): MediaRemovalPlan {
+    this.messageInsertCount++;
+    if (this.messageInsertCount % Database.MESSAGES_PRUNE_EVERY !== 0) {
+      return { media_ids: [], storage_keys: [] };
+    }
+    try {
+      const doomed = this.stmt(
+        'SELECT id FROM messages ORDER BY id DESC LIMIT -1 OFFSET ?',
+      ).all(Database.MESSAGES_MAX_ROWS) as { id: number }[];
+      const ids = doomed.map((row) => Number(row.id));
+      if (ids.length === 0) return { media_ids: [], storage_keys: [] };
+      const placeholders = ids.map(() => '?').join(', ');
+      this.db.exec('BEGIN IMMEDIATE');
+      try {
+        const plan = this.releaseMessageMedia(ids);
+        this.stmt(`DELETE FROM messages WHERE id IN (${placeholders})`).run(...ids);
+        this.db.exec('COMMIT');
+        return plan;
+      } catch (error) {
+        this.db.exec('ROLLBACK');
+        throw error;
+      }
+    } catch (error) {
+      // 修剪失败（磁盘满/数据库锁）：记录告警——留言与媒体表会持续增长，不能静默
+      console.warn('[dsh-passwords] 留言修剪失败（表可能持续增长）:', String(error));
+      return { media_ids: [], storage_keys: [] };
+    }
+  }
+
+  /**
+   * 显式清空消息历史（测试/运维用）：一并清理 message_media 关系与孤儿媒体，
+   * 返回待删 storage keys。
+   */
+  clearMessages(): MediaRemovalPlan {
+    return this.clearMessagesInternal();
+  }
+
+  private clearMessagesInternal(): MediaRemovalPlan {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const ids = (this.stmt('SELECT id FROM messages').all() as { id: number }[]).map((row) => Number(row.id));
+      const plan = this.releaseMessageMedia(ids);
+      this.stmt('DELETE FROM messages').run();
+      this.db.exec('COMMIT');
+      return plan;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  /**
+   * 清理指向已删资产的孤儿关系行（历史库/异常中断残留）：
+   * 孤儿关系会让「已被任何消息占用」误判，阻断媒体的删除与 GC。
+   * 返回清理行数。
+   */
+  pruneOrphanedMessageMedia(): number {
+    const countRows = (): number =>
+      Number((this.stmt('SELECT COUNT(*) AS n FROM message_media').get() as { n: number }).n ?? 0);
+    const before = countRows();
+    this.stmt(
+      'DELETE FROM message_media WHERE media_id NOT IN (SELECT id FROM media_assets)' +
+        ' OR message_id NOT IN (SELECT id FROM messages)',
+    ).run();
+    return before - countRows();
+  }
 
   /** 平台主用户 id（首个 admin）；平台必有主用户，缺失说明数据损坏 */
   findAdminId(): number | null {
