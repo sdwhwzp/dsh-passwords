@@ -1,7 +1,7 @@
 // SQLite 数据层：Node 内置 node:sqlite（零外部数据库依赖）
 // 表结构：users / platform_settings / audit_logs / login_attempts / ip_throttle /
 // user_permissions / user_usage / messages / user_workspaces / user_session_grants /
-// media_assets / message_media
+// workspace_cleanup_intents / media_assets / message_media
 //
 // 静态加密（见 src/encrypt.ts）：
 //   - users.username         → AES-256-GCM 密文存储；username_hash（HMAC）做等值索引
@@ -22,7 +22,7 @@
 //   - 一个媒体只能被一条消息占用（message_media.media_id 上有 UNIQUE 索引），
 //     绑定与消息创建在同一事务内完成，任一校验失败整体回滚。
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import type { FieldCrypto } from './encrypt.js';
 import { normalizePath } from './permissions.js';
@@ -79,6 +79,20 @@ export interface UserPermissionsRow {
   sandbox_mode: string | null;
   disabled_sessions: string[];
   updated_at: string;
+}
+
+/**
+ * 删除联动的清理意图（对应 workspace_cleanup_intents 表）：目录已物理删除但
+ * DB 清理事务回滚时，保存可信的服务端派生元数据，使重试在进程重启、内存缓存
+ * 清空、上游注册表条目已消失（仅剩会话 grants）后仍能收敛。
+ */
+export interface WorkspaceCleanupIntent {
+  /** 记录时经 normalizeForMatch 规范化的被删根路径。 */
+  root: string;
+  /** 首次删除时收集到的、属于该目录树的会话 ID（去重、长度校验）。 */
+  sessionIds: string[];
+  /** 发起删除的主用户（仅审计与失效范围用；准入仍由端点 requireAdmin 把关）。 */
+  ownerUserId: number;
 }
 
 /** 用户用量（对应 user_usage 表） */
@@ -305,6 +319,16 @@ CREATE TABLE IF NOT EXISTS user_session_grants (
   PRIMARY KEY (user_id, session_id)
 );
 CREATE INDEX IF NOT EXISTS idx_user_session_grants_session ON user_session_grants(session_id);
+-- 删除联动失败后的清理意图（跨重启的重试凭证）：只在目录已物理删除且 DB 清理
+-- 事务回滚时写入；记录受信的 realpath/归一化根 + 受影响会话 + 操作者。重试准入
+-- 只认与记录根同一路径的请求（共用 pathWithinDeletedTree/samePathForMatch），
+-- 且必须先过敏感目录检查；DB 清理成功后才删除对应行。
+CREATE TABLE IF NOT EXISTS workspace_cleanup_intents (
+  root          TEXT PRIMARY KEY,
+  session_ids   TEXT NOT NULL DEFAULT '[]',
+  owner_user_id INTEGER NOT NULL,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
 CREATE TABLE IF NOT EXISTS media_assets (
   id              TEXT PRIMARY KEY,
   owner_id        INTEGER NOT NULL,
@@ -408,6 +432,58 @@ function sanitizeAllowedFolders(folders: string[]): string[] {
     return normalized === '.' || normalized === '/' || /^[a-z]:\/$/i.test(normalized);
   });
   return invalid ? ['__deny__'] : cleaned;
+}
+
+/**
+ * 删除联动/重试准入共用的路径树包含判定（网关与 DB 清理必须同口径，否则
+ * 「重试准入认为有残留引用，DB 清理却匹配不到」会各说各话）：
+ * 字符串归一（盘符根保留）+ 段边界 + 尽力 realpath（路径已删除时用父目录
+ * realpath + 末段回退，符号链接/junction 别名也能归位）+ Windows 大小写不敏感；
+ * '/ws' 不命中 '/ws2'。实现在 db.ts 而不是 gateway.ts：gateway 已依赖 db.ts，
+ * 反向 import 会形成循环。
+ */
+export function normalizeForMatch(candidate: string): string {
+  const normalized = normalizePath(candidate);
+  // 盘符根（C:/）不能去尾斜杠，否则段边界判定失效。
+  if (/^[a-z]:\/+$/.test(normalized)) return normalized[0] + ':/';
+  const trimmed = normalized.replace(/\/+$/, '');
+  return trimmed === '' ? '/' : trimmed;
+}
+
+function foldPathCase(value: string): string {
+  return process.platform === 'win32' ? value.toLowerCase() : value;
+}
+
+/** realpath 优先；路径已删除时用「父目录 realpath + 末段」尽力归位；最后退回字符串归一。 */
+export function canonicalForMatch(candidate: string): string {
+  try {
+    return normalizePath(realpathSync(candidate));
+  } catch {
+    try {
+      return normalizePath(path.join(realpathSync(path.dirname(candidate)), path.basename(candidate)));
+    } catch {
+      return normalizePath(candidate);
+    }
+  }
+}
+
+function isWithinKey(candidateKey: string, rootKey: string): boolean {
+  if (rootKey === '' || rootKey === '.') return false;
+  if (rootKey === '/' || /^[a-z]:\/$/.test(rootKey)) return candidateKey === rootKey || candidateKey.startsWith(rootKey);
+  return candidateKey === rootKey || candidateKey.startsWith(rootKey + '/');
+}
+
+export function pathWithinDeletedTree(candidate: string, root: string): boolean {
+  if (isWithinKey(foldPathCase(normalizeForMatch(candidate)), foldPathCase(normalizeForMatch(root)))) return true;
+  return isWithinKey(
+    foldPathCase(normalizeForMatch(canonicalForMatch(candidate))),
+    foldPathCase(normalizeForMatch(canonicalForMatch(root))),
+  );
+}
+
+/** 双向包含 = 同一路径（别名/大小写/分隔符形态不同也算）。 */
+export function samePathForMatch(a: string, b: string): boolean {
+  return pathWithinDeletedTree(a, b) && pathWithinDeletedTree(b, a);
 }
 
 /**
@@ -1335,7 +1411,178 @@ export class Database {
     this.stmt('UPDATE user_workspaces SET path = ? WHERE user_id = ? AND path = ?').run(normalizePath(newPath), userId, normalizePath(oldPath));
   }
 
-  // ── 用户用量（时间 / token 配额） ─────────────────────────
+  /**
+   * 目录树删除联动清理：把被删路径树内的归属行、白名单条目与会话授权在一个事务里清掉。
+   *
+   * 为什么白名单删空必须回落 `__deny__`：`folderAllowed` 把空 allowed_folders 当作
+   * “不限制任何目录”（fail-open）。若用户仅剩的白名单目录被删除后留下空数组，该子用户
+   * 会瞬间获得全盘工作区权限；因此清空时必须写回 `__deny__` 哨兵。
+   *
+   * @param deletedRoot - 被删除（或即将删除）的目录；调用方保证已 realpath 规范化。
+   * @param sessionIds - 明确归属该目录树的会话（注册表快照 / cwd 映射得出）。
+   * @returns 需要失效内存快照与 Remote mux 的用户、以及各表清理计数。
+   */
+  cleanupDeletedWorkspaceTree(
+    deletedRoot: string,
+    sessionIds: readonly string[] = [],
+  ): {
+    invalidateUserIds: number[];
+    removedWorkspaces: number;
+    removedFolders: number;
+    removedGrants: number;
+  } {
+    const invalidate = new Set<number>();
+    let removedWorkspaces = 0;
+    let removedFolders = 0;
+    let removedGrants = 0;
+    const doomedSessions = new Set(
+      sessionIds.filter((id): id is string => typeof id === 'string' && id.length > 0 && id.length <= 200),
+    );
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      // 归属行按数据库中的原始 path 删除，避免历史行分隔符/大小写与规范化结果不一致而漏删。
+      const deleteWorkspaceRow = this.stmt('DELETE FROM user_workspaces WHERE user_id = ? AND path = ?');
+      const ownershipRows = this.stmt('SELECT user_id AS user_id, path AS path FROM user_workspaces').all() as Array<{
+        user_id: number;
+        path: string;
+      }>;
+      for (const row of ownershipRows) {
+        if (!pathWithinDeletedTree(row.path, deletedRoot)) continue;
+        deleteWorkspaceRow.run(row.user_id, row.path);
+        removedWorkspaces += 1;
+        invalidate.add(row.user_id);
+      }
+      if (doomedSessions.size > 0) {
+        const deleteGrant = this.stmt('DELETE FROM user_session_grants WHERE user_id = ? AND session_id = ?');
+        const grantRows = this.stmt('SELECT user_id AS user_id, session_id AS session_id FROM user_session_grants').all() as Array<{
+          user_id: number;
+          session_id: string;
+        }>;
+        for (const row of grantRows) {
+          if (!doomedSessions.has(row.session_id)) continue;
+          deleteGrant.run(row.user_id, row.session_id);
+          removedGrants += 1;
+          invalidate.add(row.user_id);
+        }
+      }
+      const updateFolders = this.stmt(
+        "UPDATE user_permissions SET allowed_folders = ?, updated_at = datetime('now') WHERE user_id = ?",
+      );
+      const permissionRows = this.stmt('SELECT user_id AS user_id, allowed_folders FROM user_permissions').all() as Array<{
+        user_id: number;
+        allowed_folders: string | null;
+      }>;
+      for (const row of permissionRows) {
+        // 空数组=不限制（不能动）；__deny__/损坏值保持原样（parseAllowedFolders 已 fail-closed）。
+        const folders = parseAllowedFolders(row.allowed_folders);
+        if (folders.length === 0 || folders.includes('__deny__')) continue;
+        const kept = folders.filter((folder) => !pathWithinDeletedTree(folder, deletedRoot));
+        if (kept.length === folders.length) continue;
+        const next = kept.length === 0 ? ['__deny__'] : kept;
+        updateFolders.run(JSON.stringify(next), row.user_id);
+        removedFolders += folders.length - kept.length;
+        invalidate.add(row.user_id);
+      }
+      this.db.exec('COMMIT');
+    } catch (error) {
+      // 原始错误必须优先（回滚失败不能掩盖它）：事务可能已被 SQLite 自动回滚。
+      try { this.db.exec('ROLLBACK'); } catch { /* 无活动事务 */ }
+      throw error;
+    }
+    return { invalidateUserIds: [...invalidate], removedWorkspaces, removedFolders, removedGrants };
+  }
+
+  // ── 删除联动的清理意图（跨重启的重试凭证） ───────────────
+  /**
+   * 记录/合并一条清理意图：仅当物理删除已完成但 DB 清理失败时调用。
+   * root 由调用方保证来自服务端 realpath/归一化结果，sessionIds 只保留合法
+   * 长度并去重；已有同一路径（含别名/大小写形态）的行时合并会话集，不产生第二行。
+   */
+  recordWorkspaceCleanupIntent(root: string, sessionIds: readonly string[], ownerUserId: number): void {
+    if (typeof root !== 'string' || root === '' || root.length > 4096) {
+      throw new Error('cleanup intent root invalid');
+    }
+    if (!Number.isInteger(ownerUserId) || ownerUserId <= 0) {
+      throw new Error('cleanup intent owner invalid');
+    }
+    const normalizedRoot = normalizeForMatch(root);
+    const sessions = [...new Set(
+      sessionIds.filter((id): id is string => typeof id === 'string' && id.length > 0 && id.length <= 200),
+    )].slice(0, 2000);
+    // 同一路径的两个并发删除都可能在 DB 清理失败后写入意图。先拿 SQLite 写锁再
+    // 查找/合并，避免 find→INSERT 的竞态把第二个请求误报为“不可重试”。
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const existing = this.findWorkspaceCleanupIntent(normalizedRoot);
+      if (existing !== null) {
+        const merged = [...new Set([...existing.sessionIds, ...sessions])].slice(0, 2000);
+        this.stmt(
+          "UPDATE workspace_cleanup_intents SET session_ids = ?, owner_user_id = ?, created_at = datetime('now') WHERE root = ?",
+        ).run(JSON.stringify(merged), ownerUserId, existing.root);
+      } else {
+        this.stmt(
+          'INSERT INTO workspace_cleanup_intents (root, session_ids, owner_user_id) VALUES (?, ?, ?)',
+        ).run(normalizedRoot, JSON.stringify(sessions), ownerUserId);
+      }
+      this.db.exec('COMMIT');
+    } catch (error) {
+      try { this.db.exec('ROLLBACK'); } catch { /* 无活动事务 */ }
+      throw error;
+    }
+  }
+
+  /** 查找与给定路径同一（归一化 + 段边界 + 尽力 realpath + Windows 大小写折叠）的清理意图。 */
+  findWorkspaceCleanupIntent(root: string): WorkspaceCleanupIntent | null {
+    if (typeof root !== 'string' || root === '') return null;
+    const rows = this.stmt(
+      'SELECT root, session_ids, owner_user_id FROM workspace_cleanup_intents',
+    ).all() as Array<{ root: string; session_ids: string; owner_user_id: number }>;
+    for (const row of rows) {
+      if (!samePathForMatch(row.root, root)) continue;
+      return {
+        root: row.root,
+        sessionIds: parseJsonArray(row.session_ids)
+          .filter((id) => id.length > 0 && id.length <= 200)
+          .slice(0, 2000),
+        ownerUserId: Number.isInteger(row.owner_user_id) ? row.owner_user_id : 0,
+      };
+    }
+    return null;
+  }
+
+  /**
+   * 清除与给定路径同一的清理意图（可有多行别名形态），返回删除行数。
+   * 只允许在对应目录树的 DB 清理成功之后调用。
+   */
+  clearWorkspaceCleanupIntent(root: string): number {
+    if (typeof root !== 'string' || root === '') return 0;
+    const rows = this.stmt('SELECT root FROM workspace_cleanup_intents').all() as Array<{ root: string }>;
+    const doomed = rows.map((row) => row.root).filter((key) => samePathForMatch(key, root));
+    if (doomed.length === 0) return 0;
+    const remove = this.stmt('DELETE FROM workspace_cleanup_intents WHERE root = ?');
+    for (const key of doomed) remove.run(key);
+    return doomed.length;
+  }
+
+  /** 持有这些显式会话授权之一的用户 ID（清理失败时补齐 mux/WS 失效范围；不修改数据）。 */
+  listSessionGrantUserIds(sessionIds: readonly string[]): number[] {
+    const wanted = [...new Set(
+      sessionIds.filter((id): id is string => typeof id === 'string' && id.length > 0 && id.length <= 200),
+    )].slice(0, 2000);
+    if (wanted.length === 0) return [];
+    const found = new Set<number>();
+    for (let index = 0; index < wanted.length; index += 256) {
+      const chunk = wanted.slice(index, index + 256);
+      const placeholders = chunk.map(() => '?').join(', ');
+      const rows = this.stmt(
+        `SELECT DISTINCT user_id AS user_id FROM user_session_grants WHERE session_id IN (${placeholders})`,
+      ).all(...chunk) as Array<{ user_id: number }>;
+      for (const row of rows) found.add(row.user_id);
+    }
+    return [...found];
+  }
+
+  // ── 用户用量（时间 / token 配额） ───────────────────────────
   getUsage(userId: number, day: string): UsageRow | null {
     const row = this.stmt(
       'SELECT user_id, day, first_seen_at, last_active_at, active_seconds, hourly_window_start, hourly_tokens FROM user_usage WHERE user_id = ? AND day = ?',

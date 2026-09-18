@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
 import { Component, createElement, type ComponentProps, type ReactNode } from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
-import { DshPasswordsCard, type UpdateInfo } from '../src/client/card.tsx';
+import { DshPasswordsCard, readModelCatalogResponse, type UpdateInfo } from '../src/client/card.tsx';
 
 class CardBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
   state = { failed: false };
@@ -67,6 +67,16 @@ async function mountCard(t: TestContext, overrides: Record<string, () => Respons
   const payloads: Record<string, unknown> = {
     '/api/dsh-passwords/state': { me, users: [] },
     '/gateway/api/overview': { me, users: [], },
+    '/api/session/modelCatalog': {
+      type: 'server-response', rpcId: 'rpc-model-catalog', result: {
+        ok: true, value: {
+          default: { provider: 'openai', model: 'gpt-5' },
+          routableProviders: ['openai'],
+          groups: [{ id: 'openai', name: 'OpenAI', models: [{ id: 'gpt-5', name: 'GPT-5' }] }],
+          failures: [],
+        },
+      },
+    },
     '/api/dsh-passwords/workspaces': { workspaces: [] },
     '/api/dsh-passwords/patch/status': {
       status: { settingsHostMode: true, workspaceSearch: true, bindAll: true, connectionCookieBridge: 'patched' },
@@ -100,6 +110,24 @@ async function mountCard(t: TestContext, overrides: Record<string, () => Respons
     },
   };
 }
+
+test('modelCatalog response parser accepts the alpha.2 client-request response envelope', () => {
+  const catalog = readModelCatalogResponse({
+    type: 'server-response',
+    rpcId: 'rpc-model-catalog',
+    result: {
+      ok: true,
+      value: {
+        default: { provider: 'openai', model: 'gpt-5' },
+        routableProviders: ['openai'],
+        groups: [{ id: 'openai', name: 'OpenAI', models: [{ id: 'gpt-5', name: 'GPT-5' }] }],
+        failures: [],
+      },
+    },
+  });
+  assert.equal(catalog.status, 'ready');
+  assert.deepEqual(catalog.entries.map((entry) => entry.id), ['openai/gpt-5']);
+});
 
 test('settings card renders account and patch controls for a healthy response', async (t) => {
   const card = await mountCard(t);

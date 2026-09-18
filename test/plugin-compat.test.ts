@@ -5,6 +5,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createPluginCompat } from '../src/plugin-compat.js';
+import { isPermanentGatewayExitCode } from '../src/plugin.js';
+
+test('网关永久错误码不会进入自动重启循环', () => {
+  for (const code of [1, 30, 31, 32, 33, 34, 35, 36, 37]) {
+    assert.equal(isPermanentGatewayExitCode(code), true, `exit ${code}`);
+  }
+  for (const code of [0, 2, 143, 'unknown']) {
+    assert.equal(isPermanentGatewayExitCode(code), false, `exit ${String(code)}`);
+  }
+});
 
 test('兼容层默认关闭：全部钩子不接管任何路径（第三方一律走登记表 / fail-closed）', () => {
   const off = createPluginCompat(false);

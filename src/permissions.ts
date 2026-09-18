@@ -162,12 +162,20 @@ export function endpointAllowed(
  * 而第三方插件的通道同样是 `/api/<插件名>/...`——两者路径形状相同，只能靠
  * 命名空间区分。
  *
- * 本清单来源：DSH 0.1.6-alpha.1 官方包实测（`namespace: "..."` 的 host 侧注册，
- * 已与 0.1.5-rc.2 实测清单交叉核对）∪ 本项目既有适配知识中属于官方的部分。
+ * 本清单来源：DSH 0.1.6-alpha.1/0.1.5-rc.2 官方包实测（`namespace: "..."` 的
+ * host 侧注册）∪ 本项目既有适配知识中属于官方的部分。
  * 方向刻意偏宽容：清单写宽只会让个别第三方路径漏过，写窄会直接打断官方功能。
  * ⚠ `terminal` 命名空间（dsh-api-terminal-controller：create/follow/shells）
  * 故意不在清单内：它是服务器端远程 shell，对子用户开放等于完全沙箱逃逸；
  * 官方 web 客户端无调用证据（日志零命中），主用户不受影响（管理员不经分类）。
+ * ⚠ `officeToPdf`（@deepseek-ai/dsh-office-to-pdf，alpha.2 官方）同样不进清单：
+ * `render(workspaceFileScope, path, …)` 接受绝对/工作区相对路径，scope 由请求头
+ * 派生（sessionId + workspaceRoot），作用域隔离依赖 workspaceFiles 实现（alpha.2
+ * 只读审计：可能放行作用域外路径），网关侧尚无该命名空间的会话/文件夹守卫，
+ * 真实 E2E 也未证明隔离；在此之前子用户 fail-closed（见
+ * SUBUSER_BLOCKED_API_NAMESPACES）。主用户不经分类，不受影响。
+ * ⚠ `pluginManager` 与 `agentTeams` 同样不在清单内，并由
+ * SUBUSER_BLOCKED_API_NAMESPACES 硬拒绝（登记规则也无法覆盖）。
  * 变更时必须同步 test / 兼容性矩阵。
  */
 export const OFFICIAL_API_NAMESPACES: ReadonlySet<string> = new Set([
@@ -205,17 +213,60 @@ export const OFFICIAL_API_NAMESPACES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * `/api/<namespace>[/...]`（或旧式 `/api/<namespace>.<method>`）的命名空间；
+ * 非 `/api/` 路径返回 null。取第一段再按 `.` 取头部，两种形状口径一致。
+ */
+function apiNamespaceOf(pathname: string): { segment: string; head: string } | null {
+  if (!pathname.startsWith('/api/')) return null;
+  const rest = pathname.slice('/api/'.length);
+  const segment = rest.split('/')[0] ?? '';
+  const head = segment.split('.')[0] ?? '';
+  return { segment, head };
+}
+
+/**
+ * 子用户硬拒绝的 API 命名空间：先于端点登记表判定，任何登记规则都无法覆盖。
+ *
+ * `pluginManager`（dsh-plugin-manager）的 change/runPnpm 可在 profile 内安装、
+ * 卸载、运行第三方包——等于把特权/RCE 面交给子用户；`agentTeams`
+ * （dsh-experimental-agent-team）是 alpha.2 实验特性，现有安全模型没有对应的
+ * owner-only 专属授权；`officeToPdf`（dsh-office-to-pdf，alpha.2）的 `render`
+ * 接受绝对/工作区相对路径，且底层 workspaceFiles 可能放行作用域外路径（只读
+ * 审计）。三者命中 `/api/*` 这类宽泛规则（或精确规则）时仍归入 third-party
+ * （fail-closed）；`owner:` 登记语义不受影响。主用户不经分类，不受影响。
+ *
+ * officeToPdf 的 fail-closed 是临时收紧：在专用授权守卫与真实 E2E 证明作用域
+ * 隔离之前，既不做官方自动放行，也不因通用 SSH 登记规则被带入。
+ *
+ * ⚠ `terminal` 故意不在本集合：其既有政策（不进官方清单 + 网关对 terminal/list
+ * 回空成功）本轮保持不变，变更需单独评审。
+ */
+export const SUBUSER_BLOCKED_API_NAMESPACES: ReadonlySet<string> = new Set([
+  'pluginManager',
+  'agentTeams',
+  'officeToPdf',
+]);
+
+/** 该路径是否命中子用户硬拒绝命名空间（`/api/x`、`/api/x.y`、`/api/x/…` 同口径）。 */
+function isBlockedSubuserApiPath(pathname: string): boolean {
+  const namespace = apiNamespaceOf(pathname);
+  if (namespace === null) return false;
+  return (
+    SUBUSER_BLOCKED_API_NAMESPACES.has(namespace.segment) ||
+    SUBUSER_BLOCKED_API_NAMESPACES.has(namespace.head)
+  );
+}
+
+/**
  * 该路径是否属于官方 dsh API 面。
  *
  * 取第一段（按 `/` 切分）再按 `.` 取头部，因此 `/api/session/history`、
  * `/api/session.export` 与 `/api/session` 都归入 session 命名空间。
  */
 export function isOfficialApiPath(pathname: string): boolean {
-  if (!pathname.startsWith('/api/')) return false;
-  const rest = pathname.slice('/api/'.length);
-  const segment = rest.split('/')[0] ?? '';
-  const head = segment.split('.')[0] ?? '';
-  return OFFICIAL_API_NAMESPACES.has(segment) || OFFICIAL_API_NAMESPACES.has(head);
+  const namespace = apiNamespaceOf(pathname);
+  if (namespace === null) return false;
+  return OFFICIAL_API_NAMESPACES.has(namespace.segment) || OFFICIAL_API_NAMESPACES.has(namespace.head);
 }
 
 /**
@@ -251,8 +302,9 @@ export function isOfficialRootPath(pathname: string): boolean {
  *   official    —— 官方 dsh 面（官方 /api 命名空间 + 官方根级静态/页面路径）
  *   third-party —— 其余路径（未登记的第三方 /api 或根级插件路由）：默认拒绝
  *
- * 判定顺序 owner-only → ssh → platform → official → third-party：显式登记优先于
- * 自动分类；transport 决定带传输前缀的规则是否命中（owner: 规则不区分通道）。
+ * 判定顺序 owner-only → blocked → ssh → platform → official → third-party：
+ * 显式 owner: 登记优先；SUBUSER_BLOCKED_API_NAMESPACES 先于 ssh 登记（宽泛
+ * 规则也不能放行）；transport 决定带传输前缀的规则是否命中（owner: 规则不区分通道）。
  */
 export type SubuserPathClass = 'platform' | 'owner-only' | 'ssh' | 'official' | 'third-party';
 
@@ -261,6 +313,7 @@ export function classifySubuserPath(
   options: { endpointRules: readonly string[]; transport: 'http' | 'ws' },
 ): SubuserPathClass {
   if (endpointAllowed(pathname, options.endpointRules, { capability: 'owner-only' })) return 'owner-only';
+  if (isBlockedSubuserApiPath(pathname)) return 'third-party';
   if (endpointAllowed(pathname, options.endpointRules, { capability: 'ssh', transport: options.transport })) return 'ssh';
   if (pathname === '/api/dsh-passwords' || pathname.startsWith('/api/dsh-passwords/')) return 'platform';
   if (pathname.startsWith('/api/')) return isOfficialApiPath(pathname) ? 'official' : 'third-party';

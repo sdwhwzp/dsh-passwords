@@ -90,6 +90,22 @@ const MAX_PARALLEL_UPLOADS = 3;
  */
 const MEDIA_ACCEPT = Object.keys(MEDIA_MIME_KIND).join(',');
 
+/**
+ * 面板内 Tab 环绕用的保守可聚焦选择器：覆盖常见原生可聚焦元素与显式 tabindex≥0，
+ * 排除 disabled 控件与 tabindex="-1"（如 aria-hidden 的隐藏 file input）。
+ * 不做可见性判断（宁多勿漏）：漏掉控件会让 Tab 把焦点带出面板、落到 DSH 页面上。
+ */
+const CHAT_FOCUSABLE_SELECTOR = [
+  'a[href]',
+  'button:not([disabled])',
+  'input:not([disabled]):not([tabindex="-1"])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  'video[controls]',
+  'audio[controls]',
+  '[tabindex]:not([tabindex="-1"])',
+].join(',');
+
 const mediaFileKey = (file: File): string => `${file.name}:${file.size}:${file.lastModified}`;
 
 /**
@@ -326,6 +342,17 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
     lastPos: { left: number; top: number } | null;
   } | null>(null);
 
+  // ── 焦点移交（可访问性）──
+  // 打开面板 → 焦点进入关闭按钮；关闭动画完全结束 → 焦点归还入口。
+  const fabButtonRef = useRef<HTMLButtonElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  // 关闭发起瞬间焦点是否由面板持有：只有面板持有焦点才在关闭结束后归还入口，
+  // 避免把用户在关闭动画期间主动移到别处的焦点抢回来。
+  const focusWasInPanelRef = useRef(false);
+  // 上一次渲染的 open：用于区分“真正打开/完全关闭”与“关闭动画中重开”（后者 open 不变）
+  const wasOpenRef = useRef(false);
+
   // 读取按用户存储的聊天入口偏好（服务端默认开启，跨设备同步），
   // 同时取子用户列表供主用户选择私信收件人（state 仅对主用户返回全量用户）。
   useEffect(() => {
@@ -468,7 +495,13 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
     };
   }, [chatEntry]);
 
+  // 面板打开时浮动入口退场：CSS 隐藏类（opacity/pointer-events/visibility）+ tabIndex/aria。
+  // 关闭动画（closing=true，180ms）期间保持可见可用：此时点入口属于“关闭途中立即重开”，
+  // openPanel 会取消 pending 的 close 定时器；若连 closing 也隐藏，该重开路径将无法触发。
+  const fabHidden = open && !closing;
+
   const onFabMouseDown = (e: React.MouseEvent<HTMLButtonElement>) => {
+    if (fabHidden) return; // 面板打开中：不响应拖动（键盘/程序化触发的兜底防御）
     if (e.button !== 1) return; // 仅中键
     // 阻止中键默认行为（浏览器 autoscroll 滚动模式）
     e.preventDefault();
@@ -490,6 +523,30 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
     if (open) {
       setUnread(0);
       atBottomRef.current = true; // 打开面板：跳到最新（滚动由下方 effect 执行）
+    }
+  }, [open]);
+
+  // 焦点移交：真正打开（false→true）时把键盘焦点移入面板（优先关闭按钮）；
+  // 完全关闭（true→false，180ms 关闭动画结束）后归还入口。
+  // 关闭途中立即重开不会改变 open，因此不会误触发归还（close 定时器已被 openPanel 取消；
+  // 该路径的焦点由 openPanel 显式移回面板）。
+  useEffect(() => {
+    const wasOpen = wasOpenRef.current;
+    wasOpenRef.current = open;
+    if (open && !wasOpen) {
+      closeButtonRef.current?.focus();
+      return;
+    }
+    if (!open && wasOpen) {
+      let returnFocus = focusWasInPanelRef.current;
+      if (returnFocus && typeof document !== 'undefined') {
+        const active = document.activeElement;
+        // 关闭动画期间用户若把焦点主动移到页面其他元素，则不抢回；
+        // 焦点落到 body（面板卸载后浏览器默认落点）或已脱离文档（面板内元素被卸载）时才归还。
+        returnFocus = !(active && active !== document.body && document.contains(active));
+      }
+      focusWasInPanelRef.current = false;
+      if (returnFocus) fabButtonRef.current?.focus();
     }
   }, [open]);
 
@@ -592,8 +649,19 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
     atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
   };
 
+  /** 关闭发起瞬间焦点是否在面板内：无 document（测试/SSR）按 true，保证归还逻辑可测 */
+  const focusIsInsidePanel = () => {
+    if (typeof document === 'undefined') return true;
+    const active = document.activeElement;
+    if (!active || active === document.body) return true; // 焦点在 body：仍视为应由面板归还
+    const panel = panelRef.current;
+    return !!panel && panel.contains(active);
+  };
+
   const close = () => {
     haptic();
+    // 记录焦点归属：关闭动画结束后据此决定是否把焦点归还入口
+    focusWasInPanelRef.current = focusIsInsidePanel();
     setClosing(true);
     if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current);
     closeTimerRef.current = window.setTimeout(() => {
@@ -605,17 +673,81 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
   };
 
   const openPanel = () => {
+    // 已完全打开：幂等保护，避免 pointer-events:none 之外的路径（键盘/程序化触发）重复刷新
+    if (fabHidden) return;
     haptic();
-    // 关闭动画进行中重开：取消 pending 的 close 定时器，否则面板开了又被强制关
+    // 关闭定时器 pending = 关闭动画进行中（入口此刻仍可见可点）。open 不会变化，
+    // 因此 [open] 焦点 effect 不会重跑；记录该状态供下方把焦点移回面板。
+    const reopeningDuringClose = closeTimerRef.current !== null;
+    // 取消 pending 的 close 定时器，否则面板开了又被强制关
     if (closeTimerRef.current !== null) {
       window.clearTimeout(closeTimerRef.current);
       closeTimerRef.current = null;
+    }
+    // 打开面板时终止进行中的拖动：清空 drag ref 并触发一次渲染移除 .dragging。
+    // 否则 .dragging 的 transition:none 会让入口的淡出退场失效，且 mousemove 仍会继续改写位置。
+    if (dragRef.current !== null) {
+      dragRef.current = null;
+      setFabPosState((p) => ({ ...p }));
     }
     setClosing(false);
     setOpen(true);
     setUnread(0);
     refreshContacts();
+    // 关闭途中重开：这次点击已按浏览器默认行为把焦点落在入口上，而入口随后会重新
+    // 隐藏；显式把焦点移回面板（关闭按钮），避免焦点停留在 aria-hidden 的入口上。
+    if (reopeningDuringClose) closeButtonRef.current?.focus();
   };
+
+  // ── 面板键盘行为：Esc 关闭 + Tab 焦点环绕（与 aria-modal 对话框语义一致）──
+  // 监听挂在 window 捕获阶段：面板打开时不论焦点落在哪个控件（甚至 body）都先收到事件。
+  //   - Esc：关闭面板并消费事件（preventDefault + stopPropagation），同一次按键不再传给
+  //     DSH 宿主（宿主也可能用 Esc 关自己的浮层）；closing 期间只消费、不重复 close()，
+  //     否则会重启 180ms 定时器、把关闭无限推迟。
+  //   - Tab：焦点限制在面板可聚焦控件内环绕。closing 期间不拦截：面板正在退场，入口已恢复
+  //     可聚焦（关闭途中可重开），锁焦点会与“关闭动画期间焦点可移出、关闭结束后不抢回”的
+  //     既有语义冲突；面板卸载后监听器随 effect 清理移除，不残留全局键盘拦截。
+  //   - IME 组合输入期间整体放行（isComposing / 旧式 keyCode 229）：Esc 取消候选、Enter 确认
+  //     候选都必须留给输入法，既不能触发面板快捷键，也不能 preventDefault/stopPropagation。
+  useEffect(() => {
+    if (chatEntry !== 'on' || !open) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      // keyCode 229 是组合期间 keydown 的传统标记，兜底 isComposing 缺失/为 false 的旧浏览器
+      if (event.isComposing || event.keyCode === 229) return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!closing) close();
+        return;
+      }
+      if (event.key !== 'Tab' || closing) return;
+      const panel = panelRef.current;
+      if (!panel) return;
+      const focusables = Array.from(panel.querySelectorAll<HTMLElement>(CHAT_FOCUSABLE_SELECTOR));
+      if (focusables.length === 0) {
+        // 无可聚焦控件（正常不会出现：关闭按钮恒在）：不放行，避免焦点逃到 DSH 页面
+        event.preventDefault();
+        return;
+      }
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const active = typeof document !== 'undefined' ? document.activeElement : null;
+      const inside = !!active && panel.contains(active);
+      if (event.shiftKey) {
+        // 首个控件（或焦点已不在面板内）反向环绕到末尾
+        if (!inside || active === first) {
+          event.preventDefault();
+          last.focus();
+        }
+      } else if (!inside || active === last) {
+        // 末尾控件（或焦点已不在面板内）正向环绕到开头
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [open, closing, chatEntry]);
 
   const updateUpload = (localId: string, patch: Partial<MediaUpload>) => {
     const next = uploadsRef.current.map((u) => (u.localId === localId ? { ...u, ...patch } : u));
@@ -905,10 +1037,13 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
   return (
     <>
       <button
+        ref={fabButtonRef}
         type="button"
-        className={'dshpw-chat-fab' + (shaking ? ' shaking' : '') + (dragging ? ' dragging' : '')}
+        className={'dshpw-chat-fab' + (shaking ? ' shaking' : '') + (dragging ? ' dragging' : '') + (fabHidden ? ' dshpw-chat-fab-hidden' : '')}
         style={{ left: fabPos.left, top: fabPos.top, bottom: 'auto' }}
         aria-label={t('chat.open')}
+        aria-hidden={fabHidden || undefined}
+        tabIndex={fabHidden ? -1 : 0}
         title={`${t('chat.open')} · ${t('chat.dragHint')}`}
         onClick={openPanel}
         onMouseDown={onFabMouseDown}
@@ -941,10 +1076,10 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
           aria-modal="true"
           aria-label={t('chat.title')}
         >
-          <div className={'dshpw-chat-panel' + (closing ? ' closing' : '')} onClick={(e) => e.stopPropagation()}>
+          <div ref={panelRef} className={'dshpw-chat-panel' + (closing ? ' closing' : '')} onClick={(e) => e.stopPropagation()}>
             <div className="dshpw-chat-header">
               <span className="dshpw-chat-title">{t('chat.title')}</span>
-              <button type="button" className="dshpw-chat-close" aria-label={t('chat.close')} onClick={close}>
+              <button ref={closeButtonRef} type="button" className="dshpw-chat-close" aria-label={t('chat.close')} onClick={close}>
                 ×
               </button>
             </div>
@@ -1190,6 +1325,9 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
                     addFiles(files);
                   }}
                   onKeyDown={(e) => {
+                    // IME 组合输入中 Enter 用于确认候选词：不发送、也不阻止默认上屏
+                    // （keyCode 229 兜底 isComposing 缺失/为 false 的旧浏览器）
+                    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                     if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();
                       send();
@@ -1256,8 +1394,14 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
 
 // ── 聊天面板样式：跟随 dsh 设计令牌，主题自动适配 ───────────────
 const CHAT_CSS = `
-.dshpw-chat-fab{position:fixed;z-index:2147483000;width:36px;height:36px;border-radius:50%;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.18);transition:transform .18s,box-shadow .18s,background .18s;pointer-events:auto;animation:dshpwFabIn .4s cubic-bezier(.34,1.56,.64,1)}
-.dshpw-chat-fab.dragging{transition:none;cursor:grabbing;opacity:.85}
+.dshpw-chat-fab{position:fixed;z-index:2147483000;width:36px;height:36px;border-radius:50%;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.18);transition:transform .18s,box-shadow .18s,background .18s,opacity .18s,visibility .18s;pointer-events:auto;animation:dshpwFabIn .4s cubic-bezier(.34,1.56,.64,1)}
+/* 拖动中禁用过渡（位置跟手）；:not(隐藏) 保证同时命中隐藏类时不会用 transition:none 压掉淡出 */
+.dshpw-chat-fab.dragging:not(.dshpw-chat-fab-hidden){transition:none;cursor:grabbing;opacity:.85}
+/* 面板打开：入口淡出退场，不可点击（pointer-events）/不可键盘聚焦（visibility + tabIndex/aria）。
+   visibility 参与过渡：淡出期间仍可见（可见性在 (0,1) 按 visible 插值），动画结束才真正隐藏。
+   类名带 dshpw-chat-fab- 前缀，避免与宿主/其他样式的通用 .hidden 冲突；规则置于 .dragging
+   之后并显式声明 transition，即使拖动状态残留也能正常淡出。 */
+.dshpw-chat-fab.dshpw-chat-fab-hidden{opacity:0;pointer-events:none;visibility:hidden;transition:opacity .18s,visibility .18s}
 .dshpw-chat-fab:hover{transform:scale(1.05);background:var(--dsw-alias-interactive-bg-hover);box-shadow:0 4px 12px rgba(0,0,0,.25)}
 .dshpw-chat-fab:active{transform:scale(.88)}
 .dshpw-chat-fab:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}

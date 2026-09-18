@@ -8,7 +8,7 @@
 // 仍会被主机侧栅栏拒绝）。无论本地直连还是远程，强制打此补丁影响都不大，
 // 因此不提供开关：网关每次启动自动应用（幂等），dsh 升级覆盖文件后重启
 // 网关自动重打，或在设置页点"重载补丁"。
-import { readFileSync, writeFileSync, existsSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, unlinkSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -142,10 +142,24 @@ function findDshBundleFiles(
       ? [path.join(process.env.DSH_HOME?.trim() || path.join(homedir(), '.dsh'), 'profiles', process.env.DSH_PROFILE?.trim() || 'web')]
       : []),
   ];
+  const expectedVersion = readPackageVersion(path.join(dshRoot, 'package.json'));
   for (const root of roots) {
     if (root === '') continue;
     const file = findDshBundleFile(root, packageName, relativePath);
-    if (file !== null) candidates.add(path.resolve(file));
+    if (file === null) continue;
+    const resolved = path.resolve(file);
+    // The configured DSH root is authoritative. Profile copies are only valid
+    // when their package manifest belongs to the same DSH release; otherwise a
+    // stale profile must not be patched merely because its anchors still match.
+    if (path.resolve(root) !== path.resolve(dshRoot)) {
+      const bundleVersion = readPackageVersion(path.join(path.dirname(path.dirname(resolved)), 'package.json'));
+      if (expectedVersion === null || bundleVersion !== expectedVersion) continue;
+    }
+    try {
+      candidates.add(realpathSync(resolved));
+    } catch {
+      candidates.add(resolved);
+    }
   }
   return [...candidates];
 }
@@ -157,6 +171,15 @@ function findDshBundleFiles(
  * 它们提升到 prefix 的 `node_modules`。补丁必须跟随 Node 从 dsh 包目录逐级向上
  * 查找 node_modules 的规则，不能假设依赖永远嵌套在 dsh 包内（Issue #8 Docker）。
  */
+function readPackageVersion(manifestPath: string): string | null {
+  try {
+    const value = JSON.parse(readFileSync(manifestPath, 'utf8')) as { version?: unknown };
+    return typeof value.version === 'string' ? value.version : null;
+  } catch {
+    return null;
+  }
+}
+
 function findDshBundleFile(dshRoot: string, packageName: string, relativePath: string): string | null {
   let dir = dshRoot;
   for (;;) {
@@ -324,9 +347,11 @@ const SEARCH_AUTOFILL_V2_TO =
 export function findDshRoot(explicit: string): string | null {
   if (explicit) return existsSync(explicit) ? explicit : null;
   try {
-    const globalRoot = spawnSync('npm', ['root', '-g'], { encoding: 'utf8' }).stdout.trim();
-    const candidate = path.join(globalRoot, '@deepseek-ai', 'dsh');
-    if (existsSync(candidate)) return candidate;
+    const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+    const result = spawnSync(npmCommand, ['root', '-g'], { encoding: 'utf8' });
+    const globalRoot = result.status === 0 && typeof result.stdout === 'string' ? result.stdout.trim() : '';
+    const candidate = globalRoot === '' ? '' : path.join(globalRoot, '@deepseek-ai', 'dsh');
+    if (candidate !== '' && existsSync(candidate)) return candidate;
   } catch {
     // npm 不可用时走兜底路径
   }

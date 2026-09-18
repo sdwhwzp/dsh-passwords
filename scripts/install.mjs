@@ -98,7 +98,8 @@ if (!existsSync(pkgPath)) {
   process.exit(1);
 }
 
-// ── 1. Node.js（与 DSH 0.1.6-alpha.1 官方 engines 对齐） ──
+// ── 1. Node.js（本包 engines ^22.19.0 || >=24.0.0；DSH 0.1.6-alpha.2 依赖树中的
+//    @deepseek-ai/libreoffice-kit 声明 node >=22.19.0；DSH CLI 包自身未声明 engines） ──
 const [nodeMajor, nodeMinor] = process.versions.node.split('.').map(Number);
 if ((nodeMajor === 22 && nodeMinor < 19) || nodeMajor < 22 || nodeMajor === 23) {
   err(`Node.js 版本不受支持（当前 v${process.versions.node}），需要 22.19+ 或 24+。`);
@@ -110,7 +111,7 @@ say(`Node.js v${process.versions.node} ✓`);
 // ── 2. dsh（DeepSeek Harness）──
 if (run('dsh', ['--version'], { quiet: true }) !== 0) {
   err('未找到 dsh。请先安装 DeepSeek Harness：');
-  err('  npm install -g @deepseek-ai/dsh@0.1.6-alpha.1');
+  err('  npm install -g @deepseek-ai/dsh@0.1.6-alpha.2');
   err('  然后用 DEEPSEEK_API_KEY=sk-你的key dsh web 先跑一次确认能用');
   process.exit(1);
 }

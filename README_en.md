@@ -17,7 +17,7 @@
   &nbsp;
   <a href="https://github.com/slywalker2006/dsh-passwords/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/slywalker2006/dsh-passwords/ci.yml?style=flat-square&label=CI" alt="CI"></a>
   &nbsp;
-  <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/DSH-0.1.6--alpha.1-4c6ef5?style=flat-square&labelColor=454a54" alt="DSH"></a>
+  <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/DSH-0.1.6--alpha.2-4c6ef5?style=flat-square&labelColor=454a54" alt="DSH"></a>
   &nbsp;
   <img src="https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square" alt="License">
   &nbsp;
@@ -74,7 +74,7 @@
 
 ### Prerequisites
 
-Host installs need Node.js 22.19+ or 24+, a working dsh installation, and git. Keep this plugin on the same Node major line as the dsh host; the current verification baseline is DSH `0.1.6-alpha.1`, while the compatibility target retains every `0.1.5` release and the `0.1.2` / `0.1.3` API boundaries. Docker installs only need Docker Engine or Docker Desktop and a DeepSeek API key.
+Host installs need Node.js 22.19+ or 24+, a working dsh installation, and git. Keep this plugin on the same Node major line as the dsh host; the host baseline is the DSH 0.1.6 line, currently pinned to alpha.2 (no stable release yet; the alpha.2 dependency tree, build, regression suite, and test-server real-profile validation pass). The compatibility target retains every `0.1.5` release and the `0.1.2` / `0.1.3` API boundaries. Docker installs only need Docker Engine or Docker Desktop and a DeepSeek API key.
 
 ### Install
 
@@ -104,10 +104,10 @@ docker run -d \
   -p 127.0.0.1:3088:3088 \
   -v dsh-home:/data/dsh \
   -v dsh-passwords-state:/data/dsh-passwords \
-  skywalker237234/dsh-passwords:2.7.2
+  skywalker237234/dsh-passwords:2.7.3
 ```
 
-`.env` needs at least `DEEPSEEK_API_KEY`. Set `MCP_GATEWAY_PUBLIC_HOST` to the domain you actually use. The host publishes port `127.0.0.1:3088` only while the container listens on `0.0.0.0:3088`; terminate TLS on nginx or Caddy for public access. The image bundles DSH `0.1.6-alpha.1`; initialization is complete when healthz and readyz both return `ok:true`.
+`.env` needs at least `DEEPSEEK_API_KEY`. Set `MCP_GATEWAY_PUBLIC_HOST` to the domain you actually use. The host publishes port `127.0.0.1:3088` only while the container listens on `0.0.0.0:3088`; terminate TLS on nginx or Caddy for public access. The image bundles DSH `0.1.6-alpha.2` (the pinned release of the DSH 0.1.6 line; bundled-image runtime acceptance has passed); initialization is complete when healthz and readyz both return `ok:true`.
 
 Notes:
 
@@ -172,7 +172,7 @@ Plaintext HTTP is refused by default. When an internal-only deployment truly nee
 node scripts/start-http.mjs [port]    # default 8080, asks for confirmation
 ```
 
-Or write `MCP_GATEWAY_AUTO_TLS=0` and `MCP_GATEWAY_PORT=8080` into `.env`; the plugin then starts the gateway in HTTP mode.
+Alternatively, set `MCP_GATEWAY_AUTO_TLS=0` and `MCP_GATEWAY_PORT=8080` in `.env`; the plugin starts the gateway in HTTP mode. This mode needs no public IP, DNS, ACME, or external CDN and is suitable for an internal network. The initial installation still needs npm/GitHub access, or a prepared project tarball, dependency cache, and local DSH installation. Model replies still require an upstream provider such as `DEEPSEEK_API_KEY`; without a model service, login, permissions, files, and administration remain available but model generation does not.
 
 ## The gate card in dsh settings
 
@@ -317,7 +317,7 @@ The bottleneck is usually the network path to the server.
 
 ## Manual install
 
-> v2.7.2 currently uses DSH `0.1.6-alpha.1` as its verification baseline, while retaining compatibility targets for every `0.1.5` release and the `0.1.2` / `0.1.3` API boundaries. The installer requires Node.js `22.19+` or `24+`, registers the plugin, detects dsh, and applies the compatibility patch.
+> v2.7.3 targets the DSH 0.1.6 line, currently pinned to alpha.2, while retaining compatibility targets for every `0.1.5` release and the `0.1.2` / `0.1.3` API boundaries. The alpha.2 dependency tree, build, regression suite, and test-server runtime validation pass. The installer requires Node.js `22.19+` or `24+`, registers the plugin, detects dsh, and applies the compatibility patch.
 
 1. `git clone https://github.com/slywalker2006/dsh-passwords && cd dsh-passwords`
 2. `npm install && npm run build`
@@ -344,7 +344,7 @@ The UI is bilingual zh/en and follows the dsh language setting. The login page h
 
 ## Version compatibility
 
-Current version: 2.7.2. The current verification baseline is DSH `0.1.6-alpha.1`; compatibility targets also retain every DSH `0.1.5` release and the `0.1.2` / `0.1.3` API boundaries. The npm package ships prebuilt dist, TypeScript sources, and all scripts; Docker and npm are built from the same source revision.
+Current version: 2.7.3. The DSH baseline target is the 0.1.6 line, currently pinned to alpha.2 (no stable 0.1.6 release yet); the alpha.2 dependency tree, build, full regression suite, and test-server runtime validation pass. Compatibility targets also retain every DSH `0.1.5` release and the `0.1.2` / `0.1.3` API boundaries. The npm package ships prebuilt dist, TypeScript sources, and all scripts; Docker and npm are built from the same source revision.
 
 ## Contributing
 

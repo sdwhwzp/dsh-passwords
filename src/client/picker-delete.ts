@@ -37,18 +37,27 @@ const ARM_TIMEOUT_MS = 2500;
 const TOAST_MS = 2800;
 /** 行标记：存绝对路径，用于幂等判断 + 清除（React 重渲染不会保留 dataset）。 */
 const PATH_ATTR = 'data-dshpwPickerDelPath';
+/** 注入按钮当前绑定目录的显示名：行复用时必须同步更新无障碍名称与 tooltip。 */
+const NAME_ATTR = 'data-dshpwPickerDelName';
+/** 请求中的删除/清理按钮禁止二次触发，避免双击并发提交同一路径。行重绑（React
+ *  复用同一 DOM 行）时由注入侧同步解除；旧请求的迟到结果按「路径 + 请求代次」丢弃。 */
+const REQUEST_PENDING_ATTR = 'data-dshpwPickerDelRequestPending';
 
 /** 注入按钮与 toast 的样式（<style> 只注入一次；类名固定，不进官方 CSS 命名空间）。
  *  设计令牌与 index.tsx 的 .dshpw-card 同源：--dshpw-ease 柔和标准曲线、
  *  --dshpw-spring 轻过冲弹簧；注入 DOM 不在卡片内，这里在自身作用域重声明。 */
 const PICKER_DEL_CSS = `
-.dshpw-picker-del{--dshpw-ease:cubic-bezier(.22,1,.36,1);--dshpw-spring:cubic-bezier(.34,1.4,.64,1);position:absolute;right:26px;top:50%;transform:translateY(-50%) scale(.9);display:flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:6px;color:var(--dsw-alias-state-error-primary,#ef4444);background:transparent;cursor:pointer;opacity:0;pointer-events:none;transition:opacity .16s var(--dshpw-ease),transform .28s var(--dshpw-spring),background-color .16s var(--dshpw-ease),color .16s var(--dshpw-ease);-webkit-user-select:none;user-select:none;z-index:1}
+.dshpw-picker-del{--dshpw-ease:cubic-bezier(.22,1,.36,1);--dshpw-spring:cubic-bezier(.34,1.4,.64,1);position:absolute;right:26px;top:50%;transform:translateY(-50%) scale(.9);display:flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:6px;color:var(--dsw-alias-state-error-primary,#ef4444);background:transparent;border:0;padding:0;font:inherit;-webkit-appearance:none;appearance:none;cursor:pointer;opacity:0;pointer-events:none;transition:opacity .16s var(--dshpw-ease),transform .28s var(--dshpw-spring),background-color .16s var(--dshpw-ease),color .16s var(--dshpw-ease);-webkit-user-select:none;user-select:none;z-index:1}
 [role="listitem"]:hover>.dshpw-picker-del,.dshpw-picker-del:focus-visible{opacity:1;pointer-events:auto;transform:translateY(-50%) scale(1)}
 .dshpw-picker-del:hover{background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#ef4444) 14%,transparent)}
 .dshpw-picker-del:active{transform:translateY(-50%) scale(.86);transition-duration:.08s}
 .dshpw-picker-del-arm{opacity:1;pointer-events:auto;color:var(--dsw-alias-label-primary-inverted,#fff);background:var(--dsw-alias-state-error-primary,#ef4444);transform:translateY(-50%) scale(1.05)}
 .dshpw-picker-del-arm:hover{background:var(--dsw-alias-state-error-primary,#ef4444)}
-.dshpw-picker-toast{--dshpw-ease:cubic-bezier(.22,1,.36,1);--dshpw-spring:cubic-bezier(.34,1.4,.64,1);position:fixed;right:16px;bottom:16px;z-index:2147483000;max-width:320px;padding:9px 13px;border-radius:12px;background:color-mix(in srgb,var(--dsw-alias-bg-layer-3,#1f2933) 86%,transparent);color:var(--dsw-alias-label-primary,#172026);font-size:12px;line-height:1.5;box-shadow:0 10px 28px rgb(0 0 0 / 26%),0 2px 8px rgb(0 0 0 / 12%);backdrop-filter:blur(14px) saturate(1.4);-webkit-backdrop-filter:blur(14px) saturate(1.4);animation:dshpwPickerToastIn .38s var(--dshpw-spring) both}
+.dshpw-picker-del.dshpw-picker-del-retry{opacity:1;pointer-events:auto;transform:translateY(-50%) scale(1);background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#ef4444) 12%,transparent)}
+.dshpw-picker-del.dshpw-picker-del-retry:hover{background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#ef4444) 22%,transparent)}
+[role="listitem"].dshpw-picker-del-tombstone{opacity:.6}
+[role="listitem"].dshpw-picker-del-tombstone>button:not(.dshpw-picker-del){text-decoration:line-through;pointer-events:none}
+.dshpw-picker-toast{--dshpw-ease:cubic-bezier(.22,1,.36,1);--dshpw-spring:cubic-bezier(.34,1.4,.64,1);position:fixed;right:16px;bottom:16px;z-index:2147483000;max-width:320px;padding:9px 13px;border-radius:12px;background:color-mix(in srgb,var(--dsw-alias-bg-layer-3,#1f2933) 86%,transparent);color:var(--dsw-alias-label-primary,#172026);font-size:12px;line-height:1.5;white-space:pre-line;box-shadow:0 10px 28px rgb(0 0 0 / 26%),0 2px 8px rgb(0 0 0 / 12%);backdrop-filter:blur(14px) saturate(1.4);-webkit-backdrop-filter:blur(14px) saturate(1.4);animation:dshpwPickerToastIn .38s var(--dshpw-spring) both}
 .dshpw-picker-toast-error{background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#ef4444) 92%,transparent);color:#fff}
 @keyframes dshpwPickerToastIn{from{opacity:0;transform:translateY(10px) scale(.95)}to{opacity:1;transform:none}}
 @media (prefers-reduced-motion:reduce){.dshpw-picker-toast{animation:none}.dshpw-picker-del{transition:none}}
@@ -68,21 +77,26 @@ export interface PickerText {
   aria: string;
   done: string;
   failed: string;
+  /** 墓碑行的重试动作 / 状态文案（locales 未收录，由本文件按当前语言给值）。 */
+  retry: string;
+  pending: string;
 }
 
 /** 当前语言的文案；navigator 缺失（SSR/测试）时回退英文。 */
 export const pickerText: PickerText = (() => {
-  const dict =
-    typeof navigator !== 'undefined' && typeof navigator.language === 'string' &&
-    navigator.language.toLowerCase().startsWith('zh')
-      ? zh
-      : en;
+  const zhLang =
+    typeof navigator !== 'undefined' &&
+    typeof navigator.language === 'string' &&
+    navigator.language.toLowerCase().startsWith('zh');
+  const dict = zhLang ? zh : en;
   return {
     del: dict.pickerDel,
     confirm: dict.pickerDelConfirm,
     aria: dict.pickerDelAria,
     done: dict.pickerDelDone,
     failed: dict.pickerDelFailed,
+    retry: zhLang ? '重试清理' : 'Retry cleanup',
+    pending: zhLang ? '目录已删除，工作区授权清理未完成' : 'Directory deleted; workspace authorization cleanup incomplete',
   };
 })();
 
@@ -159,6 +173,8 @@ export function extractPickerListings(envelope: unknown): PickerEntry[][] {
 /** 一份已被抓到的列列表（按列名序列索引行 → 绝对路径）。 */
 export interface CapturedListing {
   names: string[];
+  /** 与 names 同序的绝对路径：用于区分不同目录下恰好同名的列。 */
+  paths: string[];
   byName: Map<string, PickerEntry>;
 }
 
@@ -167,15 +183,21 @@ const capturedListings: CapturedListing[] = [];
 
 function rememberListings(entries: PickerEntry[]): void {
   if (entries.length === 0) return;
-  const listing: CapturedListing = { names: [], byName: new Map() };
+  const listing: CapturedListing = { names: [], paths: [], byName: new Map() };
   for (const entry of entries) {
     listing.names.push(entry.name);
+    listing.paths.push(entry.path);
     // 同名目录在同一列内不可能出现（同目录下的子项名唯一），直接覆盖即可
     listing.byName.set(entry.name, entry);
   }
-  // 去重：同一列重复上报时把它挪到最前，避免刷掉真正更早的另一列
+  // 去重必须同时比较绝对路径：不同父目录都可能有相同名称序列（例如 a/x 与
+  // b/x）。只按名称把后者覆盖为“最新列”会把旧列的垃圾桶绑定到错误路径。
   const existing = capturedListings.findIndex(
-    (item) => item.names.length === listing.names.length && item.names.every((name, i) => name === listing.names[i]),
+    (item) =>
+      item.names.length === listing.names.length &&
+      item.names.every((name, i) => name === listing.names[i]) &&
+      item.paths.length === listing.paths.length &&
+      item.paths.every((entryPath, i) => entryPath === listing.paths[i]),
   );
   if (existing >= 0) capturedListings.splice(existing, 1);
   capturedListings.unshift(listing);
@@ -208,7 +230,9 @@ export function matchPickerListing(
   listings: readonly { names: readonly string[] }[],
 ): number | null {
   if (names.length === 0) return null;
-  // 1) 精确序列相等（最新优先：列表本身最新在前）
+  // 1) 精确序列相等。若多列恰好同名，DOM 没有父目录/路径锚点可区分，宁可
+  // 不注入也不能把垃圾桶绑到另一列的同名路径。
+  let exact: number | null = null;
   for (let i = 0; i < listings.length; i++) {
     const candidate = listings[i].names;
     if (candidate.length !== names.length) continue;
@@ -219,8 +243,11 @@ export function matchPickerListing(
         break;
       }
     }
-    if (same) return i;
+    if (!same) continue;
+    if (exact !== null) return null;
+    exact = i;
   }
+  if (exact !== null) return exact;
   // 2) 有序子序列（显示被过滤）：取 listing 最长者
   let best: number | null = null;
   let bestLength = 0;
@@ -290,30 +317,85 @@ function showToast(message: string, error: boolean): void {
   }, TOAST_MS);
 }
 
-/** 调用删除端点；返回服务端错误文案（没有则 null 表示成功）。 */
-async function requestDelete(path: string): Promise<string | null> {
+/** 删除端点的一次调用结果（目录删除与 workspace 同步/DB 清理可能部分失败）。 */
+export interface DeleteOutcome {
+  /** 目录是否已被物理删除：HTTP 非 2xx 时也可能为 true（联动部分失败）。 */
+  deleted: boolean;
+  /** 面向用户的失败/警告文案（成功且无警告时为 null）；可含换行。 */
+  message: string | null;
+  /** toast 是否用错误样式（部分失败也要醒目）。 */
+  error: boolean;
+  /**
+   * 目录已删但服务端仍留有可重试的授权清理（DB_CLEANUP_FAILED / retryable）：
+   * 调用方必须保留墓碑行与重试入口，不能把行移除（否则唯一的重试通道就没了）。
+   */
+  retry: boolean;
+  /**
+   * 服务端 409 CLEANUP_RETRY_CONFLICT：清理重试的目标已被重新创建。此时没有可重试的
+   * 清理任务，调用方必须撤销墓碑/重试状态、让该行回到常规删除（不能卡在仅重试状态）。
+   * 仅在为 true 时出现：未冲突的结果保持既有四字段形状，兼容既有调用方与断言。
+   */
+  conflict?: boolean;
+}
+
+/**
+ * 把删除端点响应归一化为选择器行为所需结果（纯函数）。
+ *
+ * 关键契约：服务端在「目录已删但 workspace 同步/DB 清理失败」时返回非 2xx
+ * 但携带 `deleted` 路径与 `warnings`/`error`。此时行必须被移除（本地已确认
+ * 删除），同时把警告展示给用户——不能因为整体 `ok=false` 就当作未删除。
+ * 例外：DB 清理失败（retryable）时保留墓碑行 + 重试动作（见 applyRetryState）。
+ */
+export function interpretDeleteResponse(responseOk: boolean, data: unknown): DeleteOutcome {
+  const record = data !== null && typeof data === 'object' && !Array.isArray(data)
+    ? (data as Record<string, unknown>)
+    : {};
+  const warnings = Array.isArray(record.warnings)
+    ? record.warnings.filter((item): item is string => typeof item === 'string' && item !== '')
+    : [];
+  const deleted = typeof record.deleted === 'string' && record.deleted !== '';
+  // 409 CLEANUP_RETRY_CONFLICT：目录已被重新创建，服务端为保护新内容取消了清理重试。
+  // 它与 retry 互斥：必须撤销墓碑/重试状态回到常规删除，不能继续当作「可重试失败」。
+  const conflict = !responseOk && record.code === 'CLEANUP_RETRY_CONFLICT';
+  const retry = !conflict && !responseOk && deleted && (record.retryable === true || record.code === 'DB_CLEANUP_FAILED');
+  if (responseOk && record.ok === true) {
+    return { deleted: true, message: warnings.length > 0 ? warnings.join('\n') : null, error: warnings.length > 0, retry: false };
+  }
+  const failure = typeof record.error === 'string' && record.error !== '' ? record.error : pickerText.failed;
+  const outcome: DeleteOutcome = {
+    // 冲突时目录已被重新创建，绝不能被当作已删除（否则会误移除仍存在的行）。
+    deleted: conflict ? false : deleted,
+    message: warnings.length > 0 ? `${failure}\n${warnings.join('\n')}` : failure,
+    error: true,
+    retry,
+  };
+  if (conflict) outcome.conflict = true;
+  return outcome;
+}
+
+/** 调用删除端点并归一化服务端结果（导出供单测直接覆盖网络异常路径）。 */
+export async function requestDelete(path: string, cleanupOnly = false): Promise<DeleteOutcome> {
   try {
     const response = await fetch(DELETE_ENDPOINT, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       credentials: 'same-origin',
-      body: JSON.stringify({ path }),
+      body: JSON.stringify(cleanupOnly ? { path, cleanupOnly: true } : { path }),
     });
-    const data = (await response.json().catch(() => null)) as { ok?: unknown; error?: unknown } | null;
-    if (response.ok && data?.ok === true) return null;
-    // 服务端错误文案已是中文兜底；非中文界面下优先本地化失败文案
-    return typeof data?.error === 'string' && data.error !== '' ? data.error : pickerText.failed;
+    const data = (await response.json().catch(() => null)) as unknown;
+    return interpretDeleteResponse(response.ok, data);
   } catch {
-    return pickerText.failed;
+    return { deleted: false, message: pickerText.failed, error: true, retry: false };
   }
 }
 
 /** 删除后从界面移除该行；若删的正是选中行，其后的（子目录）列已无意义，一并移除。 */
-function dropRowAfterDelete(button: HTMLButtonElement): void {
-  const rowHost = button.closest('[role="listitem"]');
+function dropRowAfterDelete(node: HTMLElement): void {
+  // 以注入节点（而非注入时捕获的官方按钮引用）为锚点：React 复用行时可能替换行内元素。
+  const rowHost = node.closest('[role="listitem"]');
   if (rowHost === null) return;
   const column = rowHost.closest('[role="list"]');
-  const selected = button.getAttribute('aria-current') === 'true';
+  const selected = rowHost.querySelector(':scope > button:not(.dshpw-picker-del)')?.getAttribute('aria-current') === 'true';
   if (selected && column !== null) {
     // 该列之后的所有兄弟列 = 选中目录的子列（父目录已删，子列表随即失效）
     let sibling = column.nextElementSibling;
@@ -326,13 +408,98 @@ function dropRowAfterDelete(button: HTMLButtonElement): void {
   rowHost.remove();
 }
 
+// ── DB 清理失败的墓碑行（保留重试入口） ─────────────────────────
+
+/**
+ * 目录已物理删除、但服务端 DB 清理失败（DB_CLEANUP_FAILED）时，行不能直接移除：
+ * 那会丢掉唯一的重试入口（服务端已确认删除，重试只会做幂等授权清理）。因此把行
+ * 标为墓碑：置灰 + 划线 + 禁止进入（官方行按钮同时退出指针与键盘可达），删除按钮
+ * 转为始终可见的「重试清理」，单击/Enter/Space 直接重发同一路径（不再有数据可删，
+ * 无需二次确认）。状态按路径记在模块 Set 里：React 重建行后重新注入时能恢复。
+ */
+const cleanupsPending = new Set<string>();
+
+/** 官方行按钮原始 tabindex 的暂存标记：墓碑态移出 Tab 序列，恢复时还原。 */
+const ROW_TAB_ATTR = 'data-dshpw-picker-del-row-tab';
+
+/**
+ * 墓碑行的官方按钮必须既不能用指针也不能用键盘进入：指针禁用由 CSS 完成（选择器
+ * 用 :not(.dshpw-picker-del) 只命中官方按钮），键盘可达性在这里关掉——tabindex=-1
+ * 移出 Tab 序列，aria-disabled 向辅助技术说明状态；退出墓碑时还原原始 tabindex
+ * （官方按钮默认没有该属性）。
+ */
+function setRowKeyboardInert(rowHost: Element, inert: boolean): void {
+  const rowButton = rowHost.querySelector(':scope > button:not(.dshpw-picker-del)');
+  if (rowButton === null) return;
+  if (inert) {
+    if (!rowButton.hasAttribute(ROW_TAB_ATTR)) {
+      rowButton.setAttribute(ROW_TAB_ATTR, rowButton.getAttribute('tabindex') ?? '');
+    }
+    rowButton.setAttribute('tabindex', '-1');
+    rowButton.setAttribute('aria-disabled', 'true');
+    return;
+  }
+  if (!rowButton.hasAttribute(ROW_TAB_ATTR)) return;
+  const previous = rowButton.getAttribute(ROW_TAB_ATTR);
+  if (previous === null || previous === '') rowButton.removeAttribute('tabindex');
+  else rowButton.setAttribute('tabindex', previous);
+  rowButton.removeAttribute(ROW_TAB_ATTR);
+  rowButton.removeAttribute('aria-disabled');
+}
+
+function applyRetryState(node: HTMLElement, rowHost: Element, path: string, name: string): void {
+  cleanupsPending.add(path);
+  node.setAttribute(NAME_ATTR, name);
+  node.setAttribute('data-dshpw-picker-del-retry', '1');
+  node.classList.add('dshpw-picker-del-retry');
+  // 重试是墓碑行唯一的操作入口：必须进入 Tab 序列，由原生 button 响应 Enter/Space。
+  node.setAttribute('tabindex', '0');
+  rowHost.classList.add('dshpw-picker-del-tombstone');
+  setRowKeyboardInert(rowHost, true);
+  const label = `${pickerText.retry}: ${name}`;
+  node.setAttribute('aria-label', label);
+  node.setAttribute('title', label);
+}
+
+function clearRetryState(node: HTMLElement, rowHost: Element, path: string): void {
+  cleanupsPending.delete(path);
+  node.removeAttribute('data-dshpw-picker-del-retry');
+  node.classList.remove('dshpw-picker-del-retry');
+  node.setAttribute('tabindex', '-1');
+  rowHost.classList.remove('dshpw-picker-del-tombstone');
+  setRowKeyboardInert(rowHost, false);
+}
+
+function setDeleteButtonLabel(node: HTMLElement, name: string): void {
+  node.setAttribute(NAME_ATTR, name);
+  const label = `${pickerText.aria}: ${name}`;
+  node.setAttribute('aria-label', label);
+  node.setAttribute('title', label);
+}
+
 /** 给一行注入删除按钮（幂等：React 重建行后旧按钮消失，会重新注入）。 */
-function injectRowButton(rowHost: Element, button: HTMLButtonElement, entry: PickerEntry): void {
+function injectRowButton(rowHost: Element, entry: PickerEntry): void {
   const path = entry.path;
-  const existing = rowHost.querySelector(':scope > .dshpw-picker-del');
+  const existing = rowHost.querySelector(':scope > .dshpw-picker-del') as HTMLButtonElement | null;
   if (existing !== null) {
-    // 已注入：只更新路径标记（行复用/列表刷新后路径可能变）
-    existing.setAttribute(PATH_ATTR, path);
+    const previousPath = existing.getAttribute(PATH_ATTR);
+    if (previousPath !== path) {
+      // 行被 React 复用绑定到新路径：在途请求属于旧路径，必须在这里同步解除它对本节点的
+      // 占用。否则旧请求的 finally 会因路径不匹配而跳过，新路径的按钮就永久 disabled
+      //（重绑死锁）。旧请求的迟到结果由 click 侧的「路径 + 请求代次」双检丢弃。
+      existing.removeAttribute(REQUEST_PENDING_ATTR);
+      existing.disabled = false;
+      // 二次确认武装随旧绑定作废：新路径必须重新走两步确认。
+      existing.classList.remove('dshpw-picker-del-arm');
+      if (previousPath !== null) cleanupsPending.delete(previousPath);
+      existing.setAttribute(PATH_ATTR, path);
+    }
+    // 按当前绑定恢复/清除墓碑重试状态；路径未变时不会动在途 pending。
+    if (cleanupsPending.has(path)) applyRetryState(existing, rowHost, path, entry.name);
+    else {
+      clearRetryState(existing, rowHost, path);
+      setDeleteButtonLabel(existing, entry.name);
+    }
     return;
   }
   // 行容器不是定位上下文时给一个（绝对定位的按钮以此行为定位基准）
@@ -344,51 +511,89 @@ function injectRowButton(rowHost: Element, button: HTMLButtonElement, entry: Pic
   ) {
     host.style.position = 'relative';
   }
-  const node = document.createElement('span');
+  // 原生 button：Enter/Space 原生可操作，aria-label 直接是辅助技术的可读名称。
+  // 默认 tabindex=-1（悬停显现的便利入口，不做 Tab 停靠）；墓碑重试态改 0。
+  const node = document.createElement('button');
+  node.type = 'button';
   node.className = 'dshpw-picker-del';
   node.setAttribute('data-dshpw-picker-del', '1');
   node.setAttribute(PATH_ATTR, path);
-  node.setAttribute('role', 'button');
   node.setAttribute('tabindex', '-1');
-  const label = `${pickerText.aria}: ${entry.name}`;
-  node.setAttribute('aria-label', label);
-  node.setAttribute('title', label);
+  setDeleteButtonLabel(node, entry.name);
   node.innerHTML = TRASH_ICON;
 
   let armTimer = 0;
+  /** 本节点的请求代次：每次真正发出请求时自增，用于丢弃重绑前的迟到结果。 */
+  let requestSerial = 0;
   node.addEventListener('click', (event) => {
     // 行 button 自己带 onClick（进入该目录）：绝不能让它收到这次点击
     event.preventDefault();
     event.stopPropagation();
     const current = node.getAttribute(PATH_ATTR);
     if (current === null || current === '') return;
-    if (!node.classList.contains('dshpw-picker-del-arm')) {
+    // 墓碑行的按钮 = 重试授权清理：单击直达（没有数据可再删，不需要二次确认）。
+    const retryPending = node.getAttribute('data-dshpw-picker-del-retry') === '1';
+    if (node.getAttribute(REQUEST_PENDING_ATTR) === '1') return;
+    if (!retryPending && !node.classList.contains('dshpw-picker-del-arm')) {
       node.classList.add('dshpw-picker-del-arm');
       node.setAttribute('title', pickerText.confirm);
+      const armedPath = current;
       armTimer = window.setTimeout(() => {
         armTimer = 0;
+        // 行已被重绑（React 复用）：武装态已在 rebind 时撤销，别碰新绑定的样式。
+        if (node.getAttribute(PATH_ATTR) !== armedPath) return;
         node.classList.remove('dshpw-picker-del-arm');
-        node.setAttribute('title', label);
+        node.setAttribute('title', `${pickerText.aria}: ${node.getAttribute(NAME_ATTR) ?? entry.name}`);
       }, ARM_TIMEOUT_MS);
       return;
     }
-    // 已武装：第二次点击 = 确认
+    // 已武装（或重试）：执行删除/清理
     if (armTimer !== 0) window.clearTimeout(armTimer);
     armTimer = 0;
     node.classList.remove('dshpw-picker-del-arm');
-    node.setAttribute('title', label);
-    void requestDelete(current).then((failure) => {
-      if (failure !== null) {
-        // 失败保留行与按钮（可重试），只提示原因
-        showToast(failure, true);
+    if (!retryPending) node.setAttribute('title', `${pickerText.aria}: ${node.getAttribute(NAME_ATTR) ?? entry.name}`);
+    const serial = ++requestSerial;
+    node.setAttribute(REQUEST_PENDING_ATTR, '1');
+    node.disabled = true;
+    // 复用保护：只有「仍绑定同一路径」且「仍是本次请求」的结果才能作用于该节点。重绑
+    // 由 scan 侧解除 pending；代次校验确保旧请求的迟到结果不会清掉新请求的状态。
+    const stale = (): boolean => node.getAttribute(PATH_ATTR) !== current || requestSerial !== serial;
+    void requestDelete(current, retryPending).then((outcome) => {
+      if (stale()) return;
+      if (outcome.conflict) {
+        // 409 CLEANUP_RETRY_CONFLICT：目录已被重新创建，清理重试已无对象。撤销墓碑/
+        // 重试状态恢复常规删除（否则会卡在仅重试，官方行按钮也不可达）。
+        clearRetryState(node, rowHost, current);
+        setDeleteButtonLabel(node, node.getAttribute(NAME_ATTR) ?? entry.name);
+        showToast(outcome.message ?? pickerText.failed, true);
         return;
       }
-      showToast(`${pickerText.done}: ${entry.name}`, false);
-      dropRowAfterDelete(button);
+      // 目录已被服务端确认删除（即使 workspace 同步/DB 清理部分失败）→ 移除该行，
+      // 并把 warnings/actionable 信息展示出来；未删除则保留行以便重试。
+      if (!outcome.deleted) {
+        showToast(outcome.message ?? pickerText.failed, true);
+        return;
+      }
+      if (outcome.retry) {
+        // DB 清理失败：保留墓碑行 + 重试按钮（服务端 DB 事务已回滚，重试可收敛）。
+        applyRetryState(node, rowHost, current, entry.name);
+        showToast(`${pickerText.pending}\n${outcome.message ?? ''}`.trim(), true);
+        return;
+      }
+      clearRetryState(node, rowHost, current);
+      dropRowAfterDelete(node);
+      const done = `${pickerText.done}: ${node.getAttribute(NAME_ATTR) ?? entry.name}`;
+      showToast(outcome.message === null ? done : `${done}\n${outcome.message}`, outcome.error);
+    }).finally(() => {
+      // 复用保护：只复位仍属于本次请求的节点（重绑后的新绑定有自己的 pending 生命周期）。
+      if (stale()) return;
+      node.removeAttribute(REQUEST_PENDING_ATTR);
+      node.disabled = false;
     });
   });
 
   rowHost.appendChild(node);
+  if (cleanupsPending.has(path)) applyRetryState(node, rowHost, path, entry.name);
 }
 
 // ── 扫描（幂等） ───────────────────────────────────────────────
@@ -400,7 +605,8 @@ export function scanPickerDialogs(): void {
   for (const dialog of dialogs) {
     const columns = dialog.querySelectorAll('[role="list"]');
     for (const column of columns) {
-      const rows = column.querySelectorAll(':scope > [role="listitem"] > button');
+      // 排除注入的控件：原生 button 也是 listitem 的直接子按钮，不能被当作目录行
+      const rows = column.querySelectorAll(':scope > [role="listitem"] > button:not(.dshpw-picker-del)');
       if (rows.length === 0) continue;
       const names: string[] = [];
       for (const row of rows) names.push((row.textContent ?? '').trim());
@@ -413,7 +619,7 @@ export function scanPickerDialogs(): void {
         if (entry === undefined) continue;
         const rowHost = button.parentElement;
         if (rowHost === null) continue;
-        injectRowButton(rowHost, button, entry);
+        injectRowButton(rowHost, entry);
       }
     }
   }

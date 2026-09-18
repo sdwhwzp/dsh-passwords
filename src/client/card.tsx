@@ -213,6 +213,25 @@ export function readModelCatalog(overview: PermOverview | null): {
   return { entries, status: 'ready' };
 }
 
+/** 读取官方 session/modelCatalog 的 server-response 信封。 */
+export function readModelCatalogResponse(response: unknown): {
+  entries: ModelCatalogEntry[];
+  status: ModelCatalogStatus;
+} {
+  if (typeof response !== 'object' || response === null || Array.isArray(response)) {
+    return { entries: [], status: 'unavailable' };
+  }
+  const result = (response as { result?: unknown }).result;
+  if (typeof result !== 'object' || result === null || Array.isArray(result)) {
+    return { entries: [], status: 'unavailable' };
+  }
+  const row = result as { ok?: unknown; value?: unknown };
+  if (row.ok !== true || typeof row.value !== 'object' || row.value === null || Array.isArray(row.value)) {
+    return { entries: [], status: 'unavailable' };
+  }
+  return readModelCatalog({ modelCatalog: row.value as PermOverview['modelCatalog'] } as PermOverview);
+}
+
 /** 与 host 侧一致的最小密码策略（本机提示用，最终以服务端校验为准） */
 const PASSWORD_RE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{12,}$/;
 const USERNAME_RE = /^[A-Za-z0-9_-]{3,32}$/;
@@ -332,11 +351,33 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
         if (d.me?.role !== 'admin') return undefined;
         return api<PermOverview>('/gateway/api/overview')
           .then((o) => {
+            // overview 是权限快照；modelCatalog 只有在网关此前观察到官方 RPC 时才会
+            // 内嵌。首次进入设置页主动调用无参数的官方 RPC，避免依赖主界面先打开模型选择器。
+            const overviewCatalog = readModelCatalog(o);
+            // Render the permission snapshot independently of the optional model catalog.
+            // A stalled upstream catalog request must not make the whole settings card disappear.
             setOverview(o);
-            // 模型目录与权限同一个快照：一次刷新内两者口径一致
-            const catalog = readModelCatalog(o);
-            setModelCatalog(catalog.entries);
-            setModelCatalogStatus(catalog.status);
+            const catalogPromise = overviewCatalog.status === 'ready'
+              ? Promise.resolve(overviewCatalog)
+              : (() => {
+                  const controller = new AbortController();
+                  const timeout = setTimeout(() => controller.abort(), 5000);
+                  return api<unknown>('/api/session/modelCatalog', {
+                    type: 'client-request',
+                    rpcId: `dshpw-model-catalog-${Date.now()}`,
+                    method: 'session/modelCatalog',
+                    payload: { args: {} },
+                  }, controller.signal)
+                    .then(readModelCatalogResponse)
+                    .catch(() => overviewCatalog)
+                    .finally(() => clearTimeout(timeout));
+                })();
+            // 模型目录是可选的上游数据；它不能阻塞权限草稿、工作区和预设的渲染。
+            void catalogPromise.then((catalog) => {
+              setModelCatalog(catalog.entries);
+              setModelCatalogStatus(catalog.status);
+            });
+
             // 草稿同步：新用户初始化；未在编辑（dirty）中的草稿用服务端最新值覆盖
             // （注释承诺的“主用户在别处修改后页面自动同步最新状态”真正生效）；
             // 已删除的用户清草稿；正在编辑的用户保留本地未保存修改。

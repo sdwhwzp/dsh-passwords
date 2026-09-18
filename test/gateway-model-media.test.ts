@@ -715,6 +715,13 @@ test('session/modelCatalog：子用户只看到 allowlist 内的模型，主用�
   assert.equal(admin.status, 200, admin.body);
   const adminValue = (admin.json.result as { value?: unknown } | undefined)?.value;
   assert.deepEqual(visibleCatalogModelIds(adminValue), allCatalogModelIds(), '主用户不受模型 allowlist 限制');
+
+  // 设置页通过 overview 读取模型目录：主用户的官方请求也必须填充网关快照，
+  // 不能因为 reqAs.dshpwPerms 对 admin 为 undefined 而永远返回 modelCatalog=null。
+  const overview = await req('GET', '/gateway/api/overview', { cookie: adminCookie });
+  assert.equal(overview.status, 200, overview.body);
+  const overviewCatalog = (overview.json as { modelCatalog?: { groups?: unknown } }).modelCatalog;
+  assert.ok(overviewCatalog !== null && Array.isArray(overviewCatalog?.groups), 'overview 必须暴露已观测到的 modelCatalog');
 });
 
 test('session/modelCatalog：[] 白名单的子用户看不到任何模型', async () => {

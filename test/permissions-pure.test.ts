@@ -17,6 +17,8 @@ import {
   parseEndpointRule,
   endpointAllowed,
   isOfficialRootPath,
+  OFFICIAL_API_NAMESPACES,
+  SUBUSER_BLOCKED_API_NAMESPACES,
   classifySubuserPath,
   pathWithin,
   workspaceRegistrationAllowed,
@@ -121,6 +123,95 @@ test('isOfficialRootPath：官方根级白名单（SPA 壳 / 静态 / 插件 bun
   for (const denied of ['/third-party-panel/read', '/modlens', '/sidebar/ws/terminal', '/api/x', '/html', '/open-in-app/unknown']) {
     assert.equal(isOfficialRootPath(denied), false, `${denied} 不属官方根级`);
   }
+});
+
+test('alpha.2 命名空间门禁：officeToPdf 保持 fail-closed；pluginManager/agentTeams 同样硬拒绝', () => {
+  const endpointRules = parseEndpointAllowlist('', 'TEST');
+
+  // alpha.2 官方包 @deepseek-ai/dsh-office-to-pdf 注册 namespace: 'officeToPdf'，
+  // 方法为 generation / render。但 render(workspaceFileScope, path, …) 接受绝对或
+  // 工作区相对路径，scope 由请求头派生、作用域隔离依赖 workspaceFiles 实现
+  // （只读审计：可能放行作用域外路径）。现有文档（含 compatibility-matrix.md）
+  // 没有允许子用户使用该命名空间的既有政策；在专用授权守卫与真实 E2E 证明作用域
+  // 隔离前，不归官方自动放行，两条通道与两种 API 形状一律 fail-closed。
+  assert.equal(OFFICIAL_API_NAMESPACES.has('officeToPdf'), false);
+  assert.equal(SUBUSER_BLOCKED_API_NAMESPACES.has('officeToPdf'), true);
+  assert.equal(classifySubuserPath('/api/officeToPdf', { endpointRules, transport: 'http' }), 'third-party');
+  assert.equal(classifySubuserPath('/api/officeToPdf/generation', { endpointRules, transport: 'http' }), 'third-party');
+  assert.equal(classifySubuserPath('/api/officeToPdf/render', { endpointRules, transport: 'http' }), 'third-party');
+  assert.equal(classifySubuserPath('/api/officeToPdf.render', { endpointRules, transport: 'http' }), 'third-party', '旧式 namespace.method 形状同口径');
+  assert.equal(classifySubuserPath('/api/officeToPdf.generation', { endpointRules, transport: 'ws' }), 'third-party', '两条通道一致');
+
+  // pluginManager = host 侧 pnpm 安装/卸载/运行第三方包（特权/RCE 面）：绝不进 official allowlist
+  assert.equal(OFFICIAL_API_NAMESPACES.has('pluginManager'), false);
+  assert.equal(classifySubuserPath('/api/pluginManager', { endpointRules, transport: 'http' }), 'third-party');
+  assert.equal(classifySubuserPath('/api/pluginManager/install', { endpointRules, transport: 'http' }), 'third-party');
+
+  // agentTeams（@deepseek-ai/dsh-experimental-agent-team）留默认拒绝：无 owner-only 明确授权前不开放
+  assert.equal(OFFICIAL_API_NAMESPACES.has('agentTeams'), false);
+  assert.equal(classifySubuserPath('/api/agentTeams/spawn', { endpointRules, transport: 'http' }), 'third-party');
+});
+
+test('通用 SSH 登记规则不能给子用户放行 pluginManager / agentTeams / officeToPdf（硬拒绝先于登记表）', () => {
+  // 宽泛规则（运维常见写法）不得把特权/未验证命名空间带进来
+  const generic = parseEndpointAllowlist('/api/*,ws:/api/*,http:/api/*', 'TEST');
+  const blockedPaths = [
+    '/api/pluginManager',
+    '/api/pluginManager/change',
+    '/api/pluginManager/runPnpm',
+    '/api/pluginManager.change',
+    '/api/pluginManager.runPnpm',
+    '/api/agentTeams',
+    '/api/agentTeams/spawn',
+    '/api/agentTeams.spawn',
+    '/api/officeToPdf',
+    '/api/officeToPdf/generation',
+    '/api/officeToPdf/render',
+    '/api/officeToPdf.generation',
+    '/api/officeToPdf.render',
+  ];
+  for (const path of blockedPaths) {
+    assert.equal(classifySubuserPath(path, { endpointRules: generic, transport: 'http' }), 'third-party', `http ${path}`);
+    assert.equal(classifySubuserPath(path, { endpointRules: generic, transport: 'ws' }), 'third-party', `ws ${path}`);
+  }
+
+  // 精确登记（含尾部 /* 通配）同样拿不到 ssh 分类：登记表不是硬拒绝的旁路
+  const scoped = parseEndpointAllowlist(
+    '/api/pluginManager/*,/api/pluginManager.change,ws:/api/agentTeams/*,http:/api/agentTeams.spawn,/api/officeToPdf/*,/api/officeToPdf.render',
+    'TEST',
+  );
+  assert.equal(classifySubuserPath('/api/pluginManager/change', { endpointRules: scoped, transport: 'http' }), 'third-party');
+  assert.equal(classifySubuserPath('/api/pluginManager/change', { endpointRules: scoped, transport: 'ws' }), 'third-party');
+  assert.equal(classifySubuserPath('/api/pluginManager.change', { endpointRules: scoped, transport: 'http' }), 'third-party');
+  assert.equal(classifySubuserPath('/api/agentTeams/spawn', { endpointRules: scoped, transport: 'http' }), 'third-party');
+  assert.equal(classifySubuserPath('/api/agentTeams/spawn', { endpointRules: scoped, transport: 'ws' }), 'third-party');
+  assert.equal(classifySubuserPath('/api/officeToPdf/render', { endpointRules: scoped, transport: 'http' }), 'third-party');
+  assert.equal(classifySubuserPath('/api/officeToPdf/render', { endpointRules: scoped, transport: 'ws' }), 'third-party');
+  assert.equal(classifySubuserPath('/api/officeToPdf.render', { endpointRules: scoped, transport: 'http' }), 'third-party');
+
+  // owner: 登记的既有语义保留：子用户仍 403（owner-only），且不会被误判成 ssh
+  const ownerOnly = parseEndpointAllowlist(
+    'owner:/api/pluginManager/change,owner:/api/agentTeams.spawn,owner:/api/officeToPdf/render',
+    'TEST',
+  );
+  assert.equal(classifySubuserPath('/api/pluginManager/change', { endpointRules: ownerOnly, transport: 'http' }), 'owner-only');
+  assert.equal(classifySubuserPath('/api/agentTeams.spawn', { endpointRules: ownerOnly, transport: 'ws' }), 'owner-only');
+  assert.equal(classifySubuserPath('/api/officeToPdf/render', { endpointRules: ownerOnly, transport: 'http' }), 'owner-only', '显式 owner: 登记仍先于硬拒绝（主用户语义不受影响）');
+
+  // 前缀相近但不相同的命名空间不受硬拒绝影响（防误伤）
+  assert.equal(classifySubuserPath('/api/pluginManagerBackup', { endpointRules: generic, transport: 'http' }), 'ssh');
+  assert.equal(classifySubuserPath('/api/officeToPdfBackup', { endpointRules: generic, transport: 'http' }), 'ssh');
+
+  // 集合内容精确固定：新增硬拒绝命名空间必须显式改测试与文档
+  assert.deepEqual([...SUBUSER_BLOCKED_API_NAMESPACES].sort(), ['agentTeams', 'officeToPdf', 'pluginManager']);
+});
+
+test('terminal 既有政策不受硬拒绝集合影响（本轮不改动）', () => {
+  assert.equal(OFFICIAL_API_NAMESPACES.has('terminal'), false);
+  assert.equal(SUBUSER_BLOCKED_API_NAMESPACES.has('terminal'), false);
+  const rules = parseEndpointAllowlist('', 'TEST');
+  assert.equal(classifySubuserPath('/api/terminal/shells', { endpointRules: rules, transport: 'http' }), 'third-party');
+  assert.equal(classifySubuserPath('/api/terminal.list', { endpointRules: rules, transport: 'http' }), 'third-party');
 });
 
 // ── RC.1 SessionAddress（普通会话与子代理地址） ─────────────────

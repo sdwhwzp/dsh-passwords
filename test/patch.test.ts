@@ -1,4 +1,4 @@
-// 补丁机制回归测试：覆盖 DSH 0.1.2 RC.1 的当前补丁与回滚契约
+// 补丁机制回归测试：覆盖支持的 DSH bundle 布局、当前 alpha.2 产物与回滚契约
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, copyFileSync } from 'node:fs';
@@ -78,6 +78,8 @@ function makeDshRootWithProfileSettings(
   const profileSettingsDir = path.join(profile, 'node_modules', '@deepseek-ai', 'dsh-client-ui-settings', 'lib');
   mkdirSync(dshSettingsDir, { recursive: true });
   mkdirSync(profileSettingsDir, { recursive: true });
+  writeFileSync(path.join(root, 'dsh', 'package.json'), JSON.stringify({ version: '0.1.6-alpha.2' }));
+  writeFileSync(path.join(profile, 'node_modules', '@deepseek-ai', 'dsh-client-ui-settings', 'package.json'), JSON.stringify({ version: '0.1.6-alpha.2' }));
   writeFileSync(path.join(dshSettingsDir, 'client.js'), dshSettingsContent);
   writeFileSync(path.join(profileSettingsDir, 'client.js'), profileSettingsContent);
   return { root: path.join(root, 'dsh'), profile, cleanup: () => rmSync(root, { recursive: true, force: true }) };
@@ -157,19 +159,23 @@ test('补丁：alpha.3 settings 使用 remote.$host.isLoopback 时强制 host pe
   }
 });
 
-test('补丁：当前 rc.1 npm artifacts 应应用 settings 与 Cookie bridge 并保持语法有效', () => {
+test('补丁：当前 alpha.2 npm artifacts 应应用 settings 与 Cookie bridge 并保持语法有效', () => {
   const { root, cleanup } = makeDshRoot(RC7_SETTINGS_PATCHED);
   try {
     const settingsSource = path.join(process.cwd(), 'node_modules', '@deepseek-ai', 'dsh-client-ui-settings', 'lib', 'client.js');
     const settingsTarget = path.join(root, 'node_modules', '@deepseek-ai', 'dsh-client-ui-settings', 'lib', 'client.js');
     mkdirSync(path.dirname(settingsTarget), { recursive: true });
     const source = readFileSync(settingsSource, 'utf8');
-    const unpatchedSettings = source.replace('const persistence = "host";', 'const persistence = ctx.remote.$host.isLoopback ? "host" : "memory";');
+    // alpha.2 当前包仍可能携带 remote.$host.isLoopback；若未来包已换回 host，
+    // 仍明确构造一个可被当前补丁识别的未打版本，而不是依赖无效的 no-op replace。
+    const unpatchedSettings = source.includes('ctx.remote.$host.isLoopback ? "host" : "memory"')
+      ? source
+      : source.replace('const persistence = "host";', 'const persistence = ctx.remote.$host.isLoopback ? "host" : "memory";');
     writeFileSync(settingsTarget, unpatchedSettings);
     const connectionTarget = path.join(root, 'node_modules', '@deepseek-ai', 'dsh-client-connection', 'lib', 'index.js');
     mkdirSync(path.dirname(connectionTarget), { recursive: true });
     writeFileSync(connectionTarget, ALPHA_CONNECTION_UNPATCHED);
-    // npm ci installs the official unmodified RC.1 artifacts. Both the
+    // npm ci installs the official unmodified alpha.2 artifacts. Both the
     // browser-side host persistence and the private Host Cookie bridge must
     // be patched before the public gateway is allowed to start.
     assert.equal(patchStatus(root).settingsHostMode, false);
