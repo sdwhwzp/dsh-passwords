@@ -1139,9 +1139,8 @@ export function createGatewayServer(
   const registryAuthorizedSockets = new Set<Duplex>();
   // 不泄露框架信息
   app.disable('x-powered-by');
-  // 本机反向代理前置时只信任 loopback，按真实客户端 X-Forwarded-For 计算 req.ip，
-  // 同时避免信任公网伪造的代理头。
-  app.set('trust proxy', 'loopback');
+  // 本 fork 的网关自己终结 TLS（3081），前面没有本机反向代理；不设置 trust proxy，
+  // 否则回环来源伪造的 X-Forwarded-Proto 会被当作 HTTPS（移动认证的升级判定依赖它）。
 
   // dsh-remote-web-ui 的浏览器补丁在非回环来源下会把 `/api/...` 重写成
   // `/remote/api/...`，并靠 `/api/pair/status` 的策略回包撤销该重写。该探测

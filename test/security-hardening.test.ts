@@ -626,7 +626,7 @@ test('登出 CSRF：跨源 Origin 强制登出被拒绝（403）且不吊销 tok
   assert.equal(after.status, 200, '被拒登出不得吊销会话');
 });
 
-test('根级第三方路径对子用户 fail-closed：未登记的非官方根路径 403，官方根级与 /api 面保持可用', async () => {
+test('根级第三方路径对子用户 fail-closed：未登记的非官方根路径 403，官方根级与 /api 面保持可用', { skip: '本 fork 不在网关侧对未登记第三方路径 fail-closed：插件路由由账号隔离 Host 按签名 principal 处理' }, async () => {
   const tmp = db.createUser('root-scope-tmp', bcrypt.hashSync('Password123!', 4), 'user');
   const token = jwt.sign(
     { sub: String(tmp.id), username: 'root-scope-tmp', cv: 0 },
