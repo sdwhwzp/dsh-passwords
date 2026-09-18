@@ -7,10 +7,11 @@ import type {} from '@deepseek-ai/dsh-system-prompt';
 import type { ToolDefinition, ToolResult } from '@deepseek-ai/dsh-tools';
 import type { WorkspaceRegistry } from '@deepseek-ai/dsh-workspace';
 import { createHash, randomBytes, randomInt, randomUUID } from 'node:crypto';
-import { mkdir, readFile, realpath } from 'node:fs/promises';
+import { mkdir, readFile, realpath, stat } from 'node:fs/promises';
 import http from 'node:http';
 import type { IncomingMessage } from 'node:http';
 import https from 'node:https';
+import { homedir } from 'node:os';
 import path from 'node:path';
 import { WebSocketServer, WebSocket, type RawData } from 'ws';
 import type { PlatformConfig } from './config.js';
@@ -1536,9 +1537,9 @@ function remoteToolDefinitions(
   };
   const read: ToolDefinition = {
     name: 'read',
-    description: 'Read a UTF-8 text file from the user’s paired local workspace and return line-numbered content.',
+    description: 'Read a UTF-8 text file and return line-numbered content. Accepts a path relative to the user’s paired local workspace, or the absolute Host path of a chat attachment.',
     parameters: objectSchema(['file_path'], {
-      file_path: { type: 'string', description: 'Path relative to the paired local workspace.' },
+      file_path: { type: 'string', description: 'Path relative to the paired local workspace, or the absolute Host path of a file attached to this chat.' },
       offset: { type: 'integer', minimum: 1 },
       limit: { type: 'integer', minimum: 1, maximum: 2000 },
     }),
@@ -1561,6 +1562,18 @@ function remoteToolDefinitions(
     isConcurrencySafe: () => true,
     async execute(args, exec) {
       const value = args as Record<string, unknown>;
+      const filePath = requireStringField(value.file_path, 'file_path');
+      if (path.isAbsolute(filePath)) {
+        const root = await hostAttachmentRoot();
+        if (root !== undefined) {
+          const principal = (exec as typeof exec & { readonly principal?: AuthenticatedPrincipal }).principal;
+          if (!localWorkspacePrincipalAllowed(principal, workspace.user_id)) {
+            throw new RemoteOperationError('当前账号无权访问此本机工作区', 'FORBIDDEN');
+          }
+          const hostRead = await readHostAttachmentWindow(filePath, value, root);
+          if (hostRead !== undefined) return hostRead;
+        }
+      }
       return await executeRemote(exec, 'read', {
         path: pathArg(value.file_path),
         ...(value.offset === undefined ? {} : { offset: value.offset }),
@@ -1982,6 +1995,77 @@ function objectSchema(required: string[], properties: Record<string, unknown>): 
 function requireStringField(value: unknown, name: string): string {
   if (typeof value !== 'string') throw new Error(`${name} must be a string`);
   return value;
+}
+
+/**
+ * Canonical Host attachment store root (`<dshHome>/attachments/v1`).
+ *
+ * A paired session's file tools operate on the user's own machine, but chat
+ * attachments live in the Harness Host attachment store and are projected to
+ * the model as their absolute Host path (via `fs.processPathFromHostPath`).
+ * The model cannot reach that path through the companion — it resolves outside
+ * the paired placeholder root and {@link remotePath} rejects it. The paired
+ * `read` tool recognizes such a path and serves it from the Host filesystem,
+ * where the Host process already owns the attachment library.
+ *
+ * The `dshHome` resolution mirrors the attachment-local backend and this
+ * package's gateway: `$DSH_HOME` when set, else `~/.dsh`. Resolved and
+ * canonicalized once; `undefined` when the store directory does not exist.
+ */
+let hostAttachmentRootPromise: Promise<string | undefined> | undefined;
+function hostAttachmentRoot(): Promise<string | undefined> {
+  if (hostAttachmentRootPromise === undefined) {
+    const dshHome = process.env.DSH_HOME !== undefined && process.env.DSH_HOME !== ''
+      ? path.resolve(process.env.DSH_HOME)
+      : path.join(homedir(), '.dsh');
+    hostAttachmentRootPromise = realpath(path.join(dshHome, 'attachments', 'v1')).catch(() => undefined);
+  }
+  return hostAttachmentRootPromise;
+}
+
+/** Largest Host attachment file the paired `read` will materialize, matching the companion's text-file ceiling. */
+const HOST_ATTACHMENT_MAX_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Read a Host attachment file for the paired `read` tool, in the same
+ * line-numbered window shape the companion returns.
+ *
+ * @returns the read window, or `undefined` when `absolutePath` does not
+ *   resolve to a regular file inside the Host attachment store — in which case
+ *   the caller falls back to dispatching `read` to the companion.
+ * @throws RemoteOperationError when the file is inside the store but too large.
+ */
+export async function readHostAttachmentWindow(
+  absolutePath: string,
+  args: Record<string, unknown>,
+  root: string,
+): Promise<{ path: string; offset: number; lines: { number: number; text: string }[]; totalLines: number } | undefined> {
+  let real: string;
+  try {
+    real = await realpath(absolutePath);
+  } catch {
+    return undefined;
+  }
+  const relative = path.relative(root, real);
+  if (relative === '' || relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) {
+    return undefined;
+  }
+  const info = await stat(real);
+  if (!info.isFile()) return undefined;
+  if (info.size > HOST_ATTACHMENT_MAX_BYTES) {
+    throw new RemoteOperationError('附件文本文件超过 2 MiB 上限', 'FILE_TOO_LARGE');
+  }
+  const offset = typeof args.offset === 'number' && Number.isInteger(args.offset) && args.offset >= 1 ? args.offset : 1;
+  const rawLimit = typeof args.limit === 'number' && Number.isInteger(args.limit) && args.limit >= 1 ? args.limit : 500;
+  const limit = Math.min(rawLimit, 2_000);
+  const lines = (await readFile(real, 'utf8')).split(/\r?\n/);
+  const start = Math.min(offset - 1, lines.length);
+  return {
+    path: absolutePath,
+    offset,
+    lines: lines.slice(start, start + limit).map((text, index) => ({ number: start + index + 1, text })),
+    totalLines: lines.length,
+  };
 }
 
 function remotePath(root: string, input: string): string {
