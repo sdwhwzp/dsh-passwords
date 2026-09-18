@@ -17,7 +17,7 @@ import net from 'node:net';
 import jwt from 'jsonwebtoken';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { timingSafeEqual } from 'node:crypto';
-import { createReadStream, existsSync } from 'node:fs';
+import { createReadStream, existsSync, unlinkSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -240,9 +240,12 @@ async function invalidateGatewaySessions(cfg: PlatformConfig, userId: number): P
   }
 }
 
-/** 网关启动错误码（与 cli.ts 保持一致）：30 证书签发失败 / 31 无公网域名 / 32 端口被占 */
+/** 网关启动错误码（与 cli.ts 保持一致）：永久配置/补丁错误不能自动重启。 */
 const EXIT_CERT_FAILED = 30;
 const EXIT_NO_DOMAIN = 31;
+const EXIT_DSH_ROOT_UNAVAILABLE = 34;
+const EXIT_PATCH_TARGET_UNAVAILABLE = 35;
+const EXIT_PATCH_VERIFICATION_FAILED = 36;
 
 /** 探测网关是否已在监听（防止 dsh 重启/多开时重复拉起） */
 function gatewayAlreadyRunning(port: number): Promise<boolean> {
@@ -353,6 +356,8 @@ function startGateway(ctx: Context, cfg: PlatformConfig): void {
             console.error('[dsh-passwords] 密码门未启动（错误码 30：HTTPS 证书签发失败）。检查 80/443 端口与网络；或运行 scripts/start-http.mjs 改用明文 HTTP（有被嗅探风险）');
           } else if (reason === EXIT_NO_DOMAIN) {
             console.error('[dsh-passwords] 密码门未启动（错误码 31：无法确定公网 IP/域名）。或运行 scripts/start-http.mjs 改用明文 HTTP（有被嗅探风险）');
+          } else if (reason === EXIT_DSH_ROOT_UNAVAILABLE || reason === EXIT_PATCH_TARGET_UNAVAILABLE || reason === EXIT_PATCH_VERIFICATION_FAILED) {
+            console.error(`[dsh-passwords] 密码门未启动（错误码 ${String(reason)}：DSH 补丁不可用）。修复 MCP_DSH_ROOT 或升级兼容问题后重启 dsh。`);
           } else {
             console.error(`[dsh-passwords] 密码门进程已退出（code=${String(reason)}）。重启 dsh 会自动再次拉起`);
           }
@@ -700,6 +705,12 @@ export function apply(ctx: Context): void {
           users,
           // 聊天入口为按用户同步的显示偏好：未设置默认开启；用户跨设备登录同一账号时一致。
           chatEnabled: db!.getSetting(`chat_enabled:${String(caller.userId)}`) !== '0',
+          // 媒体权限与 allowUpload 独立：主用户始终可用，子用户按当前权限实时读取；
+          // 网关仍会在 init/PUT/发送/读取各阶段再次强制校验。
+          mediaEnabled: caller.role === 'admin' || db!.getPermissions(caller.userId)?.allow_chat_media === true,
+          // 文件下载（右侧栏文件列表的下载按钮）：主用户不受限，子用户需
+          // allow_git_download；目录白名单与敏感路径仍由 /gateway/api/download 强制。
+          fileDownload: caller.role === 'admin' || db!.getPermissions(caller.userId)?.allow_git_download === true,
         });
       },
     },
@@ -841,6 +852,10 @@ export function apply(ctx: Context): void {
           const target = typeof body.target === 'string' ? body.target : '';
           assertNoSqlInjection(target, 'target');
           if (caller.role !== 'admin') throw new AuthError('FORBIDDEN_REMOVE_USER', {}, 403);
+          // DB 删除会级联媒体元数据；先取出服务端生成的对象键，删除成功后
+          // 再从固定私有目录清理文件本体。客户端文件名/路径从不参与拼接。
+          const mediaTarget = db!.getUserByUsername(target.trim());
+          const mediaKeys = mediaTarget ? db!.peekUserMediaRemoval(mediaTarget.id).storage_keys : [];
           const targetUser = await mutateUser(async () => {
             const existingUser = db!.getUserByUsername(target.trim());
             const registry = ctx.get('workspaceRegistry');
@@ -873,6 +888,16 @@ export function apply(ctx: Context): void {
           });
           if (targetUser) {
             localWorkspaceHub?.disconnectUser(targetUser.id);
+            const mediaDir = path.join(path.dirname(cfg.dbPath), 'message-media', 'objects');
+            for (const key of mediaKeys) {
+              if (!/^[A-Za-z0-9_-]{8,128}$/.test(key)) continue;
+              try {
+                unlinkSync(path.join(mediaDir, key));
+              } catch (error) {
+                // 数据删除已成功；文件清理可由网关 sweep/运维再次处理。
+                console.warn(`[dsh-passwords] 删除用户媒体文件失败 key=${key}:`, String(error));
+              }
+            }
             await invalidateGatewaySessions(cfg, targetUser.id);
           }
           writeJson(res, 200, { ok: true });

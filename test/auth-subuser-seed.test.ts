@@ -27,7 +27,7 @@ before(() => {
       acmeEmail: '', acmeStaging: false,
     },
     jwtSecret: 'test-secret', internalSecret: 'test-internal',
-    patch: { dshRoot: '', restartService: '' }, webSocket: { sshEndpoints: [] },
+    patch: { dshRoot: '', restartService: '' }, endpointRules: [], pluginCompat: false,
   };
   auth = new AuthService(config, db);
 });

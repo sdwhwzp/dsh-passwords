@@ -43,7 +43,7 @@ Do not paste `.env`, `setup-key.txt`, JWTs, cookies, API keys, SSH passwords, pr
 Supported development baseline:
 
 - Node.js `22.19+` or `24+`
-- DSH `0.1.5` (all releases; `0.1.5-rc.2` is the current verified host baseline); the compatibility layer retains the tested `0.1.2` and `0.1.3` API boundaries.
+- DSH `0.1.6-alpha.1` (current verified host baseline); the compatibility layer retains the `0.1.5` release targets and the tested `0.1.2` / `0.1.3` API boundaries.
 - npm and git
 
 Clone and install:
@@ -51,7 +51,7 @@ Clone and install:
 ```bash
 git clone https://github.com/slywalker2006/dsh-passwords.git
 cd dsh-passwords
-npm ci
+npm ci --include=optional
 ```
 
 Create a local `.env` only when a runtime test needs it. Keep local credentials outside Git and verify `git status` before every commit.
@@ -77,7 +77,7 @@ For a compatibility change, identify the DSH version and concrete wire or bundle
 Run the same checks as CI:
 
 ```bash
-npm ci
+npm ci --include=optional
 npm run build
 npm test
 ```

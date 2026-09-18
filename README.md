@@ -104,7 +104,7 @@ MySQL 模式会在空闲超时、服务重启或短暂网络断开后自动替�
 
 ### 0. 前置条件（三样）
 
-宿主机安装需要 Node.js 22.19+ 或 24+、可正常运行的 dsh 和 git。请让本插件与 dsh 宿主使用同一 Node 主线版本；DSH `0.1.5` 全版本（alpha.1 / alpha.2 / rc.1 / rc.2）均已验证，其中 `0.1.5-rc.2` 是当前验证过的主机基线，同时保留对 `0.1.2` 和 `0.1.3` 接口边界的兼容。Docker 安装只需要 Docker Engine 或 Docker Desktop 和一个 DeepSeek API key。
+宿主机安装需要 Node.js 22.19+ 或 24+、可正常运行的 dsh 和 git。DSH `0.1.6-alpha.1` 是当前验证中的主机基线；同时保留对 DSH `0.1.5` 全系列与 `0.1.2` / `0.1.3` 接口边界的兼容声明。Docker 安装只需要 Docker Engine 或 Docker Desktop 和一个 DeepSeek API key。
 
 ### 1. 安装（按平台）
 
@@ -291,7 +291,9 @@ node scripts/start-http.mjs [端口]    # 默认 8080，会弹 y/N 确认
 | `MCP_GATEWAY_HOST` | `0.0.0.0` | 网关监听地址 |
 | `MCP_GATEWAY_PORT` | 安装器首次安装为 `443`；未设置时为 `8080` | 网关端口 |
 | `MCP_GATEWAY_UPSTREAM` | `http://127.0.0.1:3080` | dsh 网页地址（插件自动指向 dsh 实际端口，一般不用改） |
-| `MCP_GATEWAY_SSH_WS_ENDPOINTS` | 空 | 第三方 SSH WebSocket 端点，逗号分隔，支持精确路径或末尾 `/*`；普通账号须开启 SSH 权限。启用账号隔离时内置 dsh-ssh 终端仍受账号权限控制。 |
+| `MCP_GATEWAY_SSH_ENDPOINTS` | 空 | 第三方端点登记表（逗号分隔，一条变量管 HTTP 与 WebSocket 两条通道）。规则为 `[owner:][ws:\|http:]路径`（前缀可省略、顺序任意）：`owner:` = 仅主用户（子用户两条通道一律 403）；其余规则子用户需「主用户已登记」+「已勾选 SSH 端点权限」两把钥匙；`ws:`/`http:` 限定通道，不写则两条通道都放行；路径为精确匹配或尾部 `/*` 只匹配直接子路径。已登记 HTTP 端点的写请求若带 `host` 字段仍做私网/回环判定。使用 `DSH_PASSWORDS_ENV_FILE` 启动时网关每 5 秒轮询该 `.env` 并热更新。未登记的第三方路径不在网关侧拒绝，仍由账号隔离 Host 按签名 principal 处理。启用账号隔离时内置 dsh-ssh 终端仍受账号权限控制。 |
+| `MCP_GATEWAY_SSH_WS_ENDPOINTS` | 空 | 旧版仅 WebSocket 的登记变量；已部署的 `.env` 继续生效，每条按 `ws:` 规则并入上面的登记表。新部署请改用 `MCP_GATEWAY_SSH_ENDPOINTS`。 |
+| `MCP_GATEWAY_PLUGIN_COMPAT` | `off` | 源码版的第三方插件兼容层开关；本 fork 只在 `/gateway/api/overview` 回显该值，路由接管仍由账号隔离 Host 完成。 |
 | `MCP_GATEWAY_REDIRECT_PORT` | `80` | 80 端口：ACME 证书验证 + 301 跳转 443 |
 | `MCP_GATEWAY_DOMAIN` | 空 | 自己的域名；留空自动用 `<公网IP>.sslip.io` |
 | `MCP_GATEWAY_AUTO_TLS` | 开 | 留空=自动；`0` 关闭（明文 HTTP，危险） |

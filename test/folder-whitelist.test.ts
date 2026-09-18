@@ -7,8 +7,8 @@ import assert from 'node:assert/strict';
 import {
   folderAllowed,
   isWorkspaceRestricted,
-  aionuiRootFrom,
 } from '../src/permissions.js';
+import { createPluginCompat } from '../src/plugin-compat.js';
 
 const WL = ['/root/11'];
 
@@ -50,12 +50,26 @@ test('F-21：空白名单 / 哨兵 / 根语义保持', () => {
   assert.equal(folderAllowed('/anything', ['']), true, '空条目全盘允许');
 });
 
-test('F-17b：aionuiRootFrom 对 DELETE 读 query root', () => {
+test('F-17b：插件兼容层 folderRootFrom 对 DELETE 读 query root（关闭时不接管任何路径）', () => {
   const q = new URLSearchParams('root=/root/11&path=a.txt');
-  assert.equal(aionuiRootFrom('DELETE', '/aionui-panel/delete', q, null), '/root/11', 'DELETE query root');
-  assert.equal(aionuiRootFrom('DELETE', '/aionui-panel/delete', new URLSearchParams('path=x'), { root: '/root/11' }), '/root/11', 'DELETE body 兜底');
-  assert.equal(aionuiRootFrom('DELETE', '/aionui-panel/delete', new URLSearchParams('path=x'), null), null, 'DELETE 无 root → null（fail-closed）');
-  assert.equal(aionuiRootFrom('GET', '/aionui-panel/raw', q, null), '/root/11', 'GET query root');
+  const on = createPluginCompat(true);
+  assert.equal(on.folderRootFrom('DELETE', '/aionui-panel/delete', q, null), '/root/11', 'DELETE query root');
+  assert.equal(on.folderRootFrom('DELETE', '/aionui-panel/delete', new URLSearchParams('path=x'), { root: '/root/11' }), '/root/11', 'DELETE body 兜底');
+  assert.equal(on.folderRootFrom('DELETE', '/aionui-panel/delete', new URLSearchParams('path=x'), null), null, 'DELETE 无 root → null（fail-closed）');
+  assert.equal(on.folderRootFrom('GET', '/aionui-panel/raw', q, null), '/root/11', 'GET query root');
+  assert.equal(on.folderRootFrom('GET', '/api/other', q, null), null, '非面板路径一律 null');
+
+  const off = createPluginCompat(false);
+  assert.equal(off.enabled, false);
+  assert.equal(off.claimsRootPath('/aionui-panel/raw'), false, '默认关闭：不接管任何根级路径');
+  assert.equal(off.isPanelPath('/aionui-panel/raw'), false);
+  assert.equal(off.folderRootFrom('GET', '/aionui-panel/raw', q, null), null);
+  assert.equal(off.isFileRead('POST', '/aionui-panel/read'), false);
+  assert.equal(off.isFileWrite('POST', '/aionui-panel/write'), false);
+  assert.equal(off.isExfilEndpoint('GET', '/aionui-panel/git-status'), false);
+  assert.equal(off.isPollingEndpoint('/aionui-panel/events'), false);
+  assert.equal(off.isDangerousUploadRequest('POST', '/api/plugin-uploads'), false);
+  assert.equal(off.responseSanitizeKind('POST', '/aionui-panel/read'), null);
 });
 
 test('isWorkspaceRestricted 语义', () => {

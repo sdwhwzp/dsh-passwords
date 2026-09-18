@@ -52,6 +52,8 @@ export interface PermOverview {
       allowUpload: boolean;
       allowGitDownload: boolean;
       allowSsh: boolean;
+      /** 聊天媒体（表情包/图片/视频）开关；旧服务端不返回时按 false 处理 */
+      allowChatMedia?: boolean;
       banned: boolean;
       sandboxMode: string | null;
       disabledSessions: string[];
@@ -74,6 +76,7 @@ interface PermDraft {
   upload: boolean;
   git: boolean;
   ssh: boolean;
+  chatMedia: boolean;
   banned: boolean;
   sandbox: string;
   disabledSessions: string[];
@@ -258,6 +261,7 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
                   upload: u.permissions.allowUpload,
                   git: u.permissions.allowGitDownload,
                   ssh: u.permissions.allowSsh,
+                  chatMedia: u.permissions.allowChatMedia === true,
                   banned: u.permissions.banned,
                   sandbox: u.permissions.sandboxMode ?? '',
                   disabledSessions: [...(u.permissions.disabledSessions ?? [])],
@@ -507,6 +511,7 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
           allowUpload: d.upload,
           allowGitDownload: d.git,
           allowSsh: d.ssh,
+          allowChatMedia: d.chatMedia,
           banned: d.banned,
           sandboxMode: d.sandbox === '' ? null : d.sandbox,
           disabledSessions: d.disabledSessions.filter((id) => liveEnabledSessions.has(id)),
@@ -896,6 +901,11 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
                     type: 'checkbox', checked: d.ssh,
                     onChange: (e: { target: { checked: boolean } }) => setDraft(u.id, { ssh: e.target.checked }),
                   }), t('permsSsh')),
+                h('label', { className: 'dshpw-check', title: t('permsChatMediaDesc') },
+                  h('input', {
+                    type: 'checkbox', checked: d.chatMedia,
+                    onChange: (e: { target: { checked: boolean } }) => setDraft(u.id, { chatMedia: e.target.checked }),
+                  }), t('permsChatMedia')),
                 h(
                   'label',
                   { className: 'dshpw-check danger' },

@@ -14,6 +14,7 @@ import { hasPrebuiltRuntime } from './prebuilt-check.mjs';
 
 const isWin = process.platform === 'win32';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const RUNTIME_DEPS = ['bcryptjs', 'dotenv', 'express', 'jsonwebtoken', 'ws'];
 const CYAN = isWin ? '' : '\x1b[1;36m';
 const RED = isWin ? '' : '\x1b[1;31m';
 const RESET = isWin ? '' : '\x1b[0m';
@@ -97,7 +98,7 @@ if (!existsSync(pkgPath)) {
   process.exit(1);
 }
 
-// ── 1. Node.js（与 DSH 0.1.3-alpha.1 官方 engines 对齐） ──
+// ── 1. Node.js（与 DSH 0.1.6-alpha.1 官方 engines 对齐） ──
 const [nodeMajor, nodeMinor] = process.versions.node.split('.').map(Number);
 if ((nodeMajor === 22 && nodeMinor < 19) || nodeMajor < 22 || nodeMajor === 23) {
   err(`Node.js 版本不受支持（当前 v${process.versions.node}），需要 22.19+ 或 24+。`);
@@ -109,25 +110,14 @@ say(`Node.js v${process.versions.node} ✓`);
 // ── 2. dsh（DeepSeek Harness）──
 if (run('dsh', ['--version'], { quiet: true }) !== 0) {
   err('未找到 dsh。请先安装 DeepSeek Harness：');
-  err('  npm install -g @deepseek-ai/dsh@0.1.5-rc.2');
+  err('  npm install -g @deepseek-ai/dsh@0.1.6-alpha.1');
   err('  然后用 DEEPSEEK_API_KEY=sk-你的key dsh web 先跑一次确认能用');
   process.exit(1);
 }
 say('dsh ✓');
 
-// ── 3. pnpm（dsh 插件管理依赖）──
-if (run('pnpm', ['--version'], { quiet: true }) !== 0) {
-  say('未找到 pnpm（dsh 插件管理需要），正在安装…');
-  mustRun(
-    'npm',
-    ['install', '-g', 'pnpm', '--no-audit', '--no-fund'],
-    'pnpm 安装失败，请手动执行 npm install -g pnpm 后重试',
-  );
-}
-say('pnpm ✓');
-
-// 首次安装的特权检查必须在安装依赖之前完成：非特权账号最终无法绑定自动 HTTPS 的 80/443，
-// 不应让用户先花时间下载/构建再失败。
+// 首次安装的特权检查必须在安装任何工具或依赖之前完成：非特权账号最终无法绑定自动 HTTPS 的 80/443，
+// 不应让用户先修改全局 pnpm、下载或构建再失败。
 const envPath = path.join(root, '.env');
 const keyFile = path.join(root, 'setup-key.txt');
 const isFirstInstall = !existsSync(envPath);
@@ -149,11 +139,22 @@ if (isFirstInstall && !isWin && typeof process.getuid === 'function' && process.
   say('  若之后改用其他用户运行 dsh，请先执行 chown -R <用户> ~/.dsh，否则插件可能加载失败。');
 }
 
+// ── 3. pnpm（dsh 插件管理依赖）──
+if (run('pnpm', ['--version'], { quiet: true }) !== 0) {
+  say('未找到 pnpm（dsh 插件管理需要），正在安装…');
+  mustRun(
+    'npm',
+    ['install', '-g', 'pnpm', '--no-audit', '--no-fund'],
+    'pnpm 安装失败，请手动执行 npm install -g pnpm 后重试',
+  );
+}
+say('pnpm ✓');
+
 // ── 4. 依赖 + 编译（npm 包已预构建时自动跳过） ──
 // 不能只看 node_modules 目录：中断安装会留下半残目录，之后直到首次运行才暴露 MODULE_NOT_FOUND。
 // 运行时依赖用 Node 模块解析检测（兼容 npm --prefix 安装时依赖被提升到上层
 // node_modules 的情况）；dist/cli.js 与 dist/client.js 均存在才视为已构建。
-const prebuilt = hasPrebuiltRuntime(root, ['bcryptjs', 'dotenv', 'express', 'jsonwebtoken']);
+const prebuilt = hasPrebuiltRuntime(root, RUNTIME_DEPS);
 if (prebuilt) {
   say('检测到已构建产物，跳过依赖安装与编译');
 } else {
@@ -161,7 +162,7 @@ if (prebuilt) {
   // npm-shrinkwrap.json 是源码、Docker 与 npm 发布包共享的确定性依赖契约。
   // 旧发布包可能不带它，退回 npm install 仍可完成自修复安装。
   const installArgs = existsSync(path.join(root, 'npm-shrinkwrap.json'))
-    ? ['ci', '--no-audit', '--no-fund']
+    ? ['ci', '--include=optional', '--include=dev', '--no-audit', '--no-fund']
     : ['install', '--no-audit', '--no-fund'];
   mustRun('npm', installArgs, '依赖安装失败，请修复 npm 输出后重试');
   // 源码 clone 与 npm 发布包都带 tsconfig.json/src（package.json files 白名单），
@@ -171,7 +172,7 @@ if (prebuilt) {
     mustRun('npm', ['run', 'build'], '编译失败，请修复错误后重试');
   } else {
     // registry 安装：依赖刚装完，再校验一次预构建产物完整性，避免带病继续
-    if (!hasPrebuiltRuntime(root, ['bcryptjs', 'dotenv', 'express', 'jsonwebtoken'])) {
+    if (!hasPrebuiltRuntime(root, RUNTIME_DEPS)) {
       err('预构建产物不完整，请重新安装 dsh-passwords');
       process.exit(1);
     }

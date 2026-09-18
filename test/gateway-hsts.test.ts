@@ -79,7 +79,7 @@ before(async () => {
       acmeEmail: '', acmeStaging: false, hstsMaxAge: 31536000,
     },
     jwtSecret: 'test-secret', internalSecret: 'test-internal',
-    patch: { dshRoot: '', restartService: '' }, webSocket: { sshEndpoints: [] },
+    patch: { dshRoot: '', restartService: '' }, endpointRules: [], pluginCompat: false,
   };
 });
 

@@ -144,6 +144,7 @@ test('旧 user_permissions 表会迁移 WebSocket 授权列，并保留现有权
       allow_workspace_create: false,
       allow_ssh: false,
       allowed_agent_presets: null,
+      allow_chat_media: false,
       banned: false,
       sandbox_mode: 'workspace-write',
       disabled_sessions: [],

@@ -23,7 +23,7 @@ function config(dbPath: string, restartService = 'dsh-web'): PlatformConfig {
   return {
     setupKey: 'test-setup-key', dbPath, dbEncKey: '', jwtSecret: 'test-jwt-secret', internalSecret: 'test-internal-secret',
     gateway: { host: '127.0.0.1', port: 9443, upstream: 'http://127.0.0.1:3080', tls: null, redirectPort: null, publicHost: '', domain: 'localhost', autoTls: false, acmeEmail: '', acmeStaging: false },
-    patch: { dshRoot: '', restartService }, webSocket: { sshEndpoints: [] },
+    patch: { dshRoot: '', restartService }, endpointRules: [], pluginCompat: false,
   };
 }
 

@@ -27,35 +27,103 @@ export function normalizePath(p: string): string {
   return n;
 }
 
-/** Parse exact or trailing-wildcard WebSocket path grants. */
-export function parseWebSocketAllowlist(raw: string | undefined, envName: string): string[] {
+/**
+ * 端点登记规则的前缀（都可选、顺序不限、大小写不敏感）：
+ *   - `owner:`           仅主用户可用（子用户两条通道一律 403），优先于 ssh 判定；
+ *   - `ws:` / `http:`    限定传输通道；不写 = HTTP 与 WebSocket 都放行。
+ * 例：`owner:http:/api/plugin/hosts`、`ws:/api/plugin/terminal`、`/api/plugin/*`。
+ */
+export type EndpointTransport = 'any' | 'http' | 'ws';
+/** 规则的能力归属：ssh = 子用户凭 allowSsh 开关使用；owner-only = 仅主用户。 */
+export type EndpointCapability = 'ssh' | 'owner-only';
+
+export interface ParsedEndpointRule {
+  capability: EndpointCapability;
+  transport: EndpointTransport;
+  path: string;
+}
+
+/**
+ * 拆出规则的能力与传输前缀，返回三者。前缀可任意组合/顺序
+ * （`owner:ws:` 与 `ws:owner:` 等价）；路径部分原样返回，由调用方校验。
+ */
+export function parseEndpointRule(rule: string): ParsedEndpointRule {
+  let rest = rule;
+  let capability: EndpointCapability = 'ssh';
+  let transport: EndpointTransport = 'any';
+  for (;;) {
+    if (capability === 'ssh' && /^owner:/i.test(rest)) {
+      capability = 'owner-only';
+      rest = rest.slice('owner:'.length);
+      continue;
+    }
+    if (transport === 'any' && /^ws:/i.test(rest)) {
+      transport = 'ws';
+      rest = rest.slice('ws:'.length);
+      continue;
+    }
+    if (transport === 'any' && /^http:/i.test(rest)) {
+      transport = 'http';
+      rest = rest.slice('http:'.length);
+      continue;
+    }
+    break;
+  }
+  return { capability, transport, path: rest };
+}
+
+/** 单条规则的路径匹配（已剥离前缀；`/*` 只匹配直接子路径）。 */
+function endpointPathMatches(pathname: string, rulePath: string): boolean {
+  if (!rulePath.endsWith('/*')) return rulePath === pathname;
+  const base = rulePath.slice(0, -2);
+  if (!pathname.startsWith(`${base}/`)) return false;
+  const child = pathname.slice(base.length + 1);
+  return child !== '' && !child.includes('/');
+}
+
+/**
+ * 解析逗号分隔的端点登记表（HTTP / WebSocket、主用户 / 子用户共用一张表）。
+ *
+ * 规则语法：`[owner:][ws:|http:]路径`（前缀都可省略、顺序任意）。路径为精确
+ * 匹配，或尾部 `/*` 只匹配其直接子路径。登记表是权限边界：格式非法的输入直接
+ * 报错（启动阶段 fail-closed），而不是被静默放宽或忽略。表内存放什么完全由主
+ * 用户决定——代码不含任何插件专属路径。
+ */
+export function parseEndpointAllowlist(raw: string | undefined, envName: string): string[] {
   if (raw === undefined || raw.trim() === '') return [];
   const rules = new Set<string>();
   for (const item of raw.split(',')) {
-    const rule = item.trim();
-    if (rule === '') continue;
-    if (rule.length > 256) throw new Error(`${envName}: rule is longer than 256 characters`);
-    if (!rule.startsWith('/')) throw new Error(`${envName}: rule must start with /: ${rule}`);
+    const entry = item.trim();
+    if (entry === '') continue;
+    if (entry.length > 256) throw new Error(`${envName}: rule is longer than 256 characters`);
+    const parsed = parseEndpointRule(entry);
+    const rule = parsed.path;
+    if (rule === '') throw new Error(`${envName}: rule is missing a path: ${entry}`);
+    if (!rule.startsWith('/')) {
+      throw new Error(`${envName}: rule must start with / (optionally after owner:/ws:/http: prefixes): ${entry}`);
+    }
     if (/[? #%\\\u0000-\u001f\u007f]/.test(rule)) {
-      throw new Error(`${envName}: rule contains query, encoding, backslash, or control characters: ${rule}`);
+      throw new Error(`${envName}: rule contains query, encoding, backslash, or control characters: ${entry}`);
     }
     const wildcard = rule.endsWith('/*');
     if (rule.includes('*') && !wildcard) {
-      throw new Error(`${envName}: only a trailing /* wildcard is supported: ${rule}`);
+      throw new Error(`${envName}: only a trailing /* wildcard is supported: ${entry}`);
     }
     const pathPart = wildcard ? rule.slice(0, -2) : rule;
     if (pathPart === '' || pathPart === '/') throw new Error(`${envName}: root and /* are not allowed`);
     if (pathPart === '/gateway' || pathPart.startsWith('/gateway/')) {
-      throw new Error(`${envName}: gateway paths cannot be allowlisted: ${rule}`);
+      throw new Error(`${envName}: gateway paths cannot be registered: ${entry}`);
     }
     if (pathPart === '/api/dsh-passwords/internal' || pathPart.startsWith('/api/dsh-passwords/internal/')) {
-      throw new Error(`${envName}: internal gateway paths cannot be allowlisted: ${rule}`);
+      throw new Error(`${envName}: internal gateway paths cannot be registered: ${entry}`);
     }
     const segments = pathPart.split('/').slice(1);
     if (segments.some((segment) => segment === '.' || segment === '..' || segment === '')) {
-      throw new Error(`${envName}: rule contains an empty or dot path segment: ${rule}`);
+      throw new Error(`${envName}: rule contains an empty or dot path segment: ${entry}`);
     }
-    rules.add(rule);
+    const capabilityPrefix = parsed.capability === 'owner-only' ? 'owner:' : '';
+    const transportPrefix = parsed.transport === 'any' ? '' : `${parsed.transport}:`;
+    rules.add(`${capabilityPrefix}${transportPrefix}${rule}`);
     if (rules.size > 64) throw new Error(`${envName}: at most 64 rules are supported`);
   }
   return [...rules];
@@ -67,22 +135,135 @@ export function matchesWebSocketRule(pathname: string, rule: string): boolean {
 }
 
 /**
- * Match a normalized WebSocket pathname against the owner-configured rules.
- * A trailing /* rule grants exactly one child path, never the base path or a
- * deeper descendant. Query strings must be removed by the caller first.
+ * 路径是否命中登记规则。`/*` 只授予其直接子路径，不放行基路径与更深层路径；
+ * 调用方需先剥离 query。可选按能力（owner-only / ssh）与传输通道过滤：
+ * 不传 capability 时两种能力的规则都算命中（SSRF 校验等场景）。
  */
-export function webSocketPathAllowed(pathname: string, rules: readonly string[]): boolean {
+export function endpointAllowed(
+  pathname: string,
+  rules: readonly string[],
+  options: { transport?: 'http' | 'ws'; capability?: EndpointCapability } = {},
+): boolean {
   for (const rule of rules) {
-    if (!rule.endsWith('/*')) {
-      if (rule === pathname) return true;
-      continue;
-    }
-    const base = rule.slice(0, -2);
-    if (!pathname.startsWith(`${base}/`)) continue;
-    const child = pathname.slice(base.length + 1);
-    if (child !== '' && !child.includes('/')) return true;
+    const parsed = parseEndpointRule(rule);
+    if (options.capability !== undefined && parsed.capability !== options.capability) continue;
+    if (options.transport !== undefined && parsed.transport !== 'any' && parsed.transport !== options.transport) continue;
+    if (endpointPathMatches(pathname, parsed.path)) return true;
   }
   return false;
+}
+
+/**
+ * 官方 dsh API 的命名空间（RPC endpoint 的第一段）。
+ *
+ * 判定口径：官方 dsh 把全部 RPC 挂在共享的 /api 前缀通道上，端点形如
+ * `/api/<namespace>/<method>`（旧版本也可能是 `/api/<namespace>.<method>`），
+ * 而第三方插件的通道同样是 `/api/<插件名>/...`——两者路径形状相同，只能靠
+ * 命名空间区分。
+ *
+ * 本清单来源：DSH 0.1.6-alpha.1 官方包实测（`namespace: "..."` 的 host 侧注册，
+ * 已与 0.1.5-rc.2 实测清单交叉核对）∪ 本项目既有适配知识中属于官方的部分。
+ * 方向刻意偏宽容：清单写宽只会让个别第三方路径漏过，写窄会直接打断官方功能。
+ * ⚠ `terminal` 命名空间（dsh-api-terminal-controller：create/follow/shells）
+ * 故意不在清单内：它是服务器端远程 shell，对子用户开放等于完全沙箱逃逸；
+ * 官方 web 客户端无调用证据（日志零命中），主用户不受影响（管理员不经分类）。
+ * 变更时必须同步 test / 兼容性矩阵。
+ */
+export const OFFICIAL_API_NAMESPACES: ReadonlySet<string> = new Set([
+  // ── 0.1.5-rc.2 实测的 host 侧 RPC 命名空间 ──
+  'agentPresets',
+  'commands',
+  'credentials',
+  'directoryPicker',
+  'dsh-composer',
+  'dynamicCordisRunner',
+  'fileReferences',
+  'fileUploads',
+  'goals',
+  'llm',
+  'messageFeedback',
+  'permissionPresets',
+  'pluginInventory',
+  'session',
+  'sessionFeedback',
+  'sessionReferenceResolver',
+  'settings',
+  'skills',
+  'subagents',
+  'workspace',
+  'workspaceFiles',
+  // ── 非 RPC 的官方 /api 路由与旧版本保留项 ──
+  '$events',
+  'file',
+  'git',
+  'host',
+  'present',
+  'remote.mux',
+  'respond',
+  'events',
+]);
+
+/**
+ * 该路径是否属于官方 dsh API 面。
+ *
+ * 取第一段（按 `/` 切分）再按 `.` 取头部，因此 `/api/session/history`、
+ * `/api/session.export` 与 `/api/session` 都归入 session 命名空间。
+ */
+export function isOfficialApiPath(pathname: string): boolean {
+  if (!pathname.startsWith('/api/')) return false;
+  const rest = pathname.slice('/api/'.length);
+  const segment = rest.split('/')[0] ?? '';
+  const head = segment.split('.')[0] ?? '';
+  return OFFICIAL_API_NAMESPACES.has(segment) || OFFICIAL_API_NAMESPACES.has(head);
+}
+
+/**
+ * 根级静态文件扩展名（dist 回退服务直接提供的资源文件）。
+ */
+const OFFICIAL_ROOT_STATIC_EXT_RE =
+  /\.(?:css|js|mjs|cjs|map|ico|png|jpe?g|gif|webp|avif|svg|woff2?|ttf|otf|eot|txt|webmanifest)$/i;
+
+/** DSH 0.1.5-rc.2 host-open-in-app 的三个官方根级路由。 */
+const OFFICIAL_OPEN_IN_APP_ICON_RE = /^\/open-in-app\/icon\/[A-Za-z0-9_-]+$/;
+
+/**
+ * 官方站点根级路径（非 /api）：SPA 壳与静态资源、插件客户端 bundle、事件流。
+ *
+ * 依据（官方 0.1.5-rc.2 实测）：除 `/plugins` 和静态回退资源外，宿主还注册
+ * 了 `dsh-host-open-in-app` 的应用目录、图标与启动路由。其余非 /api 路径一律
+ * 视为第三方：未登记对子用户拒绝（fail-closed）。
+ */
+export function isOfficialRootPath(pathname: string): boolean {
+  if (pathname === '/' || pathname === '/index.html' || pathname === '/favicon.ico') return true;
+  if (pathname === '/open-in-app/apps' || pathname === '/open-in-app/open' || OFFICIAL_OPEN_IN_APP_ICON_RE.test(pathname)) return true;
+  if (pathname.startsWith('/assets/')) return true;
+  if (pathname === '/plugins' || pathname.startsWith('/plugins/')) return true;
+  return OFFICIAL_ROOT_STATIC_EXT_RE.test(pathname);
+}
+
+/**
+ * 子用户请求的端点分类（网关唯一的路由分类入口，不含任何插件专属路径）：
+ *
+ *   platform    —— 网关自身插件路由（/api/dsh-passwords/*），由其自身守卫鉴权
+ *   owner-only  —— 登记表中 owner: 规则：子用户两条通道一律拒绝
+ *   ssh         —— 登记表中其余规则：子用户需勾选 allow_ssh（两把钥匙）
+ *   official    —— 官方 dsh 面（官方 /api 命名空间 + 官方根级静态/页面路径）
+ *   third-party —— 其余路径（未登记的第三方 /api 或根级插件路由）：默认拒绝
+ *
+ * 判定顺序 owner-only → ssh → platform → official → third-party：显式登记优先于
+ * 自动分类；transport 决定带传输前缀的规则是否命中（owner: 规则不区分通道）。
+ */
+export type SubuserPathClass = 'platform' | 'owner-only' | 'ssh' | 'official' | 'third-party';
+
+export function classifySubuserPath(
+  pathname: string,
+  options: { endpointRules: readonly string[]; transport: 'http' | 'ws' },
+): SubuserPathClass {
+  if (endpointAllowed(pathname, options.endpointRules, { capability: 'owner-only' })) return 'owner-only';
+  if (endpointAllowed(pathname, options.endpointRules, { capability: 'ssh', transport: options.transport })) return 'ssh';
+  if (pathname === '/api/dsh-passwords' || pathname.startsWith('/api/dsh-passwords/')) return 'platform';
+  if (pathname.startsWith('/api/')) return isOfficialApiPath(pathname) ? 'official' : 'third-party';
+  return isOfficialRootPath(pathname) ? 'official' : 'third-party';
 }
 
 /**
@@ -92,7 +273,7 @@ export function webSocketPathAllowed(pathname: string, rules: readonly string[])
 const DENY_ALL_WORKSPACES = '__deny__';
 
 /**
- * 判断 host 是否私网/回环/链路本地地址（dsh-ssh 等第三方插件 SSRF 纵深防御）。
+ * 判断 host 是否私网/回环/链路本地地址（已登记 SSH 端点的 SSRF 纵深防御）。
  *
  * F-28：IP 字面量必须用真·inet_aton 语义解析——之前用 Number() 归一化，
  * 被三形态绕过（实测服务端真的解析并连接）：
@@ -118,7 +299,7 @@ export function isPrivateHost(host: string): boolean {
     if (brack) return isPrivateHost(brack[1]);
     const v6 = parseIpv6Literal(h);
     if (v6 !== null) return isPrivateIpv6(v6);
-    // IPv4:port 形式（dsh-ssh 的 host 字段可能带端口，变体段一并判）
+    // IPv4:port 形式（host 字段可能带端口，变体段一并判）
     const m = /^([^:]+):\d+$/.exec(h);
     if (m) {
       const lit = parseIpv4Literal(m[1]);
@@ -293,7 +474,7 @@ function isPrivateIpv4Bytes(bytes: [number, number, number, number]): boolean {
 }
 
 /** 上传文件名高危扩展名（Web 服务器可解释/可执行类）：
- *  第三方 dsh-uploads 不限制类型，网关层纵深防御——
+ *  已知上传插件（plugin-compat）不限制类型，网关层纵深防御——
  *  若上传目录未来被 Web 面暴露，.php/.jsp/.svg 等可被直接执行/承载脚本。
  *  .py/.sh 等 agent 合法使用的脚本类型不拦（当前下载头已强制 octet-stream+nosniff）。 */
 export function isDangerousUploadName(name: string): boolean {
@@ -659,9 +840,13 @@ export function clampSessionHistorySandbox(value: unknown, allowedMode: SandboxM
   return changed;
 }
 
-// ── 上传 / git 拦截的路径判定（纯路径 + 方法，不读请求体） ──────────────
+// ── 上传 / git / 轮询的端点判定（纯路径 + 方法，不读请求体） ──────────
+//
+// 本 fork 的部署把第三方插件路由交给账号隔离 Host 处理，网关不做未登记
+// fail-closed；因此这里保留部署实际使用的第三方端点（sidebar、describe-image、
+// aionui-panel、dsh-ssh、dsh-uploads），由上传/下载权限门控。
 
-/** 上传相关端点：dsh-file-uploads 插件 + dsh-file-path 的"复制到工作区"桥 + dsh-ssh 远程上传 */
+/** 上传相关端点：官方会话二进制上传与官方 fileUploads 上传。 */
 export function isUploadRequest(method: string, pathname: string): boolean {
   if (method !== 'POST' && method !== 'PUT') return false;
   return (
@@ -677,9 +862,8 @@ export function isUploadRequest(method: string, pathname: string): boolean {
 }
 
 /**
- * git 相关端点（dsh 内置 git 工具 RPC：git.clone / git.pull / git.fetch 等；
- * git-graph 插件；aionui-panel 的 git 面板；以及“从服务器拿走数据”的其它通道：
- * session.export 会话日志 ZIP、dsh-ssh 远程文件下载、dsh-uploads 文件下载）。
+ * git 相关端点（dsh 内置 git 工具 RPC：git.clone / git.pull / git.fetch 等）
+ * 与“从服务器拿走数据”的官方通道：session.export 会话日志 ZIP。
  * 只匹配 git 前缀的 RPC（不拦 session.fetch 这类普通端点）。
  */
 export function isGitRequest(pathname: string): boolean {
@@ -868,6 +1052,56 @@ export function isWorkspaceWrite(pathname: string): boolean {
   return isWorkspaceCreate(pathname) ||
     isWorkspaceDeleteOrRename(pathname) ||
     /^\/api\/workspace[.\/](import|move|archiveSession|insertBefore|insertSessionBefore|materialize|adopt)([.\/]|$)/.test(pathname);
+}
+
+/** alpha.1 目录浏览器的一层列表 RPC（in-app picker 的浏览动词）。 */
+export function isDirectoryListRequest(pathname: string): boolean {
+  return /^\/api\/(?:directoryPicker[.\/]list|host[.\/]listDirectory)(?:[.\/]|$)/.test(pathname);
+}
+
+/** candidate 是否位于 root 内（相等或为其子路径；空白/当前目录根无效，'/' 视为全盘）。 */
+export function pathWithin(candidate: string, root: string): boolean {
+  const c = normalizePath(candidate);
+  const r = normalizePath(root);
+  if (r === '' || r === '.') return false;
+  if (r === '/') return true;
+  return c === r || c.startsWith(r + '/');
+}
+
+/**
+ * 子用户能否把 canonical 目录登记为工作区（workspace/create）：仅接受
+ * ① 主用户显式分配的精确目录；② 该子用户自己创建的工作区子树；
+ * ③ 该子用户刚通过目录选择器成功创建、尚未过期的目录。
+ * 其余（一切预存在且未分配的目录）一律拒绝——目录树授权只授予使
+ * 用权，不授予登记权。
+ */
+export function workspaceRegistrationAllowed(
+  candidate: string,
+  assignedFolders: readonly string[],
+  ownedWorkspaces: readonly string[],
+  pendingCreated: readonly string[],
+): boolean {
+  const c = normalizePath(candidate);
+  if (c === '' || c === '.' || c === '/') return false;
+  for (const entry of assignedFolders) {
+    if (entry === '__deny__') continue;
+    if (normalizePath(entry) === c) return true;
+  }
+  for (const owned of ownedWorkspaces) {
+    if (pathWithin(c, owned)) return true;
+  }
+  for (const pending of pendingCreated) {
+    if (normalizePath(pending) === c) return true;
+  }
+  return false;
+}
+
+/**
+ * 目录浏览条目可见性：条目位于某个授权根内，或某个授权根位于条目子树内
+ * （祖先导航：只保留通往授权根的路径，其余目录名对子用户隐藏）。
+ */
+export function directoryEntryVisible(entryPath: string, allowedRoots: readonly string[]): boolean {
+  return allowedRoots.some((root) => pathWithin(entryPath, root) || pathWithin(root, entryPath));
 }
 
 // ── 工作区/会话文件夹限制：需要读 JSON 请求体 ──────────────────────────
@@ -1140,8 +1374,9 @@ export function isUsageAnchorRequest(pathname: string): boolean {
 }
 
 /**
- * 轮询 / 心跳 / SSE 事件流端点：页面开着就持续请求，不代表真实使用，
- * 不计入每日使用时长（否则子用户只要开着页面就把时长配额耗尽）。
+ * 轮询 / 心跳 / SSE 事件流端点（官方通道 + 通用命名模式）：页面开着就持续
+ * 请求，不代表真实使用，不计入每日使用时长（否则子用户只要开着页面就把时长
+ * 配额耗尽）。第三方插件的轮询端点由插件兼容层补充（默认关闭）。
  */
 export function isPollingRequest(pathname: string): boolean {
   return (

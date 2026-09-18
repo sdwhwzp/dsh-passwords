@@ -162,7 +162,7 @@ test('restricted event downlinks filter other tenants and survive an upstream re
     localWorkspace: { host: '127.0.0.1', port: 0, publicUrl: '', placeholderRoot: path.join(temporary, 'local') },
     managedWorkspaceRoot: path.join(temporary, 'managed'),
     patch: { dshRoot: '', restartService: '' },
-    webSocket: { sshEndpoints: ['/plugin/ws/*'] },
+    endpointRules: ['ws:/plugin/ws/*'], pluginCompat: false,
   };
   const gateway = createGatewayServer(config, new AuthService(config, db), db, {
     upstreamBrowserCookie: HOST_BROWSER_COOKIE,
@@ -340,7 +340,7 @@ test('restricted event downlinks stop after credential change, invalidation, or 
     localWorkspace: { host: '127.0.0.1', port: 0, publicUrl: '', placeholderRoot: path.join(temporary, 'local') },
     managedWorkspaceRoot: path.join(temporary, 'managed'),
     patch: { dshRoot: '', restartService: '' },
-    webSocket: { sshEndpoints: ['/plugin/ws/*'] },
+    endpointRules: ['ws:/plugin/ws/*'], pluginCompat: false,
   };
   const gateway = createGatewayServer(config, new AuthService(config, db), db);
   await new Promise<void>((resolve) => gateway.listen(0, '127.0.0.1', resolve));

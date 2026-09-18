@@ -48,6 +48,7 @@ function defaultPermissions(userId: number): UserPermissionsRow {
     monthly_budget_micros: 0,
     allow_upload: true,
     allow_git_download: false,
+    allow_chat_media: false,
     allow_workspace_create: false,
     allow_ssh: false,
     // 缺行时由 DENY_ALL_WORKSPACES 拦截；空数组会隐式变成“一个 preset 都不许用”

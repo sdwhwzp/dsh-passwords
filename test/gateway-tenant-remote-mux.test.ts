@@ -111,7 +111,7 @@ async function setup(mobile = false) {
     localWorkspace: { host: '127.0.0.1', port: 0, publicUrl: '', placeholderRoot: path.join(temporary, 'local') },
     managedWorkspaceRoot: path.join(temporary, 'managed'),
     patch: { dshRoot: '', restartService: '' },
-    webSocket: { sshEndpoints: [] },
+    endpointRules: [], pluginCompat: false,
   };
   const gateway = createGatewayServer(config, new AuthService(config, db), db, {
     upstreamBrowserCookie: hostCookie,

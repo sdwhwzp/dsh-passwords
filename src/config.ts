@@ -10,7 +10,7 @@ import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import type { MysqlConnectionOptions } from './mysql-sync.js';
-import { parseWebSocketAllowlist } from './permissions.js';
+import { parseEndpointAllowlist } from './permissions.js';
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 // dsh 进程里没有本项目的 .env（通过 DSH_PASSWORDS_ENV_FILE 显式指定网关 .env 路径）
@@ -117,10 +117,43 @@ export interface PlatformConfig {
     /** 补丁应用后要重启的 dsh systemd 服务名；留空则不自动重启 */
     restartService: string;
   };
-  /** Owner-configured SSH WebSocket routes, gated by each account's SSH permission. */
-  webSocket?: {
-    sshEndpoints: string[];
-  };
+  /**
+   * 第三方端点登记表（一条变量管两条通道与两种能力：
+   * MCP_GATEWAY_SSH_ENDPOINTS）。
+   *
+   * 规则语法：`[owner:][ws:|http:]路径`（前缀可省略、顺序任意）。
+   *   - owner: 仅主用户（子用户两条通道一律 403）；
+   *   - 其余规则：子用户需勾选 allow_ssh（「已登记」+「已勾选」两把钥匙）；
+   *   - ws: / http: 限定通道；不写 = 两条通道都放行。
+   * 路径为精确匹配，或尾部 `/*` 只匹配其直接子路径。不做任何插件专属自动探测
+   * （网关是独立进程，看不到宿主注册了哪些路由）。已登记端点中 body 带 host
+   * 字段的 HTTP 写请求仍会做私网/回环 SSRF 判定。
+   */
+  endpointRules: string[];
+  /**
+   * 第三方插件兼容层开关（MCP_GATEWAY_PLUGIN_COMPAT）。默认 off：
+   *   off —— 网关对第三方插件保持通用姿态：未登记的第三方路径（含根级插件
+   *          路由）对子用户一律 fail-closed；放行只走端点登记表。
+   *   on  —— 额外启用已知插件的细粒度适配（文件树白名单 / 上传下载门控 /
+   *          内容清洗；见 plugin-compat.ts）。仅在对这些插件有依赖时开启。
+   */
+  pluginCompat: boolean;
+}
+
+/** 第三方端点登记表变量名。 */
+export const SSH_ENDPOINT_ENV = 'MCP_GATEWAY_SSH_ENDPOINTS';
+/** 旧版仅 WebSocket 的登记变量：已部署的 `.env` 仍可用它，条目按 `ws:` 规则并入登记表。 */
+const SSH_WS_ENDPOINT_LEGACY_ENV = 'MCP_GATEWAY_SSH_WS_ENDPOINTS';
+
+/**
+ * 把新旧两个登记变量合并成一张登记表：旧变量只描述 WebSocket 端点，因此其
+ * 每条规则都补上 `ws:` 前缀；两边都写了同一路径时以新变量为准并去重。
+ */
+function mergeEndpointRules(primary: string | undefined, legacy: string | undefined): string[] {
+  const rules = parseEndpointAllowlist(primary, SSH_ENDPOINT_ENV);
+  const legacyRules = parseEndpointAllowlist(legacy, SSH_WS_ENDPOINT_LEGACY_ENV)
+    .map((rule) => (/^(?:owner:)?(?:ws:|http:)/i.test(rule) ? rule : `ws:${rule}`));
+  return [...new Set([...rules, ...legacyRules])];
 }
 
 function positiveIntegerEnv(name: string, fallback: number): number {
@@ -162,7 +195,7 @@ export function parseTenantSshTrustedHosts(value: string | undefined): string[] 
   return [...new Set(hosts)];
 }
 
-export function loadConfig(): PlatformConfig {
+export function loadConfig(options: { requireSetupKey?: boolean } = {}): PlatformConfig {
   // F-07：启动时收紧 .env 权限（POSIX 0600），防止同机其他用户/备份泄露密钥
   tightenEnvPerm(envFilePath());
   // Windows：手动创建/复制来的 .env 不经过安装器，这里启动时同样用 icacls 收紧
@@ -172,7 +205,7 @@ export function loadConfig(): PlatformConfig {
   // 无 SETUP_KEY 时拒绝加载（fail-closed）：
   // 之前回退到 sha256('dev') 可被公开计算，攻击者能伪造任意 JWT 认证绕过。
   // cli/plugin 入口本就强制 SETUP_KEY 非空，这里兜底防其他调用路径漏拦。
-  if (setupKey === '') {
+  if (options.requireSetupKey !== false && setupKey === '') {
     throw new Error('SETUP_KEY 未配置：请先运行安装脚本或手动配置 .env（见 .env.example）');
   }
   // JWT 密钥：从 SETUP_KEY 稳定派生（重启不失效）；生产建议显式配置 MCP_JWT_SECRET
@@ -251,6 +284,12 @@ export function loadConfig(): PlatformConfig {
     envFilePath(),
     path.join(path.dirname(managedWorkspaceRoot), 'dsh-local-workspaces'),
   );
+
+  // 第三方端点登记表（唯一来源；旧变量/旧开关已清理，不再兼容读取）。
+  const endpointRules = mergeEndpointRules(process.env[SSH_ENDPOINT_ENV], process.env[SSH_WS_ENDPOINT_LEGACY_ENV]);
+  // 插件兼容层：默认关闭（通用 fail-closed 姿态）；仅显式 1/true/yes/on 打开。
+  const pluginCompatRaw = readEnv('MCP_GATEWAY_PLUGIN_COMPAT', '').trim().toLowerCase();
+  const pluginCompat = ['1', 'true', 'yes', 'on'].includes(pluginCompatRaw);
 
   return {
     setupKey,
@@ -336,12 +375,9 @@ export function loadConfig(): PlatformConfig {
       dshRoot: readEnv('MCP_DSH_ROOT', ''),
       restartService,
     },
-    webSocket: {
-      sshEndpoints: parseWebSocketAllowlist(
-        process.env.MCP_GATEWAY_SSH_WS_ENDPOINTS,
-        'MCP_GATEWAY_SSH_WS_ENDPOINTS',
-      ),
-    },
+    // 端点登记表：HTTP 与 WebSocket 合并一条（代码不内置任何插件路径）。
+    endpointRules,
+    pluginCompat,
   };
 }
 
@@ -415,6 +451,40 @@ export function resolveEnvRelativePath(configured: string, envFile: string, fall
   if (value === '') return path.resolve(fallback);
   if (path.isAbsolute(value)) return path.normalize(value);
   return path.resolve(path.dirname(path.resolve(envFile)), value);
+}
+
+/**\n * 当前生效的部署环境文件路径（每次调用动态解析；供运行态热更新读取）。\n * 与 loadConfig 的优先级一致：显式 DSH_PASSWORDS_ENV_FILE > 模块目录上层 .env。\n */
+export function activeEnvFilePath(): string {
+  return envFilePath();
+}
+
+/** 端点运行态读取结果：ok=false 表示规则非法（调用方保留上次有效快照）。 */
+export type EndpointRuntimeRead =
+  | { ok: true; endpointRules: string[]; pluginCompat: boolean }
+  | { ok: false; error: string };
+
+/**\n * 热更新读取：从部署环境文件解析端点运行态（登记表 + 兼容层开关）。\n *\n * 只读该文件；不修改 process.env，也不重复执行 loadConfig 的其它副作用\n * （权限收紧/密钥派生等）。返回：\n *   - null        文件不存在/不可读（保持现状，不报错）\n *   - {ok:false}  规则非法（调用方必须保留上次有效快照，并向支持者报错一次）\n *   - {ok:true}   解析成功，可直接应用\n *\n * 解析规则与 loadConfig 保持一致：dotenv 风味的引号/行尾注释剥离，再交给\n * parseEndpointAllowlist（非法输入 fail-closed 报错，不静默放宽）。\n */
+export function readEndpointRuntimeConfig(envFile = envFilePath()): EndpointRuntimeRead | null {
+  let raw: string;
+  try {
+    raw = readFileSync(envFile, 'utf8');
+  } catch {
+    return null;
+  }
+  const values: Record<string, string> = {};
+  for (const line of raw.split(/\r?\n/)) {
+    if (line.trimStart().startsWith('#')) continue;
+    const match = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/.exec(line);
+    if (!match) continue;
+    values[match[1]] = match[2].replace(/\s+#.*$/, '').replace(/^['"]|['"]$/g, '').trim();
+  }
+  try {
+    const endpointRules = mergeEndpointRules(values[SSH_ENDPOINT_ENV], values[SSH_WS_ENDPOINT_LEGACY_ENV]);
+    const compatRaw = (values.MCP_GATEWAY_PLUGIN_COMPAT ?? '').trim().toLowerCase();
+    return { ok: true, endpointRules, pluginCompat: ['1', 'true', 'yes', 'on'].includes(compatRaw) };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 /**

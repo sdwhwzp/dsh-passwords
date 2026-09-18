@@ -254,6 +254,7 @@ before(async () => {
     jwtSecret: 'test-secret',
     internalSecret: 'test-internal-secret',
     patch: { dshRoot: '', restartService: '' },
+    endpointRules: [],
   };
 
   const auth = new AuthService(config, db);
@@ -621,8 +622,24 @@ test('登出 CSRF：跨源 Origin 强制登出被拒绝（403）且不吊销 tok
   const cookie = `dsh_gateway_token=${token}`;
   const r = await gatewayReq('POST', '/gateway/logout', { origin: 'https://evil.example' }, cookie);
   assert.equal(r.status, 403, '跨源提交必须被拒绝');
-  const after = await gatewayReq('GET', '/html', {}, cookie);
+  const after = await gatewayReq('GET', '/', {}, cookie);
   assert.equal(after.status, 200, '被拒登出不得吊销会话');
+});
+
+test('根级第三方路径对子用户 fail-closed：未登记的非官方根路径 403，官方根级与 /api 面保持可用', async () => {
+  const tmp = db.createUser('root-scope-tmp', bcrypt.hashSync('Password123!', 4), 'user');
+  const token = jwt.sign(
+    { sub: String(tmp.id), username: 'root-scope-tmp', cv: 0 },
+    'test-secret',
+    { expiresIn: '12h' },
+  );
+  const cookie = `dsh_gateway_token=${token}`;
+  const denied = await gatewayReq('GET', '/third-party-panel/status', {}, cookie);
+  assert.equal(denied.status, 403, '未登记的根级第三方路径必须 fail-closed');
+  const officialRoot = await gatewayReq('GET', '/plugins/example/client.js', {}, cookie);
+  assert.equal(officialRoot.status, 200, '官方根级静态/bundle 路径保持可用');
+  const officialApi = await gatewayReq('GET', '/api/session/history', {}, cookie);
+  assert.equal(officialApi.status, 200, '官方 /api 面保持可用');
 });
 
 test('登出 CSRF：同源 Origin 登出放行（302）', async () => {

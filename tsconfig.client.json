@@ -6,7 +6,7 @@
     "noEmit": true,
     "declaration": false,
     "jsx": "react-jsx",
-    "lib": ["ES2022", "DOM"]
+    "lib": ["ES2022", "DOM", "DOM.Iterable"]
   },
   "include": ["src/client/**/*.ts", "src/client/**/*.tsx"],
   "exclude": []

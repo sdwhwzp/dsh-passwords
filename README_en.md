@@ -101,7 +101,7 @@ External file services and their accounts, passwords and databases are managed b
 
 ### 0. Prerequisites (three things)
 
-Host installs need Node.js 22.19+ or 24+, a working dsh installation, and git. Keep this plugin on the same Node major line as the dsh host; every DSH `0.1.5` release (alpha.1 / alpha.2 / rc.1 / rc.2) is verified, with `0.1.5-rc.2` as the current host baseline, while the compatibility layer retains the tested `0.1.2` and `0.1.3` API boundaries. Docker installs only need Docker Engine or Docker Desktop and a DeepSeek API key.
+Host installs need Node.js 22.19+ or 24+, a working dsh installation, and git. Keep this plugin on the same Node major line as the dsh host; the current verification baseline is DSH `0.1.6-alpha.1`, while the compatibility target retains every `0.1.5` release and the `0.1.2` / `0.1.3` API boundaries. Docker installs only need Docker Engine or Docker Desktop and a DeepSeek API key.
 
 ### 1. Install (by platform)
 
@@ -284,7 +284,9 @@ After logging in to dsh, open **Settings → Plugins** to find the "dsh-password
 | `MCP_GATEWAY_HOST` | `0.0.0.0` | Gateway listen address |
 | `MCP_GATEWAY_PORT` | `443` on first installer setup; `8080` when unset | Gateway port |
 | `MCP_GATEWAY_UPSTREAM` | `http://127.0.0.1:3080` | dsh web address (the plugin points it at dsh's actual port automatically — usually leave as-is) |
-| `MCP_GATEWAY_SSH_WS_ENDPOINTS` | Empty | Comma-separated third-party SSH WebSocket paths, exact or trailing `/*`; ordinary accounts require SSH permission. The built-in dsh-ssh terminal retains account authorization when tenant isolation is enabled. |
+| `MCP_GATEWAY_SSH_ENDPOINTS` | empty | Third-party endpoint registry (comma-separated; one variable for the HTTP and WebSocket transports). A rule is `[owner:][ws:\|http:]path` (prefixes optional, order-agnostic): `owner:` rules are owner-only (subusers get 403 on both transports); every other rule requires BOTH the owner registration and the subuser's SSH-endpoint toggle; `ws:`/`http:` restrict a rule to one transport, a bare path applies to both; paths match exactly or a trailing `/*` matches direct child paths only. Write requests to registered HTTP endpoints that carry a `host` field still pass the private/loopback check. When `DSH_PASSWORDS_ENV_FILE` is set the gateway polls that `.env` every 5 seconds and hot-reloads the registry. Unregistered third-party paths are not rejected by the gateway; the account-isolated Host handles them by signed principal. The built-in dsh-ssh terminal retains account authorization when tenant isolation is enabled. |
+| `MCP_GATEWAY_SSH_WS_ENDPOINTS` | empty | Legacy WebSocket-only registry variable; an already deployed `.env` keeps working, each entry is merged into the registry above as a `ws:` rule. New deployments should use `MCP_GATEWAY_SSH_ENDPOINTS`. |
+| `MCP_GATEWAY_PLUGIN_COMPAT` | `off` | The source release's third-party plugin compat switch; this fork only echoes it in `/gateway/api/overview`, route takeover stays with the account-isolated Host. |
 | `MCP_GATEWAY_REDIRECT_PORT` | `80` | Port 80: ACME challenge answers + 301 redirect to 443 |
 | `MCP_GATEWAY_DOMAIN` | empty | Your own domain; when empty, `<public-IP>.sslip.io` is used |
 | `MCP_GATEWAY_AUTO_TLS` | on | Empty = auto; `0` disables it (plaintext HTTP, dangerous) |

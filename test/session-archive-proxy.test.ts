@@ -156,7 +156,7 @@ before(async () => {
     },
     jwtSecret: 'test-secret', internalSecret: 'test-internal',
     patch: { dshRoot: '', restartService: '' },
-    webSocket: { sshEndpoints: [] },
+    endpointRules: [],
   };
   adminCookie = tokenFor(admin, config.jwtSecret);
   userCookie = tokenFor(user, config.jwtSecret);

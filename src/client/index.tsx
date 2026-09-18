@@ -44,6 +44,8 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 /** 卡片样式：全部使用 dsh 设计令牌（--dsw-alias-*），颜色/主题与官方 PluginCard 完全一致 */
 import { CARD_CSS as CSS } from './styles';
 import { AccountsLauncher } from './accounts-launcher';
+import { startPickerDelete } from './picker-delete';
+import { startFileDownload } from './file-download';
 
 export async function apply(ctx: ClientContext): Promise<() => void | Promise<void>> {
   const remote = ctx.remote as unknown as DshPasswordsRemoteClient;
@@ -63,6 +65,14 @@ export async function apply(ctx: ClientContext): Promise<() => void | Promise<vo
     }
     return gatewayDetected;
   };
+
+  // 目录选择器删除按钮（仅主用户）：角色由模块内部探测，非主用户零副作用；
+  // 授权由网关 requireAdmin 兜底。这里 fire-and-forget，不阻塞插件加载。
+  startPickerDelete();
+
+  // 右侧栏文件下载按钮（主用户/已授权子用户）：权限由模块内部探测（fail-closed），
+  // 授权由网关下载端点兜底。同样 fire-and-forget。
+  startFileDownload();
 
   ctx.effect(() => {
     if (typeof document === 'undefined') return () => {};

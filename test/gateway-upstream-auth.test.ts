@@ -382,7 +382,8 @@ test('gateway rejects malformed trusted Host Cookie options at construction', ()
   const auth = Object.create(AuthService.prototype) as AuthService;
   const base = {
     gateway: { upstream: 'http://127.0.0.1:3080' },
-    webSocket: {},
+    endpointRules: [],
+    pluginCompat: false,
   } as PlatformConfig;
   for (const value of [
     'not-a-cookie',

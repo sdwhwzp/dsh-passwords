@@ -19,12 +19,122 @@ import {
   GOALS_SCOPED_RE,
   SESSION_SCOPED_RE,
   SUBAGENT_SCOPED_RE,
+  parseSessionAddress,
+  isUploadRequest,
+  parseEndpointAllowlist,
+  parseEndpointRule,
+  endpointAllowed,
+  isOfficialRootPath,
+  classifySubuserPath,
+  pathWithin,
+  workspaceRegistrationAllowed,
+  directoryEntryVisible,
 } from '../src/permissions.js';
 
 test('第三方插件权限：子用户不能修改共享的 dsh-at-file 设置', () => {
   assert.equal(isAdminOnlyPluginEndpoint('POST', '/api/atFile/updateSettings'), true);
   assert.equal(isAdminOnlyPluginEndpoint('POST', '/api/atFile/getSettings'), false);
   assert.equal(isAdminOnlyPluginEndpoint('POST', '/api/atFile/search'), false);
+});
+
+test('alpha.1：原始 session 上传路径纳入上传权限门卫', () => {
+  assert.equal(isUploadRequest('POST', '/api/session/uploadFileBinary'), true);
+  assert.equal(isUploadRequest('POST', '/api/fileUploads/upload'), true);
+  assert.equal(isUploadRequest('GET', '/api/session/uploadFileBinary'), false);
+  assert.equal(isUploadRequest('POST', '/api/third-party-uploads'), false, '第三方上传端点不再内置在官方门卫里');
+});
+
+// ── 端点登记表：可选传输前缀、匹配与子用户分类器 ──────────────────
+
+test('parseEndpointAllowlist：接受可选能力/传输前缀并规范化大小写', () => {
+  assert.deepEqual(parseEndpointAllowlist('WS:/api/a,Http:/api/b,Owner:/api/c,/api/d', 'TEST'), [
+    'ws:/api/a',
+    'http:/api/b',
+    'owner:/api/c',
+    '/api/d',
+  ]);
+});
+
+test('parseEndpointRule：能力与传输前缀可任意组合/顺序', () => {
+  assert.deepEqual(parseEndpointRule('owner:ws:/x'), { capability: 'owner-only', transport: 'ws', path: '/x' });
+  assert.deepEqual(parseEndpointRule('ws:owner:/x'), { capability: 'owner-only', transport: 'ws', path: '/x' });
+  assert.deepEqual(parseEndpointRule('http:/x'), { capability: 'ssh', transport: 'http', path: '/x' });
+  assert.deepEqual(parseEndpointRule('/x'), { capability: 'ssh', transport: 'any', path: '/x' });
+});
+
+test('parseEndpointAllowlist：前缀后缺路径 / 非斜杠开头 / 非法字符 / 网关前缀均启动即失败', () => {
+  assert.throws(() => parseEndpointAllowlist('ws:', 'TEST'), /missing a path/);
+  assert.throws(() => parseEndpointAllowlist('owner:', 'TEST'), /missing a path/);
+  assert.throws(() => parseEndpointAllowlist('ws:api/a', 'TEST'), /must start with \//);
+  assert.throws(() => parseEndpointAllowlist('/api/a?x=1', 'TEST'), /query, encoding/);
+  assert.throws(() => parseEndpointAllowlist('/gateway/login', 'TEST'), /gateway paths cannot be registered/);
+  assert.throws(() => parseEndpointAllowlist('http:/api/dsh-passwords/internal/x', 'TEST'), /internal gateway paths/);
+});
+
+test('endpointAllowed：按传输与能力过滤（不传 capability 时两类规则都算命中）', () => {
+  const rules = parseEndpointAllowlist('ws:/api/ws-only,http:/api/http-only,/api/both,owner:/api/owner', 'TEST');
+  assert.equal(endpointAllowed('/api/both', rules), true);
+  assert.equal(endpointAllowed('/api/both', rules, { transport: 'http' }), true);
+  assert.equal(endpointAllowed('/api/both', rules, { transport: 'ws' }), true);
+  assert.equal(endpointAllowed('/api/ws-only', rules, { transport: 'ws' }), true);
+  assert.equal(endpointAllowed('/api/ws-only', rules, { transport: 'http' }), false);
+  assert.equal(endpointAllowed('/api/http-only', rules, { transport: 'http' }), true);
+  assert.equal(endpointAllowed('/api/http-only', rules, { transport: 'ws' }), false);
+  assert.equal(endpointAllowed('/api/other', rules), false);
+  assert.equal(endpointAllowed('/api/owner', rules), true, '不传 capability：两类规则都命中（SSRF 校验口径）');
+  assert.equal(endpointAllowed('/api/owner', rules, { capability: 'ssh' }), false);
+  assert.equal(endpointAllowed('/api/owner', rules, { capability: 'owner-only' }), true);
+});
+
+test('classifySubuserPath：传输过滤 + owner: 优先于 ssh + 官方/第三方划分', () => {
+  const endpointRules = parseEndpointAllowlist(
+    'ws:/api/plugin/terminal,http:/api/plugin/exec,/api/plugin/hosts,owner:/api/plugin/hosts',
+    'TEST',
+  );
+
+  // 传输过滤
+  assert.equal(classifySubuserPath('/api/plugin/terminal', { endpointRules, transport: 'ws' }), 'ssh');
+  assert.equal(classifySubuserPath('/api/plugin/terminal', { endpointRules, transport: 'http' }), 'third-party');
+  assert.equal(classifySubuserPath('/api/plugin/exec', { endpointRules, transport: 'http' }), 'ssh');
+  assert.equal(classifySubuserPath('/api/plugin/exec', { endpointRules, transport: 'ws' }), 'third-party');
+
+  // owner: 优先（同一路径同时以 ssh 与 owner: 登记）
+  assert.equal(classifySubuserPath('/api/plugin/hosts', { endpointRules, transport: 'http' }), 'owner-only');
+  assert.equal(classifySubuserPath('/api/plugin/hosts', { endpointRules, transport: 'ws' }), 'owner-only');
+
+  // 官方面（/api 命名空间 + 官方根级路径）
+  assert.equal(classifySubuserPath('/api/session/history', { endpointRules, transport: 'http' }), 'official');
+  assert.equal(classifySubuserPath('/api/workspace.list', { endpointRules, transport: 'http' }), 'official');
+  assert.equal(classifySubuserPath('/api/permissionPresets/catalog', { endpointRules, transport: 'http' }), 'official', 'alpha.1 官方权限预设目录');
+  assert.equal(classifySubuserPath('/api/terminal/shells', { endpointRules, transport: 'http' }), 'third-party', 'terminal 命名空间故意不开放给子用户（远程 shell = 沙箱逃逸）');
+  assert.equal(classifySubuserPath('/', { endpointRules, transport: 'http' }), 'official');
+  assert.equal(classifySubuserPath('/assets/app.js', { endpointRules, transport: 'http' }), 'official');
+  assert.equal(classifySubuserPath('/plugins/pkg/client.js', { endpointRules, transport: 'http' }), 'official');
+  assert.equal(classifySubuserPath('/api/dsh-passwords/state', { endpointRules, transport: 'http' }), 'platform');
+
+  // 未登记的第三方面：/api 与根级插件路由一律 third-party（fail-closed）
+  assert.equal(classifySubuserPath('/api/plugin-other/x', { endpointRules, transport: 'http' }), 'third-party');
+  assert.equal(classifySubuserPath('/api/live-stats', { endpointRules, transport: 'http' }), 'third-party');
+  assert.equal(classifySubuserPath('/third-party-panel/status', { endpointRules, transport: 'http' }), 'third-party');
+});
+
+test('classifySubuserPath：尾部 /* 只放行直接子路径（不放行基路径与更深层）', () => {
+  const endpointRules = parseEndpointAllowlist('/api/plugin/*', 'TEST');
+  assert.equal(classifySubuserPath('/api/plugin/one', { endpointRules, transport: 'http' }), 'ssh');
+  assert.equal(classifySubuserPath('/api/plugin', { endpointRules, transport: 'http' }), 'third-party');
+  assert.equal(classifySubuserPath('/api/plugin/one/two', { endpointRules, transport: 'http' }), 'third-party');
+});
+
+test('isOfficialRootPath：官方根级白名单（SPA 壳 / 静态 / 插件 bundle），其余根路径 fail-closed', () => {
+  for (const allowed of [
+    '/', '/index.html', '/favicon.ico', '/assets/app.js', '/plugins', '/plugins/pkg/client.js', '/logo.svg',
+    '/open-in-app/apps', '/open-in-app/icon/vscode', '/open-in-app/open',
+  ]) {
+    assert.equal(isOfficialRootPath(allowed), true, `${allowed} 属官方根级`);
+  }
+  for (const denied of ['/third-party-panel/read', '/modlens', '/sidebar/ws/terminal', '/api/x', '/html', '/open-in-app/unknown']) {
+    assert.equal(isOfficialRootPath(denied), false, `${denied} 不属官方根级`);
+  }
 });
 
 test('共享设置权限：写入口和敏感描述仅管理员可用', () => {
@@ -291,4 +401,40 @@ test('extended subscription account management requires an administrator for eve
     }
   }
   assert.equal(isAdminOnlyPluginEndpoint('GET', '/dsh-subscriptions-other'), false);
+});
+
+// ── D1 工作流：工作区登记白名单与目录浏览可见性 ──────────────────
+
+test('pathWithin：相等/子路径/点段/根与空白语义', () => {
+  assert.equal(pathWithin('/root/33', '/root/33'), true, '相等');
+  assert.equal(pathWithin('/root/33/sub', '/root/33'), true, '子路径');
+  assert.equal(pathWithin('/root/33/../34', '/root/33'), false, '点段解析后不再在内');
+  assert.equal(pathWithin('/root/33', '/root/34'), false);
+  assert.equal(pathWithin('/anything', '/'), true, '根 = 全盘');
+  assert.equal(pathWithin('/anything', ''), false, '空根无效');
+  assert.equal(pathWithin('/anything', '.'), false, '当前目录根无效');
+});
+
+test('workspaceRegistrationAllowed：只接受精确分配/自己子树/刚创建目录', () => {
+  const assigned = ['/root/33'];
+  const owned = ['/root/33/mine'];
+  const pending = ['/root/33/fresh'];
+  assert.equal(workspaceRegistrationAllowed('/root/33', assigned, owned, pending), true, '精确分配');
+  assert.equal(workspaceRegistrationAllowed('/root/33/mine/sub', assigned, owned, pending), true, '自己的工作区子树');
+  assert.equal(workspaceRegistrationAllowed('/root/33/fresh', assigned, owned, pending), true, '刚创建目录');
+  assert.equal(workspaceRegistrationAllowed('/root/33/preexisting', assigned, owned, pending), false, '预存在未分配');
+  assert.equal(workspaceRegistrationAllowed('/root/33/../34', assigned, owned, pending), false, '点段逃逸');
+  assert.equal(workspaceRegistrationAllowed('/', assigned, owned, pending), false, '根目录拒绝');
+  assert.equal(workspaceRegistrationAllowed('/root/33', ['__deny__'], owned, pending), false, '哨兵不作为分配项');
+  assert.equal(workspaceRegistrationAllowed('/root/33/fresh', [], [], []), false, '无任何凭据时拒绝');
+});
+
+test('directoryEntryVisible：祖先导航只保留通往授权根的条目', () => {
+  const roots = ['/workspaces/visible'];
+  assert.equal(directoryEntryVisible('/workspaces/visible', roots), true, '授权根本身');
+  assert.equal(directoryEntryVisible('/workspaces/visible/sub', roots), true, '授权根内');
+  assert.equal(directoryEntryVisible('/workspaces', roots), true, '祖先（通往授权根）');
+  assert.equal(directoryEntryVisible('/', roots), true, '根祖先');
+  assert.equal(directoryEntryVisible('/workspaces/other', roots), false, '无关兄弟目录');
+  assert.equal(directoryEntryVisible('/root/33', roots), false, '无关子树');
 });
