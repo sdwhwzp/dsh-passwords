@@ -241,11 +241,31 @@ async function invalidateGatewaySessions(cfg: PlatformConfig, userId: number): P
 }
 
 /** 网关启动错误码（与 cli.ts 保持一致）：永久配置/补丁错误不能自动重启。 */
+const EXIT_CONFIG_INVALID = 1;
 const EXIT_CERT_FAILED = 30;
 const EXIT_NO_DOMAIN = 31;
+const EXIT_PORT_BUSY = 32;
+const EXIT_COOKIE_BRIDGE_UNAVAILABLE = 33;
 const EXIT_DSH_ROOT_UNAVAILABLE = 34;
 const EXIT_PATCH_TARGET_UNAVAILABLE = 35;
 const EXIT_PATCH_VERIFICATION_FAILED = 36;
+const EXIT_DSH_VERSION_UNSUPPORTED = 37;
+
+const PERMANENT_GATEWAY_EXIT_CODES = new Set([
+  EXIT_CONFIG_INVALID,
+  EXIT_CERT_FAILED,
+  EXIT_NO_DOMAIN,
+  EXIT_PORT_BUSY,
+  EXIT_COOKIE_BRIDGE_UNAVAILABLE,
+  EXIT_DSH_ROOT_UNAVAILABLE,
+  EXIT_PATCH_TARGET_UNAVAILABLE,
+  EXIT_PATCH_VERIFICATION_FAILED,
+  EXIT_DSH_VERSION_UNSUPPORTED,
+]);
+
+export function isPermanentGatewayExitCode(reason: number | string): boolean {
+  return typeof reason === 'number' && PERMANENT_GATEWAY_EXIT_CODES.has(reason);
+}
 
 /** 探测网关是否已在监听（防止 dsh 重启/多开时重复拉起） */
 function gatewayAlreadyRunning(port: number): Promise<boolean> {
@@ -261,6 +281,27 @@ function gatewayAlreadyRunning(port: number): Promise<boolean> {
       resolve(false);
     });
   });
+}
+
+/**
+ * Wait for a port to become free without ever terminating its owner. This is
+ * specifically for the dsh restart handoff: the old password-gateway child
+ * may still hold 443 while the new dsh process loads the plugin. A bounded
+ * wait preserves unrelated listeners and prevents a permanent skip race.
+ */
+export async function waitForGatewayPortFree(
+  port: number,
+  timeoutMs = 15_000,
+  intervalMs = 250,
+): Promise<boolean> {
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  do {
+    if (!(await gatewayAlreadyRunning(port))) return true;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    await new Promise<void>((resolve) => setTimeout(resolve, Math.min(intervalMs, remaining)));
+  } while (Date.now() <= deadline);
+  return false;
 }
 
 /**
@@ -283,91 +324,105 @@ function startGateway(ctx: Context, cfg: PlatformConfig): void {
       let disposed = false;
       let child: ChildProcess | null = null;
 
-      void gatewayAlreadyRunning(gatewayPort).then((running) => {
-        if (disposed) return;
-        if (running) {
-          console.error(`[dsh-passwords] 密码门已在运行（端口 ${String(gatewayPort)}），跳过自动拉起`);
-          return;
-        }
-        // 网关上游 = dsh 自己的 web 端口（webServer 服务在运行时可知；拿不到就退回默认 3080）。
-        // 用户显式配置过 MCP_GATEWAY_UPSTREAM（.env/环境变量）则尊重之，不自动覆盖。
-        let upstreamPort = 3080;
-        try {
-          const wsPort = (ctx.webServer as unknown as { port?: number }).port;
-          if (typeof wsPort === 'number' && wsPort > 0) upstreamPort = wsPort;
-        } catch {
-          // 拿不到就用默认值
-        }
-        const explicitUpstream = process.env.MCP_GATEWAY_UPSTREAM?.trim() ?? '';
-        const upstreamRoot = explicitUpstream !== ''
-          ? explicitUpstream
-          : `http://127.0.0.1:${String(upstreamPort)}`;
-        const connection: unknown = ctx.connection;
-        const upstreamBrowserAuthenticationRequired = supportsUpstreamBrowserAuthentication(connection);
-        const gatewayArgs =
-          explicitUpstream !== ''
-            ? [cliPath, 'serve-gateway']
-            : [cliPath, 'serve-gateway', '--upstream', upstreamRoot];
-        const spawned = spawn(process.execPath, gatewayArgs, {
-          cwd: INSTALL_ROOT,
-          env: {
-            ...process.env,
-            DSH_GATEWAY_PARENT_PID: String(process.pid),
-            DSH_GATEWAY_BROWSER_AUTH_REQUIRED: upstreamBrowserAuthenticationRequired ? '1' : '0',
-            DSH_PASSWORDS_ENV_FILE: envFilePath(),
-          },
-          stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
-        });
-        child = spawned;
-        spawned.on('message', (message: unknown) => {
-          if (
-            !upstreamBrowserAuthenticationRequired ||
-            disposed ||
-            message === null ||
-            typeof message !== 'object' ||
-            (message as { type?: unknown }).type !== UPSTREAM_BROWSER_AUTH_REQUEST ||
-            !spawned.connected
-          ) return;
-          let authenticatedUrl: string;
-          try {
-            if (!supportsUpstreamBrowserAuthentication(connection)) throw new Error('unavailable');
-            authenticatedUrl = connection.authenticatedUrl(upstreamRoot);
-          } catch {
-            console.error('[dsh-passwords] 无法创建 Host 浏览器认证会话，密码门停止启动');
-            spawned.kill('SIGTERM');
-            return;
-          }
-          spawned.send(
-            { type: UPSTREAM_BROWSER_AUTH_RESPONSE, authenticatedUrl },
-            (error) => {
-              if (error === null) return;
-              console.error('[dsh-passwords] Host 浏览器认证 IPC 传递失败，密码门停止运行');
-              if (spawned.exitCode === null) spawned.kill('SIGTERM');
-            },
-          );
-        });
-        spawned.on('error', (error) => {
-          console.error('[dsh-passwords] 密码门拉起失败:', error);
-        });
-        spawned.on('exit', (code, signal) => {
+      let retryTimer: NodeJS.Timeout | null = null;
+      const scheduleRetry = (): void => {
+        if (disposed || retryTimer !== null) return;
+        retryTimer = setTimeout(() => { retryTimer = null; launch(); }, 1000);
+        retryTimer.unref();
+      };
+      const launch = (): void => {
+        void waitForGatewayPortFree(gatewayPort).then((free) => {
           if (disposed) return;
-          const reason = code ?? signal ?? 'unknown';
-          if (reason === EXIT_CERT_FAILED) {
-            console.error('[dsh-passwords] 密码门未启动（错误码 30：HTTPS 证书签发失败）。检查 80/443 端口与网络；或运行 scripts/start-http.mjs 改用明文 HTTP（有被嗅探风险）');
-          } else if (reason === EXIT_NO_DOMAIN) {
-            console.error('[dsh-passwords] 密码门未启动（错误码 31：无法确定公网 IP/域名）。或运行 scripts/start-http.mjs 改用明文 HTTP（有被嗅探风险）');
-          } else if (reason === EXIT_DSH_ROOT_UNAVAILABLE || reason === EXIT_PATCH_TARGET_UNAVAILABLE || reason === EXIT_PATCH_VERIFICATION_FAILED) {
-            console.error(`[dsh-passwords] 密码门未启动（错误码 ${String(reason)}：DSH 补丁不可用）。修复 MCP_DSH_ROOT 或升级兼容问题后重启 dsh。`);
-          } else {
-            console.error(`[dsh-passwords] 密码门进程已退出（code=${String(reason)}）。重启 dsh 会自动再次拉起`);
+          if (!free) { scheduleRetry(); return; }
+          // 网关上游 = dsh 自己的 web 端口（webServer 服务在运行时可知；拿不到就退回默认 3080）。
+          // 用户显式配置过 MCP_GATEWAY_UPSTREAM（.env/环境变量）则尊重之，不自动覆盖。
+          let upstreamPort = 3080;
+          try {
+            const wsPort = (ctx.webServer as unknown as { port?: number }).port;
+            if (typeof wsPort === 'number' && wsPort > 0) upstreamPort = wsPort;
+          } catch {
+            // 拿不到就用默认值
           }
+          const explicitUpstream = process.env.MCP_GATEWAY_UPSTREAM?.trim() ?? '';
+          const upstreamRoot = explicitUpstream !== ''
+            ? explicitUpstream
+            : `http://127.0.0.1:${String(upstreamPort)}`;
+          const connection: unknown = ctx.connection;
+          const upstreamBrowserAuthenticationRequired = supportsUpstreamBrowserAuthentication(connection);
+          const gatewayArgs =
+            explicitUpstream !== ''
+              ? [cliPath, 'serve-gateway']
+              : [cliPath, 'serve-gateway', '--upstream', upstreamRoot];
+          const spawned = spawn(process.execPath, gatewayArgs, {
+            cwd: INSTALL_ROOT,
+            env: {
+              ...process.env,
+              DSH_GATEWAY_PARENT_PID: String(process.pid),
+              DSH_GATEWAY_BROWSER_AUTH_REQUIRED: upstreamBrowserAuthenticationRequired ? '1' : '0',
+              DSH_PASSWORDS_ENV_FILE: envFilePath(),
+            },
+            stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
+          });
+          child = spawned;
+          spawned.on('message', (message: unknown) => {
+            if (
+              !upstreamBrowserAuthenticationRequired ||
+              disposed ||
+              message === null ||
+              typeof message !== 'object' ||
+              (message as { type?: unknown }).type !== UPSTREAM_BROWSER_AUTH_REQUEST ||
+              !spawned.connected
+            ) return;
+            let authenticatedUrl: string;
+            try {
+              if (!supportsUpstreamBrowserAuthentication(connection)) throw new Error('unavailable');
+              authenticatedUrl = connection.authenticatedUrl(upstreamRoot);
+            } catch {
+              console.error('[dsh-passwords] 无法创建 Host 浏览器认证会话，密码门停止启动');
+              spawned.kill('SIGTERM');
+              return;
+            }
+            spawned.send(
+              { type: UPSTREAM_BROWSER_AUTH_RESPONSE, authenticatedUrl },
+              (error) => {
+                if (error === null) return;
+                console.error('[dsh-passwords] Host 浏览器认证 IPC 传递失败，密码门停止运行');
+                if (spawned.exitCode === null) spawned.kill('SIGTERM');
+              },
+            );
+          });
+          spawned.on('error', (error) => {
+            console.error('[dsh-passwords] 密码门拉起失败:', error);
+            child = null;
+            scheduleRetry();
+          });
+          spawned.on('exit', (code, signal) => {
+            child = null;
+            if (disposed) return;
+            const reason = code ?? signal ?? 'unknown';
+            if (reason === EXIT_CERT_FAILED) {
+              console.error('[dsh-passwords] 密码门未启动（错误码 30：HTTPS 证书签发失败）。检查 80/443 端口与网络；或运行 scripts/start-http.mjs 改用明文 HTTP（有被嗅探风险）');
+            } else if (reason === EXIT_NO_DOMAIN) {
+              console.error('[dsh-passwords] 密码门未启动（错误码 31：无法确定公网 IP/域名）。或运行 scripts/start-http.mjs 改用明文 HTTP（有被嗅探风险）');
+            } else if (reason === EXIT_DSH_ROOT_UNAVAILABLE || reason === EXIT_PATCH_TARGET_UNAVAILABLE || reason === EXIT_PATCH_VERIFICATION_FAILED) {
+              console.error(`[dsh-passwords] 密码门未启动（错误码 ${String(reason)}：DSH 补丁不可用）。修复 MCP_DSH_ROOT 或升级兼容问题后重启 dsh。`);
+            } else if (isPermanentGatewayExitCode(reason)) {
+              console.error(`[dsh-passwords] 密码门启动失败（code=${String(reason)}），修复配置后重启。`);
+            } else {
+              console.error(`[dsh-passwords] 密码门进程已退出（code=${String(reason)}），稍后重试。`);
+              scheduleRetry();
+            }
+          });
+        }).catch(() => {
+          if (!disposed) console.error('[dsh-passwords] 密码门启动前检查失败');
+          scheduleRetry();
         });
-      }).catch(() => {
-        if (!disposed) console.error('[dsh-passwords] 密码门启动前检查失败');
-      });
+      };
+      launch();
 
       return () => {
         disposed = true;
+        if (retryTimer !== null) clearTimeout(retryTimer);
         if (child !== null && child.exitCode === null && child.signalCode === null) {
           child.kill('SIGTERM');
           const force = setTimeout(() => {

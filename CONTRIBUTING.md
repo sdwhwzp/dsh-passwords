@@ -43,7 +43,7 @@ Do not paste `.env`, `setup-key.txt`, JWTs, cookies, API keys, SSH passwords, pr
 Supported development baseline:
 
 - Node.js `22.19+` or `24+`
-- DSH `0.1.6-alpha.1` (current verified host baseline); the compatibility layer retains the `0.1.5` release targets and the tested `0.1.2` / `0.1.3` API boundaries.
+- The private Harness `0.1.6-alpha.2` checkout supplies native tenant extensions. Development packages link to it; candidate and production acceptance are recorded separately from upstream release results.
 - npm and git
 
 Clone and install:

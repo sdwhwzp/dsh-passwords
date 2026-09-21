@@ -43,7 +43,9 @@ test('本机工作区环境示例和 Windows workflow 完整且不带回共享 W
   assert.match(buildScript, /local-workspace-standalone\.cjs/);
 
   const workflow = read('.github/workflows/build-windows-assistant.yml');
-  assert.match(workflow, /npm run build:windows-assistant/);
+  assert.match(workflow, /Copy-Item tools\/windows-assistant\/package\*\.json/);
+  assert.match(workflow, /node scripts\/build-local-workspace\.mjs/);
+  assert.match(workflow, /pkg\.cmd dist\/local-workspace-standalone\.cjs --targets node22-win-x64/);
   assert.match(workflow, /release\/山东梯智物联AI本机助手\.exe/);
 });
 

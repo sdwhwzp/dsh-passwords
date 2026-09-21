@@ -99,7 +99,7 @@ function nativeHarnessAvailable(dshRoot: string): boolean {
   if (!existsSync(packageFile)) return false;
   try {
     const metadata = JSON.parse(readFileSync(packageFile, 'utf8')) as DshPackageMetadata;
-    return typeof metadata.version === 'string' && /^0\.1\.(?:2-alpha\.[0-9]+|5-(?:alpha\.[12]|rc\.[12]))(?:$|[-+])/u.test(metadata.version);
+    return typeof metadata.version === 'string' && /^0\.1\.(?:2-alpha\.[0-9]+|5-(?:alpha\.[12]|rc\.[12])|6-alpha\.[12])(?:$|[-+])/u.test(metadata.version);
   } catch {
     return false;
   }
@@ -108,9 +108,9 @@ function nativeHarnessAvailable(dshRoot: string): boolean {
 /** The native Harness exposes Settings and model selection without bundle rewriting. */
 export function patchStatus(
   dshRoot: string,
-): { settingsHostMode: boolean; whitelist: boolean; workspaceSearch: boolean } {
+): { settingsHostMode: boolean; whitelist: boolean; workspaceSearch: boolean; connectionCookieBridge: 'native' | 'missing' } {
   const ready = nativeHarnessAvailable(dshRoot);
-  return { settingsHostMode: ready, whitelist: ready, workspaceSearch: ready };
+  return { settingsHostMode: ready, whitelist: ready, workspaceSearch: ready, connectionCookieBridge: ready ? 'native' : 'missing' };
 }
 
 /** Validate native Harness support; no installed package is modified. */

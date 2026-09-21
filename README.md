@@ -104,7 +104,7 @@ MySQL 模式会在空闲超时、服务重启或短暂网络断开后自动替�
 
 ### 0. 前置条件（三样）
 
-宿主机安装需要 Node.js 22.19+ 或 24+、可正常运行的 dsh 和 git。DSH `0.1.6-alpha.1` 是当前验证中的主机基线；同时保留对 DSH `0.1.5` 全系列与 `0.1.2` / `0.1.3` 接口边界的兼容声明。Docker 安装只需要 Docker Engine 或 Docker Desktop 和一个 DeepSeek API key。
+宿主机安装需要 Node.js 22.19+ 或 24+、可正常运行的 dsh 和 git。主机基线为 DSH 0.1.6 线，当前锁定 alpha.2（0.1.6 正式版尚未发布）；上游已发布 alpha.2 验收记录；本 fork 的候选包须单独验收。同时保留对 DSH `0.1.5` 全系列与 `0.1.2` / `0.1.3` 接口边界的兼容声明。Docker 安装只需要 Docker Engine 或 Docker Desktop 和一个 DeepSeek API key。
 
 ### 1. 安装（按平台）
 
@@ -132,6 +132,19 @@ dsh-passwords install     # 生成随机 SETUP_KEY + 恢复插件栈 + 应用补
 安装脚本会检查预构建文件，缺失时再安装依赖和编译；随后生成 `SETUP_KEY`、恢复已记录的 web profile 插件栈并应用远程设置补丁。
 
 ### 自动恢复已安装插件
+```bash
+# 4. Docker
+docker run -d \
+  --name dsh-passwords \
+  --restart unless-stopped \
+  --env-file .env \
+  -p 127.0.0.1:3088:3088 \
+  -v dsh-home:/data/dsh \
+  -v dsh-passwords-state:/data/dsh-passwords \
+  skywalker237234/dsh-passwords:2.7.3
+```
+
+`.env` 至少包含 `DEEPSEEK_API_KEY`。`MCP_GATEWAY_PUBLIC_HOST` 建议填实际访问的域名。宿主端口只发布在回环地址 `127.0.0.1:3088`，容器内监听 `0.0.0.0:3088`；公网访问由 nginx 或 Caddy 终结 TLS 后转发。镜像内置 DSH `0.1.6-alpha.2`（DSH 0.1.6 线当前锁定版本，官方镜像不包含本 fork 所需的租户扩展）；初始化完成以 healthz/readyz 均返回 `ok:true` 为准。
 
 `scripts/profile-plugins.json` 是跨机器部署的版本化插件清单。运行 `dsh-passwords install` 会把清单中的 NPM/Git 来源、bundle 顺序、Git 构建授权和必要的 profile patch 幂等合并到 `~/.dsh/profiles/web`，然后统一执行 `pnpm install`。已有本地 `link:` 开发源和未纳入清单的自定义插件不会被覆盖或删除；只有链接实际指向清单声明的相邻源码时才构建其配套工作区，指向独立发布目录的链接不会误用相邻路径。清单明确标记的旧聚合包会自动迁移。
 
@@ -252,6 +265,7 @@ node scripts/start-http.mjs [端口]    # 默认 8080，会弹 y/N 确认
 ```
 
 脚本会先显示明文风险警告，输入 `y` 才启动。明文 HTTP 下密码与会话 Cookie 可能被网络中间人嗅探——公网部署请优先使用自动 HTTPS（默认模式，无需配置，只有证书实在签不出来时才用 HTTP 模式）。
+或在 `.env` 写入 `MCP_GATEWAY_AUTO_TLS=0` 与 `MCP_GATEWAY_PORT=8080`，dsh 启动时插件以 HTTP 模式拉起网关。该模式不依赖公网 IP、DNS、ACME 或外部 CDN，可用于内网部署；首次安装仍需要 npm/GitHub 可访问，或提前准备项目 tarball、依赖缓存和本地 DSH 安装。模型对话仍需要配置上游模型提供方（例如 `DEEPSEEK_API_KEY`）；没有外部模型服务时，登录、权限、文件与管理功能可运行，但不会产生模型回复。
 
 更彻底的做法：`.env` 里写 `MCP_GATEWAY_AUTO_TLS=0` 和 `MCP_GATEWAY_PORT=8080`，之后 dsh 启动时插件会直接以 HTTP 模式拉起密码门。
 
@@ -344,6 +358,81 @@ dsh-local-workspace                      # 使用已保存的设备令牌恢复�
 > Windows 用户建议直接用 `install.bat`；本节以 Linux 为例，步骤等价。
 
 1. `git clone https://github.com/sdwhwzp/dsh-passwords && cd dsh-passwords`
+<details>
+<summary><strong>忘记主用户密码</strong></summary>
+
+停服后删除 users 表并重启：
+
+```bash
+node -e "const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync('data/platform.db');db.exec('DELETE FROM users;')"
+```
+
+</details>
+
+<details>
+<summary><strong>错误码 30 / 31 / 32</strong></summary>
+
+见「自动 HTTPS」一节的错误码表。
+
+</details>
+
+<details>
+<summary><strong>非 root 绑定 443 失败</strong></summary>
+
+Linux 下 1024 以下端口需要 root，改用 `MCP_GATEWAY_PORT` 高位端口并自行做端口转发。
+
+</details>
+
+<details>
+<summary><strong>dsh 报 duplicate loader entry id</strong></summary>
+
+`dsh plugin add` 会把所有声明 bundle 的依赖加入 bundles 层导致冲突。卸载后改用 `node scripts/register-plugin.mjs` 精确注册。
+
+</details>
+
+<details>
+<summary><strong>npm 安装 dsh 报 node-pty 构建错误</strong></summary>
+
+放行安装脚本后重装：
+
+```bash
+npm config set allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user
+```
+
+</details>
+
+<details>
+<summary><strong>数据库文件泄露是否有风险</strong></summary>
+
+没有。敏感字段全部加密或散列，密码仅存 bcrypt 哈希，无 `.env` 密钥无法解密。
+
+</details>
+
+<details>
+<summary><strong>能否更换 MCP_DB_ENC_KEY</strong></summary>
+
+不能，启用后更换将导致历史数据无法解密。
+
+</details>
+
+<details>
+<summary><strong>加载插件慢 / 访问慢</strong></summary>
+
+网关对内容哈希命中的静态资源强制一年期 immutable 缓存，升级后首次访问完整下载一次，之后秒进。访问慢时网关每请求开销约 1-2ms，先检查 TLS 握手：
+
+```bash
+curl -so /dev/null -w "TLS:%{time_appconnect}s\n" https://地址/gateway/login
+```
+
+通常瓶颈在到服务器的链路延迟。
+
+</details>
+
+### 手动安装
+
+> v2.7.3 以 DSH 0.1.6 线为基线目标，当前锁定 alpha.2；`0.1.5` 全系列与 `0.1.2` / `0.1.3` 接口边界保留兼容。上游已发布 alpha.2 验收记录；本 fork 的候选包须单独验收。宿主机安装器会检查 Node.js `22.19+` 或 `24+`，注册插件并应用兼容补丁。
+
+1. `git clone https://github.com/sdwhwzp/dsh-passwords && cd dsh-passwords`
 2. `npm install && npm run build`
 3. `cp .env.example .env`，把 `SETUP_KEY` 改成随机串（`openssl rand -hex 24`）
 4. 恢复插件栈：`node scripts/register-plugin.mjs`（按 `scripts/profile-plugins.json` 合并依赖、bundle、构建授权与 profile patch，再执行 `pnpm install`。**不要用 `dsh plugin add`**，原因见常见问题）
@@ -376,6 +465,7 @@ dsh-local-workspace                      # 使用已保存的设备令牌恢复�
 - **命令行（CLI）**：跟随 `LANG` / `LC_ALL` 环境变量（`en` 开头即英文）。
 
 ## 更新日志
+当前版本 2.7.3。DSH 基线目标为 0.1.6 线，当前锁定 alpha.2（0.1.6 正式版尚未发布）；本 fork 的实际检查与部署状态见部署记录。同时保留对 DSH `0.1.5` 全系列及 `0.1.2`、`0.1.3` 接口边界的兼容验证目标。
 
 ### v2.6.20（2026-09-08）
 
@@ -468,7 +558,7 @@ Linux 部署由管理员将 `scripts/tenant-terminal-launcher.py` 安装为 root
 
 ## Fork 同步与部署适配
 
-当前分支合入 `slywalker2006/dsh-passwords` 的 `59968d3`（2.7.0）。本部署构建为 `2.7.0-dsh.20260911.9`，配合包含原生 principal 扩展的 Harness 0.1.5-rc.2 使用；普通 npm 上游 Harness 包不提供这些私有扩展，部署时必须统一指向本次 Harness 构建。
+当前 fork 的源提交、候选版本、Harness 原生扩展要求与部署约束见 [兼容说明](docs/compatibility-matrix.md)。
 
 未设置 `TENANT_SSH_ENABLED=true` 时，网关保留旧版 SSH alias 归属检查：普通账号只能使用本人已认领的连接，导入、cluster 和 tunnel 仍仅供管理员。SSH alias 归属同时支持 SQLite 和 MySQL/MariaDB；账号隔离版 Host 使用这些记录迁移已有连接。
 
@@ -509,7 +599,7 @@ Linux 部署由管理员将 `scripts/tenant-terminal-launcher.py` 安装为 root
 文件夹管理在应用中央打开，侧栏和原会话保留，支持返回对话。拖动文件或文件夹到目标目录或“返回上级”即可移动；已有移动/粘贴和上传按钮保留。同名冲突会报错。详见[文件夹管理与拖拽移动](docs/plans/2026-09-11-managed-files-page.md)。
 ## 桌面客户端下载
 
-设置 `MCP_DESKTOP_DOWNLOADS_DIR` 为独立、只读的安装包发布目录，可在登录页和网页侧栏打开“下载桌面端”。登录后的列表使用现有主面板，返回时保留会话。安装包及清单公开下载，不需要业务账号；业务数据和原有文件下载权限保持原有授权检查。Windows 一键助手仍使用原入口，配对时读取服务器提供的连接地址。
+设置 `MCP_DESKTOP_DOWNLOADS_DIR` 为独立、只读的安装包发布目录，可在登录页打开“下载桌面端”；侧栏不显示下载入口。登录后的下载列表使用现有主面板，返回时保留会话。安装包及清单公开下载，不需要业务账号；业务数据和原有文件下载权限保持原有授权检查。Windows 一键助手仍使用原入口，配对时读取服务器提供的连接地址。
 
 目录内的 `manifest.json` 包含 `version`、源码 `commit`（40 位 SHA）和 `files`；每项包含 `file`、`platform`（`windows-x64` 或 `mac-arm64`）、`bytes`、`sha256`，以及可选的 `signing`（`unsigned` 或仅适用于 Mac 的 `apple-notarized`；省略时显示未签名）。只有签名、公证和安装验证通过的 Mac 构件才能标记为 `apple-notarized`。仅发布简单文件名的 `.exe`、`.dmg` 和 `.zip`，不开放目录列表或清单外文件。上传后核对 SHA-256，再切换配置并重启网关；已发布目录保持只读，不原位替换文件。下载支持 HEAD 和 Range；配置留空时不注册公开下载路由。
 

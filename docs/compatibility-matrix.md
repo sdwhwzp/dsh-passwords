@@ -1,31 +1,27 @@
 # Fork compatibility and deployment
 
-This fork integrates `slywalker2006/dsh-passwords` commit `661d6951a15da8c35f1564718492eaecd7f40179` (release v2.7.2) on `dev`. Its deployment version is `2.7.2-dsh.20260918.1`; the owned push repository is `git@github.com:sdwhwzp/dsh-passwords.git`.
+This fork integrates `slywalker2006/dsh-passwords` commit `f9a600e5cffd39efc823baaf37d3f4bc57adc52a` (v2.7.3) on `dev`. Its candidate version is `2.7.3-dsh.20260920.1`; the owned push repository is `git@github.com:sdwhwzp/dsh-passwords.git`.
 
 ## Runtime requirements
 
-| Component | Required baseline | Evidence |
-| --- | --- | --- |
-| Node.js | 22.19+ or 24+ | Local checks use 22.21.1 |
-| Harness | Personal fork 0.1.6 (alpha.1 deployed; alpha.2 checkout linked) | Compiler links, runtime peers and native-principal regression tests agree |
-| dsh-passwords | 2.7.2-dsh.20260918.1 | Build and gateway/account regression tests |
-| dsh-ssh account mode | `accountIsolation: true` with `TENANT_SSH_ENABLED=true` | Separate account stores, credentials, pools and terminal authorization |
-| Official npm Harness or bundled Docker | Insufficient for this fork's tenant deployment | Native principal extensions must come from the matching personal Harness build |
+Use Node.js 22.19+ or 24+ and the matching private Harness `0.1.6-alpha.2` build. Development dependencies link to that checkout; runtime peers refer to the same release. An official npm Harness or bundled Docker installation alone does not provide the native principal extensions needed by this tenant deployment. The native adapter does not rewrite installed Harness bundles. Startup validates the version, native settings support, and authenticated Host connection before opening the public listener.
 
-The source release's legacy bundle patcher does not replace the personal Harness's native principal and settings interfaces. Startup requires the authenticated Host connection and its gateway configuration; no compiled Harness files are rewritten. Native acceptance covers the 0.1.5 alpha.1, alpha.2, rc.1 and rc.2 version labels, while the current compiler and deployment target is rc.2. A recognized version alone does not supply the fork's private extensions.
+Native version recognition also retains the previously supported `0.1.2-alpha.*`, `0.1.5-alpha.1`, `alpha.2`, `rc.1`, and `rc.2` labels. Recognition does not supply private extensions or establish release acceptance. Record candidate and production verification with each deployment; upstream test-server results do not certify this fork.
 
-## Account and WebSocket authorization
+## Account authorization
 
-Session ownership, managed workspaces, monthly budgets, MySQL/MariaDB storage, local workspaces, tenant terminals/editors and the independent account management page remain part of this fork. Workspace and Session responses and event streams are filtered before reaching an ordinary account. Credential changes, logout and permission revocation close that account's live connections.
+Session ownership, managed workspaces, monthly budgets, MySQL/MariaDB storage, local workspaces, tenant terminals/editors and the independent account management page remain part of this fork. Host reads use authenticated immutable account identities. Credential changes, logout, permission changes and directory cleanup close affected account connections.
 
-`MCP_GATEWAY_SSH_ENDPOINTS` is the endpoint registry shared by the HTTP and WebSocket transports; a rule is `[owner:][ws:|http:]path`, exact or with a trailing `/*` for direct children. `owner:` rules are owner-only; every other registered rule requires the ordinary account's SSH permission. The legacy `MCP_GATEWAY_SSH_WS_ENDPOINTS` keeps working and is merged as `ws:` rules. Unregistered third-party paths are not rejected by the gateway: the account-isolated Host authorizes them by signed principal, which is why the source release's fail-closed classification and `MCP_GATEWAY_PLUGIN_COMPAT` route takeover are not active in this fork. Native event channels retain resource authorization. The account-isolated dsh-ssh terminal is a separate built-in route controlled by `TENANT_SSH_ENABLED` and the authenticated account.
+Directory deletion uses the authenticated Host workspace registry, verifies removed entries, and persists retry information when either registry or database cleanup fails. Both SQLite and MySQL store cleanup intents. Deleted managed roots and folder grants are removed; an emptied folder allowlist becomes `__deny__`. Affected Sessions become disabled while their immutable owners remain recorded, preventing adoption by another account. This fork does not issue temporary directory grants.
 
-The old per-user WebSocket grants and `MCP_GATEWAY_WS_ADMIN_ALLOWLIST` / `MCP_GATEWAY_WS_USER_ALLOWLIST` settings do not authorize routes. Existing database columns remain for persisted-data compatibility; permission writes clear their obsolete values. Transfer any required third-party SSH paths into the new deployment setting.
+Managed uploads remove their temporary files before returning a success or failure response, including concurrent accepted and oversized uploads.
 
-With account isolation enabled, users manage their own SSH aliases, credentials and transfers. Without it, the gateway retains legacy ownership checks: only successfully claimed aliases belong to an ordinary account, and shared import, cluster and tunnel administration remain restricted. SQLite and MySQL/MariaDB retain the ownership records used for migration. Upload and download permissions remain independent of directory browsing. Exact DNS exceptions in `TENANT_SSH_TRUSTED_HOSTS` apply only in account-isolated mode.
+Ordinary accounts retain the existing GPT 5.6-and-later model policy. The upstream per-model allowlist editor is not composed into the fork's account table. Shared skill-file read/update routes and shared platform balances are administrator-only. Tenant SSH hosts, credentials and transfers remain isolated, with upload/download permissions independent of directory browsing.
 
-## Update and deployment policy
+The host plugin waits for an occupied gateway port to be released without terminating its owner, and retries transient child exits. Permanent startup codes `1`, `30`–`37` require configuration repair. Browser authentication uses the existing IPC channel and official Host authenticated URL rather than extracting private connection fields or passing cookies in the child environment.
 
-The fork's `dsh.YYYYMMDD.N` versions are intentionally excluded from the official stable-version automatic updater, which cannot preserve the tenant adaptations. Synchronize the source into the active branch, build and test, upload all local branches to the owned fork, then deploy matching Harness and plugin artifacts together.
+## Release policy
 
-Candidate profiles preserve live credentials and data and use their own `.env`. Keep the latest production plugin pins and a rollback copy before switching. Verify production health and account behavior before deleting this deployment's local temporary profiles, databases, credentials, logs and redundant packages. Record deployed commits, artifact hashes, checks and cleanup status separately; a local build does not establish production deployment.
+Fork versions are excluded from the upstream automatic updater. Synchronize into the active branch, validate, upload all local branches to the owned fork, and install matching reviewed artifacts through the deployment manifest. Preserve existing production plugin pins, `llm-subscriptions.fastTier: false`, WeKnora, and rollback files. A successful local build is not production acceptance.
+
+After production acceptance, remove task-owned temporary profiles, databases, processes and redundant packages while retaining source, formal tests, uncommitted work and rollback records.

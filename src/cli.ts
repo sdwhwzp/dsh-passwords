@@ -171,6 +171,46 @@ function runAudit(argv: string[]): void {
 const SERVICE_NAME_RE = /^[A-Za-z0-9_.@-]+$/;
 const EXIT_DSH_ROOT_UNAVAILABLE = 34;
 const EXIT_ALPHA3_SETTINGS_UNAVAILABLE = 35;
+const EXIT_PATCH_VERIFICATION_FAILED = 36;
+/** 清单缺失/损坏或尚未审查的 DSH 版本：不得在其 bundle 上尝试打补丁或公开监听。 */
+const EXIT_DSH_VERSION_UNSUPPORTED = 37;
+/**
+ * Semver build metadata (`+build.1`) does not change which release is running:
+ * `0.1.5-rc.2+build.1` and `0.1.5-rc.2` are the same release identity. Drop it before
+ * matching so metadata cannot be appended to a gated version to evade the gate.
+ */
+function stripBuildMetadata(version: string): string {
+  const plus = version.indexOf('+');
+  return plus === -1 ? version : version.slice(0, plus);
+}
+
+/** 严格 SemVer 版本形状：清单里带空白、v 前缀或任意垃圾值都不是可信 DSH 身份。 */
+const SEMVER_VERSION_RE = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+
+/**
+ * Known DSH minor lines. This is an identity boundary, not a claim that every build
+ * received profile-level acceptance: it prevents an unreviewed future wire/bundle
+ * shape (for example 0.1.7) from receiving source patches or a public listener.
+ * Every accepted identity is subject to the same settings-host-mode and authenticated
+ * Cookie-bridge gate below; no historical prerelease is silently exempted.
+ */
+const DSH_SUPPORTED_RUNTIME_RE = /^0\.1\.(?:2|3|5|6)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+
+/** Read one trustworthy SemVer identity from the installed DSH manifest, or null. */
+function readDshVersion(dshRoot: string): string | null {
+  try {
+    const packageJson = JSON.parse(readFileSync(path.join(dshRoot, 'package.json'), 'utf8')) as { version?: unknown };
+    if (typeof packageJson.version !== 'string' || packageJson.version.trim() !== packageJson.version) return null;
+    return SEMVER_VERSION_RE.test(packageJson.version) ? packageJson.version : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A valid DSH manifest must also identify one of the explicitly supported minor lines. */
+function isSupportedDshRuntime(version: string | null): version is string {
+  return version !== null && DSH_SUPPORTED_RUNTIME_RE.test(stripBuildMetadata(version));
+}
 
 /** 补丁管理命令：node dist/cli.js patch [status]（补丁强制启用；无参数=立即重载） */
 function runPatch(argv: string[]): void {
@@ -203,6 +243,11 @@ function runPatch(argv: string[]): void {
     return;
   }
   if (action === undefined || action === 'on' || action === 'reload') {
+    const dshVersion = readDshVersion(root);
+    if (!isSupportedDshRuntime(dshVersion)) {
+      console.error(`[dsh-passwords] Unsupported or invalid DSH version ${dshVersion ?? '(missing/corrupt)'}; refusing to patch (supported minor lines: 0.1.2, 0.1.3, 0.1.5, 0.1.6)`);
+      process.exit(EXIT_DSH_VERSION_UNSUPPORTED);
+    }
     const result = applyRemotePatch(root);
     console.log(`  ${tr('cli.result')}: ${result}`);
     if (result === 'missing') {
@@ -293,18 +338,41 @@ async function boot() {
   }
 
   // ── 远程设置补丁：强制启用，网关每次启动自动应用（幂等） ──
+  // The public gateway has no useful or safe degraded mode without its DSH
+  // contract. Root discovery, patching, and post-patch verification must all
+  // finish before any database, redirect, TLS, or public listener is created.
+  const root = findDshRoot(config.patch.dshRoot);
+  if (!root) {
+    console.error(`[dsh-passwords] ${config.patch.dshRoot ? tr('cli.dshRootMissing') : tr('cli.noDshRoot')}`);
+    process.exit(EXIT_DSH_ROOT_UNAVAILABLE);
+  }
+  // 版本身份是补丁与公开网关的前置边界。未知/损坏清单不能靠“没有命中 Cookie
+  // bridge regex”被静默放行：它可能拥有不同的 bundle / Remote wire contract。
+  const dshVersion = readDshVersion(root);
+  if (!isSupportedDshRuntime(dshVersion)) {
+    console.error(`[dsh-passwords] Unsupported or invalid DSH version ${dshVersion ?? '(missing/corrupt)'}; refusing to patch or start the public gateway (supported minor lines: 0.1.2, 0.1.3, 0.1.5, 0.1.6)`);
+    process.exit(EXIT_DSH_VERSION_UNSUPPORTED);
+  }
   try {
-    const root = findDshRoot(config.patch.dshRoot);
-    if (root) {
-      const result = applyRemotePatch(root);
-      if (result === 'applied') {
-        console.error(`[dsh-passwords] ${tr('cli.patchApplied')}`);
-        if (config.patch.restartService) restartDshWeb(config.patch.restartService, 800);
-      } else if (result === 'missing') {
-        console.error(`[dsh-passwords] ${tr('cli.patchTargetMissing')}`);
-      }
-    } else if (config.patch.dshRoot) {
-      console.error(`[dsh-passwords] ${tr('cli.dshRootMissing')}`);
+    const result = applyRemotePatch(root);
+    if (result === 'missing') {
+      console.error(`[dsh-passwords] ${tr('cli.patchTargetMissing')}`);
+      process.exit(EXIT_ALPHA3_SETTINGS_UNAVAILABLE);
+    }
+    if (result === 'applied') {
+      console.error(`[dsh-passwords] ${tr('cli.patchApplied')}`);
+      if (config.patch.restartService) restartDshWeb(config.patch.restartService, 800);
+    }
+    const status = patchStatus(root);
+    // 所有已支持版本线都统一 fail-closed：公网页关没有安全的“仅 launch token”
+    // 降级模式。任何缺失/未知的宿主 bridge 都必须在监听器、数据库与 TLS 创建前终止。
+    if (!status.settingsHostMode) {
+      console.error('[dsh-passwords] DSH settings host-mode patch is missing or unsupported; refusing to start the public gateway');
+      process.exit(EXIT_ALPHA3_SETTINGS_UNAVAILABLE);
+    }
+    if (status.connectionCookieBridge !== 'native') {
+      console.error('[dsh-passwords] This DSH release requires an authenticated Cookie bridge; refusing to start the public gateway');
+      process.exit(33);
     }
   } catch (error) {
     console.error(`[dsh-passwords] ${tr('cli.patchSyncFailed')}:`, error);

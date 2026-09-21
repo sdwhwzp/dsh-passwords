@@ -101,7 +101,7 @@ External file services and their accounts, passwords and databases are managed b
 
 ### 0. Prerequisites (three things)
 
-Host installs need Node.js 22.19+ or 24+, a working dsh installation, and git. Keep this plugin on the same Node major line as the dsh host; the current verification baseline is DSH `0.1.6-alpha.1`, while the compatibility target retains every `0.1.5` release and the `0.1.2` / `0.1.3` API boundaries. Docker installs only need Docker Engine or Docker Desktop and a DeepSeek API key.
+Host installs need Node.js 22.19+ or 24+, a working dsh installation, and git. Keep this plugin on the same Node major line as the dsh host; the host baseline is the DSH 0.1.6 line, currently pinned to alpha.2 (no stable release yet; the alpha.2 dependency tree, build, regression suite, and test-server real-profile validation pass). The compatibility target retains every `0.1.5` release and the `0.1.2` / `0.1.3` API boundaries. Docker installs only need Docker Engine or Docker Desktop and a DeepSeek API key.
 
 ### 1. Install (by platform)
 
@@ -129,6 +129,19 @@ dsh-passwords install     # generates SETUP_KEY, restores the plugin stack, and 
 The installer checks for prebuilt files, installing dependencies and building only when they are missing. It then generates `SETUP_KEY`, restores the recorded web-profile plugin stack, and applies the remote-settings patch.
 
 ### Automatic plugin-stack restore
+```bash
+# 4. Docker
+docker run -d \
+  --name dsh-passwords \
+  --restart unless-stopped \
+  --env-file .env \
+  -p 127.0.0.1:3088:3088 \
+  -v dsh-home:/data/dsh \
+  -v dsh-passwords-state:/data/dsh-passwords \
+  skywalker237234/dsh-passwords:2.7.3
+```
+
+`.env` needs at least `DEEPSEEK_API_KEY`. Set `MCP_GATEWAY_PUBLIC_HOST` to the domain you actually use. The host publishes port `127.0.0.1:3088` only while the container listens on `0.0.0.0:3088`; terminate TLS on nginx or Caddy for public access. The image bundles DSH `0.1.6-alpha.2` (the pinned release of the DSH 0.1.6 line; bundled-image runtime acceptance has passed); initialization is complete when healthz and readyz both return `ok:true`.
 
 `scripts/profile-plugins.json` is the versioned cross-machine deployment manifest. `dsh-passwords install` idempotently merges its NPM/Git sources, bundle order, Git build permissions, and required profile patches into `~/.dsh/profiles/web`, then runs one `pnpm install`. Existing local `link:` development sources and custom plugins outside the manifest are preserved; retired aggregate packages explicitly named by the manifest are migrated automatically.
 
@@ -249,6 +262,7 @@ node scripts/start-http.mjs [port]    # default 8080, asks for y/N confirmation
 The script prints a plaintext-risk warning first and only starts after you type `y`. Over plain HTTP, passwords and session cookies can be sniffed on the network — for public deployments prefer automatic HTTPS (the default mode; use HTTP mode only when a certificate truly cannot be issued).
 
 For a permanent setup: put `MCP_GATEWAY_AUTO_TLS=0` and `MCP_GATEWAY_PORT=8080` in `.env`; the plugin will then start the gate in HTTP mode whenever dsh starts.
+Alternatively, set `MCP_GATEWAY_AUTO_TLS=0` and `MCP_GATEWAY_PORT=8080` in `.env`; the plugin starts the gateway in HTTP mode. This mode needs no public IP, DNS, ACME, or external CDN and is suitable for an internal network. The initial installation still needs npm/GitHub access, or a prepared project tarball, dependency cache, and local DSH installation. Model replies still require an upstream provider such as `DEEPSEEK_API_KEY`; without a model service, login, permissions, files, and administration remain available but model generation does not.
 
 ## The gate card in dsh settings
 
@@ -336,6 +350,81 @@ dsh-local-workspace                           # reconnect with the saved local d
 > Windows users: use `install.bat` instead. This section uses Linux as the example; the steps are equivalent.
 
 1. `git clone https://github.com/sdwhwzp/dsh-passwords && cd dsh-passwords`
+<details>
+<summary><strong>Forgot the owner password</strong></summary>
+
+Stop the service, clear the users table and restart:
+
+```bash
+node -e "const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync('data/platform.db');db.exec('DELETE FROM users;')"
+```
+
+</details>
+
+<details>
+<summary><strong>Exit codes 30 / 31 / 32</strong></summary>
+
+See the table under "Automatic HTTPS".
+
+</details>
+
+<details>
+<summary><strong>Binding 443 fails as non-root</strong></summary>
+
+Ports below 1024 require root on Linux; switch to a high `MCP_GATEWAY_PORT` and forward as needed.
+
+</details>
+
+<details>
+<summary><strong>dsh reports duplicate loader entry id</strong></summary>
+
+`dsh plugin add` adds every bundle-declaring dependency to the bundles layer and conflicts. Uninstall and register precisely with `node scripts/register-plugin.mjs`.
+
+</details>
+
+<details>
+<summary><strong>npm install of dsh fails on node-pty builds</strong></summary>
+
+Allow install scripts and reinstall:
+
+```bash
+npm config set allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user
+```
+
+</details>
+
+<details>
+<summary><strong>Is a stolen database file a problem</strong></summary>
+
+No. Sensitive fields are encrypted or hashed, passwords exist only as bcrypt hashes, and decryption requires the `.env` keys.
+
+</details>
+
+<details>
+<summary><strong>Can MCP_DB_ENC_KEY be rotated</strong></summary>
+
+No; changing it makes all existing data undecryptable.
+
+</details>
+
+<details>
+<summary><strong>Plugin loading is slow / access feels slow</strong></summary>
+
+The gateway force-caches content-hashed static assets for one year; the first visit after an upgrade downloads fully once, later loads are instant. The gateway adds about 1-2ms per request; check the TLS handshake first:
+
+```bash
+curl -so /dev/null -w "TLS:%{time_appconnect}s\n" https://address/gateway/login
+```
+
+The bottleneck is usually the network path to the server.
+
+</details>
+
+## Manual install
+
+> v2.7.3 targets the DSH 0.1.6 line, currently pinned to alpha.2, while retaining compatibility targets for every `0.1.5` release and the `0.1.2` / `0.1.3` API boundaries. The upstream release has separate alpha.2 validation results; this private candidate requires its own acceptance. The installer requires Node.js `22.19+` or `24+`, registers the plugin, detects dsh, and applies the compatibility patch.
+
+1. `git clone https://github.com/sdwhwzp/dsh-passwords && cd dsh-passwords`
 2. `npm install && npm run build`
 3. `cp .env.example .env`, replace `SETUP_KEY` with a random string (`openssl rand -hex 24`)
 4. Restore the plugin stack: `node scripts/register-plugin.mjs` (merges the dependencies, bundles, build permissions, and profile patches from `scripts/profile-plugins.json`, then runs `pnpm install`. **Don't use `dsh plugin add`** — see the FAQ)
@@ -368,6 +457,7 @@ The UI is bilingual (Chinese/English) and follows dsh's language setting:
 - **CLI**: follows the `LANG` / `LC_ALL` environment variables (`en` prefix = English).
 
 ## Release notes
+Current version: 2.7.3. The DSH baseline target is the 0.1.6 line, currently pinned to alpha.2 (no stable 0.1.6 release yet); upstream test-server results do not certify this private fork. Compatibility targets also retain every DSH `0.1.5` release and the `0.1.2` / `0.1.3` API boundaries. The npm package ships prebuilt dist, TypeScript sources, and all scripts; Docker and npm are built from the same source revision.
 
 ### v2.6.20 (2026-09-08)
 
@@ -440,7 +530,7 @@ Enable `MCP_TENANT_EDITOR=true` only with the tenant edition of `dsh-vsceditor` 
 
 ## Fork synchronization and deployment adaptation
 
-This branch merges `slywalker2006/dsh-passwords` commit `59968d3` (2.7.0). The deployment build is `2.7.0-dsh.20260911.9` and requires the personal Harness 0.1.5-rc.2 build with native principal support. Official npm Harness packages do not contain those private extensions; deployment overrides must select the matching Harness artifacts throughout.
+See [fork compatibility](docs/compatibility-matrix.md) for the source commit, candidate version, private Harness requirements and deployment policy.
 
 Without `TENANT_SSH_ENABLED=true`, the gateway retains legacy SSH alias ownership checks: restricted accounts may use only their claimed connections; import, cluster, and tunnel operations remain administrator-only. SQLite and MySQL/MariaDB persist alias ownership, which the account-isolated Host uses to migrate existing connections.
 

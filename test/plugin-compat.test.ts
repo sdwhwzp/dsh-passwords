@@ -5,6 +5,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createPluginCompat } from '../src/plugin-compat.js';
+import net from 'node:net';
+import { once } from 'node:events';
+import { isPermanentGatewayExitCode, waitForGatewayPortFree } from '../dist/plugin.js';
+
+test('网关永久错误码不会进入自动重启循环', () => {
+  for (const code of [1, 30, 31, 32, 33, 34, 35, 36, 37]) {
+    assert.equal(isPermanentGatewayExitCode(code), true, `exit ${code}`);
+  }
+  for (const code of [0, 2, 143, 'unknown']) {
+    assert.equal(isPermanentGatewayExitCode(code), false, `exit ${String(code)}`);
+  }
+});
 
 test('兼容层默认关闭：全部钩子不接管任何路径（第三方一律走登记表 / fail-closed）', () => {
   const off = createPluginCompat(false);
@@ -75,4 +87,18 @@ test('兼容层打开：高危上传扩展名检查只覆盖已知上传插件�
   assert.equal(on.isDangerousUploadRequest('POST', '/api/dsh-uploads/nested'), true);
   assert.equal(on.isDangerousUploadRequest('GET', '/api/dsh-uploads'), false);
   assert.equal(on.isDangerousUploadRequest('POST', '/api/other'), false);
+});
+
+test('gateway port handoff preserves its listener and detects release', async () => {
+  const server = net.createServer((socket) => socket.end());
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const port = (server.address() as net.AddressInfo).port;
+  try {
+    assert.equal(await waitForGatewayPortFree(port, 0), false);
+    assert.equal(server.listening, true);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+  assert.equal(await waitForGatewayPortFree(port, 0), true);
 });

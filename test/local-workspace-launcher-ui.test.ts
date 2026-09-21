@@ -117,7 +117,7 @@ test('通过选择模式旁的新会话控制行注册且 launch 响应经过校
   assert.match(stylesSource, /dshpw-local-launcher-seat\{position:relative;display:inline-flex/);
   assert.doesNotMatch(indexSource, /id: 'dsh-passwords-local-workspace-sidebar'/);
   assert.match(indexSource, /ctx\.uiWorkspace\.connectWorkspace\(workspace\.workspaceId\)/);
-  assert.match(indexSource, /ctx\.sessions\.open\(sessionId\)/);
+  assert.match(indexSource, /ctx\.uiWorkspace\.openSession\(sessionId\)/);
   assert.match(indexSource, /order: 30/);
   assert.doesNotMatch(launcherSource, /querySelector|MutationObserver/);
   assert.match(launcherSource, /IconProjectAddOutline16/);

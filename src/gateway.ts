@@ -27,7 +27,7 @@ import { spawn } from 'node:child_process';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { createHmac, createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHmac, createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { type Duplex, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import zlib from 'node:zlib';
@@ -54,7 +54,7 @@ import {
 import type { PlatformConfig } from './config.js';
 import { hardenSecretsAfterSetup, readEndpointRuntimeConfig } from './config.js';
 import { AuthService, AuthError, type RequestMeta } from './auth.js';
-import { Database, MediaError, MEDIA_IN_USE, type UserPermissionsRow, type MessageRow } from './db.js';
+import { Database, MediaError, MEDIA_IN_USE, pathWithinDeletedTree, samePathForMatch, type UserPermissionsRow, type MessageRow, type WorkspaceCleanupIntent } from './db.js';
 import {
   folderAllowed,
   normalizePath,
@@ -3182,12 +3182,14 @@ export function createGatewayServer(
         return;
       }
       await link(temporary, destination.target);
+      await unlink(temporary);
       db.audit('managed_file_uploaded', {
         username: access.me.username,
         detail: JSON.stringify({ path: destination.relative, bytes }),
       });
       res.status(201).json({ ok: true, file: { name, path: destination.relative, bytes } });
     } catch (error) {
+      await unlink(temporary).catch(() => undefined);
       const code = (error as NodeJS.ErrnoException).code;
       if (!res.headersSent && !res.writableEnded) {
         if (code === 'EEXIST') {
@@ -3652,6 +3654,215 @@ export function createGatewayServer(
     stream.pipe(res);
   });
 
+  // ── 目录删除联动：上游 workspace registry 快照与删除 ─────────────
+  // 信封与当前上游 dsh 0.1.5-rc.2 的实际 Remote 协议逐字对齐（读包内源码确认，非猜测）：
+  //   · 快照：WS /api/remote.mux 上 open `workspace/follow`（payload { args: {} }），
+  //     首个 item 即 { type:'baseline', value:{ items:[{workspaceId,path,sessionIds}], archivedSessionIds } }。
+  //   · 删除：POST /api/workspace/delete，请求体为 Connection 的 client-request 信封
+  //     { type:'client-request', rpcId, method:'workspace/delete', payload:{ args:{ request:{ workspaceId } } } }；
+  //     响应 { type:'server-response', rpcId, result:{ ok:true, value:{ deleted:true } } }；
+  //     result.ok=false 且 error.code='workspace/not-found' 视为目标已不存在（删除目的已达成）。
+  // 旧点号 workspace.list/remove 在当前上游已不存在，这里不做猜测性兼容；失败一律可观测。
+  type UpstreamWorkspaceEntry = { workspaceId: string; path: string; sessionIds: string[] };
+
+  // ── 删除联动专用路径判定 ──────────────────────────────────────
+  // 上游注册表路径、内存 cwd 与插件 DB 记录可能以不同大小写/符号链接形态出现，
+  // 且被删根在比较时已不存在（realpath 失败）。匹配实现放在 db.ts（网关已依赖
+  // db.ts，反向 import 会形成循环），重试准入与 DB 清理共用同一函数，保证
+  // 「准入认为可重试」与「清理实际命中」不会各说各话。
+  /** 路径本身位于敏感基内（含相等）。 */
+  const pathInsideSensitiveBase = (candidate: string): boolean =>
+    sensitivePathBases().some((base) => pathWithinDeletedTree(candidate, base));
+  /** 路径位于某个敏感基的上级（递归删除会连带删掉敏感目录）。 */
+  const pathContainsSensitiveBase = (candidate: string): boolean =>
+    sensitivePathBases().some((base) => pathWithinDeletedTree(base, candidate));
+  /** 该路径是否仍被工作区状态或插件 DB 引用（重试已删除目录时的准入依据）。 */
+  const pathReferencedByWorkspaceState = (requested: string): boolean => {
+    const within = (candidate: string): boolean => pathWithinDeletedTree(candidate, requested);
+    for (const workspacePath of workspacePathById.values()) if (within(workspacePath)) return true;
+    for (const cwd of sessionCwdById.values()) if (within(cwd)) return true;
+    try {
+      for (const owner of db.listManagedWorkspaces()) if (within(owner.path)) return true;
+      for (const user of db.listUsers()) {
+        if (user.role !== 'user') continue;
+        const perms = db.getPermissions(user.id);
+        if (perms !== null && perms.allowed_folders.some((folder) => within(folder))) return true;
+      }
+    } catch {
+      // 读库失败 = 无法确认引用 = 维持 404（不凭猜测做注册表/DB 写入）。
+      return false;
+    }
+    return false;
+  };
+  /** DB 清理失败时的失效兜底：从 DB 与内存中收集路径树相关的子用户（宁多勿漏）。 */
+  const collectPathRelatedUserIds = (root: string): number[] => {
+    const users = new Set<number>();
+    const within = (candidate: string): boolean => pathWithinDeletedTree(candidate, root);
+    try {
+      for (const owner of db.listManagedWorkspaces()) if (within(owner.path)) users.add(owner.user_id);
+      for (const user of db.listUsers()) {
+        if (user.role !== 'user') continue;
+        const perms = db.getPermissions(user.id);
+        if (perms !== null && perms.allowed_folders.some((folder) => within(folder))) users.add(user.id);
+      }
+    } catch {
+      // DB 不可读时退回内存来源；失效范围宁大勿小。
+    }
+    for (const [sessionId, cwd] of sessionCwdById) {
+      const owner = sessionOwner(sessionId);
+      if (owner !== null && within(cwd)) users.add(owner);
+    }
+    return [...users];
+  };
+
+  /** 通过 Remote mux 读取 workspace/follow 的 baseline；任何失败/超时返回 null（不阻断物理删除）。 */
+  const fetchUpstreamWorkspaceEntries = (cookie: string, timeoutMs = 2_000): Promise<UpstreamWorkspaceEntry[] | null> =>
+    new Promise((resolve) => {
+      let settled = false;
+      let socket: WebSocket | null = null;
+      const finish = (value: UpstreamWorkspaceEntry[] | null): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try { if (socket !== null) socket.close(); } catch { /* 已关闭 */ }
+        resolve(value);
+      };
+      const timer = setTimeout(() => finish(null), timeoutMs);
+      const streamId = `gwfs-${randomUUID().replace(/-/g, '')}`;
+      try {
+        socket = new WebSocket(`ws://${upstreamAuthority}/api/remote.mux`, {
+          headers: {
+            host: upstreamAuthority,
+            origin: `http://${upstreamAuthority}`,
+            ...(cookie === '' ? {} : { cookie }),
+            ...internalAdminPrincipalHeaders(),
+          },
+          rejectUnauthorized: process.env.MCP_GATEWAY_UPSTREAM_TLS_VERIFY !== '0',
+          agent: upstreamAgent,
+          maxPayload: 16 * 1024 * 1024,
+        });
+      } catch {
+        finish(null);
+        return;
+      }
+      socket.on('open', () => {
+        try {
+          socket?.send(JSON.stringify({ type: 'open', streamId, endpoint: 'workspace/follow', payload: { args: {} } }));
+        } catch {
+          finish(null);
+        }
+      });
+      socket.on('message', (data: Buffer) => {
+        let frame: ReturnType<typeof parseTenantRemoteServerFrame>;
+        try { frame = parseTenantRemoteServerFrame(data.toString('utf8')); } catch { finish(null); return; }
+        if (frame.streamId !== streamId || frame.type !== 'item') return;
+        const value = frame.value;
+        if (!isPlainJsonRecord(value) || value.type !== 'baseline' || !isPlainJsonRecord(value.value) || !Array.isArray(value.value.items)) return;
+        const entries: UpstreamWorkspaceEntry[] = [];
+        for (const item of value.value.items) {
+          if (!isPlainJsonRecord(item) || typeof item.workspaceId !== 'string' || typeof item.path !== 'string') continue;
+          entries.push({
+            workspaceId: item.workspaceId,
+            path: item.path,
+            sessionIds: Array.isArray(item.sessionIds)
+              ? item.sessionIds.filter((id): id is string => typeof id === 'string' && id.length > 0 && id.length <= 200)
+              : [],
+          });
+        }
+        finish(entries);
+      });
+      socket.on('error', () => finish(null));
+      socket.on('close', () => finish(null));
+    });
+
+  /** 按上游真实信封删除一个 workspace 注册条目；workspace/not-found 视为已达成。 */
+  const deleteUpstreamWorkspaceEntry = (
+    workspaceId: string,
+    cookie: string,
+    timeoutMs = 3_000,
+  ): Promise<{ ok: true } | { ok: false; error: string }> =>
+    new Promise((resolve) => {
+      const rpcId = randomUUID();
+      const payload = JSON.stringify({
+        type: 'client-request',
+        rpcId,
+        method: 'workspace/delete',
+        payload: { args: { request: { workspaceId } } },
+      });
+      const request = http.request({
+        hostname: upstreamHost,
+        port: upstreamPort,
+        path: '/api/workspace/delete',
+        method: 'POST',
+        headers: {
+          host: upstreamAuthority,
+          'content-type': 'application/json',
+          'content-length': String(Buffer.byteLength(payload)),
+          ...(cookie === '' ? {} : { cookie }),
+          ...internalAdminPrincipalHeaders(),
+        },
+        agent: upstreamAgent,
+        timeout: timeoutMs,
+      }, (response) => {
+        const chunks: Buffer[] = [];
+        let size = 0;
+        response.on('data', (chunk: Buffer) => {
+          size += chunk.length;
+          if (size <= 256 * 1024) chunks.push(chunk);
+        });
+        response.on('end', () => {
+          if (response.statusCode !== 200 || size > 256 * 1024) {
+            resolve({ ok: false, error: `HTTP ${response.statusCode}` });
+            return;
+          }
+          try {
+            const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
+            // 响应必须关联到本次请求，否则不能把它当成本次删除的结果。
+            if (parsed.rpcId !== rpcId) {
+              resolve({ ok: false, error: 'rpcId mismatch' });
+              return;
+            }
+            const result = parsed.result;
+            if (isPlainJsonRecord(result) && result.ok === true) {
+              resolve({ ok: true });
+              return;
+            }
+            if (isPlainJsonRecord(result) && result.ok === false && isPlainJsonRecord(result.error)) {
+              const code = typeof result.error.code === 'string' ? result.error.code : '';
+              const message = typeof result.error.message === 'string' ? result.error.message : '';
+              // 目标已不存在 = 删除目的已达成（幂等）
+              if (code === 'workspace/not-found') {
+                resolve({ ok: true });
+                return;
+              }
+              resolve({ ok: false, error: code !== '' ? `${code}: ${message}` : message || 'upstream error' });
+              return;
+            }
+            resolve({ ok: false, error: 'invalid upstream response' });
+          } catch {
+            resolve({ ok: false, error: 'invalid upstream response' });
+          }
+        });
+      });
+      request.on('error', (error) => resolve({ ok: false, error: String((error as Error).message ?? error) }));
+      request.on('timeout', () => {
+        request.destroy();
+        resolve({ ok: false, error: 'timeout' });
+      });
+      request.end(payload);
+    });
+
+  /** 本地兜底清单：网关进程内已见的 workspaceId→path（不完整）。仅用于向调用方报告
+   *  「可能有工作区未被同步」，绝不作为上游删除的依据（删除只信权威快照）。 */
+  const localUpstreamWorkspaceEntries = (): UpstreamWorkspaceEntry[] => {
+    const entries = new Map<string, UpstreamWorkspaceEntry>();
+    const remember = (workspaceId: string, workspacePath: string): void => {
+      if (!entries.has(workspaceId)) entries.set(workspaceId, { workspaceId, path: workspacePath, sessionIds: [] });
+    };
+    for (const [workspaceId, workspacePath] of workspacePathById) remember(workspaceId, workspacePath);
+    return [...entries.values()];
+  };
+
   // ── 删除文件系统目录（仅主用户；目录选择器删除按钮的后端）────
   // 用途：主用户在「选择工作区目录」弹窗里清理服务器上的文件夹（含隐藏目录）。
   // 安全约束（按顺序）：
@@ -3659,9 +3870,14 @@ export function createGatewayServer(
   //  2. 规范化 + realpath 后再校验（防 ../ 与符号链接逃逸）
   //  3. 必须是真实目录（非 Windows 用 O_DIRECTORY|O_NOFOLLOW 锁 fd 后 fstat，
   //     Windows 上 openSync 目录会报错，退化为 statSync）
-  //  4. 敏感目录屏蔽（与 /gateway/api/download 同一套基列表）及其一切子路径
+  //  4. 敏感目录屏蔽（与 /gateway/api/download 同一套基列表）及其一切子路径与祖先
   //  5. 文件系统根与用户主目录本身不可删
-  //  6. 递归删除 + 审计日志
+  //  6. 只有「注册 dsh-auth 凭据 + 权威上游 workspace/follow 快照」才允许调用
+  //     workspace/delete；删除后重读注册表复核，残留一律计失败；本地缓存只用于报告
+  //  7. 插件 DB 的 ownership / allowed_folders / grants 单事务清理（白名单清空回落
+  //     __deny__，绝不 fail-open）；清理失败返回 5xx 且仍失效 mux 快照，并把受信
+  //     根+会话写入 workspace_cleanup_intents，供重启/缓存清空后重试同一路径收敛
+  //  8. 递归删除 + 审计日志；任一步骤部分失败都必须可观测（不假装全成功）
   const fsDeleteRate = new Map<number, number[]>();
   app.post('/gateway/api/fs/delete-directory', jsonBody, (req, res) => {
     const me = apiAuth(req, res, true);
@@ -3677,70 +3893,481 @@ export function createGatewayServer(
     fsDeleteRate.set(me.userId, recent);
     const body = (req.body ?? {}) as Record<string, unknown>;
     const rawPath = typeof body.path === 'string' ? body.path : '';
+    // 目录已物理删除、但联动/授权清理未收口时，选择器会带 cleanupOnly=true 重试。
+    // 该模式绝不删除文件系统：它只接受与服务端持久化失败意图相同、且当前仍不存在的路径。
+    const cleanupOnly = body.cleanupOnly === true;
     if (rawPath === '' || rawPath.length > 4096) {
       res.status(400).json({ ok: false, code: 'INVALID', error: 'path 无效' });
       return;
     }
     const abs = path.resolve(rawPath);
-    let real: string;
+    let real: string | null = null;
+    let missingCode: string | undefined;
     try {
       real = realpathSync(abs);
-    } catch {
-      res.status(404).json({ ok: false, code: 'NOT_FOUND', error: '目录不存在' });
-      return;
+    } catch (error) {
+      missingCode = (error as { code?: string }).code;
     }
-    let isDir: boolean;
-    if (process.platform === 'win32') {
-      try {
-        isDir = statSync(real).isDirectory();
-      } catch {
+    // 目录已不存在（重试场景）：仅当该路径仍被工作区状态/插件 DB 引用，或
+    // 存在（上次删除写入的）持久化清理意图时才继续；其余维持 404——避免对任意
+    // 不存在路径做注册表/DB 写入（重试先过敏感目录检查）。
+    const alreadyDeleted = real === null && (missingCode === 'ENOENT' || missingCode === 'ENOTDIR');
+    let retryIntent: WorkspaceCleanupIntent | null = null;
+    // cleanupOnly 是墓碑行的恢复动作，而不是第二次删除确认：它必须先命中服务端
+    // 持久化的失败意图。若同一路径已被重建，废弃旧意图并拒绝，而不是把旧清理应用到
+    // 新目录或递归删除新内容。敏感路径仍优先维持 403，避免误报为普通冲突。
+    if (cleanupOnly && !alreadyDeleted) {
+      if (real === null) {
         res.status(404).json({ ok: false, code: 'NOT_FOUND', error: '目录不存在' });
         return;
       }
-    } else {
-      // 锁 fd 后再判定目录类型，缩短 realpath 与删除之间的替换窗口。
-      // ENOTDIR = 路径存在但不是目录（400）；其它打开失败（不存在/权限）统一 404。
-      let fd: number | undefined;
-      let st;
-      try {
-        fd = openSync(real, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | (fsConstants.O_NOFOLLOW ?? 0));
-        st = fstatSync(fd);
-      } catch (error) {
-        const code = (error as { code?: string }).code;
-        if (fd !== undefined) closeSync(fd);
-        if (code === 'ENOTDIR') {
-          res.status(400).json({ ok: false, code: 'INVALID', error: '只能删除目录' });
-        } else {
-          res.status(404).json({ ok: false, code: 'NOT_FOUND', error: '目录不存在' });
-        }
+      if (samePathForMatch(real, path.parse(real).root) || samePathForMatch(real, os.homedir()) ||
+        pathInsideSensitiveBase(real) || pathContainsSensitiveBase(real)) {
+        res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '敏感目录不可删除' });
         return;
       }
-      closeSync(fd);
-      isDir = st.isDirectory();
-    }
-    if (!isDir) {
-      res.status(400).json({ ok: false, code: 'INVALID', error: '只能删除目录' });
+      try {
+        // 用请求的规范化路径查意图而不是当前 realpath：重建路径可能已经指向与旧目录
+        // 不同的对象，但同一路径文本仍是唯一可安全废弃的旧恢复任务。
+        retryIntent = db.findWorkspaceCleanupIntent(normalizePath(abs));
+      } catch {
+        retryIntent = null;
+      }
+      if (retryIntent === null) {
+        res.status(404).json({ ok: false, code: 'NOT_FOUND', error: '未找到可重试的授权清理任务' });
+        return;
+      }
+      // 不清除旧意图：它记载的是原删除的未收敛授权/注册表状态；若在这里丢弃，
+      // 新目录恰好复用同一路径时旧授权残留会失去唯一的安全收敛线索。选择器退出
+      // 墓碑并恢复常规删除；之后若主用户确认删除这个新目录，完整普通流程会把旧
+      // 意图与当前目录状态一起收敛。cleanupOnly 本身绝不触碰新目录。
+      db.audit('fs_directory_cleanup_retry_conflicted', {
+        username: me.username,
+        ip: req.ip,
+        userAgent: req.headers['user-agent'] ?? null,
+        detail: JSON.stringify({ path: normalizePath(abs), intentRoot: retryIntent.root, retained: true }),
+      });
+      res.status(409).json({
+        ok: false,
+        code: 'CLEANUP_RETRY_CONFLICT',
+        error: '目录已被重新创建；为避免删除新内容，授权清理重试未执行。请刷新后按常规删除流程操作',
+      });
       return;
     }
-    const fsRoot = path.parse(real).root;
-    if (real === fsRoot || real === os.homedir() || isSensitivePath(real)) {
-      res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '敏感目录不可删除' });
+    if (alreadyDeleted) {
+      const requested = normalizePath(abs);
+      if (samePathForMatch(requested, path.parse(abs).root) || samePathForMatch(requested, os.homedir()) ||
+        pathInsideSensitiveBase(requested) || pathContainsSensitiveBase(requested)) {
+        res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '敏感目录不可删除' });
+        return;
+      }
+      // 持久化意图是「目录已物理删除、DB 清理失败」的可信凭证：它允许在重启/内存
+      // 缓存清空、上游条目已消失（仅剩会话 grants）时仍凭同一路径重试清理。
+      // 读库失败 = 无法确认 = 维持 404（不凭猜测做注册表/DB 写入）。
+      try {
+        retryIntent = db.findWorkspaceCleanupIntent(requested);
+      } catch {
+        retryIntent = null;
+      }
+      if (cleanupOnly && retryIntent === null) {
+        // 墓碑恢复只信持久化的失败意图；不允许调用方把任意缺失路径伪装成清理任务。
+        res.status(404).json({ ok: false, code: 'NOT_FOUND', error: '未找到可重试的授权清理任务' });
+        return;
+      }
+      if (!cleanupOnly && retryIntent === null && !pathReferencedByWorkspaceState(requested)) {
+        res.status(404).json({ ok: false, code: 'NOT_FOUND', error: '目录不存在' });
+        return;
+      }
+      // 仅清理重试使用首次失败时服务端记录的规范根，确保 DB 的别名匹配和审计口径
+      // 与原删除一致；普通兼容重试保留请求路径。
+      real = cleanupOnly && retryIntent !== null ? retryIntent.root : abs;
+    } else if (real === null) {
+      res.status(404).json({ ok: false, code: 'NOT_FOUND', error: '目录不存在' });
       return;
     }
-    try {
-      rmSync(real, { recursive: true, maxRetries: 3, retryDelay: 100 });
-    } catch (error) {
-      console.warn('[dsh-passwords] 目录删除失败:', String(error));
-      res.status(500).json({ ok: false, code: 'INTERNAL', error: '删除失败' });
-      return;
+    if (!alreadyDeleted) {
+      let isDir: boolean;
+      if (process.platform === 'win32') {
+        try {
+          isDir = statSync(real).isDirectory();
+        } catch {
+          res.status(404).json({ ok: false, code: 'NOT_FOUND', error: '目录不存在' });
+          return;
+        }
+      } else {
+        // 锁 fd 后再判定目录类型，缩短 realpath 与删除之间的替换窗口。
+        // ENOTDIR = 路径存在但不是目录（400）；其它打开失败（不存在/权限）统一 404。
+        let fd: number | undefined;
+        let st;
+        try {
+          fd = openSync(real, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | (fsConstants.O_NOFOLLOW ?? 0));
+          st = fstatSync(fd);
+        } catch (error) {
+          const code = (error as { code?: string }).code;
+          if (fd !== undefined) closeSync(fd);
+          if (code === 'ENOTDIR') {
+            res.status(400).json({ ok: false, code: 'INVALID', error: '只能删除目录' });
+          } else {
+            res.status(404).json({ ok: false, code: 'NOT_FOUND', error: '目录不存在' });
+          }
+          return;
+        }
+        closeSync(fd);
+        isDir = st.isDirectory();
+      }
+      if (!isDir) {
+        res.status(400).json({ ok: false, code: 'INVALID', error: '只能删除目录' });
+        return;
+      }
+      if (samePathForMatch(real, path.parse(real).root) || samePathForMatch(real, os.homedir()) ||
+        pathInsideSensitiveBase(real) || pathContainsSensitiveBase(real)) {
+        res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '敏感目录不可删除' });
+        return;
+      }
     }
-    db.audit('fs_directory_deleted', {
-      username: me.username,
-      ip: req.ip,
-      userAgent: req.headers['user-agent'] ?? null,
-      detail: real,
-    });
-    res.json({ ok: true, deleted: real });
+    const targetPath: string = real;
+    const recoveryOnly = cleanupOnly && retryIntent !== null;
+    void (async () => {
+      let physicallyDeleted = alreadyDeleted;
+      // alreadyDeleted 语义可能在请求进行中由并发删除触发（快照后、复核前路径消失）：
+      // 响应与联动都必须按幂等已删除路径处理，而不是 404 跳过清理。
+      let idempotentDelete = alreadyDeleted;
+      try {
+        const deletedRoot = normalizePath(targetPath);
+        // 1) 必须在上游删除之前取得权威快照；只使用受保护通道登记的 dsh-auth，
+        //    浏览器 Cookie（含 dsh-auth-*）绝不转发给 loopback 上游。凭据缺失 =
+        //    同步 fail-closed（只删目录，注册表保持原样并显式上报）。
+        const registryCookie = upstreamBrowserCookieHeader() ?? '';
+        const registryAuthAvailable = registryCookie !== '';
+        const upstreamEntries = registryAuthAvailable ? await fetchUpstreamWorkspaceEntries(registryCookie) : null;
+        const registrySnapshot: 'upstream' | 'unavailable' = upstreamEntries !== null ? 'upstream' : 'unavailable';
+        const affected = [...new Map(
+          (upstreamEntries ?? []).filter((entry) => pathWithinDeletedTree(entry.path, deletedRoot))
+            .map((entry) => [entry.workspaceId, entry] as const),
+        ).values()];
+        // 快照不可用时本地缓存只作为「可能受影响」报告，绝不驱动 workspace/delete。
+        const localCandidates = upstreamEntries !== null
+          ? []
+          : [...new Map(
+              localUpstreamWorkspaceEntries().filter((entry) => pathWithinDeletedTree(entry.path, deletedRoot))
+                .map((entry) => [entry.workspaceId, entry] as const),
+            ).values()];
+        // 2) 快照等待期间路径可能被替换：删前重新 realpath 并复核目录身份与敏感基（fail-closed）。
+        //    并发删除赢得竞争（路径在复核时已消失）→ 按 alreadyDeleted 的幂等联动继续，
+        //    绝不 404 跳过注册表/DB/pending 清理；真正被替换成别的对象仍返回 409。
+        if (!alreadyDeleted && !recoveryOnly) {
+          let realAgain: string | null = null;
+          let vanished = false;
+          try {
+            realAgain = realpathSync(targetPath);
+          } catch (error) {
+            const code = (error as { code?: string }).code;
+            if (code === 'ENOENT' || code === 'ENOTDIR') {
+              vanished = true;
+            } else {
+              res.status(404).json({ ok: false, code: 'NOT_FOUND', error: '目录不存在' });
+              return;
+            }
+          }
+          if (!vanished) {
+            const rechecked: string = realAgain as string;
+            if (!samePathForMatch(rechecked, targetPath)) {
+              res.status(409).json({ ok: false, code: 'CONFLICT', error: '目录在删除前发生变化，请刷新后重试' });
+              return;
+            }
+            let stillDirectory = false;
+            let statMissing = false;
+            try {
+              stillDirectory = statSync(rechecked).isDirectory();
+            } catch (error) {
+              statMissing = (error as { code?: string }).code === 'ENOENT';
+            }
+            if (!stillDirectory) {
+              if (statMissing) {
+                // stat 与 realpath 之间又被并发删除：同样按幂等已删除处理。
+                vanished = true;
+              } else {
+                res.status(400).json({ ok: false, code: 'INVALID', error: '只能删除目录' });
+                return;
+              }
+            } else if (samePathForMatch(rechecked, path.parse(rechecked).root) || samePathForMatch(rechecked, os.homedir()) ||
+              pathInsideSensitiveBase(rechecked) || pathContainsSensitiveBase(rechecked)) {
+              res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '敏感目录不可删除' });
+              return;
+            } else {
+              // 3) 物理删除（不可回滚；workspace 注册表同步失败在下面显式上报）
+              try {
+                rmSync(targetPath, { recursive: true, maxRetries: 3, retryDelay: 100 });
+                physicallyDeleted = true;
+              } catch (error) {
+                if ((error as { code?: string }).code === 'ENOENT') {
+                  // rmSync 前最后一个窗口也被并发删除赢下：删除目的已达成，继续联动清理。
+                  vanished = true;
+                } else {
+                  console.warn('[dsh-passwords] 目录删除失败:', String(error));
+                  res.status(500).json({ ok: false, code: 'INTERNAL', error: '删除失败' });
+                  return;
+                }
+              }
+            }
+          }
+          if (vanished) {
+            physicallyDeleted = true;
+            idempotentDelete = true;
+          }
+        }
+        // 4) 上游注册表同步（仅权威快照）：并发上限 8，单个失败不影响其余条目；
+        //    删除后必须重读注册表验证——仍存在的 workspaceId 一律计为失败，绝不假装成功。
+        const deletedWorkspaceIds: string[] = [];
+        const failedWorkspaces: Array<{ workspaceId: string; path: string; error: string }> = [];
+        if (upstreamEntries !== null && affected.length > 0) {
+          const failedById = new Map<string, { workspaceId: string; path: string; error: string }>();
+          for (let index = 0; index < affected.length; index += 8) {
+            const batch = affected.slice(index, index + 8);
+            const results = await Promise.all(batch.map(async (entry) => ({
+              entry,
+              outcome: await deleteUpstreamWorkspaceEntry(entry.workspaceId, registryCookie),
+            })));
+            for (const { entry, outcome } of results) {
+              if (!outcome.ok) {
+                failedById.set(entry.workspaceId, { workspaceId: entry.workspaceId, path: entry.path, error: outcome.error });
+              }
+            }
+          }
+          // 复核快照：任何失败/超时都意味着「未经证实」，按失败上报（no false success）。
+          const verified = await fetchUpstreamWorkspaceEntries(registryCookie);
+          const stillPresent = verified === null ? null : new Set(verified.map((entry) => entry.workspaceId));
+          for (const entry of affected) {
+            const failed = failedById.get(entry.workspaceId);
+            if (failed !== undefined) {
+              failedWorkspaces.push(failed);
+              continue;
+            }
+            if (stillPresent === null) {
+              failedWorkspaces.push({ workspaceId: entry.workspaceId, path: entry.path, error: 'post-delete verification unavailable' });
+              continue;
+            }
+            if (stillPresent.has(entry.workspaceId)) {
+              failedWorkspaces.push({ workspaceId: entry.workspaceId, path: entry.path, error: 'still present after delete' });
+              continue;
+            }
+            deletedWorkspaceIds.push(entry.workspaceId);
+          }
+        }
+        // 5) 受影响会话：权威快照的 sessionIds ∪ 内存 cwd 映射命中的会话
+        const affectedSessionIds = new Set<string>();
+        for (const entry of affected) {
+          for (const sessionId of entry.sessionIds) affectedSessionIds.add(sessionId);
+        }
+        for (const map of [sessionCwdById]) {
+          for (const [sessionId, cwd] of map) {
+            if (pathWithinDeletedTree(cwd, deletedRoot)) affectedSessionIds.add(sessionId);
+          }
+        }
+        // 重启/上游条目已消失时，权威快照与内存映射都不再有该目录树的会话；
+        // 用持久化意图里保存的会话 ID 补齐，否则 grants-only 残留永远无法命中。
+        if (retryIntent !== null) {
+          for (const sessionId of retryIntent.sessionIds) affectedSessionIds.add(sessionId);
+        }
+        // 6) 清理内存快照与插件 DB（单事务）；白名单删空回落 __deny__，绝不 fail-open。
+        //    已从上游删除的 id 不再保留任何 workspaceId→path 映射（含各子用户快照）。
+        for (const workspaceId of deletedWorkspaceIds) workspaceSessionIdsById.delete(workspaceId);
+        for (const sessionId of affectedSessionIds) pendingWorkspaceSessionIds.delete(sessionId);
+        rebuildActiveWorkspaceSessions();
+        workspaceSnapshotReady = false;
+        workspaceSnapshotUpdatedAt = 0;
+        for (const [workspaceId, workspacePath] of [...workspacePathById]) {
+          if (pathWithinDeletedTree(workspacePath, deletedRoot)) workspacePathById.delete(workspaceId);
+        }
+        for (const [sessionId, cwd] of [...sessionCwdById]) {
+          if (pathWithinDeletedTree(cwd, deletedRoot)) sessionCwdById.delete(sessionId);
+        }
+        let cleanup = { invalidateUserIds: [] as number[], removedWorkspaces: 0, removedFolders: 0, removedGrants: 0 };
+        let cleanupFailed = false;
+        try {
+          cleanup = db.cleanupDeletedWorkspaceTree(deletedRoot, [...affectedSessionIds]);
+        } catch (error) {
+          // 单事务回滚：不会留下空 allowed_folders（无 fail-open），但必须让调用方可观测。
+          console.warn('[dsh-passwords] 目录删除后的 workspace 授权清理失败:', String(error));
+          cleanupFailed = true;
+        }
+        // 一个目录删除只有在两条独立收敛条件都成立时才算完整：插件 DB 授权已清理，
+        // 且权威 DSH workspace/follow 快照已可用并确认所有命中条目都从 sidebar
+        // 注册表消失。此前仅按 DB 成功清意图会在上游同步失败时丢掉唯一恢复凭据。
+        const workspaceSyncIncomplete = upstreamEntries === null || failedWorkspaces.length > 0;
+        const cleanupIncomplete = cleanupFailed || workspaceSyncIncomplete;
+        // 任何未收敛路径（DB 或上游同步）都记录同一受信意图。重试只重读权威快照，
+        // 对仍在树内的 workspace 发送真实 workspace/delete；绝不以本地缓存猜测删除。
+        // 意图写不进去就绝不宣称可重试（见下方显式 *_NO_RETRY 分支）。
+        let cleanupIntentSaved = false;
+        if (cleanupIncomplete) {
+          try {
+            db.recordWorkspaceCleanupIntent(deletedRoot, [...affectedSessionIds], me.userId);
+            cleanupIntentSaved = true;
+          } catch (error) {
+            console.warn('[dsh-passwords] 记录目录清理意图失败（自动重试不可保证）:', String(error));
+          }
+        } else {
+          // 仅在 DB 与权威 sidebar 同步均收敛后清除意图。清除失败不推翻已完成的
+          // 实际状态；残留只会使同路径后续调用做一次安全的幂等空清理。
+          try {
+            if (db.clearWorkspaceCleanupIntent(deletedRoot) > 0) {
+              db.audit('fs_directory_cleanup_intent_cleared', {
+                username: me.username,
+                ip: req.ip,
+                userAgent: req.headers['user-agent'] ?? null,
+                detail: JSON.stringify({ path: targetPath }),
+              });
+            }
+          } catch (error) {
+            console.warn('[dsh-passwords] 清除目录清理意图失败:', String(error));
+          }
+        }
+        // DB 清理失败也必须失效内存/mux 快照，否则旧 baseline 会继续把已删目录当作可见工作区。
+        const invalidateUserIds = new Set<number>(cleanup.invalidateUserIds);
+        if (cleanupFailed) {
+          for (const userId of collectPathRelatedUserIds(deletedRoot)) invalidateUserIds.add(userId);
+          // 会话归属不依赖路径引用；补齐受影响账号并关闭其现有连接。
+          try {
+            for (const userId of db.listSessionOwnerUserIds([...affectedSessionIds])) invalidateUserIds.add(userId);
+          } catch {
+            // DB 不可读：无法补齐（响应仍为显式失败，不会伪装成功）。
+          }
+        }
+        for (const userId of invalidateUserIds) {
+          sessionAgentPresetByUser.delete(userId);
+          closeTenantConnections(tenantConnectionsByUserId.get(userId), 'workspace removed');
+        }
+        const warnings: string[] = [];
+        if (recoveryOnly) {
+          warnings.push('已执行仅授权/工作区同步恢复：未再次删除文件系统目录');
+        }
+        if (upstreamEntries === null) {
+          warnings.push(registryAuthAvailable
+            ? '未能读取 DSH 工作区注册表（上游不可达或超时），已跳过侧边栏工作区同步（未执行任何注册表删除）'
+            : '未登记可用的上游 dsh-auth 凭据，无法同步 DSH 工作区注册表（未发送任何上游请求）');
+          if (localCandidates.length > 0) {
+            warnings.push(`网关缓存显示该目录树内可能有 ${localCandidates.length} 个工作区（${localCandidates.map((entry) => entry.workspaceId).join(', ')}），需人工核对`);
+          }
+        }
+        if (cleanupFailed) {
+          warnings.push(cleanupIntentSaved
+            ? '插件数据库中的工作区授权清理失败，本响应不代表清理完成；请重试清理以完成授权与侧边栏同步'
+            : '插件数据库中的工作区授权清理失败，且清理重试信息无法持久化；自动重试不可保证，请人工处理残留授权');
+        } else if (workspaceSyncIncomplete) {
+          warnings.push(cleanupIntentSaved
+            ? 'DSH 侧边栏工作区同步未完成；请重试清理以重新读取权威注册表并收敛'
+            : 'DSH 侧边栏工作区同步未完成，且清理重试信息无法持久化；请人工核对残留工作区');
+        }
+        const workspaces = {
+          deleted: deletedWorkspaceIds,
+          failed: failedWorkspaces,
+          unverified: localCandidates.map((entry) => ({ workspaceId: entry.workspaceId, path: entry.path })),
+        };
+        db.audit(recoveryOnly ? 'fs_directory_cleanup_retried' : 'fs_directory_deleted', {
+          username: me.username,
+          ip: req.ip,
+          userAgent: req.headers['user-agent'] ?? null,
+          detail: targetPath,
+        });
+        if (failedWorkspaces.length > 0 || upstreamEntries === null) {
+          db.audit('fs_directory_workspace_sync_failed', {
+            username: me.username,
+            ip: req.ip,
+            userAgent: req.headers['user-agent'] ?? null,
+            detail: JSON.stringify({ path: targetPath, registrySnapshot, registryAuthAvailable, deleted: deletedWorkspaceIds, failed: failedWorkspaces, unverified: workspaces.unverified }),
+          });
+        }
+        if (cleanupFailed) {
+          db.audit('fs_directory_db_cleanup_failed', {
+            username: me.username,
+            ip: req.ip,
+            userAgent: req.headers['user-agent'] ?? null,
+            detail: JSON.stringify({ path: targetPath, invalidateUserIds: [...invalidateUserIds], retryIntentSaved: cleanupIntentSaved }),
+          });
+        }
+        if (workspaceSyncIncomplete && cleanupIntentSaved) {
+          db.audit('fs_directory_workspace_sync_retry_scheduled', {
+            username: me.username,
+            ip: req.ip,
+            userAgent: req.headers['user-agent'] ?? null,
+            detail: JSON.stringify({ path: targetPath, registrySnapshot, failed: failedWorkspaces.length }),
+          });
+        }
+        const responseBase = {
+          deleted: targetPath,
+          ...(idempotentDelete ? { alreadyDeleted: true } : {}),
+          ...(recoveryOnly ? { cleanupOnly: true } : {}),
+          workspaces,
+          registrySnapshot,
+          warnings,
+        };
+        if (cleanupFailed && !cleanupIntentSaved) {
+          // 清理意图写不进去：不得返回 DB_CLEANUP_FAILED（客户端与既有契约把它当作
+          // 「保留墓碑行 + 可重试」）。用显式不可重试 code，提示人工处理残留授权。
+          res.status(500).json({
+            ok: false,
+            code: 'DB_CLEANUP_FAILED_NO_RETRY',
+            retryable: false,
+            error: '目录已删除，但插件数据库清理失败，且清理重试信息无法保存；请人工处理残留授权',
+            ...responseBase,
+          });
+          return;
+        }
+        if (cleanupFailed) {
+          // 目录已删，稳定 code + retryable 契约：目录选择器保留该行的「重试授权清理」
+          // 动作（不会移除行而丢掉唯一入口），重试同一路径即可完成 DB 清理（准入由
+          // 持久化清理意图或残留状态引用决定，且必须先过敏感目录检查）。
+          res.status(500).json({
+            ok: false,
+            code: 'DB_CLEANUP_FAILED',
+            retryable: true,
+            error: '目录已删除，但插件数据库清理失败；请重试删除以完成授权清理',
+            ...responseBase,
+          });
+          return;
+        }
+        if (failedWorkspaces.length > 0) {
+          // 目录已删除且不可回滚：绝不假装全部成功。只有意图已持久化时才允许客户端
+          // 保留墓碑并走 cleanupOnly 重试；否则明确要求人工处理，不给虚假的重试入口。
+          res.status(500).json({
+            ok: false,
+            code: cleanupIntentSaved ? 'WORKSPACE_SYNC_FAILED' : 'WORKSPACE_SYNC_FAILED_NO_RETRY',
+            retryable: cleanupIntentSaved,
+            error: cleanupIntentSaved
+              ? `目录已删除，但 ${failedWorkspaces.length} 个侧边栏工作区未能确认从 DSH 注册表移除；请重试清理`
+              : `目录已删除，但 ${failedWorkspaces.length} 个侧边栏工作区未能确认从 DSH 注册表移除，且重试信息无法保存；请人工处理`,
+            ...responseBase,
+          });
+          return;
+        }
+        if (upstreamEntries === null) {
+          // 同步 fail-closed：未用本地缓存猜测执行任何删除；仅在恢复任务已持久化时
+          // 才暴露 cleanupOnly 重试，避免用户误以为一次普通重试会安全收敛。
+          res.status(503).json({
+            ok: false,
+            code: cleanupIntentSaved ? 'WORKSPACE_SYNC_UNAVAILABLE' : 'WORKSPACE_SYNC_UNAVAILABLE_NO_RETRY',
+            retryable: cleanupIntentSaved,
+            error: cleanupIntentSaved
+              ? '目录已删除，但未能获取权威 DSH 工作区注册表快照，侧边栏工作区未同步；请重试清理'
+              : '目录已删除，但未能获取权威 DSH 工作区注册表快照，且重试信息无法保存；请人工处理',
+            ...responseBase,
+          });
+          return;
+        }
+        res.json({ ok: true, ...responseBase });
+      } catch (error) {
+        console.error('[dsh-passwords] 目录删除联动处理异常:', String(error));
+        if (!res.headersSent) {
+          res.status(500).json({
+            ok: false,
+            code: 'INTERNAL',
+            error: physicallyDeleted ? '目录已删除，但工作区联动清理异常' : '删除失败',
+            ...(physicallyDeleted ? { deleted: targetPath } : {}),
+          });
+        }
+      }
+    })();
   });
 
 

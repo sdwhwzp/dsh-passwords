@@ -14,12 +14,14 @@ function isGatewayLoginRedirect(res: Response): boolean {
   }
 }
 
-export async function api<T>(path: string, body?: unknown): Promise<T> {
-  const res = await fetch(path, {
+export async function api<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+  const request: RequestInit = {
     method: body === undefined ? 'GET' : 'POST',
     headers: body === undefined ? undefined : { 'content-type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  };
+  if (signal !== undefined) request.signal = signal;
+  const res = await fetch(path, request);
 
   // An expired gateway session redirects fetch to an HTTP 200 HTML login page.
   if (isGatewayLoginRedirect(res)) {

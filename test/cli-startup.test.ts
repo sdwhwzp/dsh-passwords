@@ -57,3 +57,21 @@ test('native Alpha.4 reports compatibility ready without bundle rewriting', () =
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+for (const version of ['0.1.7-alpha.1', '0.1.6-alpha.02', 'v0.1.6-alpha.2']) {
+  test(`unreviewed or malformed ${version} is rejected before patching`, () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'dshpw-cli-version-'));
+    const dshRoot = path.join(root, 'dsh');
+    mkdirSync(dshRoot);
+    writeFileSync(path.join(dshRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version }));
+    try {
+      const result = spawnSync(process.execPath, [cli, 'patch', 'on'], {
+        cwd: projectRoot, timeout: 15000, encoding: 'utf8',
+        env: { ...process.env, DSH_PASSWORDS_ENV_FILE: writeConfig(root, dshRoot), LANG: 'en_US.UTF-8' },
+      });
+      assert.equal(result.signal, null);
+      assert.equal(result.error, undefined);
+      assert.equal(result.status, 37, result.stderr);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+}

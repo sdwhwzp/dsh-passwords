@@ -1,17 +1,28 @@
-// 目录选择器删除按钮：纯函数单测（无 DOM 依赖）。
+// 目录选择器删除按钮：纯函数单测 + 源码契约断言（无 DOM 依赖）。
 //
 // 覆盖：
 //   - extractPickerListings：从真实形状的 directoryPicker/list 响应信封里
 //     收集目录条目数组（含 parent/child 双列与 hidden 字段）
 //   - matchPickerListing：列名序列 → 已抓列表的匹配（精确优先、子序列回退）
 //   - pickerText / locales：zh/en 键一致且非空
+//   - interpretDeleteResponse / requestDelete：删除结果归一化与网络异常兜底，
+//     所有路径都显式携带 retry；409 CLEANUP_RETRY_CONFLICT 归一化为 conflict
+//     （撤销墓碑/重试状态，恢复常规删除）
+//   - 源码契约（Node 侧无真实 DOM，参照 client-chat-fab 的静态断言方式）：
+//     注入控件是原生 button、重试态 tabindex=0（Enter/Space 可操作）、
+//     墓碑行同时退出指针与键盘可达、墓碑 CSS 不误伤重试按钮、扫描排除注入按钮、
+//     React 复用行时重绑路径并解除在途 pending（防永久 disabled）、迟到结果按
+//     路径+请求代次丢弃、conflict 分支不卡在仅重试
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   extractPickerListings,
+  interpretDeleteResponse,
   isPickerEntry,
   matchPickerListing,
   pickerText,
+  requestDelete,
 } from '../src/client/picker-delete';
 import { zh, en } from '../src/client/locales';
 
@@ -150,4 +161,243 @@ test('pickerText/locales：zh 与 en 键完全一致且删除文案非空', () =
     assert.ok((en[key] as string).length > 0);
   }
   for (const value of Object.values(pickerText)) assert.ok(value.length > 0);
+});
+
+// ── 删除结果归一化 ───────────────────────────────────────────────
+
+test('interpretDeleteResponse：2xx 成功 → 移除行、无警告、不重试', () => {
+  assert.deepEqual(interpretDeleteResponse(true, { ok: true, path: '/root/22' }), {
+    deleted: true,
+    message: null,
+    error: false,
+    retry: false,
+  });
+});
+
+test('interpretDeleteResponse：目录已删但联动部分失败 → 仍算删除、只警告不重试', () => {
+  const softWarning = interpretDeleteResponse(true, { ok: true, warnings: ['workspace: sync failed'] });
+  assert.equal(softWarning.deleted, true);
+  assert.equal(softWarning.error, true);
+  assert.equal(softWarning.retry, false);
+  assert.equal(softWarning.message, 'workspace: sync failed');
+
+  // 非 2xx 但携带 deleted：行必须移除（本地已确认删除），不得当作未删除
+  const partial = interpretDeleteResponse(false, {
+    deleted: '/root/22',
+    error: 'workspace sync failed',
+    warnings: ['db: skipped'],
+  });
+  assert.equal(partial.deleted, true);
+  assert.equal(partial.error, true);
+  assert.equal(partial.retry, false);
+  assert.equal(partial.message, 'workspace sync failed\ndb: skipped');
+});
+
+test('interpretDeleteResponse：DB 或 sidebar 清理失败（retryable）进入重试', () => {
+  assert.equal(interpretDeleteResponse(false, { deleted: '/root/22', retryable: true, error: 'e' }).retry, true);
+  assert.equal(interpretDeleteResponse(false, { deleted: '/root/22', code: 'DB_CLEANUP_FAILED', error: 'e' }).retry, true);
+  assert.equal(interpretDeleteResponse(false, { deleted: '/root/22', code: 'WORKSPACE_SYNC_FAILED', retryable: true, error: 'e' }).retry, true);
+  assert.equal(interpretDeleteResponse(false, { deleted: '/root/22', code: 'WORKSPACE_SYNC_UNAVAILABLE', retryable: true, error: 'e' }).retry, true);
+  // 其他失败、未带 deleted、2xx 都不能走重试（重试只做幂等授权清理，不重新物理删除）
+  assert.equal(interpretDeleteResponse(false, { deleted: '/root/22', code: 'OTHER', error: 'e' }).retry, false);
+  assert.equal(interpretDeleteResponse(false, { retryable: true, error: 'e' }).retry, false);
+  assert.equal(interpretDeleteResponse(true, { ok: true, retryable: true }).retry, false);
+});
+
+test('interpretDeleteResponse：409 CLEANUP_RETRY_CONFLICT → conflict（撤销重试、恢复常规删除）', () => {
+  const conflict = interpretDeleteResponse(false, {
+    ok: false,
+    code: 'CLEANUP_RETRY_CONFLICT',
+    error: '目录已被重新创建；为避免删除新内容，授权清理重试已取消。请刷新后按常规删除流程操作',
+  });
+  assert.equal(conflict.conflict, true);
+  assert.equal(conflict.deleted, false);
+  assert.equal(conflict.retry, false);
+  assert.equal(conflict.error, true);
+  assert.match(conflict.message!, /已被重新创建/);
+
+  // 防御：即使响应同时带 deleted/retryable，冲突也必须压过重试（否则会回到仅重试状态）
+  const defensive = interpretDeleteResponse(false, {
+    ok: false,
+    code: 'CLEANUP_RETRY_CONFLICT',
+    retryable: true,
+    deleted: '/root/recreated',
+    error: '冲突',
+  });
+  assert.equal(defensive.conflict, true);
+  assert.equal(defensive.deleted, false);
+  assert.equal(defensive.retry, false);
+
+  // 非冲突结果不带 conflict 字段（保持既有四字段形状，兼容外部断言）
+  assert.equal(interpretDeleteResponse(true, { ok: true, code: 'CLEANUP_RETRY_CONFLICT' }).conflict, undefined);
+  assert.equal(interpretDeleteResponse(false, { ok: false, code: 'OTHER', error: 'e' }).conflict, undefined);
+  assert.equal(Object.hasOwn(interpretDeleteResponse(false, { error: 'nope' }), 'conflict'), false);
+});
+
+test('interpretDeleteResponse：未删除/畸形响应保留行；所有路径都显式给 retry', () => {
+  assert.deepEqual(interpretDeleteResponse(false, { error: 'nope' }), {
+    deleted: false,
+    message: 'nope',
+    error: true,
+    retry: false,
+  });
+  const malformed = interpretDeleteResponse(false, null);
+  assert.equal(malformed.deleted, false);
+  assert.equal(malformed.message, pickerText.failed);
+  assert.equal(malformed.error, true);
+  assert.equal(typeof malformed.retry, 'boolean');
+});
+
+test('requestDelete：POST 删除端点；2xx ok 归一化为已删除且不进入重试', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  globalThis.fetch = ((url: string, init?: RequestInit) => {
+    calls.push({ url, init });
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true }) });
+  }) as unknown as typeof fetch;
+  try {
+    const outcome = await requestDelete('/root/gone');
+    assert.deepEqual(outcome, { deleted: true, message: null, error: false, retry: false });
+    assert.equal(calls[0]?.url, '/gateway/api/fs/delete-directory');
+    assert.equal(calls[0]?.init?.method, 'POST');
+    assert.equal(calls[0]?.init?.credentials, 'same-origin');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('requestDelete：网络异常返回未删除兜底，显式携带 retry=false（客户端类型检查强制）', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (() => Promise.reject(new Error('offline'))) as unknown as typeof fetch;
+  try {
+    const outcome = await requestDelete('/root/gone');
+    assert.deepEqual(outcome, { deleted: false, message: pickerText.failed, error: true, retry: false });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('requestDelete：409 CLEANUP_RETRY_CONFLICT 归一化为 conflict（cleanupOnly 重试被服务端取消）', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  globalThis.fetch = ((url: string, init?: RequestInit) => {
+    calls.push({ url, init });
+    return Promise.resolve({
+      ok: false,
+      json: () =>
+        Promise.resolve({
+          ok: false,
+          code: 'CLEANUP_RETRY_CONFLICT',
+          error: '目录已被重新创建；为避免删除新内容，授权清理重试已取消',
+        }),
+    });
+  }) as unknown as typeof fetch;
+  try {
+    const outcome = await requestDelete('/root/recreated', true);
+    assert.equal(outcome.conflict, true);
+    assert.equal(outcome.deleted, false);
+    assert.equal(outcome.retry, false);
+    assert.equal(outcome.error, true);
+    assert.equal(JSON.parse(String(calls[0]?.init?.body)).cleanupOnly, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// ── 源码契约：键盘可达性 / 墓碑行为（Node 侧无真实 DOM，做静态断言） ──
+
+function pickerSource(): string {
+  return readFileSync(new URL('../src/client/picker-delete.ts', import.meta.url), 'utf8');
+}
+
+test('源码契约：注入控件是原生 button；默认 tabindex=-1，重试态 tabindex=0（Enter/Space 原生可操作）', () => {
+  const source = pickerSource();
+  assert.match(source, /document\.createElement\('button'\)/, '注入控件必须是原生 <button>');
+  assert.match(source, /node\.type = 'button'/, '原生按钮需显式 type=button（不参与表单提交）');
+  assert.match(source, /node\.setAttribute\('tabindex', '-1'\)/, '普通行按钮保持悬停显现、不进 Tab 序列');
+  assert.match(source, /node\.setAttribute\('tabindex', '0'\)/, '墓碑重试按钮必须进入 Tab 序列');
+  assert.match(source, /node\.setAttribute\('aria-label', label\)/, '重试按钮需设置可读名称');
+  assert.match(source, /\$\{pickerText\.retry\}: \$\{name\}/, '重试名称来自 pickerText.retry + 目录名');
+});
+
+test('源码契约：重试单击直达，不进入二次确认武装（不会再次物理删除）', () => {
+  const source = pickerSource();
+  assert.match(source, /const retryPending = node\.getAttribute\('data-dshpw-picker-del-retry'\) === '1'/);
+  assert.match(source, /if \(!retryPending && !node\.classList\.contains\('dshpw-picker-del-arm'\)\)/);
+});
+
+test('源码契约：墓碑行退出指针与键盘可达；重试按钮不被墓碑选择器误伤', () => {
+  const source = pickerSource();
+  // CSS：墓碑规则用 :not 只命中官方行按钮，避免特异度覆盖 .dshpw-picker-del-retry 的 pointer-events
+  const tombstone = /\[role="listitem"\]\.dshpw-picker-del-tombstone>button([^{]*)\{([^}]*)\}/.exec(source);
+  assert.ok(tombstone, '应存在墓碑行按钮规则');
+  assert.ok(tombstone[1].includes(':not(.dshpw-picker-del)'), '墓碑规则必须排除注入的重试按钮');
+  assert.match(tombstone[2], /pointer-events:\s*none/, '官方行按钮必须指针不可达');
+  const retryRule = /\.dshpw-picker-del\.dshpw-picker-del-retry\{([^}]*)\}/.exec(source);
+  assert.ok(retryRule, '重试按钮应有独立样式规则');
+  assert.match(retryRule[1], /pointer-events:\s*auto/, '重试按钮必须保持可点击');
+  // 键盘：官方行按钮 tabindex=-1 + aria-disabled，退出墓碑时还原
+  assert.match(source, /setRowKeyboardInert\(rowHost, true\)/);
+  assert.match(source, /setRowKeyboardInert\(rowHost, false\)/);
+  assert.match(source, /rowButton\.setAttribute\('tabindex', '-1'\)/);
+  assert.match(source, /rowButton\.setAttribute\('aria-disabled', 'true'\)/);
+  assert.match(source, /rowButton\.removeAttribute\('aria-disabled'\)/);
+});
+
+test('源码契约：原生 button 复位 UA 样式（边框/内边距/外观）', () => {
+  const base = /\.dshpw-picker-del\{([^}]*)\}/.exec(pickerSource());
+  assert.ok(base, '应存在 .dshpw-picker-del 基础规则');
+  for (const declaration of ['border:0', 'padding:0', 'appearance:none']) {
+    assert.ok(base[1].includes(declaration), `基础规则应包含 ${declaration}`);
+  }
+});
+
+test('源码契约：扫描行时排除注入按钮（原生 button 不会被当作目录行）', () => {
+  assert.match(
+    pickerSource(),
+    /:scope > \[role="listitem"\] > button:not\(\.dshpw-picker-del\)/,
+    '行枚举选择器必须排除注入的 .dshpw-picker-del',
+  );
+});
+
+test('源码契约：行复用重绑路径时同步解除在途 pending（修复永久 disabled 死锁）', () => {
+  const source = pickerSource();
+  // 旧实现因 pending 直接跳过整次注入：重绑后的新路径会带着旧请求的锁；该早退必须消失
+  assert.doesNotMatch(source, /if \(existing\.getAttribute\(REQUEST_PENDING_ATTR\) === '1'\) return;/);
+  // 重绑分支：解除 pending + 恢复可用 + 撤销旧绑定的二次确认武装，最后写入新路径
+  const start = source.indexOf('if (previousPath !== path) {');
+  const end = source.indexOf('if (cleanupsPending.has(path))', start);
+  assert.ok(start >= 0 && end > start, '应存在路径变化时的重绑分支');
+  const rebind = source.slice(start, end);
+  assert.ok(rebind.includes('existing.removeAttribute(REQUEST_PENDING_ATTR)'), '重绑必须解除 pending 标记');
+  assert.ok(rebind.includes('existing.disabled = false'), '重绑必须恢复按钮可用');
+  assert.ok(rebind.includes("existing.classList.remove('dshpw-picker-del-arm')"), '重绑必须撤销旧路径的二次确认武装');
+  assert.ok(rebind.includes('existing.setAttribute(PATH_ATTR, path)'), '重绑必须写入新路径');
+  // 行移除以注入节点为锚点（注入时捕获的官方按钮引用可能已被 React 替换）
+  assert.match(source, /dropRowAfterDelete\(node\)/);
+  assert.match(source, /node\.closest\('\[role="listitem"\]'\)/);
+});
+
+test('源码契约：迟到请求按路径 + 请求代次丢弃（不覆盖重绑后的新绑定）', () => {
+  const source = pickerSource();
+  assert.match(source, /let requestSerial = 0;/);
+  assert.match(source, /const serial = \+\+requestSerial;/);
+  assert.match(
+    source,
+    /const stale = \(\): boolean => node\.getAttribute\(PATH_ATTR\) !== current \|\| requestSerial !== serial;/,
+  );
+  // then 与 finally 都以 stale() 收口：旧请求既不能应用结果，也不能清掉新请求的 pending
+  assert.equal((source.match(/if \(stale\(\)\) return;/g) ?? []).length, 2);
+});
+
+test('源码契约：conflict 分支撤销墓碑/重试并恢复常规删除（不卡在仅重试）', () => {
+  const source = pickerSource();
+  const start = source.indexOf('if (outcome.conflict) {');
+  const end = source.indexOf('if (!outcome.deleted) {', start);
+  assert.ok(start >= 0 && end > start, 'conflict 分支应位于 deleted 判断之前');
+  const branch = source.slice(start, end);
+  assert.match(branch, /clearRetryState\(node, rowHost, current\)/, '必须退出墓碑/重试态');
+  assert.match(branch, /setDeleteButtonLabel\(/, '必须恢复常规删除标签');
+  assert.match(branch, /showToast\(outcome\.message \?\? pickerText\.failed, true\)/, '必须向用户展示服务端原因');
+  assert.doesNotMatch(branch, /dropRowAfterDelete/, '目录已被重新创建，不能移除该行');
 });

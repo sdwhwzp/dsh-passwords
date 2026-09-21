@@ -4,12 +4,6 @@ import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots';
 
 interface Catalog { version: string; commit: string; files: { file: string; platform: string; bytes: number; sha256: string; signing?: 'unsigned' | 'apple-notarized' }[] }
 
-export function DesktopDownloadsLauncher({ t, wide, onOpen }: PropsLocale<'dshpw'> & { wide: boolean; onOpen(): void }) {
-  return h('button', { type: 'button', onClick: onOpen, className: `dshpw-sidebar-workspace-action${wide ? '' : ' compact'}`, title: t('desktopTitle'), 'aria-label': t('desktopTitle') },
-    h('svg', { width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, 'aria-hidden': true }, h('path', { d: 'M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5' })),
-    wide ? h('span', null, t('desktopTitle')) : null);
-}
-
 export function DesktopDownloadsPanel({ t, onBack }: PropsLocale<'dshpw'> & { onBack(): void }) {
   const [catalog, setCatalog] = useState<Catalog>();
   const [failed, setFailed] = useState(false);
