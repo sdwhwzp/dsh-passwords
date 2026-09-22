@@ -44,6 +44,9 @@ const MAX_COMMAND_TIMEOUT_MS = 600_000;
 const DEFAULT_OFFICE_TIMEOUT_MS = 180_000;
 const MAX_OFFICE_OPERATIONS = 100;
 const MAX_OFFICE_TEXT_CHARS = 200_000;
+const MAX_OFFICE_CELLS = 50_000;
+const MAX_OFFICE_ROWS = 5_000;
+const MAX_OFFICE_COLUMNS = 200;
 const WINDOWS_PROTOCOL = 'dsh-local-workspace';
 const WINDOWS_PROTOCOL_PREFIXES = [
   `${WINDOWS_PROTOCOL}://connect?`,
@@ -84,7 +87,15 @@ interface RunningOperation {
   controller: AbortController;
 }
 
-const WINDOWS_WORD_AUTOMATION_SCRIPT = String.raw`
+/**
+ * PowerShell helpers shared by every Office automation script.
+ *
+ * Each action runs its own short-lived PowerShell process with only the
+ * functions that action needs, so a Word edit never parses the Excel or
+ * PowerPoint bodies. The envelope written by Write-Success and Write-Failure is
+ * the contract runOfficePowerShell parses.
+ */
+const OFFICE_SCRIPT_PRELUDE = String.raw`
 $ErrorActionPreference = 'Stop'
 [Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false)
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
@@ -113,6 +124,55 @@ function Test-ProgId([string]$ProgId) {
   }
 }
 
+function Convert-Color([string]$Color) {
+  $rgb = [Convert]::ToInt32($Color.Substring(1), 16)
+  $red = ($rgb -shr 16) -band 255
+  $green = ($rgb -shr 8) -band 255
+  $blue = $rgb -band 255
+  return ($blue -shl 16) -bor ($green -shl 8) -bor $red
+}
+`;
+
+/**
+ * Probe which Office suites can automate Word, Excel and PowerPoint.
+ *
+ * `office`, `wps` and `preferred` describe Word alone and predate the Excel and
+ * PowerPoint actions; they stay at the top level so a host built before those
+ * actions keeps reading the field it expects. `apps` carries the same three
+ * fields per application.
+ */
+const WINDOWS_OFFICE_STATUS_SCRIPT = OFFICE_SCRIPT_PRELUDE + String.raw`
+function Get-SuiteAvailability([string]$OfficeProgId, [string]$WpsProgId) {
+  $office = Test-ProgId $OfficeProgId
+  $wps = Test-ProgId $WpsProgId
+  return [PSCustomObject]@{
+    office = $office
+    wps = $wps
+    preferred = $(if ($office) { 'office' } elseif ($wps) { 'wps' } else { $null })
+  }
+}
+
+try {
+  $word = Get-SuiteAvailability 'Word.Application' 'kwps.Application'
+  $excel = Get-SuiteAvailability 'Excel.Application' 'ket.Application'
+  $powerpoint = Get-SuiteAvailability 'PowerPoint.Application' 'kwpp.Application'
+  Write-Success ([PSCustomObject]@{
+    platform = 'win32'
+    office = $word.office
+    wps = $word.wps
+    preferred = $word.preferred
+    apps = [PSCustomObject]@{
+      word = $word
+      excel = $excel
+      powerpoint = $powerpoint
+    }
+  })
+} catch {
+  Write-Failure 'OFFICE_AUTOMATION_FAILED' ([string]$_.Exception.Message)
+}
+`;
+
+const WINDOWS_WORD_AUTOMATION_SCRIPT = OFFICE_SCRIPT_PRELUDE + String.raw`
 function New-WordApplication([string]$Provider) {
   $candidates = @()
   if ($Provider -eq 'auto' -or $Provider -eq 'office') {
@@ -141,14 +201,6 @@ function Get-Paragraph($Document, [int]$Index) {
     Throw-Coded 'PARAGRAPH_OUT_OF_RANGE' ('段落索引超出范围：' + $Index)
   }
   return $Document.Paragraphs.Item($Index)
-}
-
-function Convert-Color([string]$Color) {
-  $rgb = [Convert]::ToInt32($Color.Substring(1), 16)
-  $red = ($rgb -shr 16) -band 255
-  $green = ($rgb -shr 8) -band 255
-  $blue = $rgb -band 255
-  return ($blue -shl 16) -bor ($green -shl 8) -bor $red
 }
 
 function Set-ParagraphFormat($Paragraph, $Operation) {
@@ -340,16 +392,6 @@ function Apply-WordOperation($Document, $Operation, [System.Collections.ArrayLis
 
 try {
   $request = [Console]::In.ReadToEnd() | ConvertFrom-Json
-  if ([string]$request.action -eq 'status') {
-    Write-Success ([PSCustomObject]@{
-      platform = 'win32'
-      office = Test-ProgId 'Word.Application'
-      wps = Test-ProgId 'kwps.Application'
-      preferred = $(if (Test-ProgId 'Word.Application') { 'office' } elseif (Test-ProgId 'kwps.Application') { 'wps' } else { $null })
-    })
-    exit 0
-  }
-
   $resolved = New-WordApplication ([string]$request.provider)
   $application = $resolved.application
   $document = $null
@@ -391,6 +433,602 @@ try {
     if ($null -ne $document) {
       try { $document.Close(0) } catch { }
       try { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($document) } catch { }
+    }
+    if ($null -ne $application) {
+      try { $application.Quit() } catch { }
+      try { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($application) } catch { }
+    }
+    [GC]::Collect()
+    [GC]::WaitForPendingFinalizers()
+  }
+} catch {
+  $message = [string]$_.Exception.Message
+  $code = 'OFFICE_AUTOMATION_FAILED'
+  $separator = $message.IndexOf('|')
+  if ($separator -gt 0) {
+    $code = $message.Substring(0, $separator)
+    $message = $message.Substring($separator + 1)
+  }
+  Write-Failure $code $message
+}
+`;
+
+/**
+ * Excel and WPS Spreadsheets automation.
+ *
+ * Reads go through Range.Value so a date-formatted cell arrives as a DateTime
+ * and is emitted as an ISO string; Value2 is the fallback when a provider
+ * refuses the parameterized property, and dates then arrive as serial numbers.
+ * Writes address cells by A1 reference or by row and column, and the workbook
+ * is saved only after every requested operation succeeds.
+ */
+const WINDOWS_EXCEL_AUTOMATION_SCRIPT = OFFICE_SCRIPT_PRELUDE + String.raw`
+function New-ExcelApplication([string]$Provider) {
+  $candidates = @()
+  if ($Provider -eq 'auto' -or $Provider -eq 'office') {
+    $candidates += [PSCustomObject]@{ provider = 'office'; progId = 'Excel.Application' }
+  }
+  if ($Provider -eq 'auto' -or $Provider -eq 'wps') {
+    $candidates += [PSCustomObject]@{ provider = 'wps'; progId = 'ket.Application' }
+  }
+  foreach ($candidate in $candidates) {
+    try {
+      $application = New-Object -ComObject $candidate.progId
+      return [PSCustomObject]@{
+        application = $application
+        provider = $candidate.provider
+        progId = $candidate.progId
+      }
+    } catch {
+      continue
+    }
+  }
+  Throw-Coded 'NO_OFFICE_PROVIDER' '未检测到可用的 Microsoft Excel 或 WPS 表格 COM 自动化接口'
+}
+
+function Get-Worksheet($Workbook, $Operation) {
+  if (-not (Has-Property $Operation 'sheet')) { return $Workbook.ActiveSheet }
+  $sheet = $Operation.sheet
+  if ($sheet -is [int] -or $sheet -is [long] -or $sheet -is [double]) {
+    $index = [int]$sheet
+    if ($index -lt 1 -or $index -gt $Workbook.Worksheets.Count) {
+      Throw-Coded 'SHEET_NOT_FOUND' ('工作表索引超出范围：' + $index)
+    }
+    return $Workbook.Worksheets.Item($index)
+  }
+  $name = [string]$sheet
+  foreach ($candidate in $Workbook.Worksheets) {
+    if ([string]$candidate.Name -eq $name) { return $candidate }
+  }
+  Throw-Coded 'SHEET_NOT_FOUND' ('找不到工作表：' + $name)
+}
+
+function Get-TargetRange($Worksheet, $Operation, [string]$Property) {
+  $reference = [string]$Operation.$Property
+  try {
+    return $Worksheet.Range($reference)
+  } catch {
+    Throw-Coded 'INVALID_ARGUMENT' ('无法解析区域引用：' + $reference)
+  }
+}
+
+function Convert-CellValue($Value) {
+  if ($null -eq $Value) { return '' }
+  if ($Value -is [datetime]) { return $Value.ToString('yyyy-MM-ddTHH:mm:ss') }
+  if ($Value -is [bool]) { return $(if ($Value) { 'TRUE' } else { 'FALSE' }) }
+  return [string]$Value
+}
+
+function Read-RangeRows($Range, [int]$MaxCells, [ref]$Truncated) {
+  $rows = @()
+  if ($null -eq $Range) { return $rows }
+  $values = $null
+  try {
+    $values = $Range.Value()
+  } catch {
+    $values = $Range.Value2
+  }
+  if ($null -eq $values) { return $rows }
+  if ($values -isnot [Array]) {
+    if ($MaxCells -lt 1) { $Truncated.Value = $true; return $rows }
+    return @(, @((Convert-CellValue $values)))
+  }
+  $firstRow = $values.GetLowerBound(0)
+  $lastRow = $values.GetUpperBound(0)
+  $firstColumn = $values.GetLowerBound(1)
+  $lastColumn = $values.GetUpperBound(1)
+  $remaining = $MaxCells
+  for ($row = $firstRow; $row -le $lastRow; $row++) {
+    if ($remaining -le 0) { $Truncated.Value = $true; break }
+    $cells = @()
+    for ($column = $firstColumn; $column -le $lastColumn; $column++) {
+      if ($remaining -le 0) { $Truncated.Value = $true; break }
+      $cells += (Convert-CellValue $values.GetValue($row, $column))
+      $remaining--
+    }
+    $rows += , $cells
+  }
+  return $rows
+}
+
+function Read-ExcelWorkbook($Workbook, $Request, [string]$Provider, [string]$ProgId) {
+  $maxCells = [int]$Request.maxCells
+  $wanted = $null
+  if (Has-Property $Request 'sheet') { $wanted = $Request.sheet }
+  $sheets = @()
+  $truncated = $false
+  $remaining = $maxCells
+  $sheetCount = [int]$Workbook.Worksheets.Count
+  for ($index = 1; $index -le $sheetCount; $index++) {
+    $worksheet = $Workbook.Worksheets.Item($index)
+    if ($null -ne $wanted) {
+      if ($wanted -is [int] -or $wanted -is [long] -or $wanted -is [double]) {
+        if ([int]$wanted -ne $index) { continue }
+      } elseif ([string]$worksheet.Name -ne [string]$wanted) {
+        continue
+      }
+    }
+    $used = $worksheet.UsedRange
+    $rowCount = 0
+    $columnCount = 0
+    $firstRow = 1
+    $firstColumn = 1
+    if ($null -ne $used) {
+      $rowCount = [int]$used.Rows.Count
+      $columnCount = [int]$used.Columns.Count
+      $firstRow = [int]$used.Row
+      $firstColumn = [int]$used.Column
+    }
+    $wasTruncated = $false
+    $rows = Read-RangeRows $used $remaining ([ref]$wasTruncated)
+    if ($wasTruncated) { $truncated = $true }
+    $consumed = 0
+    foreach ($row in $rows) { $consumed += $row.Count }
+    $remaining -= $consumed
+    $sheets += [PSCustomObject]@{
+      index = $index
+      name = [string]$worksheet.Name
+      firstRow = $firstRow
+      firstColumn = $firstColumn
+      rowCount = $rowCount
+      columnCount = $columnCount
+      rows = $rows
+    }
+  }
+  return [PSCustomObject]@{
+    provider = $Provider
+    progId = $ProgId
+    sheetCount = $sheetCount
+    truncated = $truncated
+    sheets = $sheets
+  }
+}
+
+function Set-RangeFormat($Range, $Operation) {
+  if (Has-Property $Operation 'bold') { $Range.Font.Bold = [bool]$Operation.bold }
+  if (Has-Property $Operation 'italic') { $Range.Font.Italic = [bool]$Operation.italic }
+  if (Has-Property $Operation 'fontName') { $Range.Font.Name = [string]$Operation.fontName }
+  if (Has-Property $Operation 'fontSize') { $Range.Font.Size = [double]$Operation.fontSize }
+  if (Has-Property $Operation 'color') { $Range.Font.Color = Convert-Color ([string]$Operation.color) }
+  if (Has-Property $Operation 'background') { $Range.Interior.Color = Convert-Color ([string]$Operation.background) }
+  if (Has-Property $Operation 'numberFormat') { $Range.NumberFormat = [string]$Operation.numberFormat }
+  if (Has-Property $Operation 'wrap') { $Range.WrapText = [bool]$Operation.wrap }
+  if (Has-Property $Operation 'alignment') {
+    $alignments = @{ left = -4131; center = -4108; right = -4152 }
+    $Range.HorizontalAlignment = $alignments[[string]$Operation.alignment]
+  }
+  if (Has-Property $Operation 'merge') {
+    if ([bool]$Operation.merge) { $Range.Merge() } else { $Range.UnMerge() }
+  }
+}
+
+function Write-Rows($Worksheet, [int]$StartRow, [int]$StartColumn, $Rows) {
+  $rowIndex = $StartRow
+  foreach ($row in @($Rows)) {
+    $columnIndex = $StartColumn
+    foreach ($cell in @($row)) {
+      $text = [string]$cell
+      if ($text.StartsWith('=')) {
+        $Worksheet.Cells.Item($rowIndex, $columnIndex).Formula = $text
+      } else {
+        $Worksheet.Cells.Item($rowIndex, $columnIndex).Value2 = $text
+      }
+      $columnIndex++
+    }
+    $rowIndex++
+  }
+}
+
+function Get-LastUsedRow($Worksheet) {
+  $used = $Worksheet.UsedRange
+  if ($null -eq $used) { return 0 }
+  if ([int]$used.Rows.Count -eq 1 -and [string]$Worksheet.Cells.Item(1, 1).Value2 -eq '') { return 0 }
+  return [int]$used.Row + [int]$used.Rows.Count - 1
+}
+
+function Apply-ExcelOperation($Workbook, $Operation, [System.Collections.ArrayList]$Exports) {
+  switch ([string]$Operation.type) {
+    'set_cells' {
+      $worksheet = Get-Worksheet $Workbook $Operation
+      Write-Rows $worksheet ([int]$Operation.row) ([int]$Operation.column) $Operation.rows
+    }
+    'append_rows' {
+      $worksheet = Get-Worksheet $Workbook $Operation
+      $startRow = (Get-LastUsedRow $worksheet) + 1
+      Write-Rows $worksheet $startRow 1 $Operation.rows
+    }
+    'set_formula' {
+      $worksheet = Get-Worksheet $Workbook $Operation
+      (Get-TargetRange $worksheet $Operation 'range').Formula = [string]$Operation.formula
+    }
+    'clear_range' {
+      $worksheet = Get-Worksheet $Workbook $Operation
+      (Get-TargetRange $worksheet $Operation 'range').ClearContents()
+    }
+    'format_range' {
+      $worksheet = Get-Worksheet $Workbook $Operation
+      Set-RangeFormat (Get-TargetRange $worksheet $Operation 'range') $Operation
+    }
+    'set_column_width' {
+      $worksheet = Get-Worksheet $Workbook $Operation
+      (Get-TargetRange $worksheet $Operation 'range').EntireColumn.ColumnWidth = [double]$Operation.width
+    }
+    'set_row_height' {
+      $worksheet = Get-Worksheet $Workbook $Operation
+      (Get-TargetRange $worksheet $Operation 'range').EntireRow.RowHeight = [double]$Operation.height
+    }
+    'autofit' {
+      $worksheet = Get-Worksheet $Workbook $Operation
+      if (Has-Property $Operation 'range') {
+        $null = (Get-TargetRange $worksheet $Operation 'range').EntireColumn.AutoFit()
+      } else {
+        $null = $worksheet.UsedRange.EntireColumn.AutoFit()
+      }
+    }
+    'add_sheet' {
+      $worksheet = $Workbook.Worksheets.Add()
+      if (Has-Property $Operation 'name') { $worksheet.Name = [string]$Operation.name }
+    }
+    'rename_sheet' {
+      (Get-Worksheet $Workbook $Operation).Name = [string]$Operation.name
+    }
+    'delete_sheet' {
+      if ([int]$Workbook.Worksheets.Count -le 1) {
+        Throw-Coded 'INVALID_ARGUMENT' '工作簿必须至少保留一个工作表'
+      }
+      (Get-Worksheet $Workbook $Operation).Delete()
+    }
+    'replace_text' {
+      $worksheet = Get-Worksheet $Workbook $Operation
+      $lookAt = $(if ([bool]$Operation.wholeCell) { 1 } else { 2 })
+      $null = $worksheet.Cells.Replace([string]$Operation.find, [string]$Operation.replace, $lookAt, 1, $false, $false, [bool]$Operation.matchCase)
+    }
+    'insert_image' {
+      $worksheet = Get-Worksheet $Workbook $Operation
+      $anchor = Get-TargetRange $worksheet $Operation 'range'
+      $width = $(if (Has-Property $Operation 'widthPoints') { [double]$Operation.widthPoints } else { -1 })
+      $height = $(if (Has-Property $Operation 'heightPoints') { [double]$Operation.heightPoints } else { -1 })
+      $null = $worksheet.Shapes.AddPicture([string]$Operation.imagePath, $false, $true, [double]$anchor.Left, [double]$anchor.Top, $width, $height)
+    }
+    'export_pdf' {
+      $null = $Exports.Add([string]$Operation.outputPath)
+    }
+    default {
+      Throw-Coded 'INVALID_ARGUMENT' ('不支持的 Excel 操作：' + [string]$Operation.type)
+    }
+  }
+}
+
+try {
+  $request = [Console]::In.ReadToEnd() | ConvertFrom-Json
+  $resolved = New-ExcelApplication ([string]$request.provider)
+  $application = $resolved.application
+  $workbook = $null
+  try {
+    try { $application.Visible = $false } catch { }
+    try { $application.DisplayAlerts = $false } catch { }
+    try { $application.AutomationSecurity = 3 } catch { }
+    if ([string]$request.action -eq 'read_excel') {
+      $workbook = $application.Workbooks.Open([string]$request.path, $false, $true)
+      Write-Success (Read-ExcelWorkbook $workbook $request $resolved.provider $resolved.progId)
+    } else {
+      if ([bool]$request.create) {
+        $workbook = $application.Workbooks.Add()
+      } else {
+        $workbook = $application.Workbooks.Open([string]$request.path)
+      }
+      $exports = New-Object System.Collections.ArrayList
+      $applied = 0
+      foreach ($operation in @($request.operations)) {
+        Apply-ExcelOperation $workbook $operation $exports
+        $applied++
+      }
+      if ([bool]$request.create) {
+        $workbook.SaveAs([string]$request.workPath)
+      } else {
+        $workbook.Save()
+      }
+      foreach ($outputPath in $exports) {
+        $workbook.ExportAsFixedFormat(0, [string]$outputPath)
+      }
+      Write-Success ([PSCustomObject]@{
+        provider = $resolved.provider
+        progId = $resolved.progId
+        created = [bool]$request.create
+        operationsApplied = $applied
+      })
+    }
+  } finally {
+    if ($null -ne $workbook) {
+      try { $workbook.Close($false) } catch { }
+      try { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($workbook) } catch { }
+    }
+    if ($null -ne $application) {
+      try { $application.Quit() } catch { }
+      try { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($application) } catch { }
+    }
+    [GC]::Collect()
+    [GC]::WaitForPendingFinalizers()
+  }
+} catch {
+  $message = [string]$_.Exception.Message
+  $code = 'OFFICE_AUTOMATION_FAILED'
+  $separator = $message.IndexOf('|')
+  if ($separator -gt 0) {
+    $code = $message.Substring(0, $separator)
+    $message = $message.Substring($separator + 1)
+  }
+  Write-Failure $code $message
+}
+`;
+
+/**
+ * PowerPoint and WPS Presentation automation.
+ *
+ * Presentations open without a window rather than hidden: PowerPoint rejects
+ * `Visible = $false` on the application object, so `Open` receives
+ * `WithWindow = $false` instead. Shapes are addressed by their 1-based index
+ * within a slide, matching what read_ppt reports.
+ */
+const WINDOWS_POWERPOINT_AUTOMATION_SCRIPT = OFFICE_SCRIPT_PRELUDE + String.raw`
+function New-PowerPointApplication([string]$Provider) {
+  $candidates = @()
+  if ($Provider -eq 'auto' -or $Provider -eq 'office') {
+    $candidates += [PSCustomObject]@{ provider = 'office'; progId = 'PowerPoint.Application' }
+  }
+  if ($Provider -eq 'auto' -or $Provider -eq 'wps') {
+    $candidates += [PSCustomObject]@{ provider = 'wps'; progId = 'kwpp.Application' }
+  }
+  foreach ($candidate in $candidates) {
+    try {
+      $application = New-Object -ComObject $candidate.progId
+      return [PSCustomObject]@{
+        application = $application
+        provider = $candidate.provider
+        progId = $candidate.progId
+      }
+    } catch {
+      continue
+    }
+  }
+  Throw-Coded 'NO_OFFICE_PROVIDER' '未检测到可用的 Microsoft PowerPoint 或 WPS 演示 COM 自动化接口'
+}
+
+function Get-Slide($Presentation, [int]$Index) {
+  if ($Index -lt 1 -or $Index -gt $Presentation.Slides.Count) {
+    Throw-Coded 'SLIDE_OUT_OF_RANGE' ('幻灯片索引超出范围：' + $Index)
+  }
+  return $Presentation.Slides.Item($Index)
+}
+
+function Get-SlideLayout([string]$Layout) {
+  $layouts = @{ title = 1; title_content = 2; section = 33; two_content = 3; blank = 12 }
+  if ($layouts.ContainsKey($Layout)) { return $layouts[$Layout] }
+  return 2
+}
+
+function Read-ShapeText($Shape) {
+  try {
+    if (-not $Shape.HasTextFrame) { return $null }
+    if (-not $Shape.TextFrame.HasText) { return '' }
+    return [string]$Shape.TextFrame.TextRange.Text
+  } catch {
+    return $null
+  }
+}
+
+function Read-SlideNotes($Slide) {
+  try {
+    foreach ($shape in $Slide.NotesPage.Shapes) {
+      if ($shape.PlaceholderFormat.Type -eq 2) {
+        $text = Read-ShapeText $shape
+        if ($null -ne $text) { return $text }
+      }
+    }
+  } catch { }
+  return ''
+}
+
+function Read-Presentation($Presentation, $Request, [string]$Provider, [string]$ProgId) {
+  $maxChars = [int]$Request.maxChars
+  $remaining = $maxChars
+  $truncated = $false
+  $slides = @()
+  $slideCount = [int]$Presentation.Slides.Count
+  for ($index = 1; $index -le $slideCount; $index++) {
+    if ($remaining -le 0) { $truncated = $true; break }
+    $slide = $Presentation.Slides.Item($index)
+    $shapes = @()
+    $shapeCount = [int]$slide.Shapes.Count
+    for ($shapeIndex = 1; $shapeIndex -le $shapeCount; $shapeIndex++) {
+      if ($remaining -le 0) { $truncated = $true; break }
+      $shape = $slide.Shapes.Item($shapeIndex)
+      $text = Read-ShapeText $shape
+      if ($null -eq $text) { continue }
+      if ($text.Length -gt $remaining) {
+        $text = $text.Substring(0, $remaining)
+        $truncated = $true
+      }
+      $remaining -= $text.Length
+      $shapes += [PSCustomObject]@{
+        index = $shapeIndex
+        name = [string]$shape.Name
+        text = $text
+      }
+    }
+    $notes = Read-SlideNotes $slide
+    if ($notes.Length -gt 2000) { $notes = $notes.Substring(0, 2000) }
+    $slides += [PSCustomObject]@{
+      index = $index
+      shapeCount = $shapeCount
+      shapes = $shapes
+      notes = $notes
+    }
+  }
+  return [PSCustomObject]@{
+    provider = $Provider
+    progId = $ProgId
+    slideCount = $slideCount
+    truncated = $truncated
+    slides = $slides
+  }
+}
+
+function Set-ShapeTextFormat($Shape, $Operation) {
+  $range = $Shape.TextFrame.TextRange
+  if (Has-Property $Operation 'bold') { $range.Font.Bold = $(if ([bool]$Operation.bold) { -1 } else { 0 }) }
+  if (Has-Property $Operation 'italic') { $range.Font.Italic = $(if ([bool]$Operation.italic) { -1 } else { 0 }) }
+  if (Has-Property $Operation 'fontName') { $range.Font.Name = [string]$Operation.fontName }
+  if (Has-Property $Operation 'fontSize') { $range.Font.Size = [double]$Operation.fontSize }
+  if (Has-Property $Operation 'color') { $range.Font.Color.RGB = Convert-Color ([string]$Operation.color) }
+  if (Has-Property $Operation 'alignment') {
+    $alignments = @{ left = 1; center = 2; right = 3; justify = 4 }
+    $range.ParagraphFormat.Alignment = $alignments[[string]$Operation.alignment]
+  }
+}
+
+function Set-PlaceholderText($Slide, [int]$Placeholder, [string]$Text) {
+  if ($Slide.Shapes.Placeholders.Count -lt $Placeholder) { return $false }
+  $shape = $Slide.Shapes.Placeholders.Item($Placeholder)
+  $shape.TextFrame.TextRange.Text = $Text
+  return $true
+}
+
+function Apply-PowerPointOperation($Presentation, $Operation, [System.Collections.ArrayList]$Exports) {
+  switch ([string]$Operation.type) {
+    'add_slide' {
+      $index = $(if (Has-Property $Operation 'index') { [int]$Operation.index } else { [int]$Presentation.Slides.Count + 1 })
+      $layout = Get-SlideLayout ([string]$Operation.layout)
+      $slide = $Presentation.Slides.Add($index, $layout)
+      if (Has-Property $Operation 'title') {
+        $null = Set-PlaceholderText $slide 1 ([string]$Operation.title)
+      }
+      if (Has-Property $Operation 'body') {
+        $null = Set-PlaceholderText $slide 2 ([string]$Operation.body)
+      }
+      if (Has-Property $Operation 'notes') {
+        $slide.NotesPage.Shapes.Placeholders.Item(2).TextFrame.TextRange.Text = [string]$Operation.notes
+      }
+    }
+    'delete_slide' {
+      (Get-Slide $Presentation ([int]$Operation.slide)).Delete()
+    }
+    'set_text' {
+      $slide = Get-Slide $Presentation ([int]$Operation.slide)
+      if ([int]$Operation.shape -lt 1 -or [int]$Operation.shape -gt $slide.Shapes.Count) {
+        Throw-Coded 'SHAPE_OUT_OF_RANGE' ('形状索引超出范围：' + [string]$Operation.shape)
+      }
+      $shape = $slide.Shapes.Item([int]$Operation.shape)
+      if (-not $shape.HasTextFrame) {
+        Throw-Coded 'INVALID_ARGUMENT' ('该形状不含文本框：' + [string]$Operation.shape)
+      }
+      $shape.TextFrame.TextRange.Text = [string]$Operation.text
+      Set-ShapeTextFormat $shape $Operation
+    }
+    'add_textbox' {
+      $slide = Get-Slide $Presentation ([int]$Operation.slide)
+      $shape = $slide.Shapes.AddTextbox(1, [double]$Operation.left, [double]$Operation.top, [double]$Operation.widthPoints, [double]$Operation.heightPoints)
+      $shape.TextFrame.TextRange.Text = [string]$Operation.text
+      Set-ShapeTextFormat $shape $Operation
+    }
+    'replace_text' {
+      $slideCount = [int]$Presentation.Slides.Count
+      for ($slideIndex = 1; $slideIndex -le $slideCount; $slideIndex++) {
+        $slide = $Presentation.Slides.Item($slideIndex)
+        foreach ($shape in $slide.Shapes) {
+          if (-not $shape.HasTextFrame) { continue }
+          if (-not $shape.TextFrame.HasText) { continue }
+          $range = $shape.TextFrame.TextRange
+          $found = $range.Replace([string]$Operation.find, [string]$Operation.replace, 0, [bool]$Operation.matchCase, $false)
+          while ($null -ne $found) {
+            $found = $range.Replace([string]$Operation.find, [string]$Operation.replace, 0, [bool]$Operation.matchCase, $false)
+          }
+        }
+      }
+    }
+    'set_notes' {
+      $slide = Get-Slide $Presentation ([int]$Operation.slide)
+      $slide.NotesPage.Shapes.Placeholders.Item(2).TextFrame.TextRange.Text = [string]$Operation.text
+    }
+    'insert_image' {
+      $slide = Get-Slide $Presentation ([int]$Operation.slide)
+      $width = $(if (Has-Property $Operation 'widthPoints') { [double]$Operation.widthPoints } else { -1 })
+      $height = $(if (Has-Property $Operation 'heightPoints') { [double]$Operation.heightPoints } else { -1 })
+      $left = $(if (Has-Property $Operation 'left') { [double]$Operation.left } else { 0 })
+      $top = $(if (Has-Property $Operation 'top') { [double]$Operation.top } else { 0 })
+      $null = $slide.Shapes.AddPicture([string]$Operation.imagePath, $false, $true, $left, $top, $width, $height)
+    }
+    'export_pdf' {
+      $null = $Exports.Add([string]$Operation.outputPath)
+    }
+    default {
+      Throw-Coded 'INVALID_ARGUMENT' ('不支持的 PowerPoint 操作：' + [string]$Operation.type)
+    }
+  }
+}
+
+try {
+  $request = [Console]::In.ReadToEnd() | ConvertFrom-Json
+  $resolved = New-PowerPointApplication ([string]$request.provider)
+  $application = $resolved.application
+  $presentation = $null
+  try {
+    try { $application.DisplayAlerts = 1 } catch { }
+    try { $application.AutomationSecurity = 3 } catch { }
+    if ([string]$request.action -eq 'read_ppt') {
+      $presentation = $application.Presentations.Open([string]$request.path, $true, $false, $false)
+      Write-Success (Read-Presentation $presentation $request $resolved.provider $resolved.progId)
+    } else {
+      if ([bool]$request.create) {
+        $presentation = $application.Presentations.Add($false)
+      } else {
+        $presentation = $application.Presentations.Open([string]$request.path, $false, $false, $false)
+      }
+      $exports = New-Object System.Collections.ArrayList
+      $applied = 0
+      foreach ($operation in @($request.operations)) {
+        Apply-PowerPointOperation $presentation $operation $exports
+        $applied++
+      }
+      if ([bool]$request.create) {
+        $presentation.SaveAs([string]$request.workPath)
+      } else {
+        $presentation.Save()
+      }
+      foreach ($outputPath in $exports) {
+        $presentation.ExportAsFixedFormat([string]$outputPath, 2)
+      }
+      Write-Success ([PSCustomObject]@{
+        provider = $resolved.provider
+        progId = $resolved.progId
+        created = [bool]$request.create
+        operationsApplied = $applied
+      })
+    }
+  } finally {
+    if ($null -ne $presentation) {
+      try { $presentation.Close() } catch { }
+      try { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($presentation) } catch { }
     }
     if ($null -ne $application) {
       try { $application.Quit() } catch { }
@@ -854,45 +1492,113 @@ interface PowerShellEnvelope {
   error?: string;
 }
 
+/** One automated Office application: which files it accepts and how a batch edit is validated. */
+interface OfficeApplication {
+  readonly label: string;
+  readonly readAction: string;
+  readonly editAction: string;
+  readonly script: string;
+  readonly extensions: readonly string[];
+  readonly normalizeOperations: (root: string, value: unknown) => Promise<Array<Record<string, unknown>>>;
+  /** Extra read arguments, resolved from the request after the path is validated. */
+  readonly readArguments: (args: Record<string, unknown>) => Record<string, unknown>;
+}
+
+const OFFICE_APPLICATIONS: readonly OfficeApplication[] = [
+  {
+    label: 'Word',
+    readAction: 'read_word',
+    editAction: 'edit_word',
+    script: WINDOWS_WORD_AUTOMATION_SCRIPT,
+    extensions: ['.docx', '.docm', '.doc', '.rtf', '.odt'],
+    normalizeOperations: normalizeWordOperations,
+    readArguments: (args) => ({
+      maxChars: Math.min(optionalPositiveInteger(args.maxChars, 'maxChars') ?? 50_000, MAX_OFFICE_TEXT_CHARS),
+    }),
+  },
+  {
+    label: 'Excel',
+    readAction: 'read_excel',
+    editAction: 'edit_excel',
+    script: WINDOWS_EXCEL_AUTOMATION_SCRIPT,
+    extensions: ['.xlsx', '.xlsm', '.xls', '.csv', '.ods'],
+    normalizeOperations: normalizeExcelOperations,
+    readArguments: (args) => ({
+      maxCells: Math.min(optionalPositiveInteger(args.maxCells, 'maxCells') ?? 5_000, MAX_OFFICE_CELLS),
+      ...(args.sheet === undefined ? {} : { sheet: sheetSelector(args.sheet) }),
+    }),
+  },
+  {
+    label: 'PowerPoint',
+    readAction: 'read_ppt',
+    editAction: 'edit_ppt',
+    script: WINDOWS_POWERPOINT_AUTOMATION_SCRIPT,
+    extensions: ['.pptx', '.pptm', '.ppt', '.odp'],
+    normalizeOperations: normalizePowerPointOperations,
+    readArguments: (args) => ({
+      maxChars: Math.min(optionalPositiveInteger(args.maxChars, 'maxChars') ?? 50_000, MAX_OFFICE_TEXT_CHARS),
+    }),
+  },
+];
+
+const OFFICE_ACTIONS = [
+  'status',
+  ...OFFICE_APPLICATIONS.flatMap((application) => [application.readAction, application.editAction]),
+] as const;
+
 async function runOfficeOperation(root: string, args: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
-  const action = requireEnum(args.action, 'action', ['status', 'read_word', 'edit_word'] as const);
+  const action = requireEnum(args.action, 'action', OFFICE_ACTIONS);
   const provider = args.provider === undefined
     ? 'auto'
     : requireEnum(args.provider, 'provider', ['auto', 'office', 'wps'] as const);
   if (!isWindowsRuntime()) throw new CompanionError('原生 Office/WPS 自动化只支持 Windows 本机助手', 'WINDOWS_ONLY');
   if (action === 'status') {
-    return await runOfficePowerShell({ action, provider }, root, DEFAULT_OFFICE_TIMEOUT_MS, signal);
+    return await runOfficePowerShell(WINDOWS_OFFICE_STATUS_SCRIPT, { action, provider }, root, DEFAULT_OFFICE_TIMEOUT_MS, signal);
   }
+  const application = OFFICE_APPLICATIONS.find(
+    (candidate) => candidate.readAction === action || candidate.editAction === action,
+  );
+  if (application === undefined) throw new CompanionError(`未实现的 Office 操作：${action}`, 'INVALID_ARGUMENT');
 
   const relative = requireRelativePath(args.path, 'path');
-  assertWordExtension(relative);
-  if (action === 'read_word') {
+  assertOfficeExtension(application, relative);
+  if (action === application.readAction) {
     const target = await existingPathWithin(root, relative);
-    if (!(await stat(target)).isFile()) throw new CompanionError('Word 路径不是普通文件', 'NOT_FILE');
-    const maxChars = Math.min(optionalPositiveInteger(args.maxChars, 'maxChars') ?? 50_000, MAX_OFFICE_TEXT_CHARS);
-    const result = await runOfficePowerShell({ action, provider, path: target, maxChars }, path.dirname(target), DEFAULT_OFFICE_TIMEOUT_MS, signal);
+    if (!(await stat(target)).isFile()) {
+      throw new CompanionError(`${application.label} 路径不是普通文件`, 'NOT_FILE');
+    }
+    const result = await runOfficePowerShell(application.script, {
+      action,
+      provider,
+      path: target,
+      ...application.readArguments(args),
+    }, path.dirname(target), DEFAULT_OFFICE_TIMEOUT_MS, signal);
     return { ...(requireObject(result, 'Office 返回值无效')), path: displayPath(relative) };
   }
 
   const create = args.create === true;
   const overwrite = args.overwrite === true;
   const target = create ? await writablePathWithin(root, relative) : await existingPathWithin(root, relative);
-  if (!create && !(await stat(target)).isFile()) throw new CompanionError('Word 路径不是普通文件', 'NOT_FILE');
+  if (!create && !(await stat(target)).isFile()) {
+    throw new CompanionError(`${application.label} 路径不是普通文件`, 'NOT_FILE');
+  }
   if (create) {
     await mkdir(path.dirname(target), { recursive: true });
     try {
       const info = await stat(target);
-      if (!info.isFile()) throw new CompanionError('Word 路径不是普通文件', 'NOT_FILE');
-      if (!overwrite) throw new CompanionError('目标 Word 文档已存在；如需覆盖请设置 overwrite', 'FILE_EXISTS');
+      if (!info.isFile()) throw new CompanionError(`${application.label} 路径不是普通文件`, 'NOT_FILE');
+      if (!overwrite) {
+        throw new CompanionError(`目标 ${application.label} 文档已存在；如需覆盖请设置 overwrite`, 'FILE_EXISTS');
+      }
     } catch (error) {
       if (!isMissing(error)) throw error;
     }
   }
-  const operations = await normalizeWordOperations(root, args.operations);
+  const operations = await application.normalizeOperations(root, args.operations);
   const timeoutMs = Math.min(optionalPositiveInteger(args.timeoutMs, 'timeoutMs') ?? DEFAULT_OFFICE_TIMEOUT_MS, MAX_COMMAND_TIMEOUT_MS);
   const temporary = create ? temporaryOfficePath(target) : undefined;
   try {
-    const result = await runOfficePowerShell({
+    const result = await runOfficePowerShell(application.script, {
       action,
       provider,
       path: target,
@@ -914,7 +1620,9 @@ async function runOfficeOperation(root: string, args: Record<string, unknown>, s
       try {
         await unlink(temporary);
       } catch (error) {
-        if (!isMissing(error)) console.warn(`[dsh-local-workspace] Word 临时文件清理失败：${String(error)}`);
+        if (!isMissing(error)) {
+          console.warn(`[dsh-local-workspace] ${application.label} 临时文件清理失败：${String(error)}`);
+        }
       }
     }
   }
@@ -1010,22 +1718,321 @@ async function normalizeWordOperations(root: string, value: unknown): Promise<Ar
           ...(operation.paragraph === undefined ? {} : { paragraph: requiredPositiveInteger(operation.paragraph, 'paragraph') }),
         });
         break;
-      case 'export_pdf': {
-        const outputRelative = requireRelativePath(operation.outputPath, 'outputPath');
-        if (path.extname(outputRelative).toLowerCase() !== '.pdf') {
-          throw new CompanionError('outputPath 必须以 .pdf 结尾', 'INVALID_ARGUMENT');
-        }
-        const outputPath = await writablePathWithin(root, outputRelative);
-        await mkdir(path.dirname(outputPath), { recursive: true });
-        normalized.push({ type, outputPath });
+      case 'export_pdf':
+        normalized.push({ type, outputPath: await exportPdfPath(root, operation.outputPath) });
         break;
-      }
     }
   }
-  if (Buffer.byteLength(JSON.stringify(normalized), 'utf8') > 2 * 1024 * 1024) {
-    throw new CompanionError('Word 批量操作超过 2 MiB 上限', 'REQUEST_TOO_LARGE');
-  }
+  assertOfficeOperationsSize(normalized, 'Word');
   return normalized;
+}
+
+/** Accept a worksheet name or a 1-based index, the two forms Get-Worksheet resolves. */
+function sheetSelector(value: unknown): string | number {
+  if (typeof value === 'number') return requiredPositiveInteger(value, 'sheet');
+  return requireString(value, 'sheet', 1, 120);
+}
+
+/** Optional worksheet selector, spread into a normalized operation. */
+function sheetField(operation: Record<string, unknown>): Record<string, unknown> {
+  return operation.sheet === undefined ? {} : { sheet: sheetSelector(operation.sheet) };
+}
+
+/** Validate an A1-style reference before PowerShell hands it to Range(). */
+function requireRangeReference(value: unknown, name: string): string {
+  const reference = requireString(value, name, 1, 120);
+  if (!/^[A-Za-z$]{1,3}[0-9$]{0,7}(:[A-Za-z$]{1,3}[0-9$]{0,7})?$/.test(reference)) {
+    throw new CompanionError(`${name} 必须是 A1、A1:C10 或 A:C 这类区域引用`, 'INVALID_ARGUMENT');
+  }
+  return reference;
+}
+
+/** A rectangular block of cell text; a leading `=` is written as a formula. */
+function excelRows(value: unknown): string[][] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_OFFICE_ROWS) {
+    throw new CompanionError(`rows 必须包含 1-${String(MAX_OFFICE_ROWS)} 行`, 'INVALID_ARGUMENT');
+  }
+  let cells = 0;
+  return value.map((rawRow, rowIndex) => {
+    if (!Array.isArray(rawRow) || rawRow.length < 1 || rawRow.length > MAX_OFFICE_COLUMNS) {
+      throw new CompanionError(`rows[${String(rowIndex)}] 必须包含 1-${String(MAX_OFFICE_COLUMNS)} 列`, 'INVALID_ARGUMENT');
+    }
+    cells += rawRow.length;
+    if (cells > MAX_OFFICE_CELLS) {
+      throw new CompanionError(`单次写入不得超过 ${String(MAX_OFFICE_CELLS)} 个单元格`, 'REQUEST_TOO_LARGE');
+    }
+    return rawRow.map((cell, columnIndex) => requireString(cell, `rows[${String(rowIndex)}][${String(columnIndex)}]`, 0, 32_767));
+  });
+}
+
+/** Font and fill fields shared by Excel range formatting. */
+function excelFormat(operation: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...(operation.bold === undefined ? {} : { bold: requireBoolean(operation.bold, 'bold') }),
+    ...(operation.italic === undefined ? {} : { italic: requireBoolean(operation.italic, 'italic') }),
+    ...(operation.fontName === undefined ? {} : { fontName: requireString(operation.fontName, 'fontName', 1, 120) }),
+    ...(operation.fontSize === undefined ? {} : { fontSize: boundedNumber(operation.fontSize, 'fontSize', 1, 409) }),
+    ...(operation.color === undefined ? {} : { color: requireHexColor(operation.color) }),
+    ...(operation.background === undefined ? {} : { background: requireHexColor(operation.background) }),
+    ...(operation.numberFormat === undefined ? {} : { numberFormat: requireString(operation.numberFormat, 'numberFormat', 1, 200) }),
+    ...(operation.wrap === undefined ? {} : { wrap: requireBoolean(operation.wrap, 'wrap') }),
+    ...(operation.merge === undefined ? {} : { merge: requireBoolean(operation.merge, 'merge') }),
+    ...(operation.alignment === undefined ? {} : {
+      alignment: requireEnum(operation.alignment, 'alignment', ['left', 'center', 'right'] as const),
+    }),
+  };
+}
+
+const EXCEL_OPERATION_TYPES = [
+  'set_cells',
+  'append_rows',
+  'set_formula',
+  'clear_range',
+  'format_range',
+  'set_column_width',
+  'set_row_height',
+  'autofit',
+  'add_sheet',
+  'rename_sheet',
+  'delete_sheet',
+  'replace_text',
+  'insert_image',
+  'export_pdf',
+] as const;
+
+async function normalizeExcelOperations(root: string, value: unknown): Promise<Array<Record<string, unknown>>> {
+  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_OFFICE_OPERATIONS) {
+    throw new CompanionError(`operations 必须包含 1-${String(MAX_OFFICE_OPERATIONS)} 项`, 'INVALID_ARGUMENT');
+  }
+  const normalized: Array<Record<string, unknown>> = [];
+  for (const raw of value) {
+    const operation = requireObject(raw, 'Excel 操作必须是对象');
+    const type = requireEnum(operation.type, 'operation.type', EXCEL_OPERATION_TYPES);
+    switch (type) {
+      case 'set_cells':
+        normalized.push({
+          type,
+          ...sheetField(operation),
+          row: requiredPositiveInteger(operation.row ?? 1, 'row'),
+          column: requiredPositiveInteger(operation.column ?? 1, 'column'),
+          rows: excelRows(operation.rows),
+        });
+        break;
+      case 'append_rows':
+        normalized.push({ type, ...sheetField(operation), rows: excelRows(operation.rows) });
+        break;
+      case 'set_formula':
+        normalized.push({
+          type,
+          ...sheetField(operation),
+          range: requireRangeReference(operation.range, 'range'),
+          formula: requireString(operation.formula, 'formula', 1, 8_192),
+        });
+        break;
+      case 'clear_range':
+        normalized.push({ type, ...sheetField(operation), range: requireRangeReference(operation.range, 'range') });
+        break;
+      case 'format_range':
+        normalized.push({
+          type,
+          ...sheetField(operation),
+          range: requireRangeReference(operation.range, 'range'),
+          ...excelFormat(operation),
+        });
+        break;
+      case 'set_column_width':
+        normalized.push({
+          type,
+          ...sheetField(operation),
+          range: requireRangeReference(operation.range, 'range'),
+          width: boundedNumber(operation.width, 'width', 0, 255),
+        });
+        break;
+      case 'set_row_height':
+        normalized.push({
+          type,
+          ...sheetField(operation),
+          range: requireRangeReference(operation.range, 'range'),
+          height: boundedNumber(operation.height, 'height', 0, 409),
+        });
+        break;
+      case 'autofit':
+        normalized.push({
+          type,
+          ...sheetField(operation),
+          ...(operation.range === undefined ? {} : { range: requireRangeReference(operation.range, 'range') }),
+        });
+        break;
+      case 'add_sheet':
+        normalized.push({
+          type,
+          ...(operation.name === undefined ? {} : { name: requireString(operation.name, 'name', 1, 31) }),
+        });
+        break;
+      case 'rename_sheet':
+        normalized.push({ type, ...sheetField(operation), name: requireString(operation.name, 'name', 1, 31) });
+        break;
+      case 'delete_sheet':
+        normalized.push({ type, sheet: sheetSelector(operation.sheet) });
+        break;
+      case 'replace_text':
+        normalized.push({
+          type,
+          ...sheetField(operation),
+          find: requireString(operation.find, 'find', 1, 32_767),
+          replace: requireString(operation.replace, 'replace', 0, 32_767),
+          matchCase: operation.matchCase === true,
+          wholeCell: operation.wholeCell === true,
+        });
+        break;
+      case 'insert_image': {
+        const imageRelative = requireRelativePath(operation.imagePath, 'imagePath');
+        const imagePath = await existingPathWithin(root, imageRelative);
+        if (!(await stat(imagePath)).isFile()) throw new CompanionError('图片路径不是普通文件', 'NOT_FILE');
+        normalized.push({
+          type,
+          ...sheetField(operation),
+          range: requireRangeReference(operation.range ?? 'A1', 'range'),
+          imagePath,
+          ...(operation.widthPoints === undefined ? {} : { widthPoints: boundedNumber(operation.widthPoints, 'widthPoints', 1, 2_000) }),
+          ...(operation.heightPoints === undefined ? {} : { heightPoints: boundedNumber(operation.heightPoints, 'heightPoints', 1, 2_000) }),
+        });
+        break;
+      }
+      case 'export_pdf':
+        normalized.push({ type, outputPath: await exportPdfPath(root, operation.outputPath) });
+        break;
+    }
+  }
+  assertOfficeOperationsSize(normalized, 'Excel');
+  return normalized;
+}
+
+/** Text and paragraph fields shared by PowerPoint shape operations. */
+function powerPointFormat(operation: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...(operation.bold === undefined ? {} : { bold: requireBoolean(operation.bold, 'bold') }),
+    ...(operation.italic === undefined ? {} : { italic: requireBoolean(operation.italic, 'italic') }),
+    ...(operation.fontName === undefined ? {} : { fontName: requireString(operation.fontName, 'fontName', 1, 120) }),
+    ...(operation.fontSize === undefined ? {} : { fontSize: boundedNumber(operation.fontSize, 'fontSize', 1, 400) }),
+    ...(operation.color === undefined ? {} : { color: requireHexColor(operation.color) }),
+    ...(operation.alignment === undefined ? {} : {
+      alignment: requireEnum(operation.alignment, 'alignment', ['left', 'center', 'right', 'justify'] as const),
+    }),
+  };
+}
+
+const POWERPOINT_OPERATION_TYPES = [
+  'add_slide',
+  'delete_slide',
+  'set_text',
+  'add_textbox',
+  'replace_text',
+  'set_notes',
+  'insert_image',
+  'export_pdf',
+] as const;
+
+async function normalizePowerPointOperations(root: string, value: unknown): Promise<Array<Record<string, unknown>>> {
+  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_OFFICE_OPERATIONS) {
+    throw new CompanionError(`operations 必须包含 1-${String(MAX_OFFICE_OPERATIONS)} 项`, 'INVALID_ARGUMENT');
+  }
+  const normalized: Array<Record<string, unknown>> = [];
+  for (const raw of value) {
+    const operation = requireObject(raw, 'PowerPoint 操作必须是对象');
+    const type = requireEnum(operation.type, 'operation.type', POWERPOINT_OPERATION_TYPES);
+    switch (type) {
+      case 'add_slide':
+        normalized.push({
+          type,
+          ...(operation.index === undefined ? {} : { index: requiredPositiveInteger(operation.index, 'index') }),
+          layout: operation.layout === undefined
+            ? 'title_content'
+            : requireEnum(operation.layout, 'layout', ['title', 'title_content', 'two_content', 'section', 'blank'] as const),
+          ...(operation.title === undefined ? {} : { title: requireString(operation.title, 'title', 0, MAX_OFFICE_TEXT_CHARS) }),
+          ...(operation.body === undefined ? {} : { body: requireString(operation.body, 'body', 0, MAX_OFFICE_TEXT_CHARS) }),
+          ...(operation.notes === undefined ? {} : { notes: requireString(operation.notes, 'notes', 0, MAX_OFFICE_TEXT_CHARS) }),
+        });
+        break;
+      case 'delete_slide':
+        normalized.push({ type, slide: requiredPositiveInteger(operation.slide, 'slide') });
+        break;
+      case 'set_text':
+        normalized.push({
+          type,
+          slide: requiredPositiveInteger(operation.slide, 'slide'),
+          shape: requiredPositiveInteger(operation.shape, 'shape'),
+          text: requireString(operation.text, 'text', 0, MAX_OFFICE_TEXT_CHARS),
+          ...powerPointFormat(operation),
+        });
+        break;
+      case 'add_textbox':
+        normalized.push({
+          type,
+          slide: requiredPositiveInteger(operation.slide, 'slide'),
+          text: requireString(operation.text, 'text', 0, MAX_OFFICE_TEXT_CHARS),
+          left: boundedNumber(operation.left ?? 50, 'left', 0, 4_000),
+          top: boundedNumber(operation.top ?? 50, 'top', 0, 4_000),
+          widthPoints: boundedNumber(operation.widthPoints ?? 400, 'widthPoints', 1, 4_000),
+          heightPoints: boundedNumber(operation.heightPoints ?? 100, 'heightPoints', 1, 4_000),
+          ...powerPointFormat(operation),
+        });
+        break;
+      case 'replace_text':
+        normalized.push({
+          type,
+          find: requireString(operation.find, 'find', 1, MAX_OFFICE_TEXT_CHARS),
+          replace: requireString(operation.replace, 'replace', 0, MAX_OFFICE_TEXT_CHARS),
+          matchCase: operation.matchCase === true,
+        });
+        break;
+      case 'set_notes':
+        normalized.push({
+          type,
+          slide: requiredPositiveInteger(operation.slide, 'slide'),
+          text: requireString(operation.text, 'text', 0, MAX_OFFICE_TEXT_CHARS),
+        });
+        break;
+      case 'insert_image': {
+        const imageRelative = requireRelativePath(operation.imagePath, 'imagePath');
+        const imagePath = await existingPathWithin(root, imageRelative);
+        if (!(await stat(imagePath)).isFile()) throw new CompanionError('图片路径不是普通文件', 'NOT_FILE');
+        normalized.push({
+          type,
+          slide: requiredPositiveInteger(operation.slide, 'slide'),
+          imagePath,
+          ...(operation.left === undefined ? {} : { left: boundedNumber(operation.left, 'left', 0, 4_000) }),
+          ...(operation.top === undefined ? {} : { top: boundedNumber(operation.top, 'top', 0, 4_000) }),
+          ...(operation.widthPoints === undefined ? {} : { widthPoints: boundedNumber(operation.widthPoints, 'widthPoints', 1, 4_000) }),
+          ...(operation.heightPoints === undefined ? {} : { heightPoints: boundedNumber(operation.heightPoints, 'heightPoints', 1, 4_000) }),
+        });
+        break;
+      }
+      case 'export_pdf':
+        normalized.push({ type, outputPath: await exportPdfPath(root, operation.outputPath) });
+        break;
+    }
+  }
+  assertOfficeOperationsSize(normalized, 'PowerPoint');
+  return normalized;
+}
+
+/** Resolve and create the directory for one `export_pdf` destination. */
+async function exportPdfPath(root: string, value: unknown): Promise<string> {
+  const outputRelative = requireRelativePath(value, 'outputPath');
+  if (path.extname(outputRelative).toLowerCase() !== '.pdf') {
+    throw new CompanionError('outputPath 必须以 .pdf 结尾', 'INVALID_ARGUMENT');
+  }
+  const outputPath = await writablePathWithin(root, outputRelative);
+  await mkdir(path.dirname(outputPath), { recursive: true });
+  return outputPath;
+}
+
+/** Keep one batch inside the companion's message budget. */
+function assertOfficeOperationsSize(normalized: Array<Record<string, unknown>>, label: string): void {
+  if (Buffer.byteLength(JSON.stringify(normalized), 'utf8') > 2 * 1024 * 1024) {
+    throw new CompanionError(`${label} 批量操作超过 2 MiB 上限`, 'REQUEST_TOO_LARGE');
+  }
 }
 
 function wordFormat(operation: Record<string, unknown>): Record<string, unknown> {
@@ -1057,9 +2064,12 @@ function wordTableRows(value: unknown): string[][] {
   });
 }
 
-function assertWordExtension(relative: string): void {
-  if (!['.docx', '.docm', '.doc', '.rtf', '.odt'].includes(path.extname(relative).toLowerCase())) {
-    throw new CompanionError('Word 文档必须使用 .docx、.docm、.doc、.rtf 或 .odt 扩展名', 'INVALID_ARGUMENT');
+function assertOfficeExtension(application: OfficeApplication, relative: string): void {
+  if (!application.extensions.includes(path.extname(relative).toLowerCase())) {
+    throw new CompanionError(
+      `${application.label} 文档必须使用 ${application.extensions.join('、')} 扩展名`,
+      'INVALID_ARGUMENT',
+    );
   }
 }
 
@@ -1069,6 +2079,7 @@ function temporaryOfficePath(target: string): string {
 }
 
 async function runOfficePowerShell(
+  script: string,
   request: Record<string, unknown>,
   cwd: string,
   timeoutMs: number,
@@ -1078,7 +2089,7 @@ async function runOfficePowerShell(
   const executable = process.env.DSH_LOCAL_WORKSPACE_TEST_WINDOWS === '1'
     ? process.env.DSH_LOCAL_WORKSPACE_TEST_POWERSHELL ?? 'powershell.exe'
     : 'powershell.exe';
-  const encoded = Buffer.from(WINDOWS_WORD_AUTOMATION_SCRIPT, 'utf16le').toString('base64');
+  const encoded = Buffer.from(script, 'utf16le').toString('base64');
   const child = spawn(executable, [
     '-NoLogo',
     '-NoProfile',

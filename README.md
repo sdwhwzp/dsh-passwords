@@ -66,7 +66,7 @@ dsh 的网页界面默认面向本机使用。服务器地址一旦暴露，拿�
 - dsh 的 `read`、`write`、`edit`、`glob`、`grep` 会通过本机助手直接操作授权目录中的原文件
 - Windows EXE 自动启用 `--allow-shell`，包括恢复已有工作区；非 Windows EXE 命令行模式默认关闭，显式添加后 Shell 才会在该用户电脑上执行
 - 桌面端接入目录后会报告当前 Shell 权限。每次模型请求都会重新读取连接状态，并通过 `local-workspace-capabilities` 写入可回放的上下文；原会话在重连后也会使用新状态。启用时直接调用 `bash` 执行 Git、构建等命令；离线或未启用时明确提示，服务端和本机助手均保留检查。
-- Windows 工作区自动注册 `word_native_status`、`word_native_read`、`word_native_edit`：优先调用客户电脑已经安装的 Microsoft Word，不可用时回退 WPS 文字，不依赖 `@univerjs-pro/*`
+- Windows 工作区自动注册 `office_native_status` 与 Word、Excel、PowerPoint 各自的 `*_native_read`／`*_native_edit`：优先调用客户电脑已经安装的 Microsoft Office，不可用时回退 WPS 文字、表格、演示，不依赖 `@univerjs-pro/*`
 - 单独授权「桌面控制」后还会注册 `computer_screenshot` 与 `computer_use`，让模型看到并操作那台电脑自己的屏幕、鼠标和键盘；该授权与 Shell 相互独立，默认关闭
 
 ## 身份与消费额度同步
@@ -183,9 +183,9 @@ Windows 使用者不需要安装 Node.js：
 
 Windows EXE 会自动启用 `--allow-shell`，网页一键选择和恢复已有工作区均会启用 PowerShell；Shell 以当前 Windows 用户身份运行，可能访问授权目录之外的文件。客户界面只提供 Windows 一键选择流程，不显示服务器地址、确认码或旧版配对命令。
 
-Windows 本机工作区还提供原生 Word 自动化。`word_native_read` 可读取正文、段落和表格；`word_native_edit` 可创建文档或批量执行查找替换、段落插入/删除/格式设置、表格、页眉页脚、图片、分页和 PDF 导出。助手首先尝试 `Word.Application`，失败后尝试 WPS 的 `kwps.Application`。操作参数通过 JSON 标准输入传给固定 PowerShell 脚本，不会拼接为命令；所有文档、图片和导出路径都必须位于用户授权目录。文档只在整批操作成功后保存，打开文档时禁用宏自动执行。
+Windows 本机工作区还提供原生 Word、Excel 和 PowerPoint 自动化。`word_native_read` 可读取正文、段落和表格；`word_native_edit` 可创建文档或批量执行查找替换、段落插入/删除/格式设置、表格、页眉页脚、图片、分页和 PDF 导出。`excel_native_read` 按工作表读取已用区域，日期单元格返回 ISO 时间戳；`excel_native_edit` 可写入单元格区块、公式、格式、列宽行高，管理工作表，插入图片、查找替换和导出 PDF，单元格值以 `=` 开头时按公式写入。`ppt_native_read` 读取每页的形状文本与备注；`ppt_native_edit` 可增删幻灯片、设置占位符与文本框、备注、图片、查找替换和导出 PDF，形状序号与读取结果一致。助手按应用分别尝试 `Word.Application`／`Excel.Application`／`PowerPoint.Application`，失败后尝试 WPS 的 `kwps.Application`／`ket.Application`／`kwpp.Application`；`office_native_status` 报告三者各自的可用情况。每个动作只加载自己那份 PowerShell 脚本。操作参数通过 JSON 标准输入传给固定 PowerShell 脚本，不会拼接为命令；所有文档、图片和导出路径都必须位于用户授权目录。文档只在整批操作成功后保存，打开文档时禁用宏自动执行。
 
-Office RPC 使用本机助手协议 v2。升级服务器端插件后必须重新下载并运行新版 EXE；旧版助手会收到协议版本不支持提示。
+Office RPC 使用本机助手协议 v2。Excel 与 PowerPoint 只是该协议内新增的动作，没有提升版本号，所以已配对的旧版助手仍能连接，但调用 Excel 或 PowerPoint 工具会返回动作不支持的错误，`office_native_status` 的返回中也不含 `apps` 字段。升级服务器端插件后请重新下载并运行新版 EXE。
 
 ### 桌面控制（computer-use）
 

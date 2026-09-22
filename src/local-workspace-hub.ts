@@ -905,7 +905,7 @@ export class LocalWorkspaceHub {
     agent.ctx.systemPrompt.section({
       name: 'remote-local-workspace',
       order: 95,
-      text: `This session workspace is on the user’s paired computer. read, write, edit, glob, grep, and bash operate there through the local companion.${workspace.platform === 'win32' ? ' word_native_read and word_native_edit use the installed Microsoft Word or WPS Writer on that computer.' : ''} Paths are relative to the selected local folder. Use the current local-workspace-capabilities context for connection and Shell permission; earlier refusals do not describe the current connection. When Shell is enabled, use bash for requested terminal operations, including Git branch inspection and switching, and inspect its result before reporting a failure. Do not edit Git internals to substitute for Git commands.${workspace.desktop_control_enabled ? ' computer_screenshot and computer_use observe and drive that computer’s own screen, mouse and keyboard. Always take a screenshot before acting, measure coordinates on that screenshot rather than on the physical display, and take another screenshot to confirm each action landed. Input goes to whichever window holds focus, so never type credentials and stop and ask the user when a screen shows sign-in, payment or other sensitive fields.' : ''}`,
+      text: `This session workspace is on the user’s paired computer. read, write, edit, glob, grep, and bash operate there through the local companion.${workspace.platform === 'win32' ? ' word_native_read, word_native_edit, excel_native_read, excel_native_edit, ppt_native_read and ppt_native_edit drive the installed Microsoft Office or WPS applications on that computer; office_native_status reports which of them are available.' : ''} Paths are relative to the selected local folder. Use the current local-workspace-capabilities context for connection and Shell permission; earlier refusals do not describe the current connection. When Shell is enabled, use bash for requested terminal operations, including Git branch inspection and switching, and inspect its result before reporting a failure. Do not edit Git internals to substitute for Git commands.${workspace.desktop_control_enabled ? ' computer_screenshot and computer_use observe and drive that computer’s own screen, mouse and keyboard. Always take a screenshot before acting, measure coordinates on that screenshot rather than on the physical display, and take another screenshot to confirm each action landed. Input goes to whichever window holds focus, so never type credentials and stop and ask the user when a screen shows sign-in, payment or other sensitive fields.' : ''}`,
     });
     agent.ctx.systemPrompt.context({
       name: 'local-workspace-capabilities',
@@ -1789,20 +1789,50 @@ function remoteToolDefinitions(
   if (workspace.platform !== 'win32') return tools;
 
   const providerSchema = { type: 'string', enum: ['auto', 'office', 'wps'] };
-  const wordStatus: ToolDefinition = {
-    name: 'word_native_status',
-    description: 'Detect Microsoft Word and WPS Writer automation on the user’s paired Windows computer. Prefer Microsoft Word when both are available.',
+  const suiteSchema = objectSchema(['office', 'wps', 'preferred'], {
+    office: { type: 'boolean' },
+    wps: { type: 'boolean' },
+    preferred: { oneOf: [{ type: 'string', enum: ['office', 'wps'] }, { type: 'null' }] },
+  });
+  const officeStatus: ToolDefinition = {
+    name: 'office_native_status',
+    description: 'Detect Microsoft Office and WPS automation for Word, Excel and PowerPoint on the user’s paired Windows computer. Prefer Microsoft Office when both are available.',
     parameters: objectSchema([], {}),
     output: {
+      // `apps` is absent from companions built before the Excel and PowerPoint
+      // actions; those report Word alone through the three top-level fields.
       schema: objectSchema(['platform', 'office', 'wps', 'preferred'], {
         platform: { type: 'string', enum: ['win32'] },
         office: { type: 'boolean' },
         wps: { type: 'boolean' },
         preferred: { oneOf: [{ type: 'string', enum: ['office', 'wps'] }, { type: 'null' }] },
+        apps: objectSchema(['word', 'excel', 'powerpoint'], {
+          word: suiteSchema,
+          excel: suiteSchema,
+          powerpoint: suiteSchema,
+        }),
       }),
       render: (_args, value) => {
-        const status = value as { office: boolean; wps: boolean; preferred: string | null };
-        return [textOutput(`Microsoft Word: ${status.office ? 'available' : 'unavailable'}\nWPS Writer: ${status.wps ? 'available' : 'unavailable'}\nPreferred: ${status.preferred ?? 'none'}`)];
+        const status = value as {
+          office: boolean;
+          wps: boolean;
+          preferred: string | null;
+          apps?: Record<string, { office: boolean; wps: boolean; preferred: string | null }>;
+        };
+        const apps = status.apps ?? { word: { office: status.office, wps: status.wps, preferred: status.preferred } };
+        const labels: Record<string, [string, string]> = {
+          word: ['Microsoft Word', 'WPS Writer'],
+          excel: ['Microsoft Excel', 'WPS Spreadsheets'],
+          powerpoint: ['Microsoft PowerPoint', 'WPS Presentation'],
+        };
+        const lines = Object.entries(apps).map(([key, suite]) => {
+          const [officeLabel, wpsLabel] = labels[key] ?? [key, key];
+          return `${officeLabel}: ${suite.office ? 'available' : 'unavailable'}; ${wpsLabel}: ${suite.wps ? 'available' : 'unavailable'}; preferred: ${suite.preferred ?? 'none'}`;
+        });
+        if (status.apps === undefined) {
+          lines.push('The paired companion predates Excel and PowerPoint automation; update it to use those tools.');
+        }
+        return [textOutput(lines.join('\n'))];
       },
     },
     isConcurrencySafe: () => true,
@@ -1898,11 +1928,209 @@ function remoteToolDefinitions(
         create: value.create === true,
         overwrite: value.overwrite === true,
         timeoutMs,
-        operations: normalizeRemoteWordOperations(value.operations, pathArg),
+        operations: normalizeRemoteOfficeOperations(value.operations, pathArg),
       }, timeoutMs + 10_000);
     },
   };
-  return [...tools, wordStatus, wordRead, wordEdit];
+  const sheetSchema = { oneOf: [{ type: 'string' }, { type: 'integer', minimum: 1 }], description: 'Worksheet name or 1-based index; the active sheet when omitted.' };
+  const excelRead: ToolDefinition = {
+    name: 'excel_native_read',
+    description: 'Read worksheet cells from an existing workbook using Microsoft Excel or WPS Spreadsheets on the paired Windows computer. Date cells come back as ISO timestamps.',
+    parameters: objectSchema(['file_path'], {
+      file_path: { type: 'string', description: 'Workbook path relative to the paired local workspace.' },
+      provider: providerSchema,
+      sheet: sheetSchema,
+      max_cells: { type: 'integer', minimum: 1, maximum: 50000 },
+    }),
+    timeoutMs: 200_000,
+    output: {
+      schema: objectSchema(['path', 'provider', 'progId', 'sheetCount', 'truncated', 'sheets'], {
+        path: { type: 'string' },
+        provider: { type: 'string', enum: ['office', 'wps'] },
+        progId: { type: 'string' },
+        sheetCount: { type: 'integer' },
+        truncated: { type: 'boolean' },
+        sheets: {
+          type: 'array',
+          items: objectSchema(['index', 'name', 'firstRow', 'firstColumn', 'rowCount', 'columnCount', 'rows'], {
+            index: { type: 'integer' },
+            name: { type: 'string' },
+            firstRow: { type: 'integer' },
+            firstColumn: { type: 'integer' },
+            rowCount: { type: 'integer' },
+            columnCount: { type: 'integer' },
+            rows: { type: 'array', items: { type: 'array', items: { type: 'string' } } },
+          }),
+        },
+      }),
+      render: (_args, value) => {
+        const result = value as {
+          path: string;
+          provider: string;
+          truncated: boolean;
+          sheets: Array<{ name: string; firstRow: number; firstColumn: number; rowCount: number; columnCount: number; rows: string[][] }>;
+        };
+        const sheets = result.sheets.map((sheet) => {
+          const body = sheet.rows.map((row) => row.join('\t')).join('\n');
+          return `<sheet name="${sheet.name}" origin="r${String(sheet.firstRow)}c${String(sheet.firstColumn)}" size="${String(sheet.rowCount)}x${String(sheet.columnCount)}">\n${body}\n</sheet>`;
+        });
+        return [textOutput(`<path>${result.path}</path>\n<type>excel</type>\n<provider>${result.provider}</provider>\n${sheets.join('\n')}${result.truncated ? '\n[content truncated]' : ''}`)];
+      },
+    },
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const value = args as Record<string, unknown>;
+      return await executeRemote(exec, 'office', {
+        action: 'read_excel',
+        path: pathArg(value.file_path),
+        ...(value.provider === undefined ? {} : { provider: requireStringField(value.provider, 'provider') }),
+        ...(value.sheet === undefined ? {} : { sheet: value.sheet }),
+        ...(value.max_cells === undefined ? {} : { maxCells: value.max_cells }),
+      }, 190_000);
+    },
+  };
+  const excelEdit: ToolDefinition = {
+    name: 'excel_native_edit',
+    description: 'Create or batch-edit a workbook with installed Microsoft Excel or WPS Spreadsheets. Supports writing cell blocks, formulas, formatting, column widths, sheet management, images, find-and-replace, and PDF export. A cell value starting with = is written as a formula. The workbook is saved only after every requested edit succeeds.',
+    parameters: objectSchema(['file_path', 'operations'], {
+      file_path: { type: 'string', description: 'Workbook path relative to the paired local workspace.' },
+      provider: providerSchema,
+      create: { type: 'boolean', description: 'Create a new workbook instead of opening an existing one.' },
+      overwrite: { type: 'boolean', description: 'Allow create mode to replace an existing file.' },
+      timeout_ms: { type: 'integer', minimum: 1000, maximum: 600000 },
+      operations: { type: 'array', minItems: 1, maxItems: 100, items: excelOperationSchema(sheetSchema) },
+    }),
+    timeoutMs: MAX_RPC_TIMEOUT_MS,
+    output: {
+      schema: objectSchema(['path', 'provider', 'progId', 'created', 'operationsApplied', 'pdfPaths'], {
+        path: { type: 'string' },
+        provider: { type: 'string', enum: ['office', 'wps'] },
+        progId: { type: 'string' },
+        created: { type: 'boolean' },
+        operationsApplied: { type: 'integer' },
+        pdfPaths: { type: 'array', items: { type: 'string' } },
+      }),
+      render: (_args, value) => {
+        const result = value as { path: string; provider: string; operationsApplied: number; created: boolean; pdfPaths: string[] };
+        const exports = result.pdfPaths.length === 0 ? '' : `\nPDF: ${result.pdfPaths.join(', ')}`;
+        return [textOutput(`${result.created ? 'created' : 'edited'} ${result.path} with ${result.provider}; ${String(result.operationsApplied)} operation(s) applied${exports}`)];
+      },
+    },
+    async execute(args, exec) {
+      const value = args as Record<string, unknown>;
+      const timeoutMs = typeof value.timeout_ms === 'number' ? value.timeout_ms : 180_000;
+      return await executeRemote(exec, 'office', {
+        action: 'edit_excel',
+        path: pathArg(value.file_path),
+        ...(value.provider === undefined ? {} : { provider: requireStringField(value.provider, 'provider') }),
+        create: value.create === true,
+        overwrite: value.overwrite === true,
+        timeoutMs,
+        operations: normalizeRemoteOfficeOperations(value.operations, pathArg),
+      }, timeoutMs + 10_000);
+    },
+  };
+  const pptRead: ToolDefinition = {
+    name: 'ppt_native_read',
+    description: 'Read slide text, shape indexes, and speaker notes from an existing presentation using Microsoft PowerPoint or WPS Presentation on the paired Windows computer.',
+    parameters: objectSchema(['file_path'], {
+      file_path: { type: 'string', description: 'Presentation path relative to the paired local workspace.' },
+      provider: providerSchema,
+      max_chars: { type: 'integer', minimum: 1, maximum: 200000 },
+    }),
+    timeoutMs: 200_000,
+    output: {
+      schema: objectSchema(['path', 'provider', 'progId', 'slideCount', 'truncated', 'slides'], {
+        path: { type: 'string' },
+        provider: { type: 'string', enum: ['office', 'wps'] },
+        progId: { type: 'string' },
+        slideCount: { type: 'integer' },
+        truncated: { type: 'boolean' },
+        slides: {
+          type: 'array',
+          items: objectSchema(['index', 'shapeCount', 'shapes', 'notes'], {
+            index: { type: 'integer' },
+            shapeCount: { type: 'integer' },
+            notes: { type: 'string' },
+            shapes: {
+              type: 'array',
+              items: objectSchema(['index', 'name', 'text'], {
+                index: { type: 'integer' },
+                name: { type: 'string' },
+                text: { type: 'string' },
+              }),
+            },
+          }),
+        },
+      }),
+      render: (_args, value) => {
+        const result = value as {
+          path: string;
+          provider: string;
+          truncated: boolean;
+          slides: Array<{ index: number; notes: string; shapes: Array<{ index: number; text: string }> }>;
+        };
+        const slides = result.slides.map((slide) => {
+          const body = slide.shapes.map((shape) => `[${String(shape.index)}] ${shape.text}`).join('\n');
+          const notes = slide.notes === '' ? '' : `\n<notes>${slide.notes}</notes>`;
+          return `<slide index="${String(slide.index)}">\n${body}${notes}\n</slide>`;
+        });
+        return [textOutput(`<path>${result.path}</path>\n<type>powerpoint</type>\n<provider>${result.provider}</provider>\n${slides.join('\n')}${result.truncated ? '\n[content truncated]' : ''}`)];
+      },
+    },
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const value = args as Record<string, unknown>;
+      return await executeRemote(exec, 'office', {
+        action: 'read_ppt',
+        path: pathArg(value.file_path),
+        ...(value.provider === undefined ? {} : { provider: requireStringField(value.provider, 'provider') }),
+        ...(value.max_chars === undefined ? {} : { maxChars: value.max_chars }),
+      }, 190_000);
+    },
+  };
+  const pptEdit: ToolDefinition = {
+    name: 'ppt_native_edit',
+    description: 'Create or batch-edit a presentation with installed Microsoft PowerPoint or WPS Presentation. Supports adding and deleting slides, setting placeholder and textbox text, speaker notes, images, find-and-replace, and PDF export. Shape indexes match what ppt_native_read reports. The presentation is saved only after every requested edit succeeds.',
+    parameters: objectSchema(['file_path', 'operations'], {
+      file_path: { type: 'string', description: 'Presentation path relative to the paired local workspace.' },
+      provider: providerSchema,
+      create: { type: 'boolean', description: 'Create a new presentation instead of opening an existing one.' },
+      overwrite: { type: 'boolean', description: 'Allow create mode to replace an existing file.' },
+      timeout_ms: { type: 'integer', minimum: 1000, maximum: 600000 },
+      operations: { type: 'array', minItems: 1, maxItems: 100, items: powerPointOperationSchema() },
+    }),
+    timeoutMs: MAX_RPC_TIMEOUT_MS,
+    output: {
+      schema: objectSchema(['path', 'provider', 'progId', 'created', 'operationsApplied', 'pdfPaths'], {
+        path: { type: 'string' },
+        provider: { type: 'string', enum: ['office', 'wps'] },
+        progId: { type: 'string' },
+        created: { type: 'boolean' },
+        operationsApplied: { type: 'integer' },
+        pdfPaths: { type: 'array', items: { type: 'string' } },
+      }),
+      render: (_args, value) => {
+        const result = value as { path: string; provider: string; operationsApplied: number; created: boolean; pdfPaths: string[] };
+        const exports = result.pdfPaths.length === 0 ? '' : `\nPDF: ${result.pdfPaths.join(', ')}`;
+        return [textOutput(`${result.created ? 'created' : 'edited'} ${result.path} with ${result.provider}; ${String(result.operationsApplied)} operation(s) applied${exports}`)];
+      },
+    },
+    async execute(args, exec) {
+      const value = args as Record<string, unknown>;
+      const timeoutMs = typeof value.timeout_ms === 'number' ? value.timeout_ms : 180_000;
+      return await executeRemote(exec, 'office', {
+        action: 'edit_ppt',
+        path: pathArg(value.file_path),
+        ...(value.provider === undefined ? {} : { provider: requireStringField(value.provider, 'provider') }),
+        create: value.create === true,
+        overwrite: value.overwrite === true,
+        timeoutMs,
+        operations: normalizeRemoteOfficeOperations(value.operations, pathArg),
+      }, timeoutMs + 10_000);
+    },
+  };
+  return [...tools, officeStatus, wordRead, wordEdit, excelRead, excelEdit, pptRead, pptEdit];
 }
 
 function wordOperationSchema(): Record<string, unknown> {
@@ -1952,7 +2180,133 @@ function wordOperationSchema(): Record<string, unknown> {
   });
 }
 
-function normalizeRemoteWordOperations(
+/**
+ * Model-facing operation fields, in the snake_case spelling the tool schemas use.
+ *
+ * One table serves Word, Excel and PowerPoint: the host only renames fields to
+ * the companion's camelCase wire spelling, and the companion validates each
+ * operation against the application it targets.
+ */
+const OFFICE_OPERATION_FIELDS = [
+  'replace_all', 'match_case', 'whole_word', 'whole_cell',
+  'paragraph', 'after_paragraph', 'alignment', 'bold', 'italic', 'font_size',
+  'wrap', 'merge', 'rows', 'header', 'width_points', 'height_points',
+  'sheet', 'row', 'column', 'range', 'width', 'height',
+  'slide', 'shape', 'layout', 'index', 'left', 'top',
+] as const;
+
+/** Operation fields the host requires to be strings before forwarding. */
+const OFFICE_STRING_FIELDS = [
+  'find', 'replace', 'text', 'style', 'font_name', 'color',
+  'background', 'number_format', 'formula', 'name', 'title', 'body', 'notes',
+] as const;
+
+/** Operation fields resolved against the paired workspace rather than forwarded verbatim. */
+const OFFICE_PATH_FIELDS = ['image_path', 'output_path'] as const;
+
+function camelField(field: string): string {
+  return field.replace(/_([a-z])/g, (_match, letter: string) => letter.toUpperCase());
+}
+
+function excelOperationSchema(sheetSchema: Record<string, unknown>): Record<string, unknown> {
+  return objectSchema(['type'], {
+    type: {
+      type: 'string',
+      enum: [
+        'set_cells',
+        'append_rows',
+        'set_formula',
+        'clear_range',
+        'format_range',
+        'set_column_width',
+        'set_row_height',
+        'autofit',
+        'add_sheet',
+        'rename_sheet',
+        'delete_sheet',
+        'replace_text',
+        'insert_image',
+        'export_pdf',
+      ],
+    },
+    sheet: sheetSchema,
+    row: { type: 'integer', minimum: 1, description: 'set_cells: 1-based top row of the written block.' },
+    column: { type: 'integer', minimum: 1, description: 'set_cells: 1-based left column of the written block.' },
+    rows: {
+      type: 'array',
+      minItems: 1,
+      maxItems: 5000,
+      items: { type: 'array', minItems: 1, maxItems: 200, items: { type: 'string' } },
+      description: 'Cell text by row; a value starting with = is written as a formula.',
+    },
+    range: { type: 'string', description: 'A1-style reference such as A1, A1:C10 or A:C; set_column_width, set_row_height and autofit take whole columns or rows.' },
+    formula: { type: 'string' },
+    width: { type: 'number', minimum: 0, maximum: 255 },
+    height: { type: 'number', minimum: 0, maximum: 409 },
+    name: { type: 'string', maxLength: 31 },
+    find: { type: 'string' },
+    replace: { type: 'string' },
+    match_case: { type: 'boolean' },
+    whole_cell: { type: 'boolean' },
+    bold: { type: 'boolean' },
+    italic: { type: 'boolean' },
+    font_name: { type: 'string' },
+    font_size: { type: 'number', minimum: 1, maximum: 409 },
+    color: { type: 'string', pattern: '^#[0-9A-Fa-f]{6}$' },
+    background: { type: 'string', pattern: '^#[0-9A-Fa-f]{6}$' },
+    number_format: { type: 'string', description: 'Excel number format such as 0.00 or yyyy-mm-dd.' },
+    wrap: { type: 'boolean' },
+    merge: { type: 'boolean' },
+    alignment: { type: 'string', enum: ['left', 'center', 'right'] },
+    image_path: { type: 'string' },
+    width_points: { type: 'number', minimum: 1, maximum: 2000 },
+    height_points: { type: 'number', minimum: 1, maximum: 2000 },
+    output_path: { type: 'string' },
+  });
+}
+
+function powerPointOperationSchema(): Record<string, unknown> {
+  return objectSchema(['type'], {
+    type: {
+      type: 'string',
+      enum: [
+        'add_slide',
+        'delete_slide',
+        'set_text',
+        'add_textbox',
+        'replace_text',
+        'set_notes',
+        'insert_image',
+        'export_pdf',
+      ],
+    },
+    slide: { type: 'integer', minimum: 1, description: '1-based slide index.' },
+    shape: { type: 'integer', minimum: 1, description: '1-based shape index as reported by ppt_native_read.' },
+    index: { type: 'integer', minimum: 1, description: 'add_slide: position of the new slide; appended when omitted.' },
+    layout: { type: 'string', enum: ['title', 'title_content', 'two_content', 'section', 'blank'] },
+    title: { type: 'string' },
+    body: { type: 'string' },
+    notes: { type: 'string' },
+    text: { type: 'string' },
+    find: { type: 'string' },
+    replace: { type: 'string' },
+    match_case: { type: 'boolean' },
+    bold: { type: 'boolean' },
+    italic: { type: 'boolean' },
+    font_name: { type: 'string' },
+    font_size: { type: 'number', minimum: 1, maximum: 400 },
+    color: { type: 'string', pattern: '^#[0-9A-Fa-f]{6}$' },
+    alignment: { type: 'string', enum: ['left', 'center', 'right', 'justify'] },
+    left: { type: 'number', minimum: 0, maximum: 4000, description: 'Points from the slide’s left edge.' },
+    top: { type: 'number', minimum: 0, maximum: 4000, description: 'Points from the slide’s top edge.' },
+    width_points: { type: 'number', minimum: 1, maximum: 4000 },
+    height_points: { type: 'number', minimum: 1, maximum: 4000 },
+    image_path: { type: 'string' },
+    output_path: { type: 'string' },
+  });
+}
+
+function normalizeRemoteOfficeOperations(
   value: unknown,
   pathArg: (value: unknown, name?: string) => string,
 ): Array<Record<string, unknown>> {
@@ -1960,34 +2314,19 @@ function normalizeRemoteWordOperations(
   return value.map((raw) => {
     if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('each operation must be an object');
     const operation = raw as Record<string, unknown>;
-    const type = requireStringField(operation.type, 'operation.type');
-    return {
-      type,
-      ...(operation.find === undefined ? {} : { find: requireStringField(operation.find, 'find') }),
-      ...(operation.replace === undefined ? {} : { replace: requireStringField(operation.replace, 'replace') }),
-      ...(operation.replace_all === undefined ? {} : { replaceAll: operation.replace_all }),
-      ...(operation.match_case === undefined ? {} : { matchCase: operation.match_case }),
-      ...(operation.whole_word === undefined ? {} : { wholeWord: operation.whole_word }),
-      ...(operation.text === undefined ? {} : { text: requireStringField(operation.text, 'text') }),
-      ...(operation.paragraph === undefined ? {} : { paragraph: operation.paragraph }),
-      ...(operation.after_paragraph === undefined ? {} : { afterParagraph: operation.after_paragraph }),
-      ...(operation.style === undefined ? {} : { style: requireStringField(operation.style, 'style') }),
-      ...(operation.alignment === undefined ? {} : { alignment: operation.alignment }),
-      ...(operation.bold === undefined ? {} : { bold: operation.bold }),
-      ...(operation.italic === undefined ? {} : { italic: operation.italic }),
-      ...(operation.font_name === undefined ? {} : { fontName: requireStringField(operation.font_name, 'font_name') }),
-      ...(operation.font_size === undefined ? {} : { fontSize: operation.font_size }),
-      ...(operation.color === undefined ? {} : { color: requireStringField(operation.color, 'color') }),
-      ...(operation.rows === undefined ? {} : { rows: operation.rows }),
-      ...(operation.header === undefined ? {} : { header: operation.header }),
-      ...(operation.image_path === undefined ? {} : { imagePath: pathArg(operation.image_path, 'image_path') }),
-      ...(operation.width_points === undefined ? {} : { widthPoints: operation.width_points }),
-      ...(operation.height_points === undefined ? {} : { heightPoints: operation.height_points }),
-      ...(operation.output_path === undefined ? {} : { outputPath: pathArg(operation.output_path, 'output_path') }),
-    };
+    const normalized: Record<string, unknown> = { type: requireStringField(operation.type, 'operation.type') };
+    for (const field of OFFICE_STRING_FIELDS) {
+      if (operation[field] !== undefined) normalized[camelField(field)] = requireStringField(operation[field], field);
+    }
+    for (const field of OFFICE_OPERATION_FIELDS) {
+      if (operation[field] !== undefined) normalized[camelField(field)] = operation[field];
+    }
+    for (const field of OFFICE_PATH_FIELDS) {
+      if (operation[field] !== undefined) normalized[camelField(field)] = pathArg(operation[field], field);
+    }
+    return normalized;
   });
 }
-
 function objectSchema(required: string[], properties: Record<string, unknown>): Record<string, unknown> {
   return { type: 'object', additionalProperties: false, required, properties };
 }

@@ -160,7 +160,14 @@ process.stdin.on('end', () => {
   const request = JSON.parse(source);
   fs.appendFileSync(process.env.DSH_TEST_OFFICE_REQUEST_LOG, JSON.stringify(request) + '\\n');
   if (request.action === 'status') {
-    process.stdout.write(JSON.stringify({ ok: true, value: { platform: 'win32', office: true, wps: true, preferred: 'office' } }));
+    process.stdout.write(JSON.stringify({ ok: true, value: {
+      platform: 'win32', office: true, wps: true, preferred: 'office',
+      apps: {
+        word: { office: true, wps: true, preferred: 'office' },
+        excel: { office: true, wps: false, preferred: 'office' },
+        powerpoint: { office: false, wps: true, preferred: 'wps' },
+      },
+    } }));
     return;
   }
   if (request.action === 'read_word') {
@@ -192,7 +199,11 @@ process.stdin.on('end', () => {
 
   const status = await request(harness.socket, 'office', { action: 'status' });
   assert.equal(status.ok, true, harness.output());
-  assert.deepEqual(status.value, { platform: 'win32', office: true, wps: true, preferred: 'office' });
+  assert.equal((status.value as { preferred: string }).preferred, 'office');
+  assert.deepEqual(
+    (status.value as { apps: Record<string, { preferred: string | null }> }).apps.powerpoint,
+    { office: false, wps: true, preferred: 'wps' },
+  );
 
   const created = await request(harness.socket, 'office', {
     action: 'edit_word',
@@ -226,6 +237,117 @@ process.stdin.on('end', () => {
   const editRequest = logged.find((value) => value.action === 'edit_word') as { operations: Array<Record<string, unknown>> } | undefined;
   assert.equal(editRequest?.operations[0]?.text, '含有 \" 和 $() 的安全文本');
   assert.equal(path.isAbsolute(String(editRequest?.operations[2]?.outputPath)), true);
+});
+
+test('Windows 本机助手通过受控 Office RPC 读写 Excel 与 PowerPoint 且限制在授权目录', async (context) => {
+  const fixture = mkdtempSync(path.join(tmpdir(), 'dsh-local-office-suite-'));
+  const fakePowerShell = path.join(fixture, 'fake-powershell');
+  const requestLog = path.join(fixture, 'requests.jsonl');
+  writeFileSync(fakePowerShell, `#!/usr/bin/env node
+const fs = require('node:fs');
+let source = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => { source += chunk; });
+process.stdin.on('end', () => {
+  const request = JSON.parse(source);
+  fs.appendFileSync(process.env.DSH_TEST_OFFICE_REQUEST_LOG, JSON.stringify(request) + '\\n');
+  if (request.action === 'read_excel') {
+    process.stdout.write(JSON.stringify({ ok: true, value: {
+      provider: 'office', progId: 'Excel.Application', sheetCount: 1, truncated: false,
+      sheets: [{ index: 1, name: '一月', firstRow: 1, firstColumn: 1, rowCount: 2, columnCount: 2, rows: [['姓名', '金额'], ['张三', '1200']] }],
+    } }));
+    return;
+  }
+  if (request.action === 'read_ppt') {
+    process.stdout.write(JSON.stringify({ ok: true, value: {
+      provider: 'wps', progId: 'kwpp.Application', slideCount: 1, truncated: false,
+      slides: [{ index: 1, shapeCount: 2, notes: '讲稿', shapes: [{ index: 1, name: 'Title 1', text: '季度汇报' }] }],
+    } }));
+    return;
+  }
+  if (request.create) fs.writeFileSync(request.workPath, 'fake-office');
+  for (const operation of request.operations) {
+    if (operation.type === 'export_pdf') fs.writeFileSync(operation.outputPath, 'fake-pdf');
+  }
+  process.stdout.write(JSON.stringify({ ok: true, value: {
+    provider: 'office', progId: 'Excel.Application', created: request.create, operationsApplied: request.operations.length,
+  } }));
+});
+`);
+  chmodSync(fakePowerShell, 0o755);
+  const harness = await startCompanion(false, false, {
+    DSH_LOCAL_WORKSPACE_TEST_WINDOWS: '1',
+    DSH_LOCAL_WORKSPACE_TEST_POWERSHELL: fakePowerShell,
+    DSH_TEST_OFFICE_REQUEST_LOG: requestLog,
+  });
+  context.after(async () => {
+    await stopCompanion(harness);
+    rmSync(fixture, { recursive: true, force: true });
+  });
+
+  const workbook = await request(harness.socket, 'office', {
+    action: 'edit_excel',
+    path: '报表.xlsx',
+    create: true,
+    operations: [
+      { type: 'set_cells', row: 1, column: 1, rows: [['姓名', '金额'], ['张三', '=SUM(B3:B9)']] },
+      { type: 'format_range', range: 'A1:B1', bold: true, background: '#DDEEFF' },
+      { type: 'set_column_width', range: 'A:B', width: 18 },
+      { type: 'export_pdf', outputPath: '导出/报表.pdf' },
+    ],
+  });
+  assert.equal(workbook.ok, true, harness.output());
+  assert.equal(readFileSync(path.join(harness.root, '报表.xlsx'), 'utf8'), 'fake-office');
+  assert.deepEqual((workbook.value as { pdfPaths: string[] }).pdfPaths, ['导出/报表.pdf']);
+
+  const sheet = await request(harness.socket, 'office', { action: 'read_excel', path: '报表.xlsx' });
+  assert.equal(sheet.ok, true, harness.output());
+  assert.deepEqual((sheet.value as { sheets: Array<{ rows: string[][] }> }).sheets[0]?.rows[1], ['张三', '1200']);
+
+  const deck = await request(harness.socket, 'office', {
+    action: 'edit_ppt',
+    path: '汇报.pptx',
+    create: true,
+    operations: [{ type: 'add_slide', layout: 'title_content', title: '季度汇报', body: '要点' }],
+  });
+  assert.equal(deck.ok, true, harness.output());
+  assert.equal(readFileSync(path.join(harness.root, '汇报.pptx'), 'utf8'), 'fake-office');
+
+  const slides = await request(harness.socket, 'office', { action: 'read_ppt', path: '汇报.pptx' });
+  assert.equal(slides.ok, true, harness.output());
+  assert.equal((slides.value as { slides: Array<{ notes: string }> }).slides[0]?.notes, '讲稿');
+
+  const wrongExtension = await request(harness.socket, 'office', {
+    action: 'edit_excel',
+    path: '报表.docx',
+    create: true,
+    operations: [{ type: 'append_rows', rows: [['x']] }],
+  });
+  assert.equal(wrongExtension.ok, false);
+  assert.equal(wrongExtension.code, 'INVALID_ARGUMENT');
+
+  const escaped = await request(harness.socket, 'office', {
+    action: 'edit_ppt',
+    path: '../越界.pptx',
+    create: true,
+    operations: [{ type: 'add_slide', title: 'blocked' }],
+  });
+  assert.equal(escaped.ok, false);
+  assert.equal(escaped.code, 'PATH_OUTSIDE_ROOT');
+
+  const badRange = await request(harness.socket, 'office', {
+    action: 'edit_excel',
+    path: '报表.xlsx',
+    operations: [{ type: 'clear_range', range: 'DROP TABLE' }],
+  });
+  assert.equal(badRange.ok, false);
+  assert.equal(badRange.code, 'INVALID_ARGUMENT');
+
+  const logged = readFileSync(requestLog, 'utf8').trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
+  const excelEdit = logged.find((value) => value.action === 'edit_excel') as { operations: Array<Record<string, unknown>> } | undefined;
+  assert.equal((excelEdit?.operations[0]?.rows as string[][])[1]?.[1], '=SUM(B3:B9)');
+  assert.equal(excelEdit?.operations[2]?.range, 'A:B');
+  assert.equal(path.isAbsolute(String(excelEdit?.operations[3]?.outputPath)), true);
 });
 
 test('Windows 双击模式可解析网页配对命令并保存配置', async (context) => {
