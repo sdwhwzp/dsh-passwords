@@ -1457,7 +1457,7 @@ export class Database {
    * 空键与占位键（未 finalize 的上传，从来没有对应文件）不入队。
    */
   private enqueueMediaRemovalInTransaction(storageKeys: readonly string[]): void {
-    const insert = this.stmt('INSERT OR IGNORE INTO pending_media_removals (storage_key) VALUES (?)');
+    const insert = this.stmt((this.mysql ? 'INSERT IGNORE INTO' : 'INSERT OR IGNORE INTO') + ' pending_media_removals (storage_key) VALUES (?)');
     let inserted = 0;
     for (const key of storageKeys) {
       if (typeof key !== 'string' || key === '' || key.length > MEDIA_STORAGE_KEY_MAX) continue;
@@ -1954,7 +1954,7 @@ export class Database {
     const [normalized] = Database.normalizeSessionIdSet([sessionId]);
     if (normalized === undefined) return false;
     const result = this.stmt(
-      'INSERT OR IGNORE INTO user_session_grants (user_id, session_id) VALUES (?, ?)',
+      (this.mysql ? 'INSERT IGNORE INTO' : 'INSERT OR IGNORE INTO') + ' user_session_grants (user_id, session_id) VALUES (?, ?)',
     ).run(userId, normalized);
     return Number(result.changes) === 1;
   }
@@ -1987,7 +1987,7 @@ export class Database {
         this.db.exec('COMMIT');
         return false;
       }
-      const insert = this.stmt('INSERT OR IGNORE INTO user_session_grants (user_id, session_id) VALUES (?, ?)');
+      const insert = this.stmt((this.mysql ? 'INSERT IGNORE INTO' : 'INSERT OR IGNORE INTO') + ' user_session_grants (user_id, session_id) VALUES (?, ?)');
       for (const sessionId of normalized) insert.run(userId, sessionId);
       // 同事务置位（markSessionGrantsSeeded 只发一条 UPDATE，不自行提交）
       this.markSessionGrantsSeeded(userId);
@@ -3026,7 +3026,7 @@ export class Database {
 
   claimSshHost(alias: string, userId: number): boolean {
     if (typeof alias !== 'string' || alias.length === 0 || alias.length > 256) return false;
-    this.stmt(this.mysql ? 'INSERT IGNORE INTO ssh_host_owners (alias, user_id) VALUES (?, ?)' : 'INSERT OR IGNORE INTO ssh_host_owners (alias, user_id) VALUES (?, ?)').run(alias, userId);
+    this.stmt(this.mysql ? 'INSERT IGNORE INTO ssh_host_owners (alias, user_id) VALUES (?, ?)' : (this.mysql ? 'INSERT IGNORE INTO' : 'INSERT OR IGNORE INTO') + ' ssh_host_owners (alias, user_id) VALUES (?, ?)').run(alias, userId);
     return this.getSshHostOwner(alias) === userId;
   }
 
@@ -3107,7 +3107,7 @@ export class Database {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const inserted = this.stmt(
-        'INSERT OR IGNORE INTO session_owners (session_id, user_id) VALUES (?, ?)',
+        (this.mysql ? 'INSERT IGNORE INTO' : 'INSERT OR IGNORE INTO') + ' session_owners (session_id, user_id) VALUES (?, ?)',
       ).run(sessionId, userId);
       if (grantAccess && Number(inserted.changes) > 0) this.addUserSessionGrant(userId, sessionId);
       this.db.exec('COMMIT');
@@ -3445,7 +3445,7 @@ export class Database {
   // ── 子用户创建的工作区 ─────────────────────────
   addUserWorkspace(userId: number, workspacePath: string): void {
     this.stmt(
-      'INSERT OR IGNORE INTO user_workspaces (user_id, path) VALUES (?, ?)',
+      (this.mysql ? 'INSERT IGNORE INTO' : 'INSERT OR IGNORE INTO') + ' user_workspaces (user_id, path) VALUES (?, ?)',
     ).run(userId, normalizePath(workspacePath));
   }
 
