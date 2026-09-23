@@ -45,7 +45,7 @@ test('readiness proves database and authenticated Host data access without expos
   const upstreamPrincipalHeaders: http.IncomingHttpHeaders[] = [];
   let upstreamRequests = 0;
   let workspaceStatus = 200;
-  let workspaceFrameMode: 'valid' | 'rpc-error' | 'wrong-stream' | 'extra-envelope' | 'extra-baseline' = 'valid';
+  let workspaceFrameMode: 'valid' | 'current-pins' | 'invalid-pins' | 'invalid-pin-id' | 'rpc-error' | 'wrong-stream' | 'extra-envelope' | 'extra-baseline' = 'valid';
   let sessionStatus = 200;
   let sessionFrameMode:
     | 'valid'
@@ -189,6 +189,9 @@ test('readiness proves database and authenticated Host data access without expos
               type: 'baseline',
               value: {
                 items: [], archivedSessionIds: [],
+                ...(workspaceFrameMode === 'current-pins' ? { pinnedSessionIds: ['pinned-session'] } : {}),
+                ...(workspaceFrameMode === 'invalid-pins' ? { pinnedSessionIds: 'pinned-session' } : {}),
+                ...(workspaceFrameMode === 'invalid-pin-id' ? { pinnedSessionIds: [17] } : {}),
                 ...(workspaceFrameMode === 'extra-baseline' ? { extra: true } : {}),
               },
             },
@@ -269,6 +272,12 @@ test('readiness proves database and authenticated Host data access without expos
     }
     sessionFrameMode = 'valid';
 
+    workspaceFrameMode = 'current-pins';
+    const pinnedReady = await fetch(`http://127.0.0.1:${String(gatewayPort)}/gateway/internal/readyz`, {
+      headers: { 'x-internal-secret': config.internalSecret },
+    });
+    assert.equal(pinnedReady.status, 200, JSON.stringify(await pinnedReady.json()));
+
     workspaceStatus = 401;
     const unauthorizedWorkspace = await fetch(`http://127.0.0.1:${String(gatewayPort)}/gateway/internal/readyz`, {
       headers: { 'x-internal-secret': config.internalSecret },
@@ -300,7 +309,7 @@ test('readiness proves database and authenticated Host data access without expos
       ...alphaSessionReady,
     });
 
-    for (const mode of ['wrong-stream', 'extra-envelope', 'extra-baseline'] as const) {
+    for (const mode of ['wrong-stream', 'extra-envelope', 'extra-baseline', 'invalid-pins', 'invalid-pin-id'] as const) {
       workspaceFrameMode = mode;
       const malformedWorkspace = await fetch(
         `http://127.0.0.1:${String(gatewayPort)}/gateway/internal/readyz`,

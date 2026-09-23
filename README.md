@@ -12,6 +12,8 @@ dsh 的网页界面默认面向本机使用。服务器地址一旦暴露，拿�
 
 收录于 [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek-harness)（Infrastructure & Development）和 [Awesome DSH Plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)（Development & Runtime）。
 
+Harness 0.1.7 的账号网关支持工作区置顶会话列表，并严格校验置顶 ID；会话和工作区仍按登录账号隔离。
+
 ## 开发模式与纯会话
 
 左侧选择“开发模式”继续使用工作区、终端和编辑器；选择“纯会话”直接提问，不需要手动选择工作区。“新建纯会话”开启另一个话题，未提问的空会话由服务端按账号复用，多窗口同时新建也只创建一次。历史列表仅显示当前选中的空白会话；有消息、运行任务、排队输入、已归档或已命名的会话不会被自动清理。子代理记录通过原会话中的子代理入口查看，不单独列为“新会话”。聊天记录随账号保存，重新进入时可以继续。

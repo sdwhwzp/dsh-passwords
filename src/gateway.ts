@@ -6247,11 +6247,15 @@ export function createGatewayServer(
     }
     const baseline = frame.value as Record<string, unknown>;
     if (
-      !hasExactKeys(baseline, ['items', 'archivedSessionIds']) ||
+      !hasOnlyKeys(baseline, ['items', 'archivedSessionIds'], ['pinnedSessionIds']) ||
       !Array.isArray(baseline.items) ||
       !Array.isArray(baseline.archivedSessionIds)
     ) return null;
     if (!baseline.archivedSessionIds.every((id) => typeof id === 'string' && id.length > 0)) return null;
+    if (Object.hasOwn(baseline, 'pinnedSessionIds') && (
+      !Array.isArray(baseline.pinnedSessionIds) ||
+      !baseline.pinnedSessionIds.every((id) => typeof id === 'string' && id.length > 0)
+    )) return null;
     for (const item of baseline.items) {
       if (item === null || typeof item !== 'object' || Array.isArray(item)) return null;
       const workspace = item as Record<string, unknown>;
