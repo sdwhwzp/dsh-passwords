@@ -2,7 +2,7 @@
 
 import { createElement as h, useEffect, useState } from 'react';
 import {
-  IconFolderOpenOutline16,
+  IconFolderOpenOutlineRegular,
 } from '@deepseek-ai/dsh-client-ui-primitives';
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots';
 
@@ -56,7 +56,7 @@ export function ManagedFilesLauncher({ t, wide, onOpen }: Props) {
     title: t('managedFilesManage'),
     onClick: onOpen,
   },
-    h(IconFolderOpenOutline16, { size: wide ? 16 : 18 }),
+    h(IconFolderOpenOutlineRegular, { size: wide ? 16 : 18 }),
     wide ? h('span', null, t('managedFilesManage')) : null,
   );
 }

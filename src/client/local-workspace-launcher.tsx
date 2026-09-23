@@ -1,7 +1,7 @@
 /** New-session control-row action that opens the signed-in user's local workspace companion. */
 
 import { Fragment, createElement as h, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
-import { IconProjectAddOutline16 } from '@deepseek-ai/dsh-client-ui-primitives';
+import { IconProjectAddOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives';
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots';
 import { buildLocalWorkspaceLaunchUri, isWindowsBrowser } from './local-workspace-launch-uri';
 
@@ -196,7 +196,7 @@ export function LocalWorkspaceLauncher({ t, openWorkspacePath }: LauncherProps) 
         'aria-disabled': launching,
         onClick: onSummaryClick,
       },
-      h(IconProjectAddOutline16, { size: 16 }),
+      h(IconProjectAddOutlineRegular, { size: 16 }),
       h('span', null, launching ? t('localLaunching') : t('localLaunchButton')),
     ),
     h(

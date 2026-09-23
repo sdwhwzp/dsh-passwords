@@ -8,6 +8,63 @@ import { Database } from '../src/db.js';
 import { createFieldCrypto } from '../src/encrypt.js';
 import { DshPasswordsPrincipalAccessProvider } from '../src/principal-access.js';
 
+test('live session updates authorize without scanning the corpus and still observe revocation', async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), 'dshpw-live-access-'));
+  const db = new Database(path.join(temporary, 'platform.db'), createFieldCrypto('enc', 'setup'));
+  try {
+    db.init();
+    const alice = db.createUser('alice', 'hash', 'user');
+    const bob = db.createUser('bob', 'hash', 'user');
+    const permissions = {
+      allowedFolders: [temporary], hourlyTokenLimit: null, dailyMinutesLimit: null,
+      allowUpload: true, allowGitDownload: false, banned: false,
+    };
+    db.setPermissions(alice.id, permissions);
+    db.claimSessionOwner('live', alice.id);
+    db.claimSessionOwner('foreign', bob.id);
+    db.claimSessionOwner('cold', alice.id);
+    const records = new Map([
+      ['live', { header: { id: 'live', cwd: temporary } }],
+      ['child', { header: { id: 'child', cwd: temporary, origin: 'subagent', parentSession: 'live' } }],
+      ['foreign', { header: { id: 'foreign', cwd: temporary } }],
+    ]);
+    let catalogReads = 0;
+    const services = new Map<string, unknown>([
+      ['workspaceRegistry', { list: () => [] }],
+      ['sessions', { get: (id: string) => records.get(id) }],
+      ['sessionQuery', { listSessions: async () => {
+        catalogReads += 1;
+        return [...records.values(), { header: { id: 'cold', cwd: temporary } }];
+      } }],
+    ]);
+    const ctx = { root: { get: (name: string) => services.get(name) } } as unknown as Context;
+    const provider = new DshPasswordsPrincipalAccessProvider(ctx, db);
+    const principal = { source: 'dsh-passwords', id: String(alice.id), username: alice.username, role: 'user' } as const;
+    const live = await provider.resolve(principal, { sessionIds: ['live', 'child', 'foreign'] });
+    assert.deepEqual([...live.readableSessionIds], ['live', 'child']);
+    assert.equal(catalogReads, 0);
+
+    const mixed = await provider.resolve(principal, { sessionIds: ['live', 'cold', 'missing'] });
+    assert.deepEqual([...mixed.readableSessionIds], ['live', 'cold']);
+    assert.equal(catalogReads, 1);
+    db.setPermissions(alice.id, { ...permissions, disabledSessions: ['live'] });
+    assert.equal((await provider.resolve(principal, { sessionIds: ['live', 'child'] })).readableSessionIds.size, 0);
+    assert.equal(catalogReads, 1);
+    db.setPermissions(alice.id, { ...permissions, banned: true });
+    assert.equal((await provider.resolve(principal, { sessionIds: ['live'] })).readableSessionIds.size, 0);
+    db.setPermissions(alice.id, { ...permissions, allowedFolders: ['__deny__'] });
+    assert.equal((await provider.resolve(principal, { sessionIds: ['live'] })).readableSessionIds.size, 0);
+    db.setPermissions(alice.id, { ...permissions, disabledSessions: [] });
+    services.delete('sessionQuery');
+    assert.deepEqual([...(await provider.resolve(principal, { sessionIds: ['live', 'cold'] })).readableSessionIds], ['live']);
+    const aborted = AbortSignal.abort(new Error('access cancelled'));
+    await assert.rejects(provider.resolve(principal, { sessionIds: ['live'] }, aborted), /access cancelled/);
+  } finally {
+    db.close();
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test('SSH access resolves legacy ownership for the active account and observes permission changes', async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), 'dshpw-principal-ssh-'));
   const db = new Database(path.join(temporary, 'platform.db'), createFieldCrypto('enc', 'setup'));

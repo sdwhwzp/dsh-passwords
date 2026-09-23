@@ -7,6 +7,7 @@ export const TENANT_REMOTE_STREAM_ENDPOINTS: ReadonlySet<string> = new Set([
   'session/follow',
   'session/control',
   'workspaceFiles/changes',
+  'terminal/retain',
 ] as const);
 
 /**
@@ -23,6 +24,22 @@ export function tenantWorkspaceFileChangesSessionId(value: unknown): string {
     throw new Error('invalid workspace file changes scope');
   }
   return args.workspaceFileScopeId;
+}
+
+/**
+ * Read the owning Session from a terminal lifetime subscription.
+ * @param value - untrusted logical stream payload.
+ * @returns the Session id requiring tenant ownership and folder authorization.
+ */
+export function tenantTerminalRetentionSessionId(value: unknown): string {
+  const payload = record(value);
+  const args = record(payload?.args);
+  if (payload === undefined || !exactKeys(payload, ['args']) ||
+      args === undefined || !exactKeys(args, ['sessionId', 'id']) ||
+      !nonEmptyString(args.sessionId) || !nonEmptyString(args.id)) {
+    throw new Error('invalid terminal retention scope');
+  }
+  return args.sessionId;
 }
 
 /** One strictly decoded browser-to-Host mux frame. */

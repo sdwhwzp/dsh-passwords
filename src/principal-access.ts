@@ -67,7 +67,7 @@ export class DshPasswordsPrincipalAccessProvider {
     private readonly db: Database,
   ) {}
 
-  /** Return only the requested Session and Workspace ids that this account may read. */
+  /** Authorize requested resources from live headers or a request-local corpus read; recheck permissions on every call. */
   async resolve(
     principal: AuthenticatedPrincipal,
     subjects: PrincipalAccessSubjects,
@@ -93,10 +93,11 @@ export class DshPasswordsPrincipalAccessProvider {
     if (permissions.banned) return denied;
     const services = this.ctx.root as unknown as HostServices;
     const registry = services.get('workspaceRegistry') as { list(): readonly WorkspaceRecord[] } | undefined;
+    const sessions = services.get('sessions') as { get(id: string): SessionRecord | undefined } | undefined;
     const query = services.get('sessionQuery') as {
       listSessions(signal?: AbortSignal): Promise<readonly SessionRecord[]>;
     } | undefined;
-    if (registry === undefined || (requestedSessions.length > 0 && query === undefined)) return denied;
+    if (registry === undefined) return denied;
 
     const workspacePaths = new Map(registry.list().map((workspace) => [String(workspace.id), workspace.path]));
     const pathDecisions = new Map<string, Promise<boolean>>();
@@ -115,10 +116,19 @@ export class DshPasswordsPrincipalAccessProvider {
     }
 
     const readableSessionIds = new Set<SessionId>();
-    if (requestedSessions.length > 0 && query !== undefined) {
-      const records = await query.listSessions(signal);
-      signal?.throwIfAborted();
-      const headers = new Map(records.map((record) => [String(record.header.id), record.header]));
+    if (requestedSessions.length > 0) {
+      let coldHeaders: Map<string, SessionRecord['header']> | undefined;
+      const headerFor = async (id: string): Promise<SessionRecord['header'] | undefined> => {
+        const live = sessions?.get(id);
+        if (live !== undefined) return live.header;
+        if (query === undefined) return undefined;
+        if (coldHeaders === undefined) {
+          const records = await query.listSessions(signal);
+          signal?.throwIfAborted();
+          coldHeaders = new Map(records.map((record) => [String(record.header.id), record.header]));
+        }
+        return coldHeaders.get(id);
+      };
       const disabled = new Set(permissions.disabled_sessions);
       for (const sessionId of requestedSessions) {
         // Only Host-recorded subagents inherit an unclaimed parent's account.
@@ -128,8 +138,9 @@ export class DshPasswordsPrincipalAccessProvider {
         while (current !== undefined && !seen.has(current)) {
           signal?.throwIfAborted();
           seen.add(current);
-          const header = headers.get(current);
-          if (disabled.has(current) || header?.cwd === undefined || !await pathAllowed(header.cwd)) break;
+          if (disabled.has(current)) break;
+          const header = await headerFor(current);
+          if (header?.cwd === undefined || !await pathAllowed(header.cwd)) break;
           const owner = this.db.getSessionOwner(current);
           if (owner !== null) {
             if (owner === user.id) readableSessionIds.add(sessionId);

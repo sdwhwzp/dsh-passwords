@@ -364,3 +364,59 @@ tenantTest('restricted Remote mux relays ordinary items and logical cancellation
     await env.cleanup();
   }
 });
+
+
+tenantTest('restoring saved terminals preserves the workspace stream when a terminal is unavailable', async mobile => {
+  const env = await setup(mobile);
+  const { downstream, upstream } = await env.connect();
+  try {
+    const workspaceOpened = nextMessage(upstream);
+    downstream.send(JSON.stringify({ type: 'open', streamId: 'workspaces', endpoint: 'workspace/follow', payload: { args: {} } }));
+    await workspaceOpened;
+    const retained = nextMessage(upstream);
+    const frame = { type: 'open', streamId: 'terminal', endpoint: 'terminal/retain', payload: { args: { sessionId: 'own-session', id: 'saved-terminal' } } };
+    downstream.send(JSON.stringify(frame));
+    assert.deepEqual(await retained, frame);
+    const unavailable = nextMessage(downstream);
+    upstream.send(JSON.stringify({ type: 'error', streamId: 'terminal', error: { code: 'terminal/unavailable', message: 'Terminal is closing or unavailable', details: {} } }));
+    assert.equal((await unavailable).type, 'error');
+    const baseline = nextMessage(downstream);
+    upstream.send(muxItem('workspaces', { type: 'baseline', workspaces: [{ workspaceId: 'own' }] }));
+    assert.equal((await baseline).streamId, 'workspaces');
+    assert.equal(downstream.readyState, WebSocket.OPEN);
+  } finally {
+    downstream.terminate();
+    await env.cleanup();
+  }
+});
+
+tenantTest('terminal retention rejects foreign, missing, disabled and forged sessions before forwarding', async mobile => {
+  const env = await setup(mobile);
+  try {
+    for (const args of [
+      { sessionId: 'other-session', id: 'term' },
+      { sessionId: 'missing-session', id: 'term' },
+      { sessionId: 'own-session', id: 'term', workspaceRoot: otherRoot },
+      { sessionId: 'own-session' },
+    ]) {
+      const { downstream, upstream } = await env.connect();
+      const forwarded: unknown[] = [];
+      upstream.on('message', data => forwarded.push(JSON.parse(data.toString())));
+      const closed = nextClose(downstream);
+      const upstreamClosed = nextClose(upstream);
+      downstream.send(JSON.stringify({ type: 'open', streamId: 'term', endpoint: 'terminal/retain', payload: { args } }));
+      assert.equal(await closed, 1008);
+      await upstreamClosed;
+      assert.deepEqual(forwarded, []);
+    }
+    env.disableSession();
+    const { downstream, upstream } = await env.connect();
+    const closed = nextClose(downstream);
+    const upstreamClosed = nextClose(upstream);
+    downstream.send(JSON.stringify({ type: 'open', streamId: 'term', endpoint: 'terminal/retain', payload: { args: { sessionId: 'own-session', id: 'term' } } }));
+    assert.equal(await closed, 1008);
+    await upstreamClosed;
+  } finally {
+    await env.cleanup();
+  }
+});

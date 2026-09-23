@@ -76,6 +76,8 @@ Owners and subusers always sign in with local accounts and bcrypt passwords stor
 
 Workspace and session lists used by both initial sign-in and later refreshes are filtered on the server for the current subuser. WebSocket workspace, session, and archive events pass through the same ownership filter, so the browser never receives owner data while waiting for client-side hiding. The gateway strictly validates both newer Harness `workspace/follow`, `session/list`, and `session/page` Remote/slash RPCs and legacy dot-style RPCs according to their respective protocols. Session ownership does not depend on current workspace registration or archive state: a legacy session from a trusted Host list is adopted only from the `dsh-passwords` identity durably attached to the first human prompt in a complete oldest-page walk at one fixed log cut. That read does not activate a cold Session. Directory location is never identity evidence; blank, incomplete, or unverifiable sessions conservatively remain with the owner account.
 
+Live Session authorization reads headers from the Host Session store. Only absent Sessions require a corpus read, at most once per authorization call. Every call still rechecks the account, directory, ownership, and disabled state; subagents inherit ownership only through Host-recorded parent Sessions.
+
 Changing the database driver selects a different repository and does not copy rows from the other driver. Back up `.env` and the database and migrate existing accounts separately in production; a first deployment with an empty database can switch directly.
 
 In MySQL mode, an invalid connection is replaced after an idle timeout, server restart, or temporary network interruption. Read-only queries outside a transaction are retried once. Interrupted transactions and writes with an unknown result are not replayed, preventing duplicate data changes.
@@ -578,3 +580,5 @@ The remote desktop starts with empty server addresses, which users fill with adm
 Desktop catalogs accept `unsigned`, `developer-id-signed`, and `apple-notarized`. The download page distinguishes unsigned installers, Developer ID signatures without notarization, and notarized installers. The latter two states are valid only for Mac.
 
 The extended subscription plugin account UI and `/dsh-subscriptions/*` endpoints are administrator-only. Customer accounts using `subscriptions-codex` follow the same GPT 5.6 minimum as Codex.
+
+Desktop terminal restoration through `terminal/retain` checks session ownership, folder permissions, and disabled-session state. An unavailable terminal ends only its logical stream, preserving the shared workspace and session connection.

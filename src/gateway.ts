@@ -125,6 +125,7 @@ import {
   parseTenantRemoteClientFrame,
   parseTenantRemoteServerFrame,
   tenantWorkspaceFileChangesSessionId,
+  tenantTerminalRetentionSessionId,
 } from './tenant-remote-mux.js';
 
 export const DEFAULT_USER_REQUEST_BODY_BYTES = 64 * 1024 * 1024;
@@ -8834,7 +8835,7 @@ export function createGatewayServer(
       type LogicalStream = {
         readonly endpoint: string;
         readonly events: TenantRemoteEventFilter | null;
-        readonly workspaceFileSessionId: string | null;
+        readonly authorizedSessionId: string | null;
       };
       const streams = new Map<string, LogicalStream>();
       const cancelledStreamIds = new Set<string>();
@@ -8931,17 +8932,19 @@ export function createGatewayServer(
             ) {
               throw new Error('Remote stream open is not allowed');
             }
-            const workspaceFileSessionId = frame.endpoint === 'workspaceFiles/changes'
+            const authorizedSessionId = frame.endpoint === 'workspaceFiles/changes'
               ? tenantWorkspaceFileChangesSessionId(frame.payload)
-              : null;
-            if (workspaceFileSessionId !== null &&
-                !subuserCanAccessSession(userId, perms, workspaceFileSessionId)) {
-              throw new Error('workspace file changes session is not allowed');
+              : frame.endpoint === 'terminal/retain'
+                ? tenantTerminalRetentionSessionId(frame.payload)
+                : null;
+            if (authorizedSessionId !== null &&
+                !subuserCanAccessSession(userId, perms, authorizedSessionId)) {
+              throw new Error('Remote stream session is not allowed');
             }
             streams.set(frame.streamId, {
               endpoint: frame.endpoint,
               events: frame.endpoint === '$events' ? new TenantRemoteEventFilter() : null,
-              workspaceFileSessionId,
+              authorizedSessionId,
             });
           } else {
             if (!streams.delete(frame.streamId)) throw new Error('unknown Remote stream cancellation');
@@ -9015,10 +9018,10 @@ export function createGatewayServer(
             }
             throw new Error('unknown upstream Remote stream id');
           }
-          if (frame.type === 'item' && stream.workspaceFileSessionId !== null) {
+          if (frame.type === 'item' && stream.authorizedSessionId !== null) {
             const perms = effectivePermissions(userId);
-            if (perms.banned || !subuserCanAccessSession(userId, perms, stream.workspaceFileSessionId)) {
-              closeBoth(1008, 'workspace file changes access revoked');
+            if (perms.banned || !subuserCanAccessSession(userId, perms, stream.authorizedSessionId)) {
+              closeBoth(1008, 'Remote stream session access revoked');
               return;
             }
           }
