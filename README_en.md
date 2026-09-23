@@ -584,3 +584,5 @@ The extended subscription plugin account UI and `/dsh-subscriptions/*` endpoints
 Desktop terminal restoration through `terminal/retain` checks session ownership, folder permissions, and disabled-session state. An unavailable terminal ends only its logical stream, preserving the shared workspace and session connection.
 
 Host login exchange accepts root redirects `/` and `./` without following them; external destinations and query-bearing targets are rejected.
+
+The verified Harness 0.1.7-alpha.2 runtime starts the gateway through native permission APIs without rewriting installed bundles. Unreviewed future versions remain rejected at startup.

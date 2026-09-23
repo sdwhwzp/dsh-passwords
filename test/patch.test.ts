@@ -47,7 +47,7 @@ test('pre-alpha installations fail closed instead of rewriting removed packages'
   }
 });
 
-for (const version of ['0.1.5-alpha.2', '0.1.5-rc.1', '0.1.5-rc.2', '0.1.6-alpha.1', '0.1.6-alpha.2']) {
+for (const version of ['0.1.5-alpha.2', '0.1.5-rc.1', '0.1.5-rc.2', '0.1.6-alpha.1', '0.1.6-alpha.2', '0.1.7-alpha.2']) {
   test(`native ${version} requires no installed-bundle rewrite`, () => {
     const root = nativeRoot(version);
     try {

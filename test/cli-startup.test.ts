@@ -33,13 +33,13 @@ test('patch command uses a stable exit code when the configured DSH root is abse
   }
 });
 
-test('native Alpha.4 reports compatibility ready without bundle rewriting', () => {
+for (const version of ['0.1.2-alpha.4', '0.1.7-alpha.2']) test(`native ${version} reports compatibility ready without bundle rewriting`, () => {
   const root = mkdtempSync(path.join(tmpdir(), 'dshpw-cli-native-'));
   const dshRoot = path.join(root, 'dsh');
   mkdirSync(dshRoot, { recursive: true });
   writeFileSync(
     path.join(dshRoot, 'package.json'),
-    `${JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.2-alpha.4' })}\n`,
+    `${JSON.stringify({ name: '@deepseek-ai/dsh', version })}\n`,
   );
   try {
     const result = spawnSync(process.execPath, [cli, 'patch', 'status'], {
