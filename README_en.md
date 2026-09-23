@@ -586,3 +586,5 @@ Desktop terminal restoration through `terminal/retain` checks session ownership,
 Host login exchange accepts root redirects `/` and `./` without following them; external destinations and query-bearing targets are rejected.
 
 The verified Harness 0.1.7-alpha.2 runtime starts the gateway through native permission APIs without rewriting installed bundles. Unreviewed future versions remain rejected at startup.
+
+Session ownership validation accepts legacy projections and current `cached`/`sequenced` projections with the `agentAvailable` flag, while retaining strict type and field validation.

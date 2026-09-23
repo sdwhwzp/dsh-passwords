@@ -58,7 +58,7 @@ test('readiness proves database and authenticated Host data access without expos
     | 'invalid-cwd'
     | 'invalid-field'
     | 'unknown-item-key'
-    | 'invalid-projections' = 'valid';
+    | 'invalid-projections' | 'current-cached' | 'current-sequenced' | 'invalid-agent' | 'invalid-kind' = 'valid';
   const upstream = http.createServer((req, res) => {
     upstreamRequests += 1;
     upstreamCookies.push(req.headers.cookie);
@@ -90,6 +90,9 @@ test('readiness proves database and authenticated Host data access without expos
           cwd: temporary,
         };
         const items: unknown[] = (() => {
+          if (sessionFrameMode === 'current-cached' || sessionFrameMode === 'current-sequenced') return [{ ...validItem, agentAvailable: sessionFrameMode === 'current-sequenced', projections: { kind: sessionFrameMode.slice(8), asOfSeq: 0, values: {} } }];
+          if (sessionFrameMode === 'invalid-agent') return [{ ...validItem, agentAvailable: 'true' }];
+          if (sessionFrameMode === 'invalid-kind') return [{ ...validItem, projections: { kind: 'unknown', asOfSeq: 0, values: {} } }];
           if (sessionFrameMode === 'non-object-item') return ['fixture-session'];
           if (sessionFrameMode === 'missing-session-id') {
             const { sessionId: _sessionId, ...withoutSessionId } = validItem;
@@ -259,6 +262,13 @@ test('readiness proves database and authenticated Host data access without expos
       source: 'dsh-passwords', id: String(admin.id), username: admin.username, role: 'admin',
     });
 
+    for (const mode of ['current-cached', 'current-sequenced'] as const) {
+      sessionFrameMode = mode;
+      const response = await fetch(`http://127.0.0.1:${String(gatewayPort)}/gateway/internal/readyz`, { headers: { 'x-internal-secret': config.internalSecret } });
+      assert.equal(response.status, 200, JSON.stringify(await response.json()));
+    }
+    sessionFrameMode = 'valid';
+
     workspaceStatus = 401;
     const unauthorizedWorkspace = await fetch(`http://127.0.0.1:${String(gatewayPort)}/gateway/internal/readyz`, {
       headers: { 'x-internal-secret': config.internalSecret },
@@ -338,6 +348,8 @@ test('readiness proves database and authenticated Host data access without expos
       ['invalid-field', 'invalid-envelope'],
       ['unknown-item-key', 'invalid-envelope'],
       ['invalid-projections', 'invalid-envelope'],
+      ['invalid-agent', 'invalid-envelope'],
+      ['invalid-kind', 'invalid-envelope'],
     ] as const) {
       sessionFrameMode = mode;
       const malformedSession = await fetch(

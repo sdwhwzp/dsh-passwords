@@ -6471,7 +6471,8 @@ export function createGatewayServer(
     if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
     const projections = value as Record<string, unknown>;
     return (
-      hasExactKeys(projections, ['asOfSeq', 'values']) &&
+      hasOnlyKeys(projections, ['asOfSeq', 'values'], ['kind']) &&
+      (!Object.hasOwn(projections, 'kind') || projections.kind === 'cached' || projections.kind === 'sequenced') &&
       typeof projections.asOfSeq === 'number' &&
       Number.isInteger(projections.asOfSeq) &&
       projections.asOfSeq >= -1 &&
@@ -6534,12 +6535,13 @@ export function createGatewayServer(
         !hasOnlyKeys(
           summary,
           ['sessionId', 'updatedAt', 'running', 'blank'],
-          ['parentSessionId', 'origin', 'cwd', 'projections'],
+          ['parentSessionId', 'origin', 'cwd', 'projections', 'agentAvailable'],
         ) ||
         typeof summary.sessionId !== 'string' || summary.sessionId.length === 0 ||
         typeof summary.updatedAt !== 'number' || !Number.isFinite(summary.updatedAt) ||
         typeof summary.running !== 'boolean' ||
         typeof summary.blank !== 'boolean' ||
+        (Object.hasOwn(summary, 'agentAvailable') && typeof summary.agentAvailable !== 'boolean') ||
         (Object.hasOwn(summary, 'parentSessionId') && (
           typeof summary.parentSessionId !== 'string' || summary.parentSessionId.length === 0
         )) ||
