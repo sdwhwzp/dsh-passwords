@@ -250,11 +250,42 @@ test('0.1.6 line variants all refuse startup when the Cookie bridge is unavailab
   }
 });
 
-test('unsupported 0.1.7 is rejected before patching or opening a listener', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'dshpw-cli-017-'));
+test('supported 0.1.7 line variants pass the version gate and then require the Cookie bridge', async () => {
   const settings = 'const persistence = ctx.remote.$host.isLoopback ? "host" : "memory";\n';
-  const dshRoot = makeAlpha3Root(root, settings, 'export class Connection {}\n', '0.1.7-alpha.1');
-  // 未审查的未来 minor 必须在 applyRemotePatch、数据库和监听器之前拒绝。
+  for (const version of ['0.1.7-alpha.1', '0.1.7-alpha.2', '0.1.7-alpha.12', '0.1.7-beta.1', '0.1.7-rc.1', '0.1.7-preview.4', '0.1.7+build.1', '0.1.7']) {
+    const root = mkdtempSync(path.join(tmpdir(), 'dshpw-cli-017-'));
+    const dshRoot = makeAlpha3Root(root, settings, 'export class Connection {}\n', version);
+    const blocker = createServer();
+    await new Promise<void>((resolve) => blocker.listen(0, '0.0.0.0', resolve));
+    const port = (blocker.address() as AddressInfo).port;
+    try {
+      const result = spawnSync(process.execPath, [cli, 'serve-gateway'], {
+        cwd: projectRoot,
+        env: {
+          ...process.env,
+          DSH_PASSWORDS_ENV_FILE: writeConfig(root, dshRoot, {
+            MCP_GATEWAY_PORT: String(port),
+            MCP_GATEWAY_REDIRECT_PORT: '0',
+            MCP_DB_PATH: path.join(root, 'gateway.db'),
+          }),
+          LANG: 'en_US.UTF-8',
+        },
+        encoding: 'utf8',
+        timeout: 20_000,
+      });
+      assert.equal(result.status, 33, `${version}: ${result.stdout}\n${result.stderr}`);
+      assert.match(result.stderr, /Cookie bridge/i, version);
+    } finally {
+      blocker.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test('unsupported 0.1.8 is rejected before patching or opening a listener', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'dshpw-cli-018-'));
+  const settings = 'const persistence = ctx.remote.$host.isLoopback ? "host" : "memory";\n';
+  const dshRoot = makeAlpha3Root(root, settings, 'export class Connection {}\n', '0.1.8-alpha.1');
   const blocker = createServer();
   await new Promise<void>((resolve) => blocker.listen(0, '0.0.0.0', resolve));
   const port = (blocker.address() as AddressInfo).port;

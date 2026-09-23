@@ -161,6 +161,7 @@ before(async () => {
     internalSecret: 'test-internal-secret',
     patch: { dshRoot: '', restartService: '' },
     endpointRules: [],
+    pluginCompat: false,
   };
 
   const auth = new AuthService(config, db);
@@ -645,6 +646,22 @@ const chatMsg = (id: number): ChatMessage => ({
   content: 'x',
   tags: [],
   created_at: new Date().toISOString(),
+});
+
+test('保命技能密码错误第五次限流，锁定期间不继续尝试 bcrypt', async () => {
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    const response = await gatewayReq('POST', '/gateway/api/dsh-passwords/purge', {}, adminCookie, JSON.stringify({
+      password: 'not-the-admin-password',
+      confirm: true,
+    }));
+    assert.equal(response.status, attempt === 5 ? 429 : 401);
+  }
+  const blocked = await gatewayReq('POST', '/gateway/api/dsh-passwords/purge', {}, adminCookie, JSON.stringify({
+    password: 'not-the-admin-password',
+    confirm: true,
+  }));
+  assert.equal(blocked.status, 429);
+  assert.match(blocked.body, /IP_THROTTLED/);
 });
 
 test('M-5：返回 id ≤ 游标 = 游标倒退（DB 重建）', () => {

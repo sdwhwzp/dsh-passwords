@@ -135,11 +135,11 @@ const SEMVER_VERSION_RE = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?
 /**
  * Known DSH minor lines. This is an identity boundary, not a claim that every build
  * received profile-level acceptance: it prevents an unreviewed future wire/bundle
- * shape (for example 0.1.7) from receiving source patches or a public listener.
+ * shape (for example 0.1.8) from receiving source patches or a public listener.
  * Every accepted identity is subject to the same settings-host-mode and authenticated
  * Cookie-bridge gate below; no historical prerelease is silently exempted.
  */
-const DSH_SUPPORTED_RUNTIME_RE = /^0\.1\.(?:2|3|5|6)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+const DSH_SUPPORTED_RUNTIME_RE = /^0\.1\.(?:2|3|5|6|7)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
 /** Read one trustworthy SemVer identity from the installed DSH manifest, or null. */
 function readDshVersion(dshRoot: string): string | null {
@@ -200,7 +200,7 @@ function runPatch(argv: string[]): void {
   if (action === undefined || action === 'on' || action === 'reload') {
     const dshVersion = readDshVersion(root);
     if (!isSupportedDshRuntime(dshVersion)) {
-      console.error(`[dsh-passwords] Unsupported or invalid DSH version ${dshVersion ?? '(missing/corrupt)'}; refusing to patch (supported minor lines: 0.1.2, 0.1.3, 0.1.5, 0.1.6)`);
+      console.error(`[dsh-passwords] Unsupported or invalid DSH version ${dshVersion ?? '(missing/corrupt)'}; refusing to patch (supported minor lines: 0.1.2, 0.1.3, 0.1.5, 0.1.6, 0.1.7)`);
       process.exit(EXIT_DSH_VERSION_UNSUPPORTED);
     }
     const result = applyRemotePatch(root);
@@ -298,7 +298,7 @@ async function boot() {
   // bridge regex”被静默放行：它可能拥有不同的 bundle / Remote wire contract。
   const dshVersion = readDshVersion(root);
   if (!isSupportedDshRuntime(dshVersion)) {
-    console.error(`[dsh-passwords] Unsupported or invalid DSH version ${dshVersion ?? '(missing/corrupt)'}; refusing to patch or start the public gateway (supported minor lines: 0.1.2, 0.1.3, 0.1.5, 0.1.6)`);
+    console.error(`[dsh-passwords] Unsupported or invalid DSH version ${dshVersion ?? '(missing/corrupt)'}; refusing to patch or start the public gateway (supported minor lines: 0.1.2, 0.1.3, 0.1.5, 0.1.6, 0.1.7)`);
     process.exit(EXIT_DSH_VERSION_UNSUPPORTED);
   }
   try {

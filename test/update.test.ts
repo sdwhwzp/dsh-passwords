@@ -5,10 +5,11 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { PlatformConfig } from '../src/config.ts';
-import { isBackgroundUpdateRequest } from '../src/gateway.ts';
+import { isBackgroundUpdateRequest, systemdPurgeLaunchArgs } from '../src/gateway.ts';
 import {
   compareVersions,
   detectRuntime,
+  isContainerRuntime,
   parseNpmPackageInfo,
   parseReleaseInfo,
   updateApplyHttpStatus,
@@ -23,7 +24,7 @@ function config(dbPath: string, restartService = 'dsh-web'): PlatformConfig {
   return {
     setupKey: 'test-setup-key', dbPath, dbEncKey: '', jwtSecret: 'test-jwt-secret', internalSecret: 'test-internal-secret',
     gateway: { host: '127.0.0.1', port: 9443, upstream: 'http://127.0.0.1:3080', tls: null, redirectPort: null, publicHost: '', domain: 'localhost', autoTls: false, acmeEmail: '', acmeStaging: false },
-    patch: { dshRoot: '', restartService }, endpointRules: [],
+    patch: { dshRoot: '', restartService }, endpointRules: [], pluginCompat: false,
   };
 }
 
@@ -175,6 +176,21 @@ test('source archives without .git still use the npm update runtime', () => {
     mkdirSync(path.join(root, 'scripts'));
     assert.equal(detectRuntime(root, { DSH_PASSWORDS_RUNTIME: '' }), 'git');
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('container detection covers explicit runtime, data homes and standard container markers', () => {
+  assert.equal(isContainerRuntime({ DSH_PASSWORDS_RUNTIME: 'docker' }, () => false), true);
+  assert.equal(isContainerRuntime({ DSH_HOME: '/data/dsh' }, () => false), true);
+  assert.equal(isContainerRuntime({}, (candidate) => candidate === '/.dockerenv'), true);
+  assert.equal(isContainerRuntime({}, (candidate) => candidate === '/run/.containerenv'), true);
+  assert.equal(isContainerRuntime({}, () => false), false);
+});
+
+test('systemd purge runner waits for helper exec before reporting a successful launch', () => {
+  assert.deepEqual(systemdPurgeLaunchArgs('dsh-passwords-purge-test', '/usr/bin/node', '/tmp/purge.mjs', '/tmp/plan.json', '/tmp'), [
+    '--unit', 'dsh-passwords-purge-test', '--collect', '--quiet', '--property=Type=exec', '--setenv=TMPDIR=/tmp',
+    '/usr/bin/node', '/tmp/purge.mjs', '/tmp/plan.json',
+  ]);
 });
 
 test('update metadata parser only accepts the expected npm package, version, registry and integrity', () => {

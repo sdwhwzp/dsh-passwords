@@ -8,7 +8,7 @@
 //   - allowUpload            是否使用大请求体/大文件上传档位（false = 64 MiB，true = 300 MiB）
 //   - allowGitDownload       是否允许 git 下载（clone/pull 等）
 //   - allowWorkspaceCreate   是否允许创建/删除/重命名工作区
-//   - allowSsh               是否允许使用主用户配置的 SSH WebSocket 端点
+//   - allowSsh               是否允许使用主用户配置的 SSH 端点与官方 terminal
 //   - allowedSessionIds      显式会话授权（未初始化前自动种子化可见会话；保存后新会话不再自动加入）
 //   - disabledSessions       已授权工作区内逐会话关闭的会话 ID（兼容旧行为）
 //   - sandboxMode            沙盒级别（read-only / workspace-write / danger-full-access）
@@ -162,34 +162,54 @@ export function endpointAllowed(
  * 而第三方插件的通道同样是 `/api/<插件名>/...`——两者路径形状相同，只能靠
  * 命名空间区分。
  *
- * 本清单来源：DSH 0.1.6-alpha.1/0.1.5-rc.2 官方包实测（`namespace: "..."` 的
- * host 侧注册）∪ 本项目既有适配知识中属于官方的部分。
- * 方向刻意偏宽容：清单写宽只会让个别第三方路径漏过，写窄会直接打断官方功能。
- * ⚠ `terminal` 命名空间（dsh-api-terminal-controller：create/follow/shells）
- * 故意不在清单内：它是服务器端远程 shell，对子用户开放等于完全沙箱逃逸；
- * 官方 web 客户端无调用证据（日志零命中），主用户不受影响（管理员不经分类）。
- * ⚠ `officeToPdf`（@deepseek-ai/dsh-office-to-pdf，alpha.2 官方）同样不进清单：
+ * 本清单来源：DSH 0.1.7 官方包实测（0.1.7-alpha.1 落地）——@deepseek-ai/dsh-api-remotes
+ * 的客户端 Remote 面 `namespace: "..."` 注册，与各 owner 包 `lib/typert.host.js` 的
+ * `invocation.namespace` 逐项交叉核对（0.1.5-rc.2 / 0.1.6-alpha.2 实测清单是其子集）。
+ * 方向取舍（0.1.7 起收紧）：清单写宽会把第三方路径自动当成 official 直接交给
+ * 子用户（绕过主用户的登记决策），因此只登记有实测依据的命名空间；**本地名字
+ * 空间式成员不进清单**——例如 `dsh-composer` 是 dsh-client-ui-conversation 里
+ * 浏览器端 contenteditable 编辑器的实例名（`Editor({ namespace })`），不是 host
+ * RPC 命名空间，列进来会让一切叫 `/api/dsh-composer/...` 的第三方路由无条件获得
+ * 官方待遇。非 RPC 的官方路由按精确路径判定（见 OFFICIAL_API_ROUTE_RE），旧的
+ * 遗留命名空间只保留已确认的精确端点（见 LEGACY_OFFICIAL_API_ROUTE_RE）。
+ * ⚠ `terminal` 命名空间（dsh-api-terminal-controller：list/environment/shells/
+ * close/create/write/follow/resize/rename/retain）故意不在清单内：它是服务器端
+ * 远程 shell，不能因官方命名空间或宽泛 SSH 登记而自动放行。0.1.7 客户端**确实**
+ * 会调用 list/environment/shells/close（终端面板与顶栏「重试恢复终端」先探环境、再列出
+ * 已有终端、必要时 create），这些请求由 gateway 的显式 SSH 权限分支处理：allowSsh
+ * 关闭时返回无能力 UX 桩，开启时才透传官方 terminal；create/write/follow 等宿主
+ * shell 能力同样只在该开关开启后可用。主用户不受影响（管理员不经分类）。
+ * 0.1.7 起仍由 SUBUSER_BLOCKED_API_NAMESPACES 硬拒绝通用分类：否则 `/api/terminal/*`
+ * 一旦被通用或精确 SSH 规则登记，terminal 就会绕过「官方 terminal 与第三方 SSH
+ * 共用一个权限开关」的显式网关语义。terminal/list 的关闭态空成功伪装由 gateway
+ * 特殊分支提供，不改变这里的 fail-closed 分类。
+ * ⚠ `officeToPdf`（@deepseek-ai/dsh-office-to-pdf，0.1.7 官方）同样不进清单：
  * `render(workspaceFileScope, path, …)` 接受绝对/工作区相对路径，scope 由请求头
- * 派生（sessionId + workspaceRoot），作用域隔离依赖 workspaceFiles 实现（alpha.2
+ * 派生（sessionId + workspaceRoot），作用域隔离依赖 workspaceFiles 实现（0.1.7
  * 只读审计：可能放行作用域外路径），网关侧尚无该命名空间的会话/文件夹守卫，
  * 真实 E2E 也未证明隔离；在此之前子用户 fail-closed（见
  * SUBUSER_BLOCKED_API_NAMESPACES）。主用户不经分类，不受影响。
  * ⚠ `pluginManager` 与 `agentTeams` 同样不在清单内，并由
  * SUBUSER_BLOCKED_API_NAMESPACES 硬拒绝（登记规则也无法覆盖）。
+ *
+ * 官方面 = 本集合（命名空间）∪ OFFICIAL_API_ROUTE_RE（官方精确路由）∪
+ * LEGACY_OFFICIAL_API_ROUTE_RE（旧线保留端点），且必须先通过硬拒绝检查
+ * （classifySubuserPath 的判定顺序）。
  * 变更时必须同步 test / 兼容性矩阵。
  */
 export const OFFICIAL_API_NAMESPACES: ReadonlySet<string> = new Set([
-  // ── 0.1.5-rc.2 实测的 host 侧 RPC 命名空间 ──
+  // ── 0.1.7 host 侧 RPC 命名空间（dsh-api-remotes 实测，逐个 owner 包核对）──
   'agentPresets',
   'commands',
   'credentials',
   'directoryPicker',
-  'dsh-composer',
   'dynamicCordisRunner',
   'fileReferences',
   'fileUploads',
   'goals',
   'llm',
+  'job',
+  'account',
   'messageFeedback',
   'permissionPresets',
   'pluginInventory',
@@ -201,15 +221,9 @@ export const OFFICIAL_API_NAMESPACES: ReadonlySet<string> = new Set([
   'subagents',
   'workspace',
   'workspaceFiles',
-  // ── 非 RPC 的官方 /api 路由与旧版本保留项 ──
-  '$events',
-  'file',
-  'git',
-  'host',
-  'present',
-  'remote.mux',
-  'respond',
-  'events',
+  // ── 非 RPC 的官方通道 ──
+  '$events', // dsh-api-gateway：remote mux 上的逻辑事件流端点（/api/$events*）
+  'remote.mux', // dsh-api-gateway：流多路复用 WebSocket
 ]);
 
 /**
@@ -225,45 +239,189 @@ function apiNamespaceOf(pathname: string): { segment: string; head: string } | n
 }
 
 /**
+ * `/api/<namespace>[.<method>][/<method>…]` 的命名空间与方法拆解；非 /api/、
+ * 无方法段或形状不合法返回 null。点号与斜杠两种官方写法同口径
+ * （`/api/session.history` 与 `/api/session/history` 都是 session/history）。
+ */
+function apiEndpointOf(pathname: string): { namespace: string; method: string | null } | null {
+  const namespace = apiNamespaceOf(pathname);
+  if (namespace === null) return null;
+  const dotMethod =
+    namespace.segment.length > namespace.head.length + 1
+      ? namespace.segment.slice(namespace.head.length + 1)
+      : '';
+  const segments = pathname.slice('/api/'.length).split('/');
+  const slashMethod = segments.length > 1 && segments[1] !== '' ? segments[1] : '';
+  const method = dotMethod !== '' ? dotMethod : slashMethod !== '' ? slashMethod : null;
+  return { namespace: namespace.head, method };
+}
+
+/**
+ * 官方**精确路由**（不是命名空间）：官方包用 connection.fetch.register 直接注册
+ * 的单条 HTTP 路由，没有更深层路径。按精确路径判定而不是给这些通用词（file /
+ * changes / present）开命名空间：第三方插件注册同名 namespace 时不会自动获得
+ * 官方待遇（对子用户仍 fail-closed，需主用户登记）。
+ *
+ * 依据（0.1.7 官方注册点实测）：
+ *   - GET/HEAD /api/file                    dsh-api-session-controller：有界文件读取，
+ *                                           路径来自 query 且为**任意绝对路径**（无会话作用域）
+ *   - GET  /api/changes.summary|diff
+ *     POST /api/changes.open                dsh-client-ui-deliverables：变更摘要/对比/宿主打开
+ *   - GET  /api/present.host
+ *     POST /api/present.open                dsh-client-ui-deliverables：桌面可用性/打开已声明文件
+ * （会话日志导出 /api/session.export 由 `session` 命名空间覆盖；remote mux 与
+ * $events 见命名空间清单。）
+ */
+const OFFICIAL_API_ROUTE_RE = /^\/api\/(?:file|changes\.(?:summary|diff|open)|present\.(?:host|open))$/;
+
+/**
+ * 旧线（0.1.2 / 0.1.3 / 0.1.5）保留的官方精确路由：网关仍要回连这些 DSH 行，
+ * 但它们注册的命名空间在 0.1.7 已不存在或已改名，逐条列出实际端点与现状：
+ *   - /api/respond                审批响应（0.1.7 已并入 session/respond）
+ *   - /api/events.host|events.mux 旧事件通道（0.1.7 改为 /api/remote.mux）
+ *   - /api/host.createDirectory|listDirectory  旧目录选择器 RPC（0.1.7 改为 directoryPicker）
+ *   - /api/git.<动词>             dsh 内置 git 工具的 RPC（取数据/只读检视类动词）
+ * 兼容只落在这些**精确端点**上，不做整命名空间放行：第三方插件注册同名
+ * namespace（例如自己的 /api/git/xyz、/api/host/xyz）不会被当成官方，对子用户
+ * 仍是 third-party（未登记即拒绝）；主用户不经分类，不受影响。
+ * ⚠ events 只保留点号形状：斜杠形状 /api/events/host 不是 DSH 注册过的路由，
+ * 放行会让该路径绕过网关的 host 事件流过滤（信息泄露），因此保持 third-party。
+ * ⚠ git 只列取数据/只读动词；写类动词（push/commit/reset…）不在兼容列表，需要时
+ * 由主用户按 ssh 规则显式登记（fail-closed）。
+ */
+const LEGACY_OFFICIAL_API_ROUTE_RE =
+  /^\/api\/(?:respond|events\.(?:host|mux)|host[.\/](?:createDirectory|listDirectory)|git[.\/](?:clone|pull|fetch|status|diff|log|show|branch|checkout|lsFiles|ls-files|revParse|rev-parse|remote|tag|tags|blame))$/;
+
+/** 路径是否命中官方精确路由（/api/file、/api/changes.*、/api/present.*）。 */
+export function isOfficialApiRoute(pathname: string): boolean {
+  return OFFICIAL_API_ROUTE_RE.test(pathname);
+}
+
+/** 路径是否命中旧线保留的官方精确路由（respond / events / host 目录 / git 取数据）。 */
+export function isLegacyOfficialApiRoute(pathname: string): boolean {
+  return LEGACY_OFFICIAL_API_ROUTE_RE.test(pathname);
+}
+
+/**
  * 子用户硬拒绝的 API 命名空间：先于端点登记表判定，任何登记规则都无法覆盖。
  *
  * `pluginManager`（dsh-plugin-manager）的 change/runPnpm 可在 profile 内安装、
  * 卸载、运行第三方包——等于把特权/RCE 面交给子用户；`agentTeams`
- * （dsh-experimental-agent-team）是 alpha.2 实验特性，现有安全模型没有对应的
- * owner-only 专属授权；`officeToPdf`（dsh-office-to-pdf，alpha.2）的 `render`
+ * （dsh-experimental-agent-team）是 0.1.7 实验特性，现有安全模型没有对应的
+ * owner-only 专属授权；`officeToPdf`（dsh-office-to-pdf，0.1.7）的 `render`
  * 接受绝对/工作区相对路径，且底层 workspaceFiles 可能放行作用域外路径（只读
- * 审计）。三者命中 `/api/*` 这类宽泛规则（或精确规则）时仍归入 third-party
- * （fail-closed）；`owner:` 登记语义不受影响。主用户不经分类，不受影响。
+ * 审计尚未证明其隔离边界）。
+ * `terminal`（dsh-api-terminal-controller）的 create/write/follow 等
+ * 是宿主侧远程 shell，不能由官方命名空间或第三方登记表自动开放。命中 `/api/*`
+ * 这类宽泛规则（或精确规则）时仍归入 third-party，随后由 gateway 的统一 allowSsh
+ * 分支决定是否允许；没有该显式权限时仍 fail-closed。`owner:` 登记语义不受影响，
+ * 主用户不经分类，不受影响。
  *
  * officeToPdf 的 fail-closed 是临时收紧：在专用授权守卫与真实 E2E 证明作用域
  * 隔离之前，既不做官方自动放行，也不因通用 SSH 登记规则被带入。
  *
- * ⚠ `terminal` 故意不在本集合：其既有政策（不进官方清单 + 网关对 terminal/list
- * 回空成功）本轮保持不变，变更需单独评审。
+ * ⚠ `terminal` 的硬拒绝分类是 0.1.7 安全边界（根因：terminal 原不在本集合，
+ * `/api/terminal/*` 一旦被登记就会被归为 ssh，无法区分官方 terminal 与第三方路由）。
+ * 进集合后无论通用还是精确 SSH 登记都保持 third-party；gateway 再以 allowSsh 作为
+ * 唯一显式开关：关闭时 terminal/list/environment/shells/close 回固定的本地 UX 桩，
+ * 其它方法 403/逻辑流拒绝；开启时仅官方 terminal 的已知 HTTP/mux 端点原样透传。
+ * 未知 terminal 方法仍 fail-closed。terminal 仍不进 OFFICIAL_API_NAMESPACES；主用户
+ * 不经分类，官方 0.1.7 terminal 对主用户由网关原样透传。
  */
 export const SUBUSER_BLOCKED_API_NAMESPACES: ReadonlySet<string> = new Set([
   'pluginManager',
   'agentTeams',
   'officeToPdf',
+  'terminal',
+  'dynamicCordisRunner',
 ]);
 
-/** 该路径是否命中子用户硬拒绝命名空间（`/api/x`、`/api/x.y`、`/api/x/…` 同口径）。 */
-function isBlockedSubuserApiPath(pathname: string): boolean {
+/**
+ * 子用户硬拒绝的**单个 RPC 端点**（`<namespace>/<method>`）：命名空间整体仍属
+ * 官方时用本集合收紧个别方法。与命名空间集合一样先于端点登记表判定，任何登记
+ * 规则都无法覆盖（owner: 登记除外，其语义优先）。匹配为**逐方法精确相等**，
+ * 不按命名空间前缀扩散：同命名空间的其它方法（含未知方法）不受影响。
+ *
+ * `dynamicCordisRunner` 已按命名空间整体硬拒绝，未在下方方法集合重复登记。
+ *
+ * `directoryPicker/pick`（dsh-api-workspace-controller）：直接打开**宿主操作系统
+ * 原生目录选择器**，返回的绝对路径不受子用户目录白名单约束，且网关侧没有任何
+ * 可校验的输入（无 path、无 sessionId）；它属于宿主操作员能力，子用户 fail-closed。
+ * 同命名空间的 list / createDirectory 仍可用：网关对它们有子树白名单校验、创建
+ * 记账与响应过滤（见 isDirectoryListRequest / isWorkspaceDirectoryCreate）。
+ *
+ * 0.1.7 收紧项（全部属于宿主级能力，或网关无法取得可校验归属的请求）：
+ *   - `credentials/set` / `credentials/unset`（credentials Remote）：写入/删除宿主
+ *     凭据（provider 密钥等）。wire 里只有凭据内容、没有会话身份，网关没有任何
+ *     可校验的归属输入；子用户能写凭据就等于能替换宿主身份与上游密钥，fail-closed。
+ *   - `settings/openSettingsDocument`（settings Remote）：无路径参数，直接在宿主上
+ *     用原生编辑器打开提供方配置文件（在任何沙盒之外）。同命名空间的其余 settings
+ *     读写仍按官方路径走网关校验。
+ *   - `session/openWorkspacePath` / `session/canOpenWorkspacePath` /
+ *     `session/workspacePathApplications`（dsh-api-session-controller）：宿主桌面
+ *     文件管理器导航、原生能力探测与关联应用枚举。三者 wire 里都**没有会话身份**
+ *     （分别只带 `request.path` 或无参），网关无法把动作绑定到某个已授权会话，也
+ *     无法用会话 cwd 白名单约束目标路径（`canOpenWorkspacePath` 更是全局能力探测）。
+ *     它们不再靠 SESSION_SCOPED_RE 的归属校验（本类请求取不到身份，判定无意义），
+ *     统一 fail-closed。
+ *   - `dynamicCordisRunner`（dsh-cordis-host-runner）：整个命名空间涉及动态包定义、
+ *     host half 生命周期、宿主代码执行、运行状态枚举与插件控制。其请求面无法由
+ *     网关可靠收敛到子用户的沙盒/工作区权限，因此 0.1.7 起对子用户整体硬拒绝；
+ *     未知或未来新增方法也必须保持 fail-closed。
+ */
+export const SUBUSER_BLOCKED_API_ENDPOINTS: ReadonlySet<string> = new Set([
+  'directoryPicker/pick',
+  'account/startSignIn',
+  'account/cancelSignIn',
+  'account/signOut',
+  'credentials/set',
+  'credentials/unset',
+  'settings/openSettingsDocument',
+  'session/openWorkspacePath',
+  'session/canOpenWorkspacePath',
+  'session/workspacePathApplications',
+]);
+
+export const SUBUSER_ALLOWED_ACCOUNT_ENDPOINTS: ReadonlySet<string> = new Set([
+  'account/getState',
+  'account/getProfile',
+  'account/getBalance',
+]);
+
+/**
+ * 该路径是否命中子用户硬拒绝的命名空间或单个端点
+ * （`/api/x`、`/api/x.y`、`/api/x/…` 同口径）。
+ */
+export function isSubuserBlockedApiPath(pathname: string): boolean {
   const namespace = apiNamespaceOf(pathname);
-  if (namespace === null) return false;
-  return (
-    SUBUSER_BLOCKED_API_NAMESPACES.has(namespace.segment) ||
-    SUBUSER_BLOCKED_API_NAMESPACES.has(namespace.head)
-  );
+  if (
+    namespace !== null &&
+    (SUBUSER_BLOCKED_API_NAMESPACES.has(namespace.segment) ||
+      SUBUSER_BLOCKED_API_NAMESPACES.has(namespace.head))
+  ) {
+    // Block the namespace root as well as every method/deeper path. This avoids a
+    // root-path parse miss becoming an official or registered subuser route.
+    return true;
+  }
+  const endpoint = apiEndpointOf(pathname);
+  if (endpoint === null) return false;
+  if (endpoint.namespace === 'account') {
+    return endpoint.method === null || !SUBUSER_ALLOWED_ACCOUNT_ENDPOINTS.has(`account/${endpoint.method}`);
+  }
+  return endpoint.method !== null && SUBUSER_BLOCKED_API_ENDPOINTS.has(`${endpoint.namespace}/${endpoint.method}`);
 }
 
 /**
  * 该路径是否属于官方 dsh API 面。
  *
- * 取第一段（按 `/` 切分）再按 `.` 取头部，因此 `/api/session/history`、
- * `/api/session.export` 与 `/api/session` 都归入 session 命名空间。
+ * 取第一段（按 `/` 拆分）再按 `.` 取头部，因此 `/api/session/history`、
+ * `/api/session.export` 与 `/api/session` 都归入 session 命名空间；非 RPC 的官方
+ * 路由按精确路径判定（file / changes.* / present.*），旧线保留端点（respond /
+ * events.host|mux / host.createDirectory|listDirectory / git 取数据动词）也只按
+ * 精确端点命中——同名第三方 namespace 不会因此无条件变成 official。
  */
 export function isOfficialApiPath(pathname: string): boolean {
+  if (isOfficialApiRoute(pathname) || isLegacyOfficialApiRoute(pathname)) return true;
   const namespace = apiNamespaceOf(pathname);
   if (namespace === null) return false;
   return OFFICIAL_API_NAMESPACES.has(namespace.segment) || OFFICIAL_API_NAMESPACES.has(namespace.head);
@@ -275,13 +433,13 @@ export function isOfficialApiPath(pathname: string): boolean {
 const OFFICIAL_ROOT_STATIC_EXT_RE =
   /\.(?:css|js|mjs|cjs|map|ico|png|jpe?g|gif|webp|avif|svg|woff2?|ttf|otf|eot|txt|webmanifest)$/i;
 
-/** DSH 0.1.5-rc.2 host-open-in-app 的三个官方根级路由。 */
+/** DSH 0.1.7 host-open-in-app 的三个官方根级路由。 */
 const OFFICIAL_OPEN_IN_APP_ICON_RE = /^\/open-in-app\/icon\/[A-Za-z0-9_-]+$/;
 
 /**
  * 官方站点根级路径（非 /api）：SPA 壳与静态资源、插件客户端 bundle、事件流。
  *
- * 依据（官方 0.1.5-rc.2 实测）：除 `/plugins` 和静态回退资源外，宿主还注册
+ * 依据（官方 0.1.7 实测）：除 `/plugins` 和静态回退资源外，宿主还注册
  * 了 `dsh-host-open-in-app` 的应用目录、图标与启动路由。其余非 /api 路径一律
  * 视为第三方：未登记对子用户拒绝（fail-closed）。
  */
@@ -303,8 +461,9 @@ export function isOfficialRootPath(pathname: string): boolean {
  *   third-party —— 其余路径（未登记的第三方 /api 或根级插件路由）：默认拒绝
  *
  * 判定顺序 owner-only → blocked → ssh → platform → official → third-party：
- * 显式 owner: 登记优先；SUBUSER_BLOCKED_API_NAMESPACES 先于 ssh 登记（宽泛
- * 规则也不能放行）；transport 决定带传输前缀的规则是否命中（owner: 规则不区分通道）。
+ * 显式 owner: 登记优先；SUBUSER_BLOCKED_API_NAMESPACES / SUBUSER_BLOCKED_API_ENDPOINTS
+ * 先于 ssh 登记（宽泛规则也不能放行）；transport 决定带传输前缀的规则是否命中
+ * （owner: 规则不区分通道）。
  */
 export type SubuserPathClass = 'platform' | 'owner-only' | 'ssh' | 'official' | 'third-party';
 
@@ -313,11 +472,95 @@ export function classifySubuserPath(
   options: { endpointRules: readonly string[]; transport: 'http' | 'ws' },
 ): SubuserPathClass {
   if (endpointAllowed(pathname, options.endpointRules, { capability: 'owner-only' })) return 'owner-only';
-  if (isBlockedSubuserApiPath(pathname)) return 'third-party';
+  if (isSubuserBlockedApiPath(pathname)) return 'third-party';
   if (endpointAllowed(pathname, options.endpointRules, { capability: 'ssh', transport: options.transport })) return 'ssh';
   if (pathname === '/api/dsh-passwords' || pathname.startsWith('/api/dsh-passwords/')) return 'platform';
   if (pathname.startsWith('/api/')) return isOfficialApiPath(pathname) ? 'official' : 'third-party';
   return isOfficialRootPath(pathname) ? 'official' : 'third-party';
+}
+
+// ── 官方文件通道（/api/file、present/changes 会话 query 路由）的严格边界判定 ──
+// 这些官方路由把“读/打开哪个文件”放在 query 里，而不是 RPC 的会话作用域内，
+// 因此网关无法用端点登记或 SESSION_SCOPED_RE 单独完成判定。以下纯函数只做一件事：
+// 从 unknown 输入里**严格**取出应有的边界信息；任何形状不符一律返回 null
+// （fail-closed，调用方必须按未授权处理，不得回落到默认值）。
+
+/**
+ * 官方 /api/file 读取路由（0.1.7 只注册 GET/HEAD）：有界文件读取。
+ * ⚠ 路径参数是**任意绝对路径**、没有会话作用域（不随会话工作区隔离），
+ * 因此受限子用户必须额外做目录白名单判定（见 fileReadTargetFromQuery）。
+ */
+export function isOfficialFileReadRequest(method: string, pathname: string): boolean {
+  return (method === 'GET' || method === 'HEAD') && pathname === '/api/file';
+}
+
+/** 从 unknown 查询容器（URLSearchParams / 普通对象）里取一个非空字符串参数。 */
+function queryParam(query: unknown, name: string): string | null {
+  if (query instanceof URLSearchParams) {
+    const value = query.get(name);
+    return value !== null && value !== '' ? value : null;
+  }
+  if (query === null || typeof query !== 'object' || Array.isArray(query)) return null;
+  const value = (query as Record<string, unknown>)[name];
+  return typeof value === 'string' && value !== '' ? value : null;
+}
+
+/** 从 unknown 查询容器里取一个非负整数字符数（缺失/非法一律 null）。 */
+function queryInteger(query: unknown, name: string): number | null {
+  const raw = queryParam(query, name);
+  if (raw === null || !/^\d+$/.test(raw)) return null;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) ? value : null;
+}
+
+/** 该路径是否绝对（POSIX 根 或 Windows 盘符）；归一化后再判定。 */
+function isAbsoluteLike(candidate: string): boolean {
+  return candidate.startsWith('/') || /^[a-z]:\//i.test(candidate);
+}
+
+/**
+ * /api/file 的目标路径（严格、fail-closed）：只接受 query 里的 `path`，
+ * 且必须是绝对路径、不含 NUL；其余（容器形状未知、参数缺失/为空、相对路径、
+ * 控制字符）返回 null。DSH 自身只接受合法绝对路径（否则 400），所以这里的
+ * null 不会误伤合法请求，只会让网关对“拿不到可校验路径”的输入拒绝。
+ */
+export function fileReadTargetFromQuery(query: unknown): string | null {
+  const raw = queryParam(query, 'path');
+  if (raw === null || raw.includes('\u0000')) return null;
+  const normalized = normalizePath(raw);
+  return isAbsoluteLike(normalized) ? normalized : null;
+}
+
+/** changes.summary|diff|open 与 present.open：会话身份位于 query 的官方路由。 */
+const OFFICIAL_SESSION_QUERY_ROUTE_RE = /^\/api\/(?:changes\.(?:summary|diff|open)|present\.open)$/;
+
+/**
+ * 该路径是否为“会话身份在 query 里”的官方路由（changes.summary|diff|open、
+ * present.open）。这些路由没有 RPC 信封，SESSION_SCOPED_RE 也拿不到 sessionId，
+ * 网关必须用 sessionQueryTarget 自行取会话身份再判归属。
+ * present.host 不带会话身份（只返回宿主桌面元数据），故不在此列。
+ */
+export function isOfficialSessionQueryRoute(pathname: string): boolean {
+  return OFFICIAL_SESSION_QUERY_ROUTE_RE.test(pathname);
+}
+
+export interface SessionQueryTarget {
+  sessionId: string;
+  /** seq 坐标（缺失/非数字为 null）；调用方需要时应自行 fail-closed。 */
+  seq: number | null;
+  /** index 坐标（present.open/changes.diff|open 需要；缺失为 null）。 */
+  index: number | null;
+}
+
+/**
+ * 严格解析官方会话 query 路由的坐标（fail-closed）：sessionId 必须是 1..200
+ * 字符的字符串，否则返回 null；seq/index 缺失或非法一律记为 null（不编造 0）。
+ * 无法确认会话身份时调用方必须拒绝（而不是转发给上游再依赖它的 404/500）。
+ */
+export function sessionQueryTarget(query: unknown): SessionQueryTarget | null {
+  const sessionId = queryParam(query, 'sessionId');
+  if (sessionId === null || sessionId.length > 200) return null;
+  return { sessionId, seq: queryInteger(query, 'seq'), index: queryInteger(query, 'index') };
 }
 
 /**
@@ -697,7 +940,8 @@ export function collectSessionCwdFromWorkspaces(value: unknown, out: Map<string,
 
 /**
  * 递归查找请求体里的 workspaceId（session.create 可能带 workspaceId 而非 cwd）。
- *  ⚠ 递归时跳过 args 子对象（同 extractPathFromBody：args 是 dsh 不消费的伪字段）。
+ * 已识别的 0.1.7 ClientConnection 信封只采信 payload.args（或 args.request）；
+ * 信封外字段不可能到达 DSH，不能成为网关授权依据。
  */
 export function extractWorkspaceId(value: unknown, depth = 0): string | null {
   if (depth > 6 || value === null || typeof value !== 'object') return null;
@@ -707,6 +951,8 @@ export function extractWorkspaceId(value: unknown, depth = 0): string | null {
     if (request !== null && typeof request === 'object' && !Array.isArray(request)) {
       return extractWorkspaceId(request, depth + 1);
     }
+    const workspaceId = args.workspaceId;
+    return typeof workspaceId === 'string' && workspaceId.length > 0 ? workspaceId : null;
   }
   const obj = value as Record<string, unknown>;
   if (typeof obj.workspaceId === 'string' && obj.workspaceId.length > 0) return obj.workspaceId;
@@ -894,6 +1140,9 @@ export function isUploadRequest(method: string, pathname: string): boolean {
  * git 相关端点（dsh 内置 git 工具 RPC：git.clone / git.pull / git.fetch 等）
  * 与“从服务器拿走数据”的官方通道：session.export 会话日志 ZIP。
  * 只匹配 git 前缀的 RPC（不拦 session.fetch 这类普通端点）。
+ * ⚠ 0.1.7 官方已无 git 命名空间 RPC（见 LEGACY_OFFICIAL_API_ROUTE_RE）：这里
+ * 的 git 前缀只对应旧线（0.1.2/0.1.3/0.1.5）保留端点，且旧的兼容白名单只列
+ * 取数据/只读动词；写类动词在子用户侧是 third-party（fail-closed）。
  */
 export function isGitRequest(pathname: string): boolean {
   return (
@@ -908,8 +1157,9 @@ export function isWorkspaceCreate(pathname: string): boolean {
 }
 
 /**
- * 目录选择器创建实际目录后，才由 workspace.create 登记工作区。alpha.3 使用
- * directoryPicker/createDirectory；保留 host.createDirectory 是为旧 dsh 兼容。
+ * 目录选择器创建实际目录后，才由 workspace.create 登记工作区。0.1.7 使用
+ * directoryPicker/createDirectory；保留 host.createDirectory 是为旧 dsh 兼容
+ * （旧端点仅按精确路由保留，见 LEGACY_OFFICIAL_API_ROUTE_RE）。
  */
 export function isWorkspaceDirectoryCreate(pathname: string): boolean {
   return /^(?:\/api\/host|\/api\/directoryPicker)[.\/]createDirectory(?:[.\/]|$)/.test(pathname);
@@ -920,16 +1170,32 @@ export function isWorkspaceDeleteOrRename(pathname: string): boolean {
   return /^\/api\/workspace[.\/](remove|delete|rename|update)([.\/]|$)/.test(pathname);
 }
 
-/** 工作区管理写操作（默认仅主用户；子用户由 allowWorkspaceCreate 控制创建/删除/重命名）。 */
+/** 纯工作区/会话排序 RPC；它不创建、删除或移动文件系统内容。 */
+export function isWorkspaceOrderWrite(pathname: string): boolean {
+  return /^\/api\/workspace[.\/](insertBefore|insertSessionBefore)([.\/]|$)/.test(pathname);
+}
+
+/**
+ * 工作区管理写操作（创建/删除/重命名由 allowWorkspaceCreate 控制；纯排序由网关对象级可见性校验）。
+ *
+ * `workspace/initializeDefault`（0.1.7，dsh-api-workspace-controller）按
+ * `request.directoryName` 在宿主文件系统里**创建并登记**一个新工作区目录，属于
+ * 工作区写，但它的入参不是路径（没有 path 可供白名单校验，也无法与
+ * workspaceRegistrationAllowed 的“已分配/已拥有/刚创建”三选一比对），因此纳入本
+ * 谓词后对子用户 fail-closed：网关侧的 isManagedWorkspaceWrite（= isWorkspaceCreate ||
+ * isWorkspaceDeleteOrRename）不含它，即使主用户勾选 allowWorkspaceCreate 也不会被
+ * 顺带放行。
+ */
 export function isWorkspaceWrite(pathname: string): boolean {
   return (
     isWorkspaceCreate(pathname) ||
     isWorkspaceDeleteOrRename(pathname) ||
-    /^\/api\/workspace[.\/](import|move|insertBefore|insertSessionBefore|materialize|adopt)([.\/]|$)/.test(pathname)
+    isWorkspaceOrderWrite(pathname) ||
+    /^\/api\/workspace[.\/](import|move|materialize|adopt|initializeDefault)([.\/]|$)/.test(pathname)
   );
 }
 
-/** alpha.1 目录浏览器的一层列表 RPC（in-app picker 的浏览动词）。 */
+/** 0.1.7 目录浏览器的一层列表 RPC（in-app picker 的浏览动词）。 */
 export function isDirectoryListRequest(pathname: string): boolean {
   return /^\/api\/(?:directoryPicker[.\/]list|host[.\/]listDirectory)(?:[.\/]|$)/.test(pathname);
 }
@@ -987,12 +1253,228 @@ export function directoryEntryVisible(entryPath: string, allowedRoots: readonly 
 export const WORKSPACE_ENDPOINT_RE = /^\/api\/session[.\/](create)([.\/]|$)/;
 
 /**
- * 会话作用域 RPC：这些端点带一个 sessionId，能读/写/改某个会话——
+ * 会话作用域 RPC：这些端点带一个会话身份，能读/写/改某个会话——
  * 子用户必须启用其所在工作区，且该会话未被管理员单独关闭。
  * create 无源会话、list 单独做工作区/会话过滤，均不在此列。
+ *
+ * workspaceFiles（dsh-api-workspace-files）全部已知方法都是会话作用域：read /
+ * readBytes / stat / list / changes 是 0.1.7 的 wire 方法，readAll / readRelated
+ * 是 0.1.6 及更早的 **legacy 方法**（0.1.7 包内已移除，保留在本集合只为兼容旧线）。
+ * 所有方法的 wire 参数 `workspaceFileScopeId` 由 workspaceFileScope lookup 解析为
+ * **SessionId**（活会话读 header.cwd，冷会话读持久化 stat）。纳入本 RE 后它们会走
+ * 网关的会话归属校验（needsOwnershipCheck），未授权会话直接 403。
+ * ⚠ 会话作用域不等于文件作用域：服务端允许读工作区**外**的绝对路径
+ * （见官方 README “files outside it are allowed”），所以调用方还需对请求里的
+ * 目标路径做目录白名单判定（见 parseWorkspaceFilesCall /
+ * workspaceFilesTargetAllowed）。
+ * ⚠ changes 例外：0.1.7 的 changes 已是 `@Remote({ mode: 'stream' })` 且 wire 新增了
+ * `path: string`，“没有 path 参数”不再能当作它进不了 HTTP 守卫的依据；但它的变更流
+ * 只按工作区根过滤、不校验会话归属，网关两条通道都对子用户拒绝（mux 侧显式回
+ * gateway/forbidden），因此它进本 RE 只表示“带会话身份、必须做归属校验”，不表示
+ * 可用。本模块对 changes 恒返回 targetPath=null（target 判定恒 false），保持
+ * fail-closed，不让新增的 path 变成放行依据。
+ *
+ * present/open 与 changes/open（dsh-client-ui-deliverables）同样使用 query 中的会话
+ * 坐标；0.1.7 的两者都支持 GET（查询关联应用）和 POST（执行宿主打开）。网关对
+ * 两种方法统一做会话归属校验，未授权会话的宿主桌面动作直接 403。
+ * ⚠ 同一批路由里只有 GET 的成员（changes.summary / changes.diff、
+ * present.host、/api/file）本 RE 盖不到——网关的归属校验只跑 POST/PUT/PATCH/
+ * DELETE，GET 侧必须由调用方用 isOfficialSessionQueryRoute / sessionQueryTarget /
+ * fileReadTargetFromQuery 自行判定。
+ *
+ * 0.1.7 增补（dsh-api-session-controller / dsh-api-workspace-controller /
+ * sessionFeedback / goals 实测）：
+ *   - `session/projections`：请求体带 `request.sessionId`（SessionProjectionsRequest）；
+ *   - `sessionFeedback/record`（dsh-command-feedback）：日志型会话反馈。反馈挂在
+ *     具体会话上，必须逐会话归属校验，否则子用户可写他人会话的反馈；
+ *   - `goals/get`：与已在表内的 goals/clear|complete|create|edit|pause|resume 同类，
+ *     读的是某个会话的目标状态，必须逐会话归属校验（wire 里取不到会话身份时由
+ *     网关 fail-closed）；
+ *   - `workspace/pinSession` / `unpinSession` / `unarchiveSession`：请求体带
+ *     `request.sessionId`，与已在表内的 `workspace/archiveSession` 同类（改的是
+ *     某个会话在工作区导航里的状态），必须逐会话做归属校验。
+ * ⚠ 0.1.7 起 `session/openWorkspacePath` / `canOpenWorkspacePath` /
+ * `workspacePathApplications` 不再进本 RE：它们的 wire 里没有会话身份（分别只带
+ * `request.path` 或无参），本 RE 的归属校验取不到身份、判定无意义，已改为
+ * SUBUSER_BLOCKED_API_ENDPOINTS 硬拒绝。
+ * ⚠ `dynamicCordisRunner` 整个命名空间都不进本 RE：它是宿主级动态包执行面，直接由
+ * SUBUSER_BLOCKED_API_NAMESPACES 硬拒绝（硬拒绝先于本 RE，无需逐方法重复登记）。
+ * 本次只加“要校验归属”的范围，不把任何新命名空间/方法变成官方放行：
+ * job/account 的只读面进入官方分类；job 的会话身份仍由 SESSION_SCOPED_RE/Remote
+ * 开流校验，account 的登录写操作由 SUBUSER_BLOCKED_API_ENDPOINTS 硬拒绝。
  */
 export const SESSION_SCOPED_RE =
-  /^\/api\/(?:session[.\/](?:history|prompt|respond|archive|delete|rename|retitle|title|resume|fork|truncate|export|attachment|updateQueue|cancel|page|openWorkspacePath|selectModel)|workspace[.\/](?:archiveSession)|commands[.\/](?:list|execute)|subagents[.\/](?:list|prompt|interruptByParent)|fileUploads[.\/](?:upload)|fileReferences[.\/](?:list)|sessionReferenceResolver[.\/](?:candidates)|skills[.\/](?:list)|messageFeedback[.\/](?:list|put|delete)|goals[.\/](?:clear|complete|create|edit|pause|resume)|dynamicCordisRunner[.\/](?:getClientCode|reportClientGuardFailure|reportRenderFailure|resolveInspectQuery|runHostHalf|settleUserRun|stopFromPanel|undefineFromPanel))([.\/]|$)/;
+  /^\/api\/(?:session[.\/](?:history|prompt|respond|archive|delete|rename|retitle|title|resume|fork|truncate|export|attachment|updateQueue|cancel|page|projections|selectModel)|workspace[.\/](?:archiveSession|pinSession|unpinSession|unarchiveSession)|commands[.\/](?:list|execute)|subagents[.\/](?:list|prompt|interruptByParent)|fileUploads[.\/](?:upload)|fileReferences[.\/](?:list)|sessionReferenceResolver[.\/](?:candidates)|skills[.\/](?:list)|messageFeedback[.\/](?:list|put|delete)|sessionFeedback[.\/](?:record)|goals[.\/](?:clear|complete|create|edit|get|pause|resume)|workspaceFiles[.\/](?:read|readAll|readBytes|stat|readRelated|list|changes)|present[.\/](?:open)|changes[.\/](?:open)|job[.\/](?:kill))([.\/]|$)/;
+
+/**
+ * workspaceFiles 的会话作用域方法（与 SESSION_SCOPED_RE 里的方法列表一致）。
+ * ⚠ `readAll` / `readRelated` 是 0.1.6 及更早的 **legacy 方法**，0.1.7 包内已移除
+ * （0.1.7 为 read / readBytes / stat / list / changes）。保留它们只为兼容旧线客户
+ * 端：形状解析与归属校验口径不变，未知的**新**方法（未来的写方法）仍为 null。
+ */
+export const WORKSPACE_FILES_SESSION_METHODS = [
+  'read',
+  'readAll', // legacy（0.1.6 及更早）
+  'readBytes',
+  'stat',
+  'readRelated', // legacy（0.1.6 及更早）
+  'list',
+  'changes',
+] as const;
+
+export type WorkspaceFilesMethod = (typeof WORKSPACE_FILES_SESSION_METHODS)[number];
+
+/**
+ * 从 wire 路径取 workspaceFiles 方法名（点号/斜杠两种形状）；非该命名空间或
+ * 方法不在已知集合（例如未来的写方法）一律 null（调用方 fail-closed）。
+ */
+export function workspaceFilesMethodOf(pathname: string): WorkspaceFilesMethod | null {
+  const endpoint = apiEndpointOf(pathname);
+  if (endpoint === null || endpoint.namespace !== 'workspaceFiles' || endpoint.method === null) return null;
+  return (WORKSPACE_FILES_SESSION_METHODS as readonly string[]).includes(endpoint.method)
+    ? (endpoint.method as WorkspaceFilesMethod)
+    : null;
+}
+
+/** 该路径是否为 workspaceFiles 的会话作用域 RPC（与 SESSION_SCOPED_RE 同口径）。 */
+export function isWorkspaceFilesSessionScopedRequest(pathname: string): boolean {
+  return workspaceFilesMethodOf(pathname) !== null;
+}
+
+/** workspaceFiles 调用的严格解析结果（字段名取自官方 typert wire 定义）。 */
+export interface WorkspaceFilesCall {
+  method: WorkspaceFilesMethod;
+  /** wire `workspaceFileScopeId`：由 workspaceFileScope lookup 解析为 SessionId。 */
+  scopeId: string;
+  /** 需要做目录边界判定的目标路径；不带路径的方法（changes）为 null。 */
+  targetPath: string | null;
+  /** targetPath 是否为绝对路径（相对路径由调用方按该会话工作区根解析后判定）。 */
+  absolute: boolean;
+}
+
+/**
+ * 严格解析 workspaceFiles 调用（fail-closed）：只认 0.1.7 的 ClientConnection
+ * 信封（payload.args），因为只有 args 里的参数会被 DSH 真正解码执行；信封外观
+ * 的伪字段不能成为授权依据。形状不符一律返回 null，调用方必须拒绝。
+ *
+ * wire 参数名（typert.host.js 实测，0.1.7 与 0.1.6 同形）：
+ *   - workspaceFileScopeId  SessionId（所有方法）
+ *   - path                  目标路径（0.1.7 起 changes 也带 path）
+ *   - relativePath          readRelated（legacy）的相对路径（相对 path 所在目录解析）
+ *   - options               readBytes 的字节选项（0.1.7 新增，见下）
+ */
+export function parseWorkspaceFilesCall(pathname: string, body: unknown): WorkspaceFilesCall | null {
+  const method = workspaceFilesMethodOf(pathname);
+  if (method === null) return null;
+  const args = clientConnectionArgs(body);
+  if (args === null) return null;
+  const scopeId = args.workspaceFileScopeId;
+  if (typeof scopeId !== 'string' || scopeId === '' || scopeId.length > 200) return null;
+  // changes：0.1.7 已是 stream 且带 path，但变更流不校验会话归属、网关对子用户
+  // 整类拒绝；这里恒不产出 targetPath，保持 fail-closed（path 不作为放行依据）。
+  if (method === 'changes') return { method, scopeId, targetPath: null, absolute: false };
+  // readBytes 独有：0.1.7 把第三个 wire 参数换成 options（字节窗口与
+  // 解析基准）。它不改变授权输入，但能改变真实读取目标，必须在转发前判定。
+  if (method === 'readBytes' && !workspaceFilesReadBytesOptionsAllowed(args.options)) return null;
+  const rawPath = args.path;
+  if (typeof rawPath !== 'string' || rawPath === '' || rawPath.includes('\u0000')) return null;
+  if (method !== 'readRelated') {
+    const target = normalizePath(rawPath);
+    return { method, scopeId, targetPath: target, absolute: isAbsoluteLike(target) };
+  }
+  const relative = args.relativePath;
+  if (typeof relative !== 'string' || relative.includes('\u0000')) return null;
+  const target = resolveRelatedReadPath(rawPath, relative);
+  if (target === null) return null;
+  return { method, scopeId, targetPath: target, absolute: isAbsoluteLike(target) };
+}
+
+/**
+ * `workspaceFiles/readBytes` 的第三个 wire 参数 `options`
+ * （0.1.7：`{ range?: { offset?: number, length?: number }, baseFile?: string }`）。
+ *
+ * 为什么必须在这里 fail-closed：`path` 本身还只是目标路径，但 `options.baseFile`
+ * 会改变它的**解析基准**——官方语义是“把相对 `path` 从 baseFile 所在目录解析”，
+ * 且 baseFile 自身可以是绝对路径或工作区相对路径。网关实际守卫会按同一规则解析
+ * baseFile 与最终目标，并对两者执行工作区、白名单和 canonical realpath 校验；本纯函数
+ * 只负责旧调用方的形状解析，不能单独作为运行时授权结论。
+ *
+ * 口径（与调用方 fail-closed 一致，返回 false 即必须拒绝）：
+ *   - `options` 缺失：视为 0.1.6 旧的两参数 readBytes（那代 wire 里根本没有
+ *     options）——此时不存在 baseFile，真实目标就是 `path`，仍由调用方的
+ *     目录白名单判定，不因本次收紧而回归；
+ *   - `options` 存在：必须是 pure plain object（非数组、原型为 Object.prototype
+ *     或 null）；
+ *   - 键只允许 `range` / `baseFile`，未知键（未来的新参数）一律拒绝；
+ *   - `baseFile` 的形状由网关运行时按 0.1.7 规则解析；本纯函数不以该字段单独
+ *     推断授权；测试调用方若不能安全重现解析必须拒绝；
+ *   - `range` 若存在：必须是 plain object，键只允许 `offset` / `length`，值若存在
+ *     必须是非负安全整数（与上游“非整数即 bad-request”同口径）。range 不参与
+ *     目标解析，收紧它只为不把未知形状当已知形状。
+ *
+ * 0.1.6 的 read / readAll / readRelated / stat 没有 options 参数，不经本函数。
+ */
+function workspaceFilesReadBytesOptionsAllowed(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return false;
+  const options = value as Record<string, unknown>;
+  for (const key of Object.keys(options)) {
+    if (key !== 'range' && key !== 'baseFile') return false;
+  }
+  if (Object.hasOwn(options, 'baseFile')) return false;
+  const range = options.range;
+  if (range === undefined) return true;
+  if (range === null || typeof range !== 'object' || Array.isArray(range)) return false;
+  const rangePrototype = Object.getPrototypeOf(range);
+  if (rangePrototype !== Object.prototype && rangePrototype !== null) return false;
+  for (const [key, raw] of Object.entries(range as Record<string, unknown>)) {
+    if (key !== 'offset' && key !== 'length') return false;
+    if (raw !== undefined && (typeof raw !== 'number' || !Number.isSafeInteger(raw) || raw < 0)) return false;
+  }
+  return true;
+}
+
+/**
+ * readRelated（legacy，0.1.7 已从包内移除）的真实读取目标：与旧宿主实现一致
+ * （`path.resolve(dirname(path), relativePath)`）——相对第二参数按第一参数的
+ * 目录拼接，绝对第二参数直接取其本身（绝对路径优先）。
+ */
+function resolveRelatedReadPath(basePath: string, relativePath: string): string | null {
+  const relative = relativePath.replace(/\\/g, '/');
+  // 旧线的上游明确要求 relativePath 是相对文件系统路径；绝对路径、盘符
+  // 路径和 URL scheme 不属于 readRelated 的参数形状，直接 fail-closed。
+  if (relative.startsWith('/') || /^[a-z][a-z\d+.-]*:/iu.test(relative)) return null;
+  const base = normalizePath(basePath);
+  return normalizePath(path.posix.join(path.posix.dirname(base), relative));
+}
+
+/**
+ * 子用户的 workspaceFiles 读取目标是否落在授权目录内（纯函数，供网关判定）。
+ *
+ * 全部为 fail-closed 口径（与网关现行守卫一致）：
+ *   - changes → false：0.1.7 的 changes 虽是带 `path` 的 stream，但变更流只按工作区
+ *     根过滤、不校验会话归属，本模块也不产出它的 targetPath；网关当前对子用户整类
+ *     拒绝该流。调用方若要放开必须另行显式授权，不得由本函数默认放行；
+ *   - 绝对与相对路径都先解析到会话工作区根下（相对路径必须知道该根，未知则
+ *     false），要求仍在根内，再套目录白名单。
+ * 调用方必须已经确认会话归属（SESSION_SCOPED_RE / 会话授权快照）；本函数只再
+ * 回答“这个文件在不在允许的目录里”。
+ */
+export function workspaceFilesTargetAllowed(
+  call: Pick<WorkspaceFilesCall, 'targetPath' | 'absolute'>,
+  sessionCwd: string | null,
+  allowedFolders: readonly string[],
+): boolean {
+  if (call.targetPath === null) return false;
+  if (sessionCwd === null || sessionCwd === '') return false;
+  const root = normalizePath(sessionCwd);
+  const target = call.absolute
+    ? normalizePath(call.targetPath)
+    : normalizePath(path.posix.join(root, call.targetPath));
+  return pathWithin(target, root) && folderAllowed(target, [...allowedFolders]);
+}
 
 export type SessionAddress =
   | { kind: 'session'; sessionId: string }
@@ -1000,7 +1482,14 @@ export type SessionAddress =
       kind: 'subagent';
       parentSessionId: string;
       childSessionId: string;
-      mode: 'one-shot' | 'continuable';
+      /**
+       * 0.1.7 的 SessionAddress 在 'one-shot' | 'continuable' 之外新增
+       * 'unknown'（子代理谱系尚未确定/未记录）。网关只用 parentSessionId 做授权，
+       * mode 原样转发给 DSH 自行校验，因此必须认识 'unknown'——否则新线客户端
+       * 的合法子代理请求会被整类拒绝（fail-closed 变成功能回归），而放开它并不
+       * 放宽授权口径（授权仍只认 parent/child 的严格格式）。
+       */
+      mode: 'one-shot' | 'continuable' | 'unknown';
     };
 
 /**
@@ -1022,7 +1511,7 @@ export function parseSessionAddress(value: unknown): SessionAddress | null {
     row.kind === 'subagent' &&
     validId(row.parentSessionId) &&
     validId(row.childSessionId) &&
-    (row.mode === 'one-shot' || row.mode === 'continuable')
+    (row.mode === 'one-shot' || row.mode === 'continuable' || row.mode === 'unknown')
   ) {
     return {
       kind: 'subagent',
@@ -1040,6 +1529,13 @@ export function parseSessionAddress(value: unknown): SessionAddress | null {
  * mode remain in the forwarded payload for DSH's own lineage validation.
  * A malformed structured subagent request returns null so callers can reject
  * it instead of falling back to recursive, ambiguous ID guessing.
+ *
+ * 除 sessionId / agentId 外还收 0.1.7 的 `workspaceFileScopeId`
+ * （dsh-api-workspace-files / dsh-office-to-pdf 的 wire 参数）：其值就是 SessionId
+ * 本身（workspaceFileScope lookup 就是按 SessionId 查工作区根），因此它必须与
+ * sessionId 同等参与归属校验——否则 workspaceFiles 入 SESSION_SCOPED_RE 后会因
+ * “找不到会话身份”被整类 403，而只看 sessionId 的旧口径更会让场景走偏。
+ * 非字符串值一律返回 false（fail-closed），不用伪造/默认身份继续。
  */
 export function collectAuthorizedSessionIds(value: unknown): Set<string> | null {
   const out = new Set<string>();
@@ -1074,7 +1570,8 @@ export function collectAuthorizedSessionIds(value: unknown): Set<string> | null 
     }
     for (const [key, child] of Object.entries(row)) {
       if (key === 'address' || key === 'parentSessionId' || key === 'childSessionId' || key === 'mode') continue;
-      if (key === 'sessionId' || key === 'agentId') {
+      // workspaceFileScopeId：官方 workspaceFiles/officeToPdf 的会话身份 wire 字段
+      if (key === 'sessionId' || key === 'agentId' || key === 'workspaceFileScopeId') {
         if (typeof child !== 'string') return false;
         out.add(child);
         continue;
@@ -1099,14 +1596,14 @@ export function extractSessionId(value: unknown, depth = 0): string | null {
 }
 
 /**
- * alpha.3 的 ClientConnection envelope 把实际参数放在 payload.args；部分 Session
+ * 0.1.7 的 ClientConnection envelope 把实际参数放在 payload.args；部分 Session
  * endpoint 再把业务请求放进 args.request。只有严格识别的 envelope 才进入 args，
  * 避免旧协议里未被 dsh 消费的伪 args 字段成为授权依据。
  */
 export function clientConnectionArgs(value: unknown): Record<string, unknown> | null {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
   const outer = value as Record<string, unknown>;
-  // alpha.3 ClientConnection endpoint 是 namespace/method。旧 rc.2 的点号
+  // 0.1.7 ClientConnection endpoint 是 namespace/method。旧 rc.2 的点号
   // method 不得因此获得 args 解释权，防止伪 args 绕过路径授权。
   if (outer.type !== 'client-request' || typeof outer.method !== 'string' || !outer.method.includes('/')) return null;
   const payload = outer.payload;
@@ -1118,7 +1615,7 @@ export function clientConnectionArgs(value: unknown): Record<string, unknown> | 
 }
 
 /** 收集请求体中的全部会话地址，避免只校验第一个字段而让第二个目标绕过授权。
- * 覆盖 alpha.3 commands 的 agentId、subagent 的 parent/childSessionId 以及旧 sessionId。
+ * 覆盖 0.1.7 commands 的 agentId、subagent 的 parent/childSessionId 以及旧 sessionId。
  * 无论值是否符合格式都收集；调用方会让空值/超长值自然无法命中授权快照，fail-closed。 */
 export function collectSessionIds(value: unknown, out: Set<string> = new Set(), depth = 0): Set<string> {
   if (depth > 6 || value === null || typeof value !== 'object') return out;
@@ -1376,10 +1873,12 @@ const PATH_FIELDS = [
 ];
 
 /**
- * 递归查找请求体里第一个字符串路径字段（兼容 typert 信封 {type,rpcId,method,payload}）。
- * ⚠ 递归时跳过 args 子对象——实测 {payload:{args:{cwd:'/root/11'}}} 会被 dsh 忽略 args、
- *  用默认工作区（/opt），而网关若把 args.cwd 当白名单依据会误放行（fail-open 越权）。
- *  真实 wire 路径是 payload.cwd（payload 层），args 是 dsh 不消费的伪字段。
+ * 递归查找请求体里可能携带目标路径的字段名。
+ *
+ * 0.1.7 ClientConnection 只把 `payload.args` 交给 RPC owner；部分 Session RPC
+ * 再把业务请求放到 `args.request`。已识别的信封必须只从该容器取值：回退扫描
+ * 信封外层会让网关校验被 DSH 丢弃的 decoy 路径，形成“校验 A、执行 B”的 fail-open。
+ * 非 ClientConnection 形状继续保留旧协议兼容扫描。
  */
 export function extractPathFromBody(value: unknown, depth = 0): string | null {
   if (depth > 6 || value === null || typeof value !== 'object') return null;
@@ -1389,11 +1888,12 @@ export function extractPathFromBody(value: unknown, depth = 0): string | null {
     if (request !== null && typeof request === 'object' && !Array.isArray(request)) {
       return extractPathFromBody(request, depth + 1);
     }
-    // directoryPicker/createDirectory 的真实 alpha.3 参数直接位于 args.path。
+    // directoryPicker/createDirectory 的真实 0.1.7 参数直接位于 args.path。
     for (const field of PATH_FIELDS) {
       const candidate = args[field];
       if (typeof candidate === 'string' && candidate.length > 0) return candidate;
     }
+    return null;
   }
   const obj = value as Record<string, unknown>;
   for (const field of PATH_FIELDS) {

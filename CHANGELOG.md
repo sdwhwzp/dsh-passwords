@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.7.4 - 2026-09-23
+
+### 中文
+
+更新公告：
+
+1. 修复主用户与多个子用户并发登录、会话/工作区快照乱序和排序竞态；`workspace/insertBefore` 与 `insertSessionBefore` 只按可见工作区/授权会话校验，不再错误绑定新建工作区权限，Remote job 流按授权 session 收敛。
+2. 完成 DSH `0.1.7-alpha.2` 官方面适配：official terminal 与第三方 SSH 共用 `allowSsh`，workspace files、account、job 和 Remote mux 的边界行为保持与官方客户端兼容；按产品决定保留子用户对宿主 account 的只读视图，未知方法及账号登录/变更操作仍拒绝。
+3. 新增“保命技能”紧急清理：主用户连续点击头像并验证密码后，可移除 DSH 本体、扩展/插件、会话和相关本地数据；清理器校验计划、路径与进程归属，Docker 环境 fail-closed，dry-run 不执行删除。
+4. 更新前端保命技能状态清理、2.7.4 版本元数据和 alpha.2 兼容文档，移除已确认的无效字段、冗余条件与不可达分支。
+
+验证：本地回归测试 546/546、构建、类型检查、打包与 diff 检查通过；测试服务器 2.7.4 / DSH 0.1.7-alpha.2 health/ready 与 patch status 正常。媒体 E2E 有 1 项因历史媒体达到 MEDIA_QUOTA 未通过；真实 destructive purge 未执行。
+
+### English
+
+Release notes:
+
+1. Fixed concurrent owner/subuser sign-ins, out-of-order workspace/session snapshots, and ordering races; `workspace/insertBefore` and `insertSessionBefore` now use visible-workspace and authorised-session checks without being tied to workspace creation permission, while Remote job streams are scoped to the authorised session.
+2. Completed the DSH `0.1.7-alpha.2` official-surface adaptation: the official terminal and third-party SSH share `allowSsh`, and workspace files, account, job, and Remote mux boundaries follow the official client contract. Per the product decision, subusers retain the read-only host account view, while unknown methods and account login/mutation operations remain blocked.
+3. Added the owner emergency self-destruct function: after rapid avatar clicks and password verification, it can remove the DSH core, extensions/plugins, sessions, and related local data. The helper validates its plan, paths, and process ownership; Docker remains fail-closed and dry-run never deletes files.
+4. Updated emergency-cleanup form state, 2.7.4 metadata, and alpha.2 compatibility documentation; removed confirmed dead fields, redundant conditions, and unreachable branches.
+
+Validation: 546/546 local tests, build, type check, package-content and diff checks passed. The test server runs 2.7.4 with DSH 0.1.7-alpha.2; health/readiness and patch checks passed. One media E2E case hit the existing MEDIA_QUOTA limit. Destructive purge was not run.
+
 ## 2.7.3 - 2026-09-19
 
 ### 中文

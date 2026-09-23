@@ -40,6 +40,7 @@ export async function api<T>(path: string, body?: unknown, signal?: AbortSignal)
     throw Object.assign(new Error(typeof details.error === 'string' && details.error
       ? details.error : `HTTP ${res.status}`), {
       code: typeof details.code === 'string' ? details.code : undefined,
+      details,
     });
   }
   if (!isRecord(data)) throw new Error('Expected a JSON object from the server');

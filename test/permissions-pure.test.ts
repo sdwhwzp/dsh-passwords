@@ -17,9 +17,25 @@ import {
   parseEndpointRule,
   endpointAllowed,
   isOfficialRootPath,
+  isOfficialApiRoute,
+  isLegacyOfficialApiRoute,
+  isOfficialFileReadRequest,
+  fileReadTargetFromQuery,
+  isOfficialSessionQueryRoute,
+  sessionQueryTarget,
   OFFICIAL_API_NAMESPACES,
   SUBUSER_BLOCKED_API_NAMESPACES,
+  SUBUSER_BLOCKED_API_ENDPOINTS,
+  isSubuserBlockedApiPath,
   classifySubuserPath,
+  isWorkspaceWrite,
+  SESSION_SCOPED_RE,
+  WORKSPACE_FILES_SESSION_METHODS,
+  workspaceFilesMethodOf,
+  isWorkspaceFilesSessionScopedRequest,
+  parseWorkspaceFilesCall,
+  workspaceFilesTargetAllowed,
+  collectAuthorizedSessionIds,
   pathWithin,
   workspaceRegistrationAllowed,
   directoryEntryVisible,
@@ -152,7 +168,7 @@ test('alpha.2 命名空间门禁：officeToPdf 保持 fail-closed；pluginManage
   assert.equal(classifySubuserPath('/api/agentTeams/spawn', { endpointRules, transport: 'http' }), 'third-party');
 });
 
-test('通用 SSH 登记规则不能给子用户放行 pluginManager / agentTeams / officeToPdf（硬拒绝先于登记表）', () => {
+test('通用 SSH 登记规则不能改变 pluginManager / agentTeams / officeToPdf / terminal / dynamicCordisRunner 的分类（硬拒绝先于登记表）', () => {
   // 宽泛规则（运维常见写法）不得把特权/未验证命名空间带进来
   const generic = parseEndpointAllowlist('/api/*,ws:/api/*,http:/api/*', 'TEST');
   const blockedPaths = [
@@ -169,15 +185,28 @@ test('通用 SSH 登记规则不能给子用户放行 pluginManager / agentTeams
     '/api/officeToPdf/render',
     '/api/officeToPdf.generation',
     '/api/officeToPdf.render',
+    '/api/terminal',
+    '/api/terminal/list',
+    '/api/terminal/create',
+    '/api/terminal/write',
+    '/api/terminal/follow',
+    '/api/terminal/shells',
+    '/api/terminal.environment',
+    '/api/terminal.create',
+    '/api/dynamicCordisRunner',
+    '/api/dynamicCordisRunner/runHostHalf',
+    '/api/dynamicCordisRunner.getClientCode',
+    '/api/dynamicCordisRunner/v1/futureMethod',
   ];
   for (const path of blockedPaths) {
     assert.equal(classifySubuserPath(path, { endpointRules: generic, transport: 'http' }), 'third-party', `http ${path}`);
     assert.equal(classifySubuserPath(path, { endpointRules: generic, transport: 'ws' }), 'third-party', `ws ${path}`);
   }
 
-  // 精确登记（含尾部 /* 通配）同样拿不到 ssh 分类：登记表不是硬拒绝的旁路
+  // 精确登记（含尾部 /* 通配）同样拿不到 ssh 分类：登记表不是硬拒绝的旁路；
+  // terminal 的 allowSsh 放行由 gateway 的显式官方 terminal 分支完成。
   const scoped = parseEndpointAllowlist(
-    '/api/pluginManager/*,/api/pluginManager.change,ws:/api/agentTeams/*,http:/api/agentTeams.spawn,/api/officeToPdf/*,/api/officeToPdf.render',
+    '/api/pluginManager/*,/api/pluginManager.change,ws:/api/agentTeams/*,http:/api/agentTeams.spawn,/api/officeToPdf/*,/api/officeToPdf.render,/api/terminal/*,ws:/api/terminal/*,/api/dynamicCordisRunner/*,ws:/api/dynamicCordisRunner/*',
     'TEST',
   );
   assert.equal(classifySubuserPath('/api/pluginManager/change', { endpointRules: scoped, transport: 'http' }), 'third-party');
@@ -188,6 +217,10 @@ test('通用 SSH 登记规则不能给子用户放行 pluginManager / agentTeams
   assert.equal(classifySubuserPath('/api/officeToPdf/render', { endpointRules: scoped, transport: 'http' }), 'third-party');
   assert.equal(classifySubuserPath('/api/officeToPdf/render', { endpointRules: scoped, transport: 'ws' }), 'third-party');
   assert.equal(classifySubuserPath('/api/officeToPdf.render', { endpointRules: scoped, transport: 'http' }), 'third-party');
+  assert.equal(classifySubuserPath('/api/terminal/create', { endpointRules: scoped, transport: 'http' }), 'third-party');
+  assert.equal(classifySubuserPath('/api/terminal/create', { endpointRules: scoped, transport: 'ws' }), 'third-party');
+  assert.equal(classifySubuserPath('/api/terminal/write', { endpointRules: scoped, transport: 'ws' }), 'third-party');
+  assert.equal(classifySubuserPath('/api/terminal/list', { endpointRules: scoped, transport: 'http' }), 'third-party', '登记规则场景下 terminal/list 仍归 third-party（空成功伪装依赖此分类）');
 
   // owner: 登记的既有语义保留：子用户仍 403（owner-only），且不会被误判成 ssh
   const ownerOnly = parseEndpointAllowlist(
@@ -203,15 +236,573 @@ test('通用 SSH 登记规则不能给子用户放行 pluginManager / agentTeams
   assert.equal(classifySubuserPath('/api/officeToPdfBackup', { endpointRules: generic, transport: 'http' }), 'ssh');
 
   // 集合内容精确固定：新增硬拒绝命名空间必须显式改测试与文档
-  assert.deepEqual([...SUBUSER_BLOCKED_API_NAMESPACES].sort(), ['agentTeams', 'officeToPdf', 'pluginManager']);
+  assert.deepEqual([...SUBUSER_BLOCKED_API_NAMESPACES].sort(), ['agentTeams', 'dynamicCordisRunner', 'officeToPdf', 'pluginManager', 'terminal']);
 });
 
-test('terminal 既有政策不受硬拒绝集合影响（本轮不改动）', () => {
+test('terminal 命名空间保持硬拒绝分类：allowSsh 放行由 gateway 显式处理（alpha.2 安全边界）', () => {
+  // 仍然不进官方清单：terminal 是宿主侧远程 shell，对子用户开放 = 沙箱逃逸。
   assert.equal(OFFICIAL_API_NAMESPACES.has('terminal'), false);
-  assert.equal(SUBUSER_BLOCKED_API_NAMESPACES.has('terminal'), false);
-  const rules = parseEndpointAllowlist('', 'TEST');
-  assert.equal(classifySubuserPath('/api/terminal/shells', { endpointRules: rules, transport: 'http' }), 'third-party');
-  assert.equal(classifySubuserPath('/api/terminal.list', { endpointRules: rules, transport: 'http' }), 'third-party');
+  assert.equal(SUBUSER_BLOCKED_API_NAMESPACES.has('terminal'), true);
+
+  // 空登记表：terminal 一律 third-party（两条通道、两种 API 形状同口径）；
+  // gateway 只有在 allowSsh=true 时才对官方已知 terminal 端点透传。
+  const none = parseEndpointAllowlist('', 'TEST');
+  assert.equal(classifySubuserPath('/api/terminal/shells', { endpointRules: none, transport: 'http' }), 'third-party');
+  assert.equal(classifySubuserPath('/api/terminal/list', { endpointRules: none, transport: 'http' }), 'third-party');
+  assert.equal(classifySubuserPath('/api/terminal.list', { endpointRules: none, transport: 'http' }), 'third-party');
+
+  // 根因回归：
+  //   generic   = 通用宽泛登记（运维常见写法）
+  //   registered= 问题报告的精确写法 /api/terminal/* + ws:/api/terminal/*，
+  //               此前会把 create/write/follow 分类为 ssh 并借 allow_ssh 放行
+  const generic = parseEndpointAllowlist('/api/*,ws:/api/*,http:/api/*', 'TEST');
+  const registered = parseEndpointAllowlist('/api/terminal/*,ws:/api/terminal/*', 'TEST');
+  const terminalPaths = [
+    '/api/terminal',
+    '/api/terminal/list',
+    '/api/terminal/create',
+    '/api/terminal/write',
+    '/api/terminal/follow',
+    '/api/terminal/shells',
+    '/api/terminal/environment',
+    '/api/terminal/resize',
+    '/api/terminal/rename',
+    '/api/terminal/close',
+    '/api/terminal/retain',
+    '/api/terminal.list',
+    '/api/terminal.create',
+  ];
+  for (const rules of [generic, registered]) {
+    for (const path of terminalPaths) {
+      assert.equal(classifySubuserPath(path, { endpointRules: rules, transport: 'http' }), 'third-party', `http ${path}`);
+      assert.equal(classifySubuserPath(path, { endpointRules: rules, transport: 'ws' }), 'third-party', `ws ${path}`);
+    }
+  }
+
+  // terminal/list 空成功伪装依赖 third-party 分支：登记场景下分类必须仍是 third-party
+  assert.equal(classifySubuserPath('/api/terminal/list', { endpointRules: registered, transport: 'http' }), 'third-party');
+
+  // owner: 登记的既有语义保留：显式 owner 仍先于硬拒绝（主用户语义不受影响）
+  const ownerOnly = parseEndpointAllowlist('owner:/api/terminal/create', 'TEST');
+  assert.equal(classifySubuserPath('/api/terminal/create', { endpointRules: ownerOnly, transport: 'http' }), 'owner-only');
+
+  // 前缀相近但不同的命名空间不受硬拒绝影响（防误伤）
+  assert.equal(classifySubuserPath('/api/terminalBackup', { endpointRules: generic, transport: 'http' }), 'ssh');
+  assert.equal(classifySubuserPath('/api/terminals.list', { endpointRules: generic, transport: 'http' }), 'ssh');
+});
+
+test('terminal：alpha.2 客户端会调用 list/environment/shells/close，网关按 allowSsh 切换桩与透传', () => {
+  // terminal 不是“客户端不调用”：终端面板与顶栏会先探环境/list、再 create。
+  // 分类层保持 third-party，真正的开关语义由 gateway 的 allowSsh 分支实现；关闭时
+  // list/environment/shells/close 使用无能力桩，开启时已知 terminal RPC 才透传。
+  const none = parseEndpointAllowlist('', 'TEST');
+  const registered = parseEndpointAllowlist('/api/terminal/*,ws:/api/terminal/*', 'TEST');
+  for (const method of ['list', 'environment', 'shells', 'close', 'create', 'write', 'follow', 'resize', 'rename', 'retain']) {
+    for (const rules of [none, registered]) {
+      assert.equal(classifySubuserPath(`/api/terminal/${method}`, { endpointRules: rules, transport: 'http' }), 'third-party', `http ${method}`);
+      assert.equal(classifySubuserPath(`/api/terminal.${method}`, { endpointRules: rules, transport: 'ws' }), 'third-party', `ws ${method}`);
+    }
+  }
+  assert.equal(OFFICIAL_API_NAMESPACES.has('terminal'), false);
+});
+
+// ── alpha.2 官方命名空间清理：清单固定 / 精确路由 / 遗留兼容 / 硬拒单端点 ──
+
+test('OFFICIAL_API_NAMESPACES：alpha.2 实测清单精确固定（新增必须显式改测试与兼容性矩阵）', () => {
+  assert.deepEqual([...OFFICIAL_API_NAMESPACES].sort(), [
+    '$events',
+    'account',
+    'agentPresets',
+    'commands',
+    'credentials',
+    'directoryPicker',
+    'dynamicCordisRunner',
+    'fileReferences',
+    'fileUploads',
+    'goals',
+    'job',
+    'llm',
+    'messageFeedback',
+    'permissionPresets',
+    'pluginInventory',
+    'remote.mux',
+    'session',
+    'sessionFeedback',
+    'sessionReferenceResolver',
+    'settings',
+    'skills',
+    'subagents',
+    'workspace',
+    'workspaceFiles',
+  ]);
+  // 本地名字空间式成员、非 RPC 的通用词、旧线遗留名、硬拒命名空间均不得混入
+  for (const absent of ['dsh-composer', 'file', 'git', 'host', 'present', 'respond', 'events', 'terminal', 'pluginManager', 'agentTeams', 'officeToPdf']) {
+    assert.equal(OFFICIAL_API_NAMESPACES.has(absent), false, absent);
+  }
+});
+
+test('dsh-composer 不是 host RPC：不再被当作 official（含全部子路径与点号形状）', () => {
+  const none = parseEndpointAllowlist('', 'TEST');
+  for (const path of ['/api/dsh-composer', '/api/dsh-composer/anything', '/api/dsh-composer.anything']) {
+    assert.equal(classifySubuserPath(path, { endpointRules: none, transport: 'http' }), 'third-party', path);
+    assert.equal(classifySubuserPath(path, { endpointRules: none, transport: 'ws' }), 'third-party', path);
+  }
+  // 登记表仍是唯一放行通道：主用户显式登记后子用户可用（ssh），owner: 语义不变
+  const registered = parseEndpointAllowlist('/api/dsh-composer/*', 'TEST');
+  assert.equal(classifySubuserPath('/api/dsh-composer/x', { endpointRules: registered, transport: 'http' }), 'ssh');
+});
+
+test('alpha.2 官方精确路由：changes / present / file 只按精确路径放行，同名第三方 namespace 不跟走', () => {
+  const none = parseEndpointAllowlist('', 'TEST');
+  for (const path of ['/api/changes.summary', '/api/changes.diff', '/api/changes.open', '/api/present.host', '/api/present.open', '/api/file']) {
+    assert.equal(isOfficialApiRoute(path), true, `${path} 属官方精确路由`);
+    assert.equal(classifySubuserPath(path, { endpointRules: none, transport: 'http' }), 'official', path);
+  }
+  // 不整命名空间放行：第三方同名 namespace 仍 fail-closed
+  for (const path of [
+    '/api/changes', '/api/changes.evil', '/api/changes/evil',
+    '/api/present', '/api/present.evil', '/api/present/evil',
+    '/api/file.evil', '/api/file/evil',
+  ]) {
+    assert.equal(isOfficialApiRoute(path), false, `${path} 不是官方精确路由`);
+    assert.equal(classifySubuserPath(path, { endpointRules: none, transport: 'http' }), 'third-party', path);
+  }
+  // 官方非 RPC 通道与会话日志导出仍按命名空间放行
+  const officialChannels = ['/api/remote.mux', '/api/$events', '/api/$events/result', '/api/session.export'];
+  for (const path of officialChannels) {
+    assert.equal(classifySubuserPath(path, { endpointRules: none, transport: 'http' }), 'official', path);
+  }
+});
+
+test('遗留兼容：respond / events / host 目录 / git 取数据只按精确端点保留，同名第三方 namespace 不跟走', () => {
+  const none = parseEndpointAllowlist('', 'TEST');
+  const legacyAllowed = [
+    '/api/respond',
+    '/api/events.host',
+    '/api/events.mux',
+    '/api/host.createDirectory',
+    '/api/host/createDirectory',
+    '/api/host.listDirectory',
+    '/api/git.clone',
+    '/api/git.pull',
+    '/api/git.fetch',
+    '/api/git/status',
+  ];
+  for (const path of legacyAllowed) {
+    assert.equal(isLegacyOfficialApiRoute(path), true, `${path} 属旧线保留端点`);
+    assert.equal(classifySubuserPath(path, { endpointRules: none, transport: 'http' }), 'official', path);
+  }
+
+  // 同名命名空间的其它端点不再是 official：第三方插件不能借名获得官方待遇
+  const notLegacy = [
+    '/api/git', '/api/git.push', '/api/git/repoInfo', '/api/git.evil',
+    '/api/host', '/api/host.evil', '/api/host/other', '/api/host.list',
+    '/api/respond.evil', '/api/respond/other',
+    '/api/events', '/api/events.other', '/api/events/other',
+  ];
+  for (const path of notLegacy) {
+    assert.equal(isLegacyOfficialApiRoute(path), false, `${path} 不是旧线保留端点`);
+    assert.equal(classifySubuserPath(path, { endpointRules: none, transport: 'http' }), 'third-party', path);
+  }
+
+  // events 只保留点号形状：斜杠形状会让事件流绕过网关过滤，必须继续 third-party
+  assert.equal(classifySubuserPath('/api/events/host', { endpointRules: none, transport: 'http' }), 'third-party');
+  assert.equal(classifySubuserPath('/api/events/mux', { endpointRules: none, transport: 'http' }), 'third-party');
+
+  // 未列入精确端点的遗留方法可由主用户显式登记（登记是唯一放行通道）
+  const generic = parseEndpointAllowlist('/api/*', 'TEST');
+  assert.equal(classifySubuserPath('/api/git.push', { endpointRules: generic, transport: 'http' }), 'ssh');
+});
+
+test('directoryPicker/pick：宿主原生选择器对子用户硬拒绝，list/createDirectory 保留官方', () => {
+  const none = parseEndpointAllowlist('', 'TEST');
+  const generic = parseEndpointAllowlist('/api/*,ws:/api/*,http:/api/*', 'TEST');
+  const exact = parseEndpointAllowlist('/api/directoryPicker/*,/api/directoryPicker.pick', 'TEST');
+
+  assert.equal(SUBUSER_BLOCKED_API_NAMESPACES.has('directoryPicker'), false, '命名空间整体仍属官方');
+  assert.equal(SUBUSER_BLOCKED_API_ENDPOINTS.has('directoryPicker/pick'), true);
+
+  // 空表/通用/精确登记三种情形都会被硬拒绝先拦下（含点号形状与两条通道）
+  for (const rules of [none, generic, exact]) {
+    for (const path of ['/api/directoryPicker/pick', '/api/directoryPicker.pick']) {
+      assert.equal(isSubuserBlockedApiPath(path), true, path);
+      assert.equal(classifySubuserPath(path, { endpointRules: rules, transport: 'http' }), 'third-party', path);
+      assert.equal(classifySubuserPath(path, { endpointRules: rules, transport: 'ws' }), 'third-party', path);
+    }
+  }
+
+  // 同命名空间的浏览/创建不受影响（网关另有子树白名单、创建记账与响应过滤）
+  assert.equal(classifySubuserPath('/api/directoryPicker/list', { endpointRules: none, transport: 'http' }), 'official');
+  assert.equal(classifySubuserPath('/api/directoryPicker/createDirectory', { endpointRules: none, transport: 'http' }), 'official');
+  assert.equal(isSubuserBlockedApiPath('/api/directoryPicker/list'), false);
+
+  // 前缀相近命名空间不误伤
+  assert.equal(isSubuserBlockedApiPath('/api/directoryPickerBackup/pick'), false);
+  assert.equal(classifySubuserPath('/api/directoryPickerBackup', { endpointRules: generic, transport: 'http' }), 'ssh');
+
+  // owner: 登记的既有语义保留：显式 owner 仍先于硬拒绝
+  const ownerOnly = parseEndpointAllowlist('owner:/api/directoryPicker/pick', 'TEST');
+  assert.equal(classifySubuserPath('/api/directoryPicker/pick', { endpointRules: ownerOnly, transport: 'http' }), 'owner-only');
+});
+
+test('0.1.7：硬拒绝端点集合精确固定（宿主级能力 + 无法校验归属的桌面动作）', () => {
+  assert.deepEqual([...SUBUSER_BLOCKED_API_ENDPOINTS].sort(), [
+    'account/cancelSignIn',
+
+    'account/signOut',
+    'account/startSignIn',
+    'credentials/set',
+    'credentials/unset',
+    'directoryPicker/pick',
+
+    'session/canOpenWorkspacePath',
+    'session/openWorkspacePath',
+    'session/workspacePathApplications',
+    'settings/openSettingsDocument',
+  ]);
+});
+
+test('0.1.7 硬拒新端点：精确方法先于登记表，且不按前缀/命名空间扩散', () => {
+  const none = parseEndpointAllowlist('', 'TEST');
+  const generic = parseEndpointAllowlist('/api/*,ws:/api/*,http:/api/*', 'TEST');
+  const exact = parseEndpointAllowlist('/api/credentials/*,/api/settings/*,/api/session/*,/api/dynamicCordisRunner/*', 'TEST');
+  const blocked = [
+    'credentials/set', 'credentials/unset', 'settings/openSettingsDocument',
+    'session/openWorkspacePath', 'session/canOpenWorkspacePath', 'session/workspacePathApplications',
+
+  ];
+  for (const endpoint of blocked) {
+    const slash = `/api/${endpoint}`;
+    const dot = `/api/${endpoint.replace('/', '.')}`;
+    assert.equal(isSubuserBlockedApiPath(slash), true, slash);
+    assert.equal(isSubuserBlockedApiPath(dot), true, dot);
+    for (const rules of [none, generic, exact]) {
+      assert.equal(classifySubuserPath(slash, { endpointRules: rules, transport: 'http' }), 'third-party', slash);
+      assert.equal(classifySubuserPath(dot, { endpointRules: rules, transport: 'ws' }), 'third-party', dot);
+    }
+  }
+  // 精确匹配：普通命名空间的前缀相近方法不被顺带硬拒
+  for (const path of [
+    '/api/credentials/setExtra', '/api/credentials.settings',
+    '/api/settings/openSettingsDocumentExtra',
+    '/api/session/openWorkspacePathExtra', '/api/session/canOpenWorkspacePathX',
+    '/api/credentialsX/set', '/api/settings2/openSettingsDocument',
+  ]) {
+    assert.equal(isSubuserBlockedApiPath(path), false, path);
+  }
+  // 普通官方命名空间的其它方法仍可按既有规则进入 official；动态 Cordis 是整体硬拒，
+  // 所有已知、未知、未来方法及命名空间根路径都必须 fail-closed。
+  for (const path of ['/api/credentials/rotate', '/api/settings/describe', '/api/session/history']) {
+    assert.equal(isSubuserBlockedApiPath(path), false, path);
+    assert.equal(classifySubuserPath(path, { endpointRules: none, transport: 'http' }), 'official', path);
+  }
+  for (const path of [
+    '/api/dynamicCordisRunner', '/api/dynamicCordisRunner/',
+    '/api/dynamicCordisRunner/getClientCode', '/api/dynamicCordisRunner/runHostHalf',
+    '/api/dynamicCordisRunner/unknownMethod', '/api/dynamicCordisRunner/v1/futureMethod',
+    '/api/dynamicCordisRunner.getClientCode', '/api/dynamicCordisRunner.runHostHalf',
+  ]) {
+    assert.equal(isSubuserBlockedApiPath(path), true, path);
+    assert.equal(classifySubuserPath(path, { endpointRules: none, transport: 'http' }), 'third-party', path);
+    assert.equal(classifySubuserPath(path, { endpointRules: generic, transport: 'ws' }), 'third-party', path);
+    assert.equal(SESSION_SCOPED_RE.test(path), false, path);
+  }
+  // owner: 登记的既有语义保留：显式 owner 仍先于硬拒，网关随后统一 403
+  const ownerOnly = parseEndpointAllowlist('owner:/api/credentials/set,owner:/api/dynamicCordisRunner/runHostHalf', 'TEST');
+  assert.equal(classifySubuserPath('/api/credentials/set', { endpointRules: ownerOnly, transport: 'http' }), 'owner-only');
+  assert.equal(classifySubuserPath('/api/dynamicCordisRunner/runHostHalf', { endpointRules: ownerOnly, transport: 'http' }), 'owner-only');
+});
+
+// ── 0.1.7-alpha.1：工作区写谓词与第三方命名空间口径 ───────────────
+
+test('isWorkspaceWrite：workspace/initializeDefault 纳入 fail-closed 工作区写', () => {
+  assert.equal(isWorkspaceWrite('/api/workspace/initializeDefault'), true);
+  assert.equal(isWorkspaceWrite('/api/workspace.initializeDefault'), true);
+  assert.equal(isWorkspaceWrite('/api/workspace/initializeDefaultExtra'), false, '前缀相近不误伤');
+  assert.equal(isWorkspaceWrite('/api/session/initializeDefault'), false, '不可跨命名空间误命中');
+  // 原有写动词口径不变
+  for (const method of ['add', 'create', 'remove', 'delete', 'rename', 'update', 'import', 'move', 'insertBefore', 'insertSessionBefore', 'materialize', 'adopt']) {
+    assert.equal(isWorkspaceWrite(`/api/workspace/${method}`), true, method);
+  }
+  // 会话导航状态写（pin/unpin/unarchive/archiveSession）不是工作区写：
+  // 它们由 SESSION_SCOPED_RE 逐会话校验，若进本谓词会变成对子用户整类 403
+  for (const method of ['archiveSession', 'pinSession', 'unpinSession', 'unarchiveSession']) {
+    assert.equal(isWorkspaceWrite(`/api/workspace/${method}`), false, method);
+  }
+});
+
+test('0.1.7 alpha.2 官方 job/account 面：写入和未登记第三方仍 fail-closed', () => {
+  const none = parseEndpointAllowlist('', 'TEST');
+  const generic = parseEndpointAllowlist('/api/*,ws:/api/*,http:/api/*', 'TEST');
+  const managerOnly = parseEndpointAllowlist('/api/pluginManager,ws:/api/pluginManager', 'TEST');
+  assert.equal(OFFICIAL_API_NAMESPACES.has('job'), true);
+  assert.equal(OFFICIAL_API_NAMESPACES.has('account'), true);
+  assert.equal(OFFICIAL_API_NAMESPACES.has('pluginManager'), false);
+  assert.equal(classifySubuserPath('/api/job/unknown', { endpointRules: none, transport: 'http' }), 'official', 'job wire 保持上游兼容');
+  assert.equal(classifySubuserPath('/api/account/unknown', { endpointRules: none, transport: 'http' }), 'third-party', 'account 未知 unary 方法对子用户拒绝');
+  assert.equal(classifySubuserPath('/api/account', { endpointRules: none, transport: 'http' }), 'third-party', 'account namespace root 不应绕过只读方法白名单');
+  for (const path of ['/api/pluginManager/install', '/api/pluginManager.install']) {
+    assert.equal(SESSION_SCOPED_RE.test(path), false, `${path} 不得被纳入归属校验面`);
+    assert.equal(classifySubuserPath(path, { endpointRules: none, transport: 'http' }), 'third-party', `${path} 未登记时必须拒绝`);
+  }
+  // pluginManager 在硬拒集合里：即使是主用户显式登记（http/ws）也照样拦下
+  assert.equal(isSubuserBlockedApiPath('/api/pluginManager/install'), true);
+  assert.equal(isSubuserBlockedApiPath('/api/pluginManager.install'), true);
+  for (const transport of ['http', 'ws'] as const) {
+    assert.equal(classifySubuserPath('/api/pluginManager/install', { endpointRules: managerOnly, transport }), 'third-party', transport);
+  }
+  // account 登录写操作硬拒；profile/balance 保持产品选定的宿主只读视图。
+  for (const method of ['startSignIn', 'cancelSignIn', 'signOut']) {
+    assert.equal(isSubuserBlockedApiPath(`/api/account/${method}`), true, method);
+  }
+  assert.equal(isSubuserBlockedApiPath('/api/account/getProfile'), false);
+  assert.equal(isSubuserBlockedApiPath('/api/account/getBalance'), false);
+  assert.equal(isSubuserBlockedApiPath('/api/account/getState'), false);
+  assert.equal(isSubuserBlockedApiPath('/api/account/unknown'), true);
+  assert.equal(isSubuserBlockedApiPath('/api/account'), true);
+  assert.equal(classifySubuserPath('/api/account/getState', { endpointRules: generic, transport: 'http' }), 'official');
+  assert.equal(classifySubuserPath('/api/job/list', { endpointRules: generic, transport: 'http' }), 'official');
+});
+
+// ── workspaceFiles / present / changes：会话作用域与文件边界 ────────
+
+/** alpha.2 ClientConnection 信封（真实 wire：POST /api/<namespace>/<method>） */
+const wsEnvelope = (method: string, args: Record<string, unknown>): unknown => ({
+  type: 'client-request',
+  rpcId: 'rpc-1',
+  method,
+  payload: { args },
+});
+
+test('workspaceFiles：七个会话方法纳入 SESSION_SCOPED_RE（点号/斜杠同口径）', () => {
+  for (const method of WORKSPACE_FILES_SESSION_METHODS) {
+    assert.equal(SESSION_SCOPED_RE.test(`/api/workspaceFiles/${method}`), true, method);
+    assert.equal(SESSION_SCOPED_RE.test(`/api/workspaceFiles.${method}`), true, method);
+    assert.equal(isWorkspaceFilesSessionScopedRequest(`/api/workspaceFiles/${method}`), true, method);
+    assert.equal(workspaceFilesMethodOf(`/api/workspaceFiles.${method}`), method);
+  }
+  // 未知/未来的方法不纳入（也不误伤前缀相近的命名空间）
+  assert.equal(workspaceFilesMethodOf('/api/workspaceFiles/write'), null);
+  assert.equal(SESSION_SCOPED_RE.test('/api/workspaceFiles/write'), false);
+  assert.equal(isWorkspaceFilesSessionScopedRequest('/api/workspaceFiles'), false);
+  assert.equal(SESSION_SCOPED_RE.test('/api/workspaceFiles'), false);
+  assert.equal(workspaceFilesMethodOf('/api/workspaceFilesBackup/read'), null);
+  // 目标目录判定需要会话根作参照，逐会话关闭语义仍由网关的归属校验落地
+  assert.equal(SESSION_SCOPED_RE.test('/api/workspaceFiles/read'), true);
+});
+
+test('0.1.7：sessionFeedback/record 与 goals/get 纳入会话作用域（点号/斜杠同口径）', () => {
+  for (const endpoint of ['sessionFeedback/record', 'goals/get']) {
+    assert.equal(SESSION_SCOPED_RE.test(`/api/${endpoint}`), true, endpoint);
+    assert.equal(SESSION_SCOPED_RE.test(`/api/${endpoint.replace('/', '.')}`), true, `${endpoint} 点号形状`);
+  }
+  // 前缀相近的方法不被顺带纳入
+  assert.equal(SESSION_SCOPED_RE.test('/api/sessionFeedback/records'), false);
+  assert.equal(SESSION_SCOPED_RE.test('/api/goals/getExtra'), false);
+  assert.equal(SESSION_SCOPED_RE.test('/api/goals/gett'), false);
+  // 它们是归属校验而不是硬拒：两条收紧路径互不替代
+  assert.equal(isSubuserBlockedApiPath('/api/sessionFeedback/record'), false);
+  assert.equal(isSubuserBlockedApiPath('/api/goals/get'), false);
+});
+
+test('present.open / changes.open 按 POST 会话作用域纳入（query 会话身份由网关回落采集）', () => {
+  assert.equal(SESSION_SCOPED_RE.test('/api/present.open'), true);
+  assert.equal(SESSION_SCOPED_RE.test('/api/changes.open'), true);
+  // 同批路由里只有 GET 的成员盖不到：归属校验只跑写方法，GET 侧必须靠专用谓词
+  assert.equal(SESSION_SCOPED_RE.test('/api/changes.summary'), false);
+  assert.equal(SESSION_SCOPED_RE.test('/api/changes.diff'), false);
+  assert.equal(isOfficialSessionQueryRoute('/api/changes.summary'), true);
+  assert.equal(isOfficialSessionQueryRoute('/api/changes.diff'), true);
+  assert.equal(isOfficialSessionQueryRoute('/api/present.open'), true);
+  assert.equal(isOfficialSessionQueryRoute('/api/present.host'), false, 'present.host 不带会话身份');
+  assert.equal(isOfficialSessionQueryRoute('/api/present/other'), false);
+});
+
+test('/api/file：官方 GET/HEAD 读取路由 + 严格绝对路径解析（fail-closed）', () => {
+  assert.equal(isOfficialFileReadRequest('GET', '/api/file'), true);
+  assert.equal(isOfficialFileReadRequest('HEAD', '/api/file'), true);
+  assert.equal(isOfficialFileReadRequest('POST', '/api/file'), false);
+  assert.equal(isOfficialFileReadRequest('GET', '/api/file/x'), false);
+  assert.equal(isOfficialFileReadRequest('GET', '/api/fileUploads/upload'), false, '前缀相近不误伤');
+
+  assert.equal(fileReadTargetFromQuery(new URLSearchParams('path=/etc/hosts')), '/etc/hosts');
+  assert.equal(fileReadTargetFromQuery(new URLSearchParams({ path: '/w/../etc/passwd' })), '/etc/passwd', '点段先归一化');
+  assert.equal(fileReadTargetFromQuery({ path: '/etc/hosts' }), '/etc/hosts', '普通对象容器同样受理');
+  assert.equal(fileReadTargetFromQuery(new URLSearchParams('path=relative/x')), null, '相对路径无法判定 → null');
+  assert.equal(fileReadTargetFromQuery(new URLSearchParams('other=/etc/hosts')), null);
+  assert.equal(fileReadTargetFromQuery(new URLSearchParams('path=')), null);
+  assert.equal(fileReadTargetFromQuery(new URLSearchParams('path=%00/etc/x')), null, 'NUL 注入 → null');
+  assert.equal(fileReadTargetFromQuery(null), null);
+  assert.equal(fileReadTargetFromQuery('path=/etc/hosts'), null, '未识别的容器形状 → null');
+});
+
+test('sessionQueryTarget：严格取会话身份与坐标（fail-closed）', () => {
+  assert.deepEqual(sessionQueryTarget(new URLSearchParams('sessionId=s1&seq=2&index=0')), { sessionId: 's1', seq: 2, index: 0 });
+  assert.deepEqual(sessionQueryTarget({ sessionId: 's1', seq: '3' }), { sessionId: 's1', seq: 3, index: null });
+  assert.deepEqual(sessionQueryTarget(new URLSearchParams('sessionId=s1')), { sessionId: 's1', seq: null, index: null });
+  assert.equal(sessionQueryTarget(new URLSearchParams('seq=1&index=0')), null, '缺会话身份 → null');
+  assert.equal(sessionQueryTarget(new URLSearchParams('sessionId=')), null);
+  assert.equal(sessionQueryTarget(new URLSearchParams({ sessionId: 'x'.repeat(201) })), null, '超长会话身份 → null');
+  assert.deepEqual(
+    sessionQueryTarget(new URLSearchParams('sessionId=s1&seq=-1&index=abc')),
+    { sessionId: 's1', seq: null, index: null },
+    '非法坐标记为 null，不编造 0',
+  );
+  assert.equal(sessionQueryTarget(null), null);
+});
+
+test('collectAuthorizedSessionIds：workspaceFileScopeId 必须作为会话身份参与归属校验', () => {
+  const ids = collectAuthorizedSessionIds(wsEnvelope('workspaceFiles/read', { workspaceFileScopeId: 's1', path: '/w/a.txt' }));
+  assert.deepEqual([...(ids ?? [])], ['s1']);
+  // 非字符串值 → 整体 fail-closed（返回 null，调用方必须拒绝）
+  assert.equal(collectAuthorizedSessionIds(wsEnvelope('workspaceFiles/read', { workspaceFileScopeId: 7, path: '/w/a.txt' })), null);
+  // 与其他会话身份字段并列收集：任一未授权都会让调用方 403
+  const both = collectAuthorizedSessionIds(wsEnvelope('session/prompt', { workspaceFileScopeId: 's1', sessionId: 's2' }));
+  assert.deepEqual([...(both ?? [])].sort(), ['s1', 's2']);
+  assert.equal(collectAuthorizedSessionIds({ sessionId: 'legacy' })?.has('legacy'), true, '非信封旧协议形状照旧受理');
+});
+
+test('parseWorkspaceFilesCall：严格解出会话身份与读取目标（fail-closed）', () => {
+  assert.deepEqual(
+    parseWorkspaceFilesCall('/api/workspaceFiles/read', wsEnvelope('workspaceFiles/read', { workspaceFileScopeId: 's1', path: '/w/a.txt' })),
+    { method: 'read', scopeId: 's1', targetPath: '/w/a.txt', absolute: true },
+  );
+  assert.deepEqual(
+    parseWorkspaceFilesCall('/api/workspaceFiles/list', wsEnvelope('workspaceFiles/list', { workspaceFileScopeId: 's1', path: 'src' })),
+    { method: 'list', scopeId: 's1', targetPath: 'src', absolute: false },
+  );
+  // changes：0.1.7 已是带 path 的 stream，但本模块恒不产出 targetPath（fail-closed，
+  // 网关对子用户整类拒绝该流），path 不作为放行依据。
+  assert.deepEqual(
+    parseWorkspaceFilesCall('/api/workspaceFiles.changes', wsEnvelope('workspaceFiles/changes', { workspaceFileScopeId: 's1' })),
+    { method: 'changes', scopeId: 's1', targetPath: null, absolute: false },
+    'changes 不产出 targetPath',
+  );
+  assert.deepEqual(
+    parseWorkspaceFilesCall('/api/workspaceFiles.changes', wsEnvelope('workspaceFiles/changes', { workspaceFileScopeId: 's1', path: '/w/a.txt' })),
+    { method: 'changes', scopeId: 's1', targetPath: null, absolute: false },
+    '0.1.7 带 path 的 changes 也不把它当授权输入',
+  );
+  // readRelated：按宿主语义（resolve(dirname(path), relativePath)）解析真实目标
+  assert.deepEqual(
+    parseWorkspaceFilesCall('/api/workspaceFiles/readRelated', wsEnvelope('workspaceFiles/readRelated', {
+      workspaceFileScopeId: 's1', path: '/w/sub/a.md', relativePath: '../../etc/passwd',
+    })),
+    { method: 'readRelated', scopeId: 's1', targetPath: '/etc/passwd', absolute: true },
+    '逃逸目标必须显式暴露给调用方判定',
+  );
+  assert.deepEqual(
+    parseWorkspaceFilesCall('/api/workspaceFiles/readRelated', wsEnvelope('workspaceFiles/readRelated', {
+      workspaceFileScopeId: 's1', path: '/w/a.md', relativePath: 'sibling.txt',
+    })),
+    { method: 'readRelated', scopeId: 's1', targetPath: '/w/sibling.txt', absolute: true },
+  );
+  assert.equal(
+    parseWorkspaceFilesCall('/api/workspaceFiles/readRelated', wsEnvelope('workspaceFiles/readRelated', {
+      workspaceFileScopeId: 's1', path: '/w/a.md', relativePath: '/etc/hosts',
+    })),
+    null,
+    '绝对 relativePath 不符合 alpha.2 readRelated 形状，必须直接拒绝',
+  );
+
+  // 形状不符一律 null：调用方必须拒绝，不能回落到默认值
+  assert.equal(parseWorkspaceFilesCall('/api/workspaceFiles/read', { sessionId: 's1', path: '/w/a.txt' }), null, '无 ClientConnection 信封');
+  assert.equal(parseWorkspaceFilesCall('/api/workspaceFiles/read', wsEnvelope('workspaceFiles/read', { path: '/w/a.txt' })), null, '缺会话身份');
+  assert.equal(parseWorkspaceFilesCall('/api/workspaceFiles/read', wsEnvelope('workspaceFiles/read', { workspaceFileScopeId: '', path: '/w/a.txt' })), null);
+  assert.equal(parseWorkspaceFilesCall('/api/workspaceFiles/read', wsEnvelope('workspaceFiles/read', { workspaceFileScopeId: 's1' })), null, '缺路径');
+  assert.equal(parseWorkspaceFilesCall('/api/workspaceFiles/read', wsEnvelope('workspaceFiles/read', { workspaceFileScopeId: 's1', path: '' })), null);
+  assert.equal(parseWorkspaceFilesCall('/api/workspaceFiles/read', wsEnvelope('workspaceFiles/read', { workspaceFileScopeId: 's1', path: 7 })), null);
+  assert.equal(
+    parseWorkspaceFilesCall('/api/workspaceFiles/readRelated', wsEnvelope('workspaceFiles/readRelated', { workspaceFileScopeId: 's1', path: '/w/a.md' })),
+    null,
+    '缺 relativePath',
+  );
+  assert.equal(parseWorkspaceFilesCall('/api/terminal/list', wsEnvelope('terminal/list', { workspaceFileScopeId: 's1' })), null, '非 workspaceFiles 路径');
+});
+
+test('readBytes：0.1.7 options 形状 fail-closed，baseFile 一律拒绝', () => {
+  const readBytes = (args: Record<string, unknown>): unknown =>
+    parseWorkspaceFilesCall('/api/workspaceFiles/readBytes', wsEnvelope('workspaceFiles/readBytes', args));
+  const scope = { workspaceFileScopeId: 's1', path: '/w/a.bin' };
+  const parsed = { method: 'readBytes', scopeId: 's1', targetPath: '/w/a.bin', absolute: true };
+
+  // 0.1.7 合法形状：options 是 plain object，只带 range（未读全部/默认窗口/显式窗口）
+  assert.deepEqual(readBytes({ ...scope, options: {} }), parsed);
+  assert.deepEqual(readBytes({ ...scope, options: { range: {} } }), parsed);
+  assert.deepEqual(readBytes({ ...scope, options: { range: { offset: 0, length: 4096 } } }), parsed);
+  // 相对 path 仍按会话根解析（绝对/相对判定不受 options 影响）
+  assert.deepEqual(
+    readBytes({ workspaceFileScopeId: 's1', path: 'media/a.bin', options: { range: { length: 16 } } }),
+    { method: 'readBytes', scopeId: 's1', targetPath: 'media/a.bin', absolute: false },
+  );
+  // 0.1.6 旧的两参数 readBytes（那代 wire 没有 options）不因本次收紧而回归
+  assert.deepEqual(readBytes(scope), parsed);
+
+  // baseFile 会改变 path 的解析基准 → 无论值是什么一律拒绝
+  assert.equal(readBytes({ ...scope, options: { baseFile: '/etc/passwd' } }), null, '绝对 baseFile');
+  assert.equal(readBytes({ ...scope, options: { baseFile: 'sibling.txt' } }), null, '相对 baseFile');
+  assert.equal(readBytes({ ...scope, options: { baseFile: null } }), null, '不可解析的 baseFile 也拒绝');
+  assert.equal(readBytes({ ...scope, options: { range: { offset: 0 }, baseFile: '/etc' } }), null, 'range+baseFile 组合');
+  assert.equal(
+    readBytes({ workspaceFileScopeId: 's1', path: 'a.bin', options: { baseFile: '/w/other.bin' } }),
+    null,
+    '工作区内的 path 也不能借 baseFile 换解析基准',
+  );
+
+  // options 存在时必须是 plain object；未知键/非法 range 同样拒绝
+  assert.equal(readBytes({ ...scope, options: null }), null);
+  assert.equal(readBytes({ ...scope, options: 'range' }), null);
+  assert.equal(readBytes({ ...scope, options: [] }), null);
+  assert.equal(readBytes({ ...scope, options: { length: 10 } }), null, '未知键（read 的 limit/length 不属于 readBytes options）');
+  assert.equal(readBytes({ ...scope, options: { range: { limit: 10 } } }), null, "readBytes 的窗口字段是 length，不是 read 的 limit");
+  assert.equal(readBytes({ ...scope, options: { range: 5 } }), null);
+  assert.equal(readBytes({ ...scope, options: { range: null } }), null);
+  assert.equal(readBytes({ ...scope, options: { range: { offset: -1 } } }), null, '负偏移');
+  assert.equal(readBytes({ ...scope, options: { range: { offset: 1.5 } } }), null, '非整数偏移');
+  assert.equal(readBytes({ ...scope, options: { range: { length: '4096' } } }), null);
+
+  // 不误伤其余方法：0.1.6/0.1.7 的 read / readRelated 都没有 options 参数
+  assert.deepEqual(
+    parseWorkspaceFilesCall('/api/workspaceFiles/read', wsEnvelope('workspaceFiles/read', { workspaceFileScopeId: 's1', path: '/w/a.txt' })),
+    { method: 'read', scopeId: 's1', targetPath: '/w/a.txt', absolute: true },
+  );
+  assert.deepEqual(
+    parseWorkspaceFilesCall('/api/workspaceFiles/readRelated', wsEnvelope('workspaceFiles/readRelated', {
+      workspaceFileScopeId: 's1', path: '/w/a.md', relativePath: 'b.md',
+    })),
+    { method: 'readRelated', scopeId: 's1', targetPath: '/w/b.md', absolute: true },
+    'readRelated 不受 readBytes options 收紧影响',
+  );
+});
+
+test('workspaceFilesTargetAllowed：读取目标的目录白名单边界（含相对与逃逸路径）', () => {
+  const folders = ['/root/11'];
+  assert.equal(workspaceFilesTargetAllowed({ targetPath: '/root/11/a.txt', absolute: true }, '/root/11', folders), true);
+  assert.equal(workspaceFilesTargetAllowed({ targetPath: '/etc/passwd', absolute: true }, '/root/11', folders), false, '工作区外绝对路径拒绝');
+  assert.equal(workspaceFilesTargetAllowed({ targetPath: '/root/12/a.txt', absolute: true }, '/root/11', folders), false);
+  assert.equal(workspaceFilesTargetAllowed({ targetPath: 'src/a.ts', absolute: false }, '/root/11', folders), true, '相对路径按会话根解析');
+  assert.equal(workspaceFilesTargetAllowed({ targetPath: '../12/a.ts', absolute: false }, '/root/11', folders), false, '相对逃逸解析后不在会话根内');
+  assert.equal(workspaceFilesTargetAllowed({ targetPath: '/root/12/a.ts', absolute: true }, '/root/11', ['/root']), false, '白名单更宽也必须在会话根内');
+  assert.equal(workspaceFilesTargetAllowed({ targetPath: '/root/11/a.txt', absolute: true }, null, folders), false, '不知会话根 → fail-closed');
+  assert.equal(workspaceFilesTargetAllowed({ targetPath: 'src/a.ts', absolute: false }, '', folders), false);
+  assert.equal(workspaceFilesTargetAllowed({ targetPath: null, absolute: false }, '/root/11', folders), false, 'changes 无路径可判定 → 不得默认放行');
+  assert.equal(workspaceFilesTargetAllowed({ targetPath: '/root/11/a.txt', absolute: true }, '/root/11', []), true, '空白名单 = 不限目录');
+  assert.equal(workspaceFilesTargetAllowed({ targetPath: '/root/11/a.txt', absolute: true }, '/root/11', ['__deny__']), false, '禁止所有哨兵');
+  assert.equal(workspaceFilesTargetAllowed({ targetPath: '/root/11', absolute: true }, '/root/11', folders), true, '会话根本身');
+
+  // 与 parseWorkspaceFilesCall 串联：readRelated 的逃逸目标被白名单拦下
+  const escape = parseWorkspaceFilesCall('/api/workspaceFiles/readRelated', wsEnvelope('workspaceFiles/readRelated', {
+    workspaceFileScopeId: 's1', path: '/root/11/sub/a.md', relativePath: '../../etc/passwd',
+  }));
+  assert.notEqual(escape, null);
+  assert.equal(workspaceFilesTargetAllowed(escape!, '/root/11', folders), false);
+  const inside = parseWorkspaceFilesCall('/api/workspaceFiles/readRelated', wsEnvelope('workspaceFiles/readRelated', {
+    workspaceFileScopeId: 's1', path: '/root/11/sub/a.md', relativePath: 'b.md',
+  }));
+  assert.equal(workspaceFilesTargetAllowed(inside!, '/root/11', folders), true);
+  // changes 整条链路：身份可解，但目标不可判定 → 拒绝
+  const changes = parseWorkspaceFilesCall('/api/workspaceFiles/changes', wsEnvelope('workspaceFiles/changes', { workspaceFileScopeId: 's1' }));
+  assert.equal(workspaceFilesTargetAllowed(changes!, '/root/11', folders), false);
 });
 
 // ── RC.1 SessionAddress（普通会话与子代理地址） ─────────────────
@@ -240,13 +831,38 @@ test('parseSessionAddress：保留普通会话与完整 subagent 地址', () => 
   });
   assert.equal(oneShot?.kind, 'subagent');
   assert.equal(oneShot?.mode, 'one-shot');
+  // 0.1.7-alpha.1 新增 mode='unknown'：仍只靠 parentSessionId 授权，不被整类拒绝
+  assert.deepEqual(parseSessionAddress({
+    kind: 'subagent',
+    parentSessionId: 'parent-visible',
+    childSessionId: 'child-unknown',
+    mode: 'unknown',
+  }), {
+    kind: 'subagent',
+    parentSessionId: 'parent-visible',
+    childSessionId: 'child-unknown',
+    mode: 'unknown',
+  });
+  assert.deepEqual(
+    [...(collectAuthorizedSessionIds({
+      address: { kind: 'subagent', parentSessionId: 'p', childSessionId: 'c', mode: 'unknown' },
+    }) ?? [])],
+    ['p'],
+    'unknown 不改变授权口径：仍取 parent',
+  );
 });
 
 test('parseSessionAddress：拒绝不完整或伪造的子代理地址', () => {
   assert.equal(parseSessionAddress({ kind: 'subagent', parentSessionId: 'p', childSessionId: 'c' }), null);
   assert.equal(parseSessionAddress({ kind: 'subagent', parentSessionId: 'p', childSessionId: 'c', mode: 'invalid' }), null);
+  assert.equal(parseSessionAddress({ kind: 'subagent', parentSessionId: 'p', childSessionId: 'c', mode: 'UNKNOWN' }), null, 'mode 大小写敏感');
+  assert.equal(parseSessionAddress({ kind: 'subagent', parentSessionId: '', childSessionId: 'c', mode: 'unknown' }), null);
+  assert.equal(parseSessionAddress({ kind: 'subagent', parentSessionId: 'p', childSessionId: 'x'.repeat(201), mode: 'unknown' }), null);
+  assert.equal(parseSessionAddress({ kind: 'subagent', parentSessionId: 'p', childSessionId: 'c', mode: 'unknown ' }), null);
   assert.equal(parseSessionAddress({ kind: 'session', sessionId: '' }), null);
   assert.equal(parseSessionAddress({ kind: 'session', sessionId: 'x'.repeat(201) }), null);
+  // 数组/自定义原型/继承字段不得冒充地址
+  assert.equal(parseSessionAddress(Object.assign(Object.create({ kind: 'session' }), { sessionId: 's1' })), null);
 });
 
 // ── permissionPresetFromCommand（/permission 命令解析） ─────────

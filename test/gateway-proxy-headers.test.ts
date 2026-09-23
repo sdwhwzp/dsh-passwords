@@ -15,7 +15,7 @@ import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, symlinkSync, realpathSync } from 'node:fs';
 import jwt from 'jsonwebtoken';
 import { createRequire } from 'node:module';
 
@@ -77,6 +77,7 @@ let lastUpstreamUrl = '';
 let sandboxStatusCode = 200;
 let sandboxSessionSequence = 0;
 let workspaceCreateMakesNewWorkspace = false;
+let workspaceOrderResponseWorkspaceId = 'ws-visible';
 let delaySessionCreateResponse = false;
 let dropDelayedWorkspaceUpsert = false;
 let sessionSearchResponseMode: 'valid' | 'malformed' = 'valid';
@@ -92,7 +93,22 @@ let assignableResources = {
 let assignableResourcesUnavailable = false;
 let remoteMuxOpenEndpoints: string[] = [];
 let remoteMuxOpenFrames: Array<Record<string, unknown>> = [];
+let remoteMuxCancelStreamIds: string[] = [];
+/** 回归用：上游收到的浏览器上行帧（0.1.7-alpha.1 的 item/end）。 */
+let remoteMuxUplinkFrames: Array<Record<string, unknown>> = [];
+/** 回归用：workspace/follow baseline 携带的 pinnedSessionIds（null = 不下发，模拟 0.1.6）。 */
+let remoteMuxBaselinePinnedSessionIds: unknown[] | null = null;
+/** 回归用：baseline 之后追加的 pinned 增量集合（null = 不发送）。 */
+let remoteMuxPinnedIncrement: unknown[] | null = null;
 let remoteMuxHistoryPayloadBytes = 0;
+/** 回归用：workspace/follow baseline 的「可见工作区」路径（默认与旧用例一致）。 */
+let remoteMuxBaselineVisiblePath = '/workspaces/visible';
+/** 回归用：baseline 是否省略可见工作区（模拟不完整的可见性快照）。 */
+let remoteMuxBaselineOmitVisibleWorkspace = false;
+/** 回归用：上游在收到 cancel 后仍发出该流的迟到 item/end（官方 Remote 契约允许）。 */
+let remoteMuxLateFrameOnCancel = false;
+/** 回归用：改写 session/follow 首帧 snapshot 的 header.id，制造身份不匹配。 */
+let remoteMuxSnapshotHeaderId: string | null = null;
 let lastRawUploadBody = Buffer.alloc(0);
 let lastSelectModelBody: Record<string, unknown> | null = null;
 let lastScopedRequestBody: Record<string, unknown> | null = null;
@@ -108,9 +124,78 @@ function startMockUpstream(): Promise<http.Server> {
     remoteMux.on('connection', (client: any) => {
       client.on('message', (data: Buffer) => {
         const frame = JSON.parse(data.toString()) as Record<string, unknown> & { type?: string; streamId?: string; endpoint?: string };
+        // 0.1.7-alpha.1 浏览器上行帧：上游只做记录，用于断言网关是否转发。
+        if (frame.type === 'item' || frame.type === 'end') {
+          remoteMuxUplinkFrames.push(frame);
+          return;
+        }
+        if (frame.type === 'cancel' && typeof frame.streamId === 'string') {
+          remoteMuxCancelStreamIds.push(frame.streamId);
+          // 官方语义允许上游在 cancel 后仍投递已排队的帧。仅在回归测试中启用，
+          // 用于断言网关按逻辑流丢弃它们而不是关闭整条 carrier。
+          if (remoteMuxLateFrameOnCancel) {
+            client.send(JSON.stringify({
+              type: 'item',
+              streamId: frame.streamId,
+              value: { type: 'event', seq: 99, records: ['late-after-cancel'] },
+            }));
+            client.send(JSON.stringify({ type: 'end', streamId: frame.streamId }));
+          }
+          return;
+        }
         if (frame.type !== 'open' || typeof frame.streamId !== 'string' || typeof frame.endpoint !== 'string') return;
         remoteMuxOpenEndpoints.push(frame.endpoint);
         remoteMuxOpenFrames.push(frame);
+        if (frame.endpoint === 'terminal/follow' || frame.endpoint === 'terminal/retain') {
+          client.send(JSON.stringify({
+            type: 'item',
+            streamId: frame.streamId,
+            value: { type: 'terminal/output', terminalId: 'term-owner-1', data: 'owner-shell-bytes' },
+          }));
+          return;
+        }
+        if (frame.endpoint === 'workspaceFiles/changes') {
+          const payload = frame.payload as Record<string, unknown> | undefined;
+          const args = payload?.args as Record<string, unknown> | undefined;
+          const targetPath = typeof args?.path === 'string' ? args.path : '/workspaces/visible/app.ts';
+          client.send(JSON.stringify({ type: 'item', streamId: frame.streamId, value: { kind: 'ready' } }));
+          client.send(JSON.stringify({
+            type: 'item', streamId: frame.streamId,
+            value: { kind: 'change', change: { absolutePath: targetPath, version: 'v1' } },
+          }));
+          client.send(JSON.stringify({
+            type: 'item', streamId: frame.streamId,
+            value: { kind: 'change', change: { absolutePath: '/workspaces/hidden/secret.txt', version: 'hidden' } },
+          }));
+          client.send(JSON.stringify({ type: 'end', streamId: frame.streamId }));
+          return;
+        }
+        if (frame.endpoint === 'job/list') {
+          client.send(JSON.stringify({
+            type: 'item',
+            streamId: frame.streamId,
+            value: { type: 'rows', jobs: [
+              { id: 'job-visible', owner: 'session-visible', label: 'visible' },
+              { id: 'job-hidden', owner: 'session-hidden', label: 'hidden' },
+              { id: 'job-ownerless', label: 'host job' },
+            ] },
+          }));
+          client.send(JSON.stringify({ type: 'end', streamId: frame.streamId }));
+          return;
+        }
+        if (frame.endpoint === 'job/follow') {
+          const payload = frame.payload as { args?: { request?: { jobId?: string } } } | undefined;
+          const jobId = payload?.args?.request?.jobId ?? '';
+          const owner = jobId === 'job-visible' ? 'session-visible' : 'session-hidden';
+          client.send(JSON.stringify({ type: 'item', streamId: frame.streamId, value: {
+            type: 'opened', job: { id: jobId, owner },
+          } }));
+          client.send(JSON.stringify({ type: 'item', streamId: frame.streamId, value: {
+            type: 'output', chunks: [`${owner}-output`],
+          } }));
+          client.send(JSON.stringify({ type: 'end', streamId: frame.streamId }));
+          return;
+        }
         if (frame.endpoint === 'workspace/follow') {
           client.send(JSON.stringify({
             type: 'item',
@@ -119,12 +204,12 @@ function startMockUpstream(): Promise<http.Server> {
               type: 'baseline',
               value: {
                 items: [
-                  {
+                  ...(remoteMuxBaselineOmitVisibleWorkspace ? [] : [{
                     workspaceId: 'workspace-visible',
-                    path: '/workspaces/visible',
+                    path: remoteMuxBaselineVisiblePath,
                     title: 'Visible workspace',
                     sessionIds: ['session-visible'],
-                  },
+                  }]),
                   {
                     workspaceId: 'workspace-hidden',
                     path: '/workspaces/hidden',
@@ -133,9 +218,19 @@ function startMockUpstream(): Promise<http.Server> {
                   },
                 ],
                 archivedSessionIds: [],
+                ...(remoteMuxBaselinePinnedSessionIds === null
+                  ? {}
+                  : { pinnedSessionIds: remoteMuxBaselinePinnedSessionIds }),
               },
             },
           }));
+          if (remoteMuxPinnedIncrement !== null) {
+            client.send(JSON.stringify({
+              type: 'item',
+              streamId: frame.streamId,
+              value: { type: 'pinned', pinnedSessionIds: remoteMuxPinnedIncrement },
+            }));
+          }
           // The Host publishes the durable attach once the delayed create
           // request is received, while its unary response is still pending.
           if (delaySessionCreateResponse) {
@@ -233,7 +328,7 @@ function startMockUpstream(): Promise<http.Server> {
               streamId: frame.streamId,
               value: {
                 type: 'snapshot',
-                header: { id: 'session-visible' },
+                header: { id: remoteMuxSnapshotHeaderId ?? 'session-visible' },
                 cursor: 1,
                 records: [{ type: 'event', event: { type: 'user/message', seq: 1, time: 1, data: 'authorized session history' } }],
                 hasMore: false,
@@ -475,6 +570,15 @@ function startMockUpstream(): Promise<http.Server> {
               },
             },
           }));
+      } else if (/^\/api\/workspace[.]insertBefore(?:[?]|$)/.test(req.url ?? '')) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ result: { ok: true, value: { workspaceIds: ['ws-visible', 'ws-hidden', 'ws-not-visible'] } } }));
+      } else if (/^\/api\/workspace[.]insertSessionBefore(?:[?]|$)/.test(req.url ?? '')) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ result: { ok: true, value: { workspace: {
+          workspaceId: workspaceOrderResponseWorkspaceId,
+          sessionIds: ['s-active', 's-archived', 's-other-user', 's-not-visible'],
+        } } } }));
       } else if ((req.url ?? '').startsWith('/api/session.list')) {
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({
@@ -485,6 +589,17 @@ function startMockUpstream(): Promise<http.Server> {
                 { sessionId: 'session-hidden', cwd: '/workspaces/hidden', title: 'Hidden session' },
               ],
             },
+          },
+        }));
+      } else if (/^\/api\/workspace[.\/](?:pinSession|unpinSession)(?:[?]|$)/.test(req.url ?? '')) {
+        // 0.1.7-alpha.1 的 pin 响应携带宿主机全局 pin 集合（会被网关收租）。
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          type: 'server-response',
+          rpcId: 'workspace-pin-mock',
+          result: {
+            ok: true,
+            value: { pinnedSessionIds: ['session-visible', 'session-hidden', 'session-other-user'] },
           },
         }));
       } else if ((req.url ?? '').startsWith('/api/workspace.list')) {
@@ -649,6 +764,8 @@ before(async () => {
       // 同一路径同时以两种能力登记：用于验证 owner: 优先于 ssh（两条通道一致）
       '/api/ssh-owner-only/hosts',
       'owner:/api/ssh-owner-only/hosts',
+      '/api/dynamicCordisRunner/*',
+      'ws:/api/dynamicCordisRunner/*',
     ],
     pluginCompat: false,
   };
@@ -767,6 +884,167 @@ function openRemoteMux(headers: Record<string, string>): Promise<{ client: any; 
     });
   });
 }
+
+/**
+ * 有界地等待下一帧：若 carrier 被意外关闭或帧迟迟不到，让回归测试以明确
+ * 错误失败，而不是永久挂起。
+ */
+function nextFrameOrFail(
+  connection: { client: any; nextFrame: () => Promise<Record<string, unknown>> },
+  label: string,
+): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const finish = (error: Error | null, frame?: Record<string, unknown>): void => {
+      clearTimeout(timer);
+      connection.client.off('close', onClose);
+      if (error !== null) reject(error);
+      else resolve(frame!);
+    };
+    const timer = setTimeout(() => finish(new Error(`${label}: frame timeout`)), 3000);
+    const onClose = (code: number, reason: Buffer): void => {
+      finish(new Error(`${label}: carrier closed (${String(code)} ${reason.toString()})`));
+    };
+    connection.client.once('close', onClose);
+    void connection.nextFrame().then(
+      (frame) => finish(null, frame),
+      (error: unknown) => finish(error instanceof Error ? error : new Error(String(error))),
+    );
+  });
+}
+
+test('workspace ordering is scoped to visible workspaces and same-workspace sessions', async () => {
+  const subUser = db.createUser('workspace-order-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: ['/workspaces/a', '/workspaces/b'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
+    allowedSessionIds: ['s-active', 's-archived', 's-other-user'],
+    banned: false, sandboxMode: null, disabledSessions: [],
+  });
+  const subCookie = `dsh_gateway_token=${jwt.sign({ sub: String(subUser.id), username: subUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' })}`;
+  const originalCookie = cookie;
+  const originalWorkspaceId = workspaceOrderResponseWorkspaceId;
+  cookie = subCookie;
+  workspaceOrderResponseWorkspaceId = 'ws-visible';
+  try {
+    const list = await gatewayReq('POST', '/api/workspace.list', { 'content-type': 'application/json', 'x-test-mode': 'archived-sessions' }, '{}');
+    assert.equal(list.status, 200, list.body);
+    assert.equal(db.isSessionGrantsSeeded(subUser.id), true);
+    assert.equal(db.listUserSessionGrants(subUser.id).includes('s-other-user'), true,
+      '跨工作区用例必须使用已授权会话，避免退化为未知会话拒绝');
+
+    let upstreamBefore = lastUpstreamUrl;
+    const hiddenWorkspace = await gatewayReq('POST', '/api/workspace.insertBefore', { 'content-type': 'application/json' }, JSON.stringify({
+      type: 'client-request', rpcId: 'workspace-order-hidden-source', method: 'workspace/insertBefore',
+      payload: { args: { request: { workspaceId: 'ws-not-visible', beforeWorkspaceId: 'ws-visible' } } },
+    }));
+    assert.equal(hiddenWorkspace.status, 403, hiddenWorkspace.body);
+    assert.equal(lastUpstreamUrl, upstreamBefore, '不可见源 workspace 的排序请求不得到达上游');
+
+    upstreamBefore = lastUpstreamUrl;
+    const hiddenAnchor = await gatewayReq('POST', '/api/workspace.insertBefore', { 'content-type': 'application/json' }, JSON.stringify({
+      type: 'client-request', rpcId: 'workspace-order-hidden-anchor', method: 'workspace/insertBefore',
+      payload: { args: { request: { workspaceId: 'ws-visible', beforeWorkspaceId: 'ws-not-visible' } } },
+    }));
+    assert.equal(hiddenAnchor.status, 403, hiddenAnchor.body);
+    assert.equal(lastUpstreamUrl, upstreamBefore, '不可见锚点 workspace 的排序请求不得到达上游');
+
+    upstreamBefore = lastUpstreamUrl;
+    const crossWorkspaceSession = await gatewayReq('POST', '/api/workspace.insertSessionBefore', { 'content-type': 'application/json' }, JSON.stringify({
+      type: 'client-request', rpcId: 'session-order-cross-workspace', method: 'workspace/insertSessionBefore',
+      payload: { args: { request: { workspaceId: 'ws-visible', sessionId: 's-other-user' } } },
+    }));
+    assert.equal(crossWorkspaceSession.status, 403, crossWorkspaceSession.body);
+    assert.equal(lastUpstreamUrl, upstreamBefore, '跨 workspace 的已授权会话排序请求不得到达上游');
+
+    const workspaceOrder = await gatewayReq('POST', '/api/workspace.insertBefore', { 'content-type': 'application/json' }, JSON.stringify({
+      type: 'client-request', rpcId: 'workspace-order', method: 'workspace/insertBefore',
+      payload: { args: { request: { workspaceId: 'ws-visible', beforeWorkspaceId: 'ws-hidden' } } },
+    }));
+    assert.equal(workspaceOrder.status, 200, workspaceOrder.body);
+    assert.deepEqual((JSON.parse(workspaceOrder.body) as { result: { value: { workspaceIds: string[] } } }).result.value.workspaceIds,
+      ['ws-visible', 'ws-hidden'], '排序返回只保留用户可见 workspace ID，allowWorkspaceCreate=false 仍可排序');
+
+    const sessionOrder = await gatewayReq('POST', '/api/workspace.insertSessionBefore', { 'content-type': 'application/json' }, JSON.stringify({
+      type: 'client-request', rpcId: 'session-order', method: 'workspace/insertSessionBefore',
+      payload: { args: { request: { workspaceId: 'ws-visible', sessionId: 's-active', beforeSessionId: 's-archived' } } },
+    }));
+    assert.equal(sessionOrder.status, 200, sessionOrder.body);
+    const sessionIds = (JSON.parse(sessionOrder.body) as { result: { value: { workspace: { sessionIds: string[] } } } }).result.value.workspace.sessionIds;
+    assert.deepEqual(sessionIds, ['s-active', 's-archived'], '响应不得将另一个 workspace 的授权会话混进当前分组');
+
+    workspaceOrderResponseWorkspaceId = 'ws-hidden';
+    const wrongWorkspace = await gatewayReq('POST', '/api/workspace.insertSessionBefore', { 'content-type': 'application/json' }, JSON.stringify({
+      type: 'client-request', rpcId: 'session-order-mismatch', method: 'workspace/insertSessionBefore',
+      payload: { args: { request: { workspaceId: 'ws-visible', sessionId: 's-active' } } },
+    }));
+    assert.equal(wrongWorkspace.status, 502, '上游返回与已授权请求不匹配的 workspace 时 fail closed');
+  } finally {
+    cookie = originalCookie;
+    workspaceOrderResponseWorkspaceId = originalWorkspaceId;
+  }
+});
+
+test('Remote job streams require a session and filter jobs to that authorized session', async () => {
+  const subUser = db.createUser('remote-job-scope-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
+    allowedSessionIds: [], allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [],
+  });
+  const subCookie = `dsh_gateway_token=${jwt.sign({ sub: String(subUser.id), username: subUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' })}`;
+  const connection = await openRemoteMux({ cookie: subCookie, origin: 'http://127.0.0.1', host: '127.0.0.1' });
+  try {
+    connection.client.send(JSON.stringify({ type: 'open', streamId: 'job-auth-baseline', endpoint: 'workspace/follow', payload: { args: {} } }));
+    const baseline = await nextFrameOrFail(connection, 'job workspace baseline');
+    assert.equal((baseline.value as { type?: string }).type, 'baseline');
+    assert.deepEqual(db.listUserSessionGrants(subUser.id), ['session-visible']);
+
+    connection.client.send(JSON.stringify({
+      type: 'open', streamId: 'job-list-visible', endpoint: 'job/list',
+      payload: { args: { request: { sessionId: 'session-visible' } } },
+    }));
+    const rows = await nextFrameOrFail(connection, 'authorized job list');
+    assert.equal(rows.streamId, 'job-list-visible');
+    assert.deepEqual((rows.value as { jobs: Array<{ id: string }> }).jobs.map((job) => job.id), ['job-visible']);
+
+    const listEnd = await nextFrameOrFail(connection, 'job list end');
+    assert.equal(listEnd.type, 'end');
+    assert.equal(listEnd.streamId, 'job-list-visible');
+
+    connection.client.send(JSON.stringify({
+      type: 'open', streamId: 'job-follow-hidden', endpoint: 'job/follow',
+      payload: { args: { request: { sessionId: 'session-visible', jobId: 'job-hidden' } } },
+    }));
+    const hiddenEnd = await nextFrameOrFail(connection, 'foreign job follow end');
+    assert.equal(hiddenEnd.type, 'end');
+    assert.equal(hiddenEnd.streamId, 'job-follow-hidden');
+
+    connection.client.send(JSON.stringify({
+      type: 'open', streamId: 'job-follow-visible', endpoint: 'job/follow',
+      payload: { args: { request: { sessionId: 'session-visible', jobId: 'job-visible' } } },
+    }));
+    const opened = await nextFrameOrFail(connection, 'authorized job owner');
+    assert.equal(opened.streamId, 'job-follow-visible');
+    assert.equal((opened.value as { type?: string }).type, 'opened');
+    const output = await nextFrameOrFail(connection, 'authorized job output');
+    assert.equal(output.streamId, 'job-follow-visible');
+    assert.deepEqual((output.value as { chunks: string[] }).chunks, ['session-visible-output']);
+
+    const visibleEnd = await nextFrameOrFail(connection, 'authorized job follow end');
+    assert.equal(visibleEnd.type, 'end');
+    assert.equal(visibleEnd.streamId, 'job-follow-visible');
+    connection.client.send(JSON.stringify({
+      type: 'open', streamId: 'job-follow-unscoped', endpoint: 'job/follow',
+      payload: { args: { request: { jobId: 'job-ownerless' } } },
+    }));
+    const rejected = await nextFrameOrFail(connection, 'unscoped job follow');
+    assert.equal(rejected.type, 'error');
+    assert.equal(rejected.streamId, 'job-follow-unscoped');
+    assert.equal(connection.client.readyState, NodeWebSocket.OPEN, 'rejecting one logical stream must preserve the carrier');
+  } finally {
+    connection.client.close();
+  }
+});
 
 test('Issue #25：主用户保存既有工作区和会话授权后，子用户能从 Remote mux 收到它们', async () => {
   const subUser = db.createUser('issue-25-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
@@ -1108,6 +1386,14 @@ test('D1 工作流：directoryPicker/list 目录浏览按授权根过滤与拦�
     // 4) 无 path（默认 home）且 home 不通往任何授权根 → 403（fail-closed）。
     const home = await gatewayReq('POST', '/api/directoryPicker/list', json, listBody(null, 'd1-list-home'));
     assert.equal(home.status, 403, '默认 home 不通往任何授权根时拒绝浏览');
+
+    // 5) alpha.2 ClientConnection 只消费 payload.args。信封外层 path 会被上游
+    // strip；若网关拿它作为授权依据，就会校验授权目录却实际列出 home。
+    const decoy = await gatewayReq('POST', '/api/directoryPicker/list', json, JSON.stringify({
+      type: 'client-request', rpcId: 'd1-list-decoy', method: 'directoryPicker/list',
+      payload: { args: {} }, path: '/workspaces/visible',
+    }));
+    assert.equal(decoy.status, 403, '信封外层 path 不得作为目录浏览授权依据');
   } finally {
     cookie = originalCookie;
   }
@@ -2417,6 +2703,79 @@ test('权限同值保存不触发子用户 Remote mux 重连', async () => {
   }
 });
 
+function waitForWebSocketClose(client: any, label: string): Promise<{ code: number; reason: string }> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      client.terminate();
+      reject(new Error(`${label}: websocket close timeout`));
+    }, 3000);
+    client.once('close', (code: number, reason: Buffer) => {
+      clearTimeout(timer);
+      resolve({ code, reason: reason.toString() });
+    });
+    client.once('error', (error: Error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+}
+
+test('凭据撤销：主用户登出会立即关闭已建立的 Remote mux', async () => {
+  const admin = db.createUser('logout-mux-admin', '$2a$10$dummyhashdummyhashdummyhashdu', 'admin');
+  const token = jwt.sign({ sub: String(admin.id), username: admin.username, cv: 0 }, 'test-secret', { expiresIn: '12h' });
+  const adminCookie = `dsh_gateway_token=${token}`;
+  const connection = await openRemoteMux({
+    cookie: adminCookie,
+    origin: 'http://127.0.0.1',
+    host: '127.0.0.1',
+  });
+  try {
+    const closed = waitForWebSocketClose(connection.client, 'logout admin mux');
+    const logout = await gatewayReq('POST', '/gateway/logout', {
+      cookie: adminCookie,
+      origin: `http://127.0.0.1:${String(gatewayPort)}`,
+    });
+    assert.equal(logout.status, 302, logout.body);
+    assert.deepEqual(await closed, { code: 1008, reason: 'Session ended' });
+  } finally {
+    connection.client.close();
+  }
+});
+
+test('凭据撤销：内部 session-invalidate 会立即关闭子用户 Remote mux', async () => {
+  const subUser = db.createUser('credential-mux-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
+    allowSsh: false, allowedAgentPresets: null, banned: false, sandboxMode: null,
+    disabledSessions: [], allowedSessionIds: ['session-visible'],
+  });
+  db.markSessionGrantsSeeded(subUser.id);
+  const subToken = jwt.sign({ sub: String(subUser.id), username: subUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' });
+  const connection = await openRemoteMux({
+    cookie: `dsh_gateway_token=${subToken}`,
+    origin: 'http://127.0.0.1',
+    host: '127.0.0.1',
+  });
+  try {
+    const closed = waitForWebSocketClose(connection.client, 'session invalidate mux');
+    const invalidated = await gatewayReq(
+      'POST',
+      '/gateway/internal/session-invalidate',
+      {
+        cookie: '',
+        'content-type': 'application/json',
+        'x-internal-secret': 'test-internal',
+      },
+      JSON.stringify({ userId: subUser.id }),
+    );
+    assert.equal(invalidated.status, 200, invalidated.body);
+    assert.deepEqual(await closed, { code: 1008, reason: 'Credentials changed' });
+  } finally {
+    connection.client.close();
+  }
+});
+
 test('Issue #25：真实权限收紧仍触发一次子用户 Remote mux 刷新', async () => {
   const subUser = db.createUser('issue-25-live-revoke', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
@@ -2507,30 +2866,44 @@ test('RC.1 Agent-scope RPC：未授权 session 在到达 DSH 前拒绝', async (
   const subCookie = `dsh_gateway_token=${jwt.sign({ sub: String(subUser.id), username: subUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' })}`;
   cookie = subCookie;
   try {
+    const envelope = (endpoint: string, sessionId: string) => JSON.stringify({
+      type: 'client-request', rpcId: `scoped-${endpoint}-${sessionId}`, method: endpoint,
+      payload: { args: { agentId: sessionId, request: { sessionId } } },
+    });
     const connection = await openRemoteMux({ cookie: subCookie, origin: 'http://127.0.0.1', host: '127.0.0.1' });
     try {
       connection.client.send(JSON.stringify({
         type: 'open', streamId: 'scoped-rpc-baseline', endpoint: 'workspace/follow', payload: { args: {} },
       }));
       assert.equal((await connection.nextFrame()).streamId, 'scoped-rpc-baseline');
-      const envelope = (endpoint: string, sessionId: string) => JSON.stringify({
-        type: 'client-request', rpcId: `scoped-${endpoint}-${sessionId}`, method: endpoint,
-        payload: { args: { agentId: sessionId, request: { sessionId } } },
-      });
       for (const endpoint of [
         '/api/fileUploads/upload',
         '/api/fileReferences/list',
         '/api/skills/list',
         '/api/messageFeedback/list',
         '/api/goals/create',
-        '/api/dynamicCordisRunner/getClientCode',
       ]) {
         const response = await gatewayReq('POST', endpoint, { 'content-type': 'application/json' }, envelope(endpoint.slice('/api/'.length), 'session-hidden'));
         assert.equal(response.status, 403, `${endpoint} must reject an unowned session`);
       }
+
+      for (const endpoint of ['/api/dynamicCordisRunner/runHostHalf', '/api/dynamicCordisRunner.runHostHalf', '/api/dynamicCordisRunner/unknownMethod', '/api/dynamicCordisRunner']) {
+        const method = endpoint.slice('/api/'.length).replace('.', '/');
+        const response = await gatewayReq('POST', endpoint, { 'content-type': 'application/json' }, envelope(method, 'session-visible'));
+        assert.equal(response.status, 403, `${endpoint} must remain unavailable even for an authorized session`);
+      }
     } finally {
       connection.client.close();
     }
+
+    // Admin requests bypass subuser classification and must retain upstream access.
+    cookie = originalCookie;
+    const adminResponse = await gatewayReq(
+      'POST', '/api/dynamicCordisRunner/runHostHalf',
+      { 'content-type': 'application/json' }, envelope('dynamicCordisRunner/runHostHalf', 'session-visible'),
+    );
+    assert.equal(adminResponse.status, 200, 'admin dynamic Cordis requests must remain pass-through');
+    assert.equal(lastUpstreamUrl, '/api/dynamicCordisRunner/runHostHalf');
   } finally {
     cookie = originalCookie;
   }
@@ -2796,18 +3169,15 @@ test('权限：收紧旧会话沙盒失败时只回收既有授权，不修改�
   }
 });
 
-test('权限 API：省略 sandboxMode 和 disabledSessions 时保留既有收紧策略', async () => {
+test('权限 API：只改上传时保留目录、配额、SSH、封禁与会话收紧策略', async () => {
   const subUser = db.createUser('permission-partial-update-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {
-    allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
-    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
-    allowedAgentPresets: [], banned: false, sandboxMode: 'read-only', disabledSessions: ['session-visible'],
+    allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: 100, dailyMinutesLimit: 45,
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false, allowSsh: true,
+    allowedAgentPresets: [], banned: true, sandboxMode: 'read-only', disabledSessions: ['session-visible'],
     allowedSessionIds: ['session-visible'],
   });
-  const permissionPayload = JSON.stringify({
-    userId: subUser.id,
-    allowedFolders: ['/workspaces/visible'],
-  });
+  const permissionPayload = JSON.stringify({ userId: subUser.id, allowUpload: true });
   const response = await gatewayReq('POST', '/gateway/api/permissions', {
     'content-type': 'application/json', 'content-length': String(Buffer.byteLength(permissionPayload)),
   }, permissionPayload);
@@ -2815,6 +3185,12 @@ test('权限 API：省略 sandboxMode 和 disabledSessions 时保留既有收紧
   const saved = db.getPermissions(subUser.id);
   assert.equal(saved?.sandbox_mode, 'read-only');
   assert.deepEqual(saved?.disabled_sessions, ['session-visible']);
+  assert.deepEqual(saved?.allowed_folders, ['/workspaces/visible']);
+  assert.equal(saved?.hourly_token_limit, 100);
+  assert.equal(saved?.daily_minutes_limit, 45);
+  assert.equal(saved?.allow_ssh, true);
+  assert.equal(saved?.banned, true);
+  assert.equal(saved?.allow_upload, true);
 });
 
 test('权限 API：非法 sandboxMode 拒绝保存且不清除既有策略', async () => {
@@ -3109,6 +3485,8 @@ test('子用户第三方 WebSocket：除内置事件与已配置 SSH 端点外�
       'http:/api/ssh-http-only/inspect',
       '/api/ssh-owner-only/hosts',
       'owner:/api/ssh-owner-only/hosts',
+      '/api/dynamicCordisRunner/*',
+      'ws:/api/dynamicCordisRunner/*',
     ]);
     assert.equal(overviewBody.pluginCompat, false, '默认关闭第三方插件兼容层');
 
@@ -3466,4 +3844,1006 @@ test('未认证根路径重定向到登录页时不把 next 参数甩到地址�
   const deep = await gatewayReq('GET', '/settings/general', { cookie: '' });
   assert.equal(deep.status, 302);
   assert.match(locationOf(deep.rawHeaders), /^\/gateway\/login\?next=/);
+});
+
+test('Remote mux 竞态：cancel 后的迟到上游帧只丢弃该逻辑流，不关闭整条 carrier', async () => {
+  remoteMuxOpenEndpoints = [];
+  remoteMuxLateFrameOnCancel = true;
+  const connection = await openRemoteMux({ cookie, origin: 'http://127.0.0.1', host: '127.0.0.1' });
+  let closed: { code: number; reason: string } | null = null;
+  connection.client.on('close', (code: number, reason: Buffer) => {
+    closed = { code, reason: reason.toString() };
+  });
+  try {
+    connection.client.send(JSON.stringify({
+      type: 'open', streamId: 'cancel-race-doomed', endpoint: 'workspace/follow', payload: { args: {} },
+    }));
+    const baseline = await nextFrameOrFail(connection, 'workspace baseline');
+    assert.equal(baseline.streamId, 'cancel-race-doomed');
+    assert.equal(baseline.type, 'item');
+
+    // cancel 到达上游后，上游仍发该流的 item + end（官方契约允许）。
+    connection.client.send(JSON.stringify({ type: 'cancel', streamId: 'cancel-race-doomed' }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(closed, null, `迟到的单流帧不得关闭物理 carrier：${JSON.stringify(closed)}`);
+    assert.equal(connection.client.readyState, NodeWebSocket.OPEN, 'cancel 后的迟到帧不得使客户端连接退出 OPEN');
+
+    // 同一 carrier 上的其它逻辑流必须仍能建流并收到响应。
+    connection.client.send(JSON.stringify({
+      type: 'open', streamId: 'cancel-race-survivor', endpoint: 'session/control', payload: { args: {} },
+    }));
+    const survivor = await nextFrameOrFail(connection, 'surviving stream');
+    assert.equal(survivor.streamId, 'cancel-race-survivor');
+    assert.equal(survivor.type, 'item');
+    assert.equal(connection.client.readyState, NodeWebSocket.OPEN, '其它逻辑流应能在同一 carrier 上继续');
+  } finally {
+    remoteMuxLateFrameOnCancel = false;
+    connection.client.terminate();
+  }
+});
+
+test('Remote mux 竞态：session/follow 首帧快照不匹配只结束该逻辑流，不关闭整条 carrier', async () => {
+  remoteMuxOpenEndpoints = [];
+  remoteMuxCancelStreamIds = [];
+  remoteMuxSnapshotHeaderId = 'session-mismatched';
+  const subUser = db.createUser('remote-mux-snapshot-mismatch-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
+    allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: ['session-visible'],
+  });
+  db.markSessionGrantsSeeded(subUser.id);
+  const subToken = jwt.sign({ sub: String(subUser.id), username: subUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' });
+  const connection = await openRemoteMux({
+    cookie: `dsh_gateway_token=${subToken}`, origin: 'http://127.0.0.1', host: '127.0.0.1',
+  });
+  try {
+    connection.client.send(JSON.stringify({
+      type: 'open', streamId: 'mismatch-follow', endpoint: 'session/follow',
+      payload: { args: { request: { address: { kind: 'session', sessionId: 'session-visible' } } } },
+    }));
+    connection.client.send(JSON.stringify({
+      type: 'open', streamId: 'mismatch-workspace', endpoint: 'workspace/follow', payload: { args: {} },
+    }));
+
+    // 基线先经 workspace/follow 建立，随后被 flush 的 session/follow 才到达上游；
+    // 上游回一个 header.id 不匹配的 snapshot，网关必须只拒绝该逻辑流。
+    const seen: Record<string, unknown>[] = [];
+    const waitFor = async (streamId: string): Promise<Record<string, unknown>> => {
+      for (;;) {
+        const frame = await nextFrameOrFail(connection, `waiting for ${streamId}`);
+        seen.push(frame);
+        if (frame.streamId === streamId) return frame;
+      }
+    };
+    const workspace = await waitFor('mismatch-workspace');
+    assert.equal(workspace.type, 'item');
+    const rejected = await waitFor('mismatch-follow');
+    assert.deepEqual(rejected, {
+      type: 'error',
+      streamId: 'mismatch-follow',
+      error: {
+        code: 'gateway/invalid-snapshot',
+        message: 'Remote session follow snapshot rejected',
+        details: {},
+      },
+    });
+    assert.equal(connection.client.readyState, NodeWebSocket.OPEN, '快照不匹配不得关闭物理 mux');
+    for (let attempt = 0; attempt < 20 && !remoteMuxCancelStreamIds.includes('mismatch-follow'); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+    assert.ok(remoteMuxCancelStreamIds.includes('mismatch-follow'), '快照拒绝后必须向上游补发 cancel');
+    assert.deepEqual(remoteMuxOpenEndpoints, ['workspace/follow', 'session/follow']);
+
+    // 被拒绝后，同一 carrier 上的新逻辑流仍可正常建立。
+    connection.client.send(JSON.stringify({
+      type: 'open', streamId: 'mismatch-control', endpoint: 'session/control', payload: { args: {} },
+    }));
+    const control = await waitFor('mismatch-control');
+    assert.equal(control.type, 'item');
+    assert.equal(connection.client.readyState, NodeWebSocket.OPEN, '同一 carrier 的其它逻辑流必须存活');
+  } finally {
+    remoteMuxSnapshotHeaderId = null;
+    connection.client.close();
+  }
+});
+
+test('Remote mux：主用户 terminal/follow 与 terminal/retain 原样转发到上游', async () => {
+  remoteMuxOpenEndpoints = [];
+  remoteMuxOpenFrames = [];
+  const connection = await openRemoteMux({ cookie, origin: 'http://127.0.0.1', host: '127.0.0.1' });
+  try {
+    for (const [streamId, endpoint, args] of [
+      ['admin-terminal-follow', 'terminal/follow', { agentId: 'agent-owner', id: 'term-owner-1', attachmentId: 'att-owner-1' }],
+      ['admin-terminal-retain', 'terminal/retain', { sessionId: 'session-owner', id: 'term-owner-1' }],
+    ] as const) {
+      connection.client.send(JSON.stringify({ type: 'open', streamId, endpoint, payload: { args } }));
+      const frame = await nextFrameOrFail(connection, `${endpoint} admin roundtrip`);
+      assert.deepEqual(frame, {
+        type: 'item',
+        streamId,
+        value: { type: 'terminal/output', terminalId: 'term-owner-1', data: 'owner-shell-bytes' },
+      });
+    }
+    assert.deepEqual(remoteMuxOpenEndpoints, ['terminal/follow', 'terminal/retain']);
+    assert.deepEqual(
+      remoteMuxOpenFrames.map((frame) => frame.endpoint),
+      ['terminal/follow', 'terminal/retain'],
+    );
+    assert.equal(connection.client.readyState, NodeWebSocket.OPEN, '主用户 terminal 流不应关闭 carrier');
+  } finally {
+    connection.client.close();
+  }
+});
+
+test('Remote mux：子用户合法形状未知端点只结束逻辑流且 carrier 存活', async () => {
+  remoteMuxOpenEndpoints = [];
+  remoteMuxOpenFrames = [];
+  remoteMuxCancelStreamIds = [];
+  const subUser = db.createUser('remote-mux-unknown-endpoint-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
+    allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: ['session-visible'],
+  });
+  db.markSessionGrantsSeeded(subUser.id);
+  const subToken = jwt.sign({ sub: String(subUser.id), username: subUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' });
+  const connection = await openRemoteMux({
+    cookie: `dsh_gateway_token=${subToken}`, origin: 'http://127.0.0.1', host: '127.0.0.1',
+  });
+  try {
+    connection.client.send(JSON.stringify({
+      type: 'open', streamId: 'unknown-deep', endpoint: 'future/remote/terminal/stream', payload: { args: {} },
+    }));
+    const rejected = await nextFrameOrFail(connection, 'unknown deep endpoint rejection');
+    assert.deepEqual(rejected, {
+      type: 'error', streamId: 'unknown-deep',
+      error: { code: 'gateway/forbidden', message: 'Remote endpoint is not available for this user', details: {} },
+    });
+    assert.equal(connection.client.readyState, NodeWebSocket.OPEN, '合法形状的未知端点不得关闭 carrier');
+    assert.deepEqual(remoteMuxOpenEndpoints, [], '未知端点不得到达上游');
+    assert.deepEqual(remoteMuxCancelStreamIds, [], '本地拒绝的流不应伪造上游 cancel');
+  } finally {
+    connection.client.close();
+  }
+});
+
+test('Remote mux：子用户 terminal/follow 与 terminal/retain 只结束该逻辑流，workspace baseline 仍可达且上游收不到 terminal', async () => {
+  remoteMuxOpenEndpoints = [];
+  remoteMuxOpenFrames = [];
+  const subUser = db.createUser('remote-mux-terminal-denied-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
+    allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: ['session-visible'],
+  });
+  db.markSessionGrantsSeeded(subUser.id);
+  const subToken = jwt.sign({ sub: String(subUser.id), username: subUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' });
+  const connection = await openRemoteMux({
+    cookie: `dsh_gateway_token=${subToken}`, origin: 'http://127.0.0.1', host: '127.0.0.1',
+  });
+  try {
+    // 子用户永远不能 create 终端，因此这两条 open 只能被拒绝；关键是只拒绝该
+    // 逻辑流（error + active 删除），而不是关掉整条物理 carrier。
+    connection.client.send(JSON.stringify({
+      type: 'open', streamId: 'terminal-retain-denied', endpoint: 'terminal/retain', payload: { args: {} },
+    }));
+    const retainError = await nextFrameOrFail(connection, 'terminal/retain rejection');
+    assert.equal(retainError.type, 'error');
+    assert.equal(retainError.streamId, 'terminal-retain-denied');
+    const retainDetail = retainError.error as Record<string, unknown>;
+    assert.equal(retainDetail.code, 'terminal/unavailable');
+    assert.equal(typeof retainDetail.message, 'string');
+    assert.ok((retainDetail.message as string).length > 0, 'terminal/unavailable 必须带固定非空 message');
+    assert.deepEqual(retainDetail.details, {});
+
+    connection.client.send(JSON.stringify({
+      type: 'open', streamId: 'terminal-follow-denied', endpoint: 'terminal/follow',
+      payload: { args: { request: { address: { kind: 'session', sessionId: 'session-visible' } } } },
+    }));
+    const followError = await nextFrameOrFail(connection, 'terminal/follow rejection');
+    assert.equal(followError.type, 'error');
+    assert.equal(followError.streamId, 'terminal-follow-denied');
+    assert.equal((followError.error as Record<string, unknown>).code, 'terminal/unavailable');
+
+    // terminal 只结束该逻辑流：同一 socket 的 workspace/follow 仍能建立 baseline。
+    connection.client.send(JSON.stringify({
+      type: 'open', streamId: 'terminal-survivor-workspace', endpoint: 'workspace/follow', payload: { args: {} },
+    }));
+    const baseline = await nextFrameOrFail(connection, 'workspace baseline after terminal rejection');
+    assert.equal(baseline.streamId, 'terminal-survivor-workspace');
+    assert.equal(baseline.type, 'item');
+    assert.equal((baseline.value as { type?: unknown }).type, 'baseline');
+
+    assert.equal(connection.client.readyState, NodeWebSocket.OPEN, 'terminal 拒绝不得关闭物理 carrier');
+    assert.deepEqual(remoteMuxOpenEndpoints, ['workspace/follow'], 'terminal 逻辑流不得转发到上游');
+    assert.equal(
+      remoteMuxOpenFrames.some((frame) => typeof frame.endpoint === 'string' && frame.endpoint.startsWith('terminal/')),
+      false,
+      '上游不得收到任何 terminal 端点',
+    );
+  } finally {
+    connection.client.close();
+  }
+});
+
+test('Remote mux：allowSsh=true 的子用户 terminal/follow 与 terminal/retain 原样转发到上游', async () => {
+  remoteMuxOpenEndpoints = [];
+  remoteMuxOpenFrames = [];
+  const subUser = db.createUser('remote-mux-terminal-allowed-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: [], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
+    allowSsh: true, allowedAgentPresets: null, banned: false, sandboxMode: null,
+    disabledSessions: [], allowedSessionIds: [],
+  });
+  db.markSessionGrantsSeeded(subUser.id);
+  const subToken = jwt.sign({ sub: String(subUser.id), username: subUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' });
+  const connection = await openRemoteMux({
+    cookie: `dsh_gateway_token=${subToken}`, origin: 'http://127.0.0.1', host: '127.0.0.1',
+  });
+  try {
+    for (const [streamId, endpoint] of [
+      ['terminal-follow-allowed', 'terminal/follow'],
+      ['terminal-retain-allowed', 'terminal/retain'],
+    ] as const) {
+      connection.client.send(JSON.stringify({
+        type: 'open', streamId, endpoint, payload: { args: {} },
+      }));
+      const frame = await nextFrameOrFail(connection, `${endpoint} allowed roundtrip`);
+      assert.deepEqual(frame, {
+        type: 'item',
+        streamId,
+        value: { type: 'terminal/output', terminalId: 'term-owner-1', data: 'owner-shell-bytes' },
+      });
+    }
+    assert.deepEqual(remoteMuxOpenEndpoints, ['terminal/follow', 'terminal/retain']);
+    assert.equal(connection.client.readyState, NodeWebSocket.OPEN, '官方 terminal 流不应关闭 carrier');
+  } finally {
+    connection.client.close();
+  }
+});
+
+test('Remote mux：allowSsh 从 true 改为 false 会立即关闭子用户 terminal carrier', async () => {
+  remoteMuxOpenEndpoints = [];
+  remoteMuxOpenFrames = [];
+  const subUser = db.createUser('remote-mux-terminal-revoked-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: [], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
+    allowSsh: true, allowedAgentPresets: null, banned: false, sandboxMode: null,
+    disabledSessions: [], allowedSessionIds: [],
+  });
+  db.markSessionGrantsSeeded(subUser.id);
+  const subToken = jwt.sign({ sub: String(subUser.id), username: subUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' });
+  const connection = await openRemoteMux({
+    cookie: `dsh_gateway_token=${subToken}`, origin: 'http://127.0.0.1', host: '127.0.0.1',
+  });
+  try {
+    connection.client.send(JSON.stringify({
+      type: 'open', streamId: 'terminal-revoke-stream', endpoint: 'terminal/follow', payload: { args: {} },
+    }));
+    const forwarded = await nextFrameOrFail(connection, 'terminal before revoke');
+    assert.equal(forwarded.type, 'item');
+    assert.deepEqual(remoteMuxOpenEndpoints, ['terminal/follow']);
+
+    const closed = waitForWebSocketClose(connection.client, 'terminal permission revoke');
+    const payload = JSON.stringify({
+      userId: subUser.id,
+      allowedFolders: [],
+      allowSsh: false,
+    });
+    const saved = await gatewayReq(
+      'POST',
+      '/gateway/api/permissions',
+      { 'content-type': 'application/json', 'content-length': String(Buffer.byteLength(payload)) },
+      payload,
+    );
+    assert.equal(saved.status, 200, saved.body);
+    assert.deepEqual(await closed, { code: 1012, reason: 'Permissions changed' });
+    assert.equal(db.getPermissions(subUser.id)?.allow_ssh, false);
+  } finally {
+    connection.client.close();
+  }
+});
+
+// ── 0.1.7-alpha.1 网关修复 ────────────────────────────────────────────────
+
+/** 已授权 session-visible（工作区 /workspaces/visible）的子用户，并用 Remote baseline
+ *  填充网关的会话归属快照（与真实前端启动顺序一致）。 */
+async function authorizedSubuserFixture(
+  username: string,
+  options: { allowSsh?: boolean; allowGitDownload?: boolean } = {},
+): Promise<{
+  userId: number;
+  cookie: string;
+  connection: { client: any; nextFrame: () => Promise<Record<string, unknown>> };
+  baseline: Record<string, unknown>;
+}> {
+  const subUser = db.createUser(username, '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: ['/workspaces/visible'],
+    hourlyTokenLimit: null,
+    dailyMinutesLimit: null,
+    allowUpload: false,
+    allowGitDownload: options.allowGitDownload === true,
+    allowWorkspaceCreate: false,
+    ...(options.allowSsh === true ? { allowSsh: true } : {}),
+    allowedAgentPresets: null,
+    banned: false,
+    sandboxMode: null,
+    disabledSessions: [],
+    allowedSessionIds: ['session-visible'],
+  });
+  db.markSessionGrantsSeeded(subUser.id);
+  const subCookie = `dsh_gateway_token=${jwt.sign(
+    { sub: String(subUser.id), username: subUser.username, cv: 0 },
+    'test-secret',
+    { expiresIn: '12h' },
+  )}`;
+  const connection = await openRemoteMux({ cookie: subCookie, origin: 'http://127.0.0.1', host: '127.0.0.1' });
+  connection.client.send(JSON.stringify({
+    type: 'open', streamId: `fixture-${username}`, endpoint: 'workspace/follow', payload: { args: {} },
+  }));
+  const baseline = await nextFrameOrFail(connection, `${username} workspace baseline`);
+  assert.equal(baseline.type, 'item');
+  return { userId: subUser.id, cookie: subCookie, connection, baseline };
+}
+
+/** 0.1.7-alpha.1 workspaceFiles/readBytes 的 ClientConnection 信封。 */
+function readBytesEnvelope(scopeId: string, targetPath: string, options: unknown): string {
+  return JSON.stringify({
+    type: 'client-request',
+    rpcId: 'workspace-files-readBytes',
+    method: 'workspaceFiles/readBytes',
+    payload: { args: { workspaceFileScopeId: scopeId, path: targetPath, options } },
+  });
+}
+
+/** 打开 Remote mux，发送一条原始消息，返回 carrier 的关闭码与原因。 */
+async function remoteMuxCloseAfterRawSend(cookieValue: string, payload: string | Buffer): Promise<{ code: number; reason: string }> {
+  const client = new NodeWebSocket(`ws://127.0.0.1:${String(gatewayPort)}/api/remote.mux`, {
+    headers: { cookie: cookieValue, origin: 'http://127.0.0.1', host: '127.0.0.1' },
+  });
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => { client.terminate(); reject(new Error('Remote mux open timeout')); }, 3000);
+    client.once('open', () => { clearTimeout(timer); resolve(); });
+    client.once('error', (error: Error) => { clearTimeout(timer); reject(error); });
+  });
+  const closed = waitForWebSocketClose(client, 'raw Remote mux send');
+  client.send(payload);
+  const result = await closed;
+  client.terminate();
+  return result;
+}
+
+test('Remote mux alpha.1 上行：仅透明放行的已开流转发 item/end，未知或过滤流只丢弃该帧', async () => {
+  remoteMuxOpenEndpoints = [];
+  remoteMuxUplinkFrames = [];
+  const fixture = await authorizedSubuserFixture('mux-uplink-user', { allowSsh: true });
+  try {
+    fixture.connection.client.send(JSON.stringify({
+      type: 'open', streamId: 'uplink-terminal', endpoint: 'terminal/follow', payload: { args: {} },
+    }));
+    const output = await nextFrameOrFail(fixture.connection, 'terminal output');
+    assert.equal(output.streamId, 'uplink-terminal');
+
+    fixture.connection.client.send(JSON.stringify({
+      type: 'item', streamId: 'uplink-terminal', value: { type: 'terminal/input', data: 'ls\n' },
+    }));
+    fixture.connection.client.send(JSON.stringify({ type: 'end', streamId: 'uplink-terminal' }));
+    // 未打开的流：只丢弃该帧，不转发、不关闭 carrier
+    fixture.connection.client.send(JSON.stringify({
+      type: 'item', streamId: 'never-opened', value: { type: 'terminal/input', data: 'pwn' },
+    }));
+    fixture.connection.client.send(JSON.stringify({ type: 'end', streamId: 'never-opened' }));
+    // 已打开但被网关按租户逐帧过滤的流：不得借上行帧把数据注入该流
+    fixture.connection.client.send(JSON.stringify({
+      type: 'item', streamId: 'fixture-mux-uplink-user', value: { type: 'emit', event: 'x', args: [] },
+    }));
+    fixture.connection.client.send(JSON.stringify({ type: 'end', streamId: 'fixture-mux-uplink-user' }));
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.deepEqual(
+      remoteMuxUplinkFrames,
+      [
+        { type: 'item', streamId: 'uplink-terminal', value: { type: 'terminal/input', data: 'ls\n' } },
+        { type: 'end', streamId: 'uplink-terminal' },
+      ],
+      '只有透明放行的已开流可以上行转发',
+    );
+    assert.equal(fixture.connection.client.readyState, NodeWebSocket.OPEN, '丢弃上行帧不得关闭物理 carrier');
+  } finally {
+    fixture.connection.client.close();
+  }
+});
+
+test('Remote mux alpha.1 上行：畸形 item/end 仍 1008，二进制帧仍 1003', async () => {
+  for (const frame of [
+    { type: 'item' },
+    { type: 'item', streamId: 'x', extra: 1 },
+    { type: 'item', streamId: '' },
+    { type: 'end' },
+    { type: 'end', streamId: 'x', value: 1 },
+    { type: 'end', streamId: 'x', streamId2: 'y' },
+  ]) {
+    assert.deepEqual(
+      await remoteMuxCloseAfterRawSend(cookie, JSON.stringify(frame)),
+      { code: 1008, reason: 'invalid Remote stream request' },
+      JSON.stringify(frame),
+    );
+  }
+  assert.deepEqual(
+    await remoteMuxCloseAfterRawSend(cookie, Buffer.from([0x01, 0x02, 0x03])),
+    { code: 1003, reason: 'text messages required' },
+  );
+});
+
+test('Remote mux 0.1.7-alpha.1：workspace/follow baseline 与 pinned 增量只下发已授权会话', async () => {
+  remoteMuxBaselinePinnedSessionIds = ['session-visible', 'session-hidden', 's-other-user', 42];
+  remoteMuxPinnedIncrement = ['session-hidden', 'session-visible'];
+  const fixture = await authorizedSubuserFixture('mux-pinned-user');
+  try {
+    const value = (fixture.baseline.value as { value: Record<string, unknown> }).value;
+    assert.deepEqual(value.archivedSessionIds, []);
+    assert.deepEqual(value.pinnedSessionIds, ['session-visible'], '全局 pin 集合里的其他租户会话必须被过滤');
+    const increment = await nextFrameOrFail(fixture.connection, 'pinned increment');
+    assert.deepEqual(increment, {
+      type: 'item',
+      streamId: 'fixture-mux-pinned-user',
+      value: { type: 'pinned', pinnedSessionIds: ['session-visible'] },
+    });
+    assert.equal(fixture.connection.client.readyState, NodeWebSocket.OPEN);
+  } finally {
+    remoteMuxBaselinePinnedSessionIds = null;
+    remoteMuxPinnedIncrement = null;
+    fixture.connection.client.close();
+  }
+});
+
+test('Remote mux 0.1.6 兼容：baseline 不含 pinnedSessionIds 时不补发该字段', async () => {
+  const fixture = await authorizedSubuserFixture('mux-0-1-6-pinned-user');
+  try {
+    const value = (fixture.baseline.value as { value: Record<string, unknown> }).value;
+    assert.equal(Object.hasOwn(value, 'pinnedSessionIds'), false);
+    assert.deepEqual(value.archivedSessionIds, []);
+  } finally {
+    fixture.connection.client.close();
+  }
+});
+
+test('权限：workspace.pinSession 响应只回子用户已授权会话的 pin 集合', async () => {
+  const fixture = await authorizedSubuserFixture('pin-response-user');
+  const originalCookie = cookie;
+  cookie = fixture.cookie;
+  try {
+    const allowed = await gatewayReq(
+      'POST',
+      '/api/workspace.pinSession',
+      { 'content-type': 'application/json' },
+      JSON.stringify({ sessionId: 'session-visible' }),
+    );
+    assert.equal(allowed.status, 200, allowed.body);
+    const parsed = JSON.parse(allowed.body) as { result?: { ok?: boolean; value?: { pinnedSessionIds?: unknown } } };
+    assert.deepEqual(
+      parsed.result?.value?.pinnedSessionIds,
+      ['session-visible'],
+      '全局 pin 集合里的其他租户会话必须被过滤掉',
+    );
+    const hidden = await gatewayReq(
+      'POST',
+      '/api/workspace.pinSession',
+      { 'content-type': 'application/json' },
+      JSON.stringify({ sessionId: 'session-hidden' }),
+    );
+    assert.equal(hidden.status, 403, '未授权会话的 pin 请求侧即被拒绝');
+  } finally {
+    cookie = originalCookie;
+    fixture.connection.client.close();
+  }
+});
+
+test('权限：present.open 的 GET 与 POST 都做会话归属校验，POST 仍校验 action', async () => {
+  const fixture = await authorizedSubuserFixture('present-open-user');
+  const originalCookie = cookie;
+  cookie = fixture.cookie;
+  try {
+    assert.equal(
+      (await gatewayReq('GET', '/api/present.open?sessionId=session-hidden&seq=1&index=0')).status,
+      403,
+      'GET 不得绕过会话归属校验',
+    );
+    assert.equal((await gatewayReq('GET', '/api/present.open?sessionId=session-visible&seq=1&index=0')).status, 200);
+    assert.equal(
+      (await gatewayReq('GET', '/api/present.open?sessionId=session-visible&seq=nope&index=0')).status,
+      403,
+      '不可解析的坐标一律 fail-closed',
+    );
+    assert.equal(
+      (await gatewayReq('POST', '/api/present.open?sessionId=session-visible&seq=1&index=0&action=evil')).status,
+      403,
+      'POST 仍校验 action',
+    );
+    assert.equal(
+      (await gatewayReq('POST', '/api/present.open?sessionId=session-visible&seq=1&index=0&action=reveal')).status,
+      200,
+    );
+  } finally {
+    cookie = originalCookie;
+    fixture.connection.client.close();
+  }
+});
+
+test('权限：0.1.7 changes.open 的 GET/POST 都按会话归属校验', async () => {
+  const fixture = await authorizedSubuserFixture('changes-route-user');
+  const originalCookie = cookie;
+  cookie = fixture.cookie;
+  try {
+    assert.equal(
+      (await gatewayReq('GET', '/api/changes.open?sessionId=session-visible&seq=1&index=0')).status,
+      200,
+      '0.1.7 GET changes.open 查询关联应用必须可用',
+    );
+    assert.equal((await gatewayReq('GET', '/api/changes.summary?sessionId=session-visible&seq=1')).status, 200);
+    assert.equal((await gatewayReq('GET', '/api/changes.diff?sessionId=session-visible&seq=1&index=0')).status, 200);
+    assert.equal((await gatewayReq('GET', '/api/changes.summary?sessionId=session-hidden&seq=1')).status, 403);
+    assert.equal((await gatewayReq('GET', '/api/changes.open?sessionId=session-hidden&seq=1&index=0')).status, 403);
+    assert.equal((await gatewayReq('POST', '/api/changes.open?sessionId=session-visible&seq=1&index=0')).status, 200);
+    assert.equal((await gatewayReq('POST', '/api/changes.open?sessionId=session-hidden&seq=1&index=0')).status, 403);
+  } finally {
+    cookie = originalCookie;
+    fixture.connection.client.close();
+  }
+});
+
+test('权限：workspaceFiles/readBytes 的 options.baseFile 与 path 同口径 fail-closed', async () => {
+  const fixture = await authorizedSubuserFixture('readBytes-basefile-user');
+  const originalCookie = cookie;
+  cookie = fixture.cookie;
+  const postReadBytes = (body: string) =>
+    gatewayReq('POST', '/api/workspaceFiles/readBytes', { 'content-type': 'application/json' }, body);
+  try {
+    // 基准文件与相对目标都落在会话工作区内：放行并到达上游
+    lastUpstreamUrl = '';
+    const allowed = await postReadBytes(
+      readBytesEnvelope('session-visible', 'b.txt', { baseFile: '/workspaces/visible/sub/a.txt' }),
+    );
+    assert.equal(allowed.status, 200, allowed.body);
+    assert.ok(lastUpstreamUrl.startsWith('/api/workspaceFiles/readBytes'));
+
+    // 相对目标逃逸出会话根：上游会读 resolve(dirname(baseFile), path)，网关必须先拦下
+    assert.equal(
+      (await postReadBytes(readBytesEnvelope('session-visible', '../../etc/passwd', { baseFile: '/workspaces/visible/a.txt' }))).status,
+      403,
+    );
+    // 基准文件在工作区外 → 目标也在工作区外
+    assert.equal(
+      (await postReadBytes(readBytesEnvelope('session-visible', 'hostname', { baseFile: '/etc/passwd' }))).status,
+      403,
+    );
+    // 带 baseFile 时 path 必须是相对路径，否则上游会把目标甩到工作区外
+    assert.equal(
+      (await postReadBytes(readBytesEnvelope('session-visible', '/etc/passwd', { baseFile: '/workspaces/visible/a.txt' }))).status,
+      403,
+    );
+    // 畸形 options 一律拒绝
+    for (const options of [
+      'x',
+      5,
+      [],
+      { baseFile: 5 },
+      { baseFile: '' },
+      { baseFile: '/workspaces/visible/a.txt', extra: 1 },
+      { range: { offset: 'x' } },
+      { range: [] },
+    ]) {
+      assert.equal(
+        (await postReadBytes(readBytesEnvelope('session-visible', 'b.txt', options))).status,
+        403,
+        JSON.stringify(options),
+      );
+    }
+    // 无 baseFile 的既有口径不变
+    assert.equal((await postReadBytes(readBytesEnvelope('session-visible', 'sub/b.txt', {}))).status, 200);
+    assert.equal((await postReadBytes(readBytesEnvelope('session-visible', 'sub/b.txt', undefined))).status, 200);
+    assert.equal((await postReadBytes(readBytesEnvelope('session-visible', '/etc/passwd', undefined))).status, 403);
+    // 未授权的 scope 不能借 baseFile 读取工作区内的文件
+    assert.equal(
+      (await postReadBytes(readBytesEnvelope('session-hidden', 'sub/b.txt', { baseFile: '/workspaces/visible/a.txt' }))).status,
+      403,
+    );
+  } finally {
+    cookie = originalCookie;
+    fixture.connection.client.close();
+  }
+});
+
+// ── 0.1.7-alpha.1 对象级授权 / 授权版本回归 ─────────────────────────────
+
+test('权限：session.export 对子用户按 query sessionId 做归属校验，缺失/越权一律 403', async () => {
+  const fixture = await authorizedSubuserFixture('session-export-user', { allowGitDownload: true });
+  const originalCookie = cookie;
+  const sub = (method: string, url: string) => gatewayReq(method, url, { cookie: fixture.cookie });
+  try {
+    // 前置对照：授权会话可用，说明下面 403 的原因确实只是导出路由的归属校验
+    assert.equal((await sub('GET', '/api/changes.summary?sessionId=session-visible&seq=1')).status, 200);
+
+    // 缺失 sessionId：即使 allow_git_download=true 也必须 403，且不得到达上游
+    const beforeMissing = lastUpstreamUrl;
+    assert.equal((await sub('GET', '/api/session.export')).status, 403);
+    assert.equal(lastUpstreamUrl, beforeMissing, '缺失 sessionId 的导出请求不得到达上游');
+
+    // 越权 sessionId：403 且不得到达上游（否则等于拿走其他租户的会话日志）
+    const beforeForeign = lastUpstreamUrl;
+    assert.equal((await sub('GET', '/api/session.export?sessionId=session-hidden')).status, 403);
+    assert.equal(lastUpstreamUrl, beforeForeign, '他人会话的导出请求不得到达上游');
+    assert.equal((await sub('HEAD', '/api/session.export?sessionId=session-hidden')).status, 403, 'HEAD 走同一套归属校验');
+    assert.equal((await sub('HEAD', '/api/session/export?sessionId=session-hidden')).status, 403, '斜杠写法同样校验');
+    assert.equal((await sub('GET', '/api/session.export?sessionId=')).status, 403, '空 sessionId 同样拒绝');
+
+    // 已授权会话：放行并到达上游（是否允许下载本身仍由 allow_git_download 控制）
+    lastUpstreamUrl = '';
+    const allowed = await sub('GET', '/api/session.export?sessionId=session-visible');
+    assert.equal(allowed.status, 200, allowed.body);
+    assert.ok(lastUpstreamUrl.startsWith('/api/session.export'), `必须转发到上游：${lastUpstreamUrl}`);
+
+    // 主用户不受该限制
+    cookie = originalCookie;
+    assert.equal((await gatewayReq('GET', '/api/session.export?sessionId=session-hidden')).status, 200);
+    assert.equal((await gatewayReq('GET', '/api/session.export')).status, 200);
+  } finally {
+    cookie = originalCookie;
+    fixture.connection.client.close();
+  }
+});
+
+test('权限：workspaceFiles/changes 的 HTTP unary 面对子用户显式 403，主用户透传', async () => {
+  const fixture = await authorizedSubuserFixture('workspace-files-changes-user');
+  const originalCookie = cookie;
+  const envelope = (method: string): string => JSON.stringify({
+    type: 'client-request',
+    rpcId: 'workspace-files-changes',
+    method,
+    payload: { args: { workspaceFileScopeId: 'session-visible', path: '/workspaces/visible' } },
+  });
+  try {
+    // scope + path 都合法：旧实现会把它当普通只读 RPC 转发出去（等上游报 signature-invalid），
+    // 这里必须由网关自己显式拒绝。
+    const before = lastUpstreamUrl;
+    assert.equal(
+      (await gatewayReq('POST', '/api/workspaceFiles/changes', { 'content-type': 'application/json', cookie: fixture.cookie }, envelope('workspaceFiles/changes'))).status,
+      403,
+    );
+    assert.equal(
+      (await gatewayReq('POST', '/api/workspaceFiles.changes', { 'content-type': 'application/json', cookie: fixture.cookie }, envelope('workspaceFiles.changes'))).status,
+      403,
+    );
+    assert.equal(lastUpstreamUrl, before, 'changes 的 HTTP unary 请求不得到达上游');
+
+    // 不误伤同一命名空间下仍按 scope + path 授权的只读 RPC
+    assert.equal(
+      (await gatewayReq(
+        'POST',
+        '/api/workspaceFiles/stat',
+        { 'content-type': 'application/json', cookie: fixture.cookie },
+        JSON.stringify({
+          type: 'client-request', rpcId: 'workspace-files-stat', method: 'workspaceFiles/stat',
+          payload: { args: { workspaceFileScopeId: 'session-visible', path: '/workspaces/visible/a.txt' } },
+        }),
+      )).status,
+      200,
+    );
+
+    // 主用户不受限制
+    cookie = originalCookie;
+    assert.equal(
+      (await gatewayReq('POST', '/api/workspaceFiles.changes', { 'content-type': 'application/json' }, envelope('workspaceFiles.changes'))).status,
+      200,
+    );
+  } finally {
+    cookie = originalCookie;
+    fixture.connection.client.close();
+  }
+});
+
+test('权限：子用户 workspaceFiles/changes 只允许授权会话工作区，并过滤越界变化', async () => {
+  remoteMuxOpenEndpoints = [];
+  const fixture = await authorizedSubuserFixture('workspace-files-change-feed-user');
+  try {
+    fixture.connection.client.send(JSON.stringify({
+      type: 'open',
+      streamId: 'workspace-file-change-feed',
+      endpoint: 'workspaceFiles/changes',
+      payload: { args: { workspaceFileScopeId: 'session-visible', path: '/workspaces/visible/app.ts' } },
+    }));
+    const ready = await nextFrameOrFail(fixture.connection, 'workspace file changes ready');
+    assert.deepEqual(ready, {
+      type: 'item', streamId: 'workspace-file-change-feed', value: { kind: 'ready' },
+    });
+    const allowed = await nextFrameOrFail(fixture.connection, 'workspace file changes allowed change');
+    assert.deepEqual(allowed, {
+      type: 'item', streamId: 'workspace-file-change-feed',
+      value: { kind: 'change', change: { absolutePath: '/workspaces/visible/app.ts', version: 'v1' } },
+    });
+    const ended = await nextFrameOrFail(fixture.connection, 'workspace file changes end');
+    assert.deepEqual(ended, { type: 'end', streamId: 'workspace-file-change-feed' });
+    assert.equal(remoteMuxOpenEndpoints.includes('workspaceFiles/changes'), true);
+
+    fixture.connection.client.send(JSON.stringify({
+      type: 'open',
+      streamId: 'workspace-file-change-denied',
+      endpoint: 'workspaceFiles/changes',
+      payload: { args: { workspaceFileScopeId: 'session-hidden', path: '/workspaces/hidden/secret.txt' } },
+    }));
+    const denied = await nextFrameOrFail(fixture.connection, 'workspace file changes denied');
+    assert.equal(denied.type, 'error');
+    assert.equal((denied.error as { code?: string }).code, 'gateway/forbidden');
+    assert.equal(remoteMuxOpenEndpoints.includes('workspaceFiles/changes'), true, 'denied stream must not reach upstream');
+  } finally {
+    fixture.connection.client.close();
+  }
+});
+
+test('权限：workspaceFiles 目标路径同时按词法与 canonical 口径判定（符号链接不可逃逸）', async (t) => {
+  const tempRoot = mkdtempSync(path.join(os.tmpdir(), 'dshpw-wf-root-'));
+  const outsideRoot = mkdtempSync(path.join(os.tmpdir(), 'dshpw-wf-outside-'));
+  const originalCookie = cookie;
+  const previousVisiblePath = remoteMuxBaselineVisiblePath;
+  let connection: Awaited<ReturnType<typeof openRemoteMux>> | null = null;
+  try {
+    writeFileSync(path.join(tempRoot, 'inside.txt'), 'inside');
+    writeFileSync(path.join(outsideRoot, 'secret.txt'), 'secret');
+    const linkPath = path.join(tempRoot, 'escape');
+    let linked = false;
+    for (const type of ['junction', 'dir'] as const) {
+      try {
+        symlinkSync(outsideRoot, linkPath, type);
+        linked = true;
+        break;
+      } catch {
+        // 当前平台/权限不支持目录符号链接：下面显式跳过该用例
+      }
+    }
+    if (!linked) {
+      t.skip('当前平台无法创建目录符号链接/junction，跳过 canonical 逃逸回归');
+      return;
+    }
+    // 用真实路径作为授权根：使根自身的词法口径与 canonical 口径一致
+    const rootPath = realpathSync(tempRoot).replace(/\\/g, '/');
+    const subUser = db.createUser('workspace-files-canonical-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+    db.setPermissions(subUser.id, {
+      allowedFolders: [rootPath], hourlyTokenLimit: null, dailyMinutesLimit: null,
+      allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false, allowSsh: false,
+      allowedAgentPresets: null, banned: false, sandboxMode: null,
+      disabledSessions: [], allowedSessionIds: ['session-visible'],
+    });
+    db.markSessionGrantsSeeded(subUser.id);
+    const subCookie = `dsh_gateway_token=${jwt.sign(
+      { sub: String(subUser.id), username: subUser.username, cv: 0 },
+      'test-secret',
+      { expiresIn: '12h' },
+    )}`;
+    // 让会话 cwd 落在真实临时根上（Remote baseline 是唯一的快照来源）
+    remoteMuxBaselineVisiblePath = rootPath;
+    connection = await openRemoteMux({ cookie: subCookie, origin: 'http://127.0.0.1', host: '127.0.0.1' });
+    connection.client.send(JSON.stringify({
+      type: 'open', streamId: 'canonical-workspace', endpoint: 'workspace/follow', payload: { args: {} },
+    }));
+    await nextFrameOrFail(connection, 'canonical workspace baseline');
+    const read = (target: string) => gatewayReq(
+      'POST',
+      '/api/workspaceFiles/readBytes',
+      { 'content-type': 'application/json', cookie: subCookie },
+      JSON.stringify({
+        type: 'client-request', rpcId: 'workspace-files-canonical', method: 'workspaceFiles/readBytes',
+        payload: { args: { workspaceFileScopeId: 'session-visible', path: target } },
+      }),
+    );
+    // 会话根内的真实文件：词法与 canonical 都命中 → 放行
+    assert.equal((await read(`${rootPath}/inside.txt`)).status, 200);
+    // 词法上在根内、真实路径经 junction/symlink 落在根外 → canonical 口径必须拒绝
+    const escapedBefore = lastUpstreamUrl;
+    const escaped = await read(`${rootPath}/escape/secret.txt`);
+    assert.equal(escaped.status, 403, escaped.body);
+    assert.equal(lastUpstreamUrl, escapedBefore, '经符号链接逃逸的读取不得到达上游');
+  } finally {
+    remoteMuxBaselineVisiblePath = previousVisiblePath;
+    cookie = originalCookie;
+    connection?.client.close();
+    for (const dir of [tempRoot, outsideRoot]) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        // Windows 上句柄可能未释放：临时目录交给系统回收
+      }
+    }
+  }
+});
+
+test('revision：权限变更后旧基线立即失效，且在途 create 响应不得回写授权', async () => {
+  const fixture = await authorizedSubuserFixture('epoch-fence-user');
+  const originalCookie = cookie;
+  const subJson = { 'content-type': 'application/json', cookie: fixture.cookie };
+  delaySessionCreateResponse = true;
+  releaseSessionCreateResponse = null;
+  try {
+    // 前置：旧基线已经授权 session-visible
+    assert.equal(
+      (await gatewayReq('GET', '/api/changes.summary?sessionId=session-visible&seq=1', { cookie: fixture.cookie })).status,
+      200,
+    );
+
+    // 在途 create（上游挂起响应）
+    const create = gatewayReq('POST', '/api/session.create', subJson, JSON.stringify({
+      type: 'client-request', rpcId: 'epoch-fence-create', method: 'session/create',
+      payload: { args: { request: { workspaceId: 'workspace-visible' } } },
+    }));
+    for (let attempt = 0; attempt < 20 && releaseSessionCreateResponse === null; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+    const release = releaseSessionCreateResponse as (() => void) | null;
+    if (release === null) throw new Error('mock DSH must receive the delayed create request');
+
+    // 权限变更：撤销该用户的会话授权（去 grant + 逐会话禁用）
+    const revoked = JSON.stringify({
+      userId: fixture.userId,
+      allowedFolders: ['/workspaces/visible'],
+      hourlyTokenLimit: null,
+      dailyMinutesLimit: null,
+      allowUpload: false,
+      allowGitDownload: false,
+      allowWorkspaceCreate: false,
+      allowedAgentPresets: null,
+      banned: false,
+      sandboxMode: null,
+      disabledSessions: ['session-visible'],
+      allowedSessionIds: [],
+    });
+    const saved = await gatewayReq(
+      'POST',
+      '/gateway/api/permissions',
+      { 'content-type': 'application/json', 'content-length': String(Buffer.byteLength(revoked)) },
+      revoked,
+    );
+    assert.equal(saved.status, 200, saved.body);
+    assert.deepEqual(db.listUserSessionGrants(fixture.userId), []);
+
+    // 旧基线必须立即失效，不能等到下一次 baseline
+    assert.equal(
+      (await gatewayReq('GET', '/api/changes.summary?sessionId=session-visible&seq=1', { cookie: fixture.cookie })).status,
+      403,
+      '撤销后旧授权快照不得继续放行',
+    );
+
+    // 释放在途响应：授权已变，旧请求不得把新会话写回 grant/快照
+    release();
+    releaseSessionCreateResponse = null;
+    const response = await create;
+    assert.equal(response.status, 200, response.body);
+    assert.deepEqual(db.listUserSessionGrants(fixture.userId), [], '在途 create 响应不得回写已撤销的授权');
+    assert.equal(
+      (await gatewayReq('GET', `/api/changes.summary?sessionId=${wireCreatedSessionId}&seq=1`, { cookie: fixture.cookie })).status,
+      403,
+      '在途响应也不得把新会话写回授权快照',
+    );
+  } finally {
+    delaySessionCreateResponse = false;
+    const pendingRelease = releaseSessionCreateResponse as (() => void) | null;
+    releaseSessionCreateResponse = null;
+    if (pendingRelease !== null) pendingRelease();
+    cookie = originalCookie;
+    fixture.connection.client.close();
+  }
+});
+
+test('Remote mux：baseline 未建立且 grant 尚未 seed 时不得立即拒绝 session/follow', async () => {
+  const subUser = db.createUser('pending-follow-legacy-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
+    allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: [],
+  });
+  // 故意不 markSessionGrantsSeeded：模拟首次迁移前的旧用户（grant 还没 seed）
+  assert.equal(db.isSessionGrantsSeeded(subUser.id), false);
+  const subCookie = `dsh_gateway_token=${jwt.sign(
+    { sub: String(subUser.id), username: subUser.username, cv: 0 },
+    'test-secret',
+    { expiresIn: '12h' },
+  )}`;
+  remoteMuxOpenEndpoints = [];
+  const connection = await openRemoteMux({ cookie: subCookie, origin: 'http://127.0.0.1', host: '127.0.0.1' });
+  const early: Record<string, unknown>[] = [];
+  const onMessage = (data: Buffer): void => { early.push(JSON.parse(data.toString()) as Record<string, unknown>); };
+  try {
+    connection.client.on('message', onMessage);
+    connection.client.send(JSON.stringify({
+      type: 'open', streamId: 'legacy-follow', endpoint: 'session/follow',
+      payload: { args: { request: { address: { kind: 'session', sessionId: 'session-visible' } } } },
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    connection.client.off('message', onMessage);
+    assert.deepEqual(early, [], 'grant 尚未 seed 时既不得立即拒绝，也不得提前放行');
+    assert.deepEqual(remoteMuxOpenEndpoints, [], 'baseline 之前不得把 session/follow 转发到上游');
+
+    // baseline 到达后统一重读 grant/disabled/白名单/所有权（迁移 seed 后放行）
+    connection.client.send(JSON.stringify({
+      type: 'open', streamId: 'legacy-workspace', endpoint: 'workspace/follow', payload: { args: {} },
+    }));
+    const workspace = await nextFrameOrFail(connection, 'legacy workspace baseline');
+    const snapshot = await nextFrameOrFail(connection, 'legacy follow snapshot');
+    assert.equal(workspace.streamId, 'legacy-workspace');
+    assert.equal(snapshot.streamId, 'legacy-follow');
+    assert.equal((snapshot.value as { type?: string }).type, 'snapshot');
+    assert.deepEqual(remoteMuxOpenEndpoints, ['workspace/follow', 'session/follow']);
+    assert.equal(db.isSessionGrantsSeeded(subUser.id), true);
+    assert.deepEqual(db.listUserSessionGrants(subUser.id), ['session-visible']);
+  } finally {
+    connection.client.off('message', onMessage);
+    connection.client.close();
+  }
+});
+
+test('Remote mux：延迟等待 baseline 的 session/follow 有界 TTL，超时按逻辑流拒绝', async () => {
+  const subUser = db.createUser('pending-follow-ttl-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
+    allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: [],
+  });
+  assert.equal(db.isSessionGrantsSeeded(subUser.id), false);
+  const subCookie = `dsh_gateway_token=${jwt.sign(
+    { sub: String(subUser.id), username: subUser.username, cv: 0 },
+    'test-secret',
+    { expiresIn: '12h' },
+  )}`;
+  const connection = await openRemoteMux({ cookie: subCookie, origin: 'http://127.0.0.1', host: '127.0.0.1' });
+  try {
+    connection.client.send(JSON.stringify({
+      type: 'open', streamId: 'ttl-follow', endpoint: 'session/follow',
+      payload: { args: { request: { address: { kind: 'session', sessionId: 'session-visible' } } } },
+    }));
+    // 5 秒 TTL：等待超过 TTL 后发一条消息触发超时收敛（心跳也会收敛）
+    await new Promise((resolve) => setTimeout(resolve, 5_200));
+    assert.equal(connection.client.readyState, NodeWebSocket.OPEN, '超时只拒绝该逻辑流，不额外关闭 carrier');
+    connection.client.send(JSON.stringify({ type: 'cancel', streamId: 'ttl-follow' }));
+    const frame = await Promise.race([
+      connection.nextFrame(),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('pending session stream TTL rejection timeout')), 3_000)),
+    ]);
+    assert.deepEqual(frame, {
+      type: 'error',
+      streamId: 'ttl-follow',
+      error: { code: 'gateway/forbidden', message: 'Remote session not available for this user', details: {} },
+    });
+  } finally {
+    connection.client.close();
+  }
+});
+
+test('Remote mux：不完整的 baseline 不抹掉仍合法的会话授权快照', async () => {
+  const fixture = await authorizedSubuserFixture('baseline-retention-user');
+  const originalCookie = cookie;
+  cookie = fixture.cookie;
+  remoteMuxBaselineOmitVisibleWorkspace = true;
+  try {
+    assert.equal((await gatewayReq('GET', '/api/changes.summary?sessionId=session-visible&seq=1')).status, 200);
+    fixture.connection.client.send(JSON.stringify({
+      type: 'open', streamId: 'retention-workspace', endpoint: 'workspace/follow', payload: { args: {} },
+    }));
+    const baseline = await nextFrameOrFail(fixture.connection, 'incomplete workspace baseline');
+    const value = (baseline.value as { value?: { items?: unknown[] } }).value;
+    assert.deepEqual(value?.items, [], '第二个 baseline 确实不含可见工作区（用于验证保留行为）');
+
+    // grant 未变、未禁用、仍在白名单内且非他人所有权 → 旧快照条目必须保留
+    assert.equal(db.hasUserSessionGrant(fixture.userId, 'session-visible'), true);
+    assert.equal(
+      (await gatewayReq('GET', '/api/changes.summary?sessionId=session-visible&seq=1')).status,
+      200,
+      '不完整 baseline 不得把仍在授权内的会话从授权快照里抹掉',
+    );
+  } finally {
+    remoteMuxBaselineOmitVisibleWorkspace = false;
+    cookie = originalCookie;
+    fixture.connection.client.close();
+  }
 });

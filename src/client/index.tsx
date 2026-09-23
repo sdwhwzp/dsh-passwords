@@ -15,16 +15,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client';
 import type {} from '@deepseek-ai/dsh-client-ui-settings-general/client';
 import type {} from '@deepseek-ai/dsh-client-ui-slots';
 
-// dsh-passwords owns these extension slots; keep their declarations local so
-// the compiler verifies the same registration keys used by the runtime.
-declare module '@deepseek-ai/dsh-client-ui-slots' {
-  interface SlotMap {
-    'dsh-passwords.plugin.item': {
-      kind: 'list';
-      scope: 'root';
-    };
-  }
-}
+
 import { DshPasswordsCard } from './card';
 import { DshPasswordsSection } from './section';
 import { ChatLauncher } from './chat';
@@ -75,7 +66,7 @@ const CSS = `
 .dshpw-form-actions{justify-content:flex-end}
 .dshpw-preference{padding-top:14px}
 .dshpw-profile{display:flex;align-items:center;gap:12px;padding:10px 0 18px;border-bottom:1px solid var(--dshpw-line)}
-.dshpw-avatar{display:grid;place-items:center;width:38px;height:38px;border-radius:11px;background:var(--dshpw-accent);color:var(--dshpw-inverted);font-size:16px;font-weight:700;flex:none;box-shadow:0 2px 8px color-mix(in srgb,var(--dshpw-accent) 30%,transparent);animation:dshpwAvatarIn .5s var(--dshpw-spring) both}
+.dshpw-avatar{display:grid;place-items:center;width:38px;height:38px;border-radius:11px;background:var(--dshpw-accent);color:var(--dshpw-inverted);font-size:16px;font-weight:700;flex:none;box-shadow:0 2px 8px color-mix(in srgb,var(--dshpw-accent) 30%,transparent);animation:dshpwAvatarIn .5s var(--dshpw-spring) both}.dshpw-avatar-trigger{cursor:pointer;border:0;padding:0;appearance:none;font:inherit}.dshpw-avatar-trigger:focus-visible{outline:2px solid var(--dshpw-accent);outline-offset:3px}.dshpw-purge{margin:14px 0 0;padding:14px;border:1px solid var(--dshpw-danger);border-radius:10px;background:color-mix(in srgb,var(--dshpw-danger) 7%,transparent)}.dshpw-purge-warning{color:var(--dshpw-danger);font-weight:650}.dshpw-purge-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.dshpw-purge .dshpw-check{color:var(--dshpw-danger)}
 @keyframes dshpwAvatarIn{from{opacity:0;transform:scale(.6)}to{opacity:1;transform:none}}
 .dshpw-profile-copy{display:flex;flex-direction:column;gap:1px;min-width:0}
 .dshpw-profile-label{font-size:12px;color:var(--dshpw-muted)}

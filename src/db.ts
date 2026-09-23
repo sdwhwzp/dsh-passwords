@@ -1,7 +1,7 @@
 // SQLite 数据层：Node 内置 node:sqlite（零外部数据库依赖）
 // 表结构：users / platform_settings / audit_logs / login_attempts / ip_throttle /
 // user_permissions / user_usage / messages / user_workspaces / user_session_grants /
-// workspace_cleanup_intents / media_assets / message_media
+// workspace_cleanup_intents / media_assets / message_media / pending_media_removals
 //
 // 静态加密（见 src/encrypt.ts）：
 //   - users.username         → AES-256-GCM 密文存储；username_hash（HMAC）做等值索引
@@ -19,6 +19,10 @@
 //     不透明媒体 ID + 展示元数据）。
 //   - 生命周期：pending（已签发上传，文件未就绪）→ ready（校验通过）
 //     → 过期清理 / 删除；失败或放弃的 pending 由网关删除并回收 storage_key。
+//   - 「元数据已删、文件本体待删」的 storage_key 记入 pending_media_removals 队列：
+//     入队与元数据删除同事务，避免消息修剪路径（addMessageWithMedia 内部的
+//     maybePruneMessages）返回的回收计划没人消费时文件永久残留；调用方用
+//     drainPendingMediaRemovals() 取走并 unlink（DB 层不做文件系统操作）。
 //   - 一个媒体只能被一条消息占用（message_media.media_id 上有 UNIQUE 索引），
 //     绑定与消息创建在同一事务内完成，任一校验失败整体回滚。
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
@@ -196,6 +200,53 @@ export class MediaError extends Error {
   }
 }
 
+/**
+ * 集合在「读取基线」与「写入」之间被并发改写（子用户 session/create 追加 grant、
+ * 工作区清理删除 grant、另一次权限保存等）。调用方必须 fail-closed：不能把旧草稿
+ * 的全量集合覆盖回去，应提示管理员重新同步后重试。
+ *
+ * 冲突发生在 user_permissions 行上的哪个「会话 ID 集合」：
+ *   - 'allowed_session_grants' = user_session_grants 显式授权（默认，保持旧行为）
+ *   - 'disabled_sessions'      = user_permissions.disabled_sessions 逐会话开关
+ * 两者都是基于基线的比较替换，调用方处理方式相同（重新同步后重试），因此共用同一个
+ * 错误类型，用 scope 区分即可。
+ */
+export class PermissionStateConflictError extends Error {
+  constructor(readonly userId: number) {
+    super('permissions changed concurrently');
+    this.name = 'PermissionStateConflictError';
+  }
+}
+
+function permissionState(row: UserPermissionsRow | null): string {
+  if (row === null) return 'null';
+  return JSON.stringify([
+    row.allowed_folders, row.hourly_token_limit, row.daily_minutes_limit,
+    row.allow_upload, row.allow_git_download, row.allow_workspace_create, row.allow_ssh,
+    row.allowed_agent_presets, row.allowed_models, row.allow_chat_media,
+    row.banned, row.sandbox_mode,
+  ]);
+}
+
+export type SessionSetConflictScope = 'allowed_session_grants' | 'disabled_sessions';
+
+export class SessionGrantsConflictError extends Error {
+  constructor(
+    readonly userId: number,
+    /** 事务中读到的真实集合（已归一化排序） */
+    readonly currentSessionIds: string[],
+    /** 调用方声明的基线 */
+    readonly expectedSessionIds: string[],
+    /** 冲突的集合（省略 = 显式会话授权，与历史行为一致） */
+    readonly scope: SessionSetConflictScope = 'allowed_session_grants',
+  ) {
+    super(scope === 'disabled_sessions'
+      ? 'disabled sessions changed concurrently'
+      : 'session grants changed concurrently');
+    this.name = 'SessionGrantsConflictError';
+  }
+}
+
 const MEDIA_SELECT_SQL =
   'SELECT id, owner_id, storage_key, original_name, media_kind AS kind, mime_type, byte_size, sha256, width, height, duration_ms, state, expires_at FROM media_assets';
 
@@ -227,6 +278,10 @@ const MEDIA_DIMENSION_MAX = 100_000;
 const MEDIA_DURATION_MAX = 24 * 60 * 60 * 1000;
 /** datetime('now') 口径：24 小时内不会与其他行重名的存储键（同一 upload id 仍受 PK 约束） */
 const PLACEHOLDER_STORAGE_KEY_PREFIX = '__pending__:';
+/** 单次 drain 上限：避免一次回收长时间持有写锁；调用方可循环 drain 到返回空数组 */
+const PENDING_MEDIA_DRAIN_MAX = 500;
+/** 待回收队列容量上限（网关没接入 drain 时的硬护栏，防无界增长） */
+const PENDING_MEDIA_REMOVALS_MAX = 5_000;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
@@ -360,6 +415,14 @@ CREATE TABLE IF NOT EXISTS message_media (
 -- 一个媒体对象只能被一条消息占用：UNIQUE 是「重复占用」的最终防线
 -- （应用层先 SELECT 再 INSERT，并发下仍可能双写，靠索引拒绝第二条关系）。
 CREATE UNIQUE INDEX IF NOT EXISTS idx_message_media_media ON message_media(media_id);
+-- 待回收的媒体文件（storage_key）：元数据行已删、文件本体还没删的删除凭证。
+-- 跨进程/跨重启存在（网关进程与 dsh 插件进程共享同一个库），入队与元数据删除同事务，
+-- 因此不会出现「元数据没了但没人知道该删哪个文件」的永久残留；重复 key 由主键去重。
+-- 只存 storage_key（不存 media_id）：入队后文件已不可寻址，media_id 没有消费方。
+CREATE TABLE IF NOT EXISTS pending_media_removals (
+  storage_key TEXT PRIMARY KEY,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
 
 `;
 
@@ -486,6 +549,13 @@ export function samePathForMatch(a: string, b: string): boolean {
   return pathWithinDeletedTree(a, b) && pathWithinDeletedTree(b, a);
 }
 
+/** 顺序无关的字符串集合相等判定（会话 grant 基线校验用） */
+function sameStringSet(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  const seen = new Set(a);
+  return b.every((value) => seen.has(value));
+}
+
 /**
  * 密文判定（users.username / audit_logs 各列共用）：不能只看 v1: 前缀——
  * 明文值恰好以 v1: 开头时会被误判为密文。只有同时满足
@@ -528,6 +598,25 @@ export class Database {
       this.stmts.set(sql, s);
     }
     return s;
+  }
+
+  /**
+   * 动态 `IN (?,?,…)` 的固定 chunk 大小。node:sqlite 的 StatementSync 没有
+   * finalize/close 接口（无法在 finally 里显式释放），所以控制 SQL 文本种类是
+   * 保证 statement cache 有界的唯一手段：按固定 chunk 切分后，占位符数量只有
+   * 「满块」与「尾块」两种来源，同一模板在 this.stmts 里的变体数量有界
+   * （而不是每遇到一个新 id 总数就多一条预处理语句）。
+   * 取值与 listSessionGrantUserIds 的 256 保持一致。
+   */
+  private static readonly DYNAMIC_IN_CHUNK = 256;
+
+  /** 把 id 列表切成固定大小的块（空列表返回空数组） */
+  private static chunkIds<T>(ids: readonly T[]): T[][] {
+    const chunks: T[][] = [];
+    for (let index = 0; index < ids.length; index += Database.DYNAMIC_IN_CHUNK) {
+      chunks.push(ids.slice(index, index + Database.DYNAMIC_IN_CHUNK));
+    }
+    return chunks;
   }
 
   /** 显式释放 SQLite 文件句柄（测试/一次性工具使用；常驻服务由进程退出回收）。 */
@@ -928,9 +1017,15 @@ export class Database {
       this.stmt('DELETE FROM user_session_grants WHERE user_id = ?').run(id);
       this.stmt('DELETE FROM user_usage WHERE user_id = ?').run(id);
       this.stmt('DELETE FROM user_workspaces WHERE user_id = ?').run(id);
+      const ownedMediaKeys = (this.stmt(
+        'SELECT storage_key FROM media_assets WHERE owner_id = ?',
+      ).all(id) as { storage_key: string }[]).map((row) => String(row.storage_key));
       this.deleteMediaRelationsOfUser(id);
       this.stmt('DELETE FROM messages WHERE sender_id = ? OR recipient_id = ?').run(id, id);
       this.stmt('DELETE FROM media_assets WHERE owner_id = ?').run(id);
+      // 元数据删除与回收凭证同事务提交；用户删除后的文件 unlink 失败/进程崩溃
+      // 仍可由网关 sweep 的 drain 继续处理。
+      this.enqueueMediaRemovalInTransaction(ownedMediaKeys);
       this.stmt('DELETE FROM users WHERE id = ?').run(id);
       this.db.exec('COMMIT');
     } catch (error) {
@@ -976,40 +1071,146 @@ export class Database {
    *   2. 早于 pendingCutoff 仍未完成上传的 pending 资产（未提交上传的清理）。
    * now / pendingCutoff 省略时分别取当前时间 / 不清理 pending。
    * 内部先删关系再删元数据，不会产生孤儿关系行。
+   *
+   * 返回值由调用方消费（网关周期任务按 storage_keys unlink 文件）；消息修剪那边
+   * 拿不到调用方的场景走队列：见 enqueueMediaRemovalInTransaction / drainPendingMediaRemovals。
+   *
+   * 同时充当孤儿关系行的既有周期性清扫入口（见内部 pruneOrphanedMessageMedia）。
    */
   pruneMedia(options: { pendingCutoff?: string | Date | null; now?: string | Date } = {}): MediaRemovalPlan {
+    // 孤儿关系行清扫接在这里（而不是 init()）：这是网关周期任务已经在调用的既有
+    // 媒体清理入口，能持续修复而不只是启动时修一次；且 init() 里清理会删掉旧库
+    // 夹具刻意造出的“指向不存在资产的遗留关系行”，干扰唯一索引升级迁移的可验证性。
+    // 孤儿行（指向已删资产/已删消息）会让 mediaAttachedToAnyMessage 永远为真，
+    // 永久阻断对应媒体的删除与 GC。先清关系行再算过期集合，让刚变成可回收的
+    // 资产能在同一次清理里被回收。
+    // 尽力而为：这是媒体 GC 之外的附加维护，失败只告警，不影响本次回收。
+    try {
+      const orphanedRelations = this.pruneOrphanedMessageMedia();
+      if (orphanedRelations > 0) {
+        console.warn(`[dsh-passwords] 清理孤儿媒体关系行 ${orphanedRelations} 条`);
+      }
+    } catch (error) {
+      console.warn('[dsh-passwords] 孤儿媒体关系清理失败:', String(error));
+    }
     const nowText = this.sqliteTime(options.now ?? new Date());
     const pendingCutoff = this.sqliteTime(options.pendingCutoff);
-    const expired = this.stmt(
-      `SELECT id, storage_key FROM media_assets
-        WHERE expires_at IS NOT NULL AND expires_at <= ?
-          AND id NOT IN (SELECT media_id FROM message_media)`,
-    ).all(nowText) as { id: string; storage_key: string }[];
-    const stale = pendingCutoff === null
-      ? []
-      : (this.stmt(
-          `SELECT id, storage_key FROM media_assets
-            WHERE state = 'pending' AND created_at < ?
-              AND id NOT IN (SELECT media_id FROM message_media)`,
-        ).all(pendingCutoff) as { id: string; storage_key: string }[]);
-    const targets = new Map<string, string>();
-    for (const row of [...expired, ...stale]) targets.set(String(row.id), String(row.storage_key));
-    if (targets.size === 0) return { media_ids: [], storage_keys: [] };
-    const ids = [...targets.keys()];
-    const placeholders = ids.map(() => '?').join(', ');
+    // 选择、删除和入队必须共享同一个写事务：否则一个并发 finalize/reuse 在
+    // 选择之后、删除之前改变状态时，旧 storage_key 可能被拿去误删新文件。
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      this.stmt(`DELETE FROM message_media WHERE media_id IN (${placeholders})`).run(...ids);
-      this.stmt(`DELETE FROM media_assets WHERE id IN (${placeholders})`).run(...ids);
+      const expired = this.stmt(
+        `SELECT id, storage_key FROM media_assets
+          WHERE expires_at IS NOT NULL AND expires_at <= ?
+            AND id NOT IN (SELECT media_id FROM message_media)`,
+      ).all(nowText) as { id: string; storage_key: string }[];
+      const stale = pendingCutoff === null
+        ? []
+        : (this.stmt(
+            `SELECT id, storage_key FROM media_assets
+              WHERE state = 'pending' AND created_at < ?
+                AND id NOT IN (SELECT media_id FROM message_media)`,
+          ).all(pendingCutoff) as { id: string; storage_key: string }[]);
+      const targets = new Map<string, string>();
+      for (const row of [...expired, ...stale]) targets.set(String(row.id), String(row.storage_key));
+      if (targets.size === 0) {
+        this.db.exec('COMMIT');
+        return { media_ids: [], storage_keys: [] };
+      }
+      const ids = [...targets.keys()];
+      // 固定 chunk（见 DYNAMIC_IN_CHUNK）：占位符数量有界，statement cache 不随
+      // 待清理媒体数量增长；chunk 间保持同一事务，清理仍然原子。
+      for (const chunk of Database.chunkIds(ids)) {
+        const placeholders = chunk.map(() => '?').join(', ');
+        this.stmt(`DELETE FROM message_media WHERE media_id IN (${placeholders})`).run(...chunk);
+        this.stmt(`DELETE FROM media_assets WHERE id IN (${placeholders})`).run(...chunk);
+      }
+      this.enqueueMediaRemovalInTransaction([...targets.values()]);
       this.db.exec('COMMIT');
+      return {
+        media_ids: ids,
+        storage_keys: [...targets.values()].filter((key) => key !== ''),
+      };
     } catch (error) {
       this.db.exec('ROLLBACK');
       throw error;
     }
-    return {
-      media_ids: ids,
-      storage_keys: [...targets.values()].filter((key) => key !== ''),
-    };
+  }
+
+  // ── 待回收媒体文件队列（元数据已删、文件本体待调用方 unlink） ──
+
+  /**
+   * 入队待回收的 storage keys。**必须在「删除元数据」的同一事务内调用**：
+   * 否则会出现「元数据已删但没人知道该删哪个文件」的永久残留，或重复入队。
+   * 空键与占位键（未 finalize 的上传，从来没有对应文件）不入队。
+   */
+  private enqueueMediaRemovalInTransaction(storageKeys: readonly string[]): void {
+    const insert = this.stmt('INSERT OR IGNORE INTO pending_media_removals (storage_key) VALUES (?)');
+    let inserted = 0;
+    for (const key of storageKeys) {
+      if (typeof key !== 'string' || key === '' || key.length > MEDIA_STORAGE_KEY_MAX) continue;
+      if (key.startsWith(PLACEHOLDER_STORAGE_KEY_PREFIX)) continue;
+      if (Number(insert.run(key).changes) > 0) inserted += 1;
+    }
+    if (inserted > 0) this.trimPendingMediaRemovals();
+  }
+
+  /**
+   * 队列容量硬护栏：调用方（网关）若完全没接入 drain，队列会随媒体清理无界增长。
+   * 超过上限就丢最旧条目（放弃这些已不可寻址文件的回收），保住库体积与写放大。
+   */
+  private trimPendingMediaRemovals(): void {
+    const row = this.stmt('SELECT COUNT(*) AS n FROM pending_media_removals').get() as { n: number };
+    if (Number(row.n) <= PENDING_MEDIA_REMOVALS_MAX) return;
+    this.stmt(
+      `DELETE FROM pending_media_removals WHERE rowid NOT IN (
+         SELECT rowid FROM pending_media_removals ORDER BY rowid DESC LIMIT ?
+       )`,
+    ).run(PENDING_MEDIA_REMOVALS_MAX);
+    console.warn(
+      `[dsh-passwords] 待回收媒体文件队列超过上限 ${PENDING_MEDIA_REMOVALS_MAX}，已丢弃最旧条目`,
+    );
+  }
+
+  /** 队列里待回收的 storage key 数量（观测/测试用，不修改数据） */
+  countPendingMediaRemovals(): number {
+    const row = this.stmt('SELECT COUNT(*) AS n FROM pending_media_removals').get() as { n: number };
+    return Number(row.n) || 0;
+  }
+
+  /**
+   * 取出（claim）待回收的 storage keys，调用方按返回值 unlink 文件本体。
+   *
+   * 并发安全：`BEGIN IMMEDIATE`（写锁）内「读出 + 删除」一次完成，网关进程与 dsh
+   * 插件进程（共享同一个库文件）并发 drain 时同一个 key 只会被一个调用方拿到，
+   * 也不会因为读后崩溃而卡住队列。DB 层不做文件系统操作：
+   * `storage_keys` 在取出后就不可再得，unlink 失败的文件只能靠上层补齐（与现有
+   * pruneMedia / peekUserMediaRemoval 契约一致），所以调用方只应记录告警。
+   * limit 省略时取 PENDING_MEDIA_DRAIN_MAX；返回空数组 = 队列已空。
+   */
+  drainPendingMediaRemovals(limit: number = PENDING_MEDIA_DRAIN_MAX): string[] {
+    const requested = Number(Math.trunc(limit));
+    const take = Number.isFinite(requested) && requested > 0
+      ? Math.min(requested, PENDING_MEDIA_REMOVALS_MAX)
+      : PENDING_MEDIA_DRAIN_MAX;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const rows = this.stmt(
+        'SELECT storage_key FROM pending_media_removals ORDER BY rowid LIMIT ?',
+      ).all(take) as { storage_key: string }[];
+      if (rows.length === 0) {
+        this.db.exec('COMMIT');
+        return [];
+      }
+      const keys = rows.map((row) => String(row.storage_key));
+      const remove = this.stmt('DELETE FROM pending_media_removals WHERE storage_key = ?');
+      for (const key of keys) remove.run(key);
+      this.db.exec('COMMIT');
+      return keys;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   touchLogin(userId: number): void {
@@ -1196,6 +1397,29 @@ export class Database {
   }
 
   // ── 子用户权限（网关强制执行） ────────────────────────────
+  /**
+   * 会话 ID 集合归一化（disabled_sessions 与 user_session_grants 共用一套口径）：
+   * 丢掉非字符串/空串/超长值、去重、限制集合规模（防止异常调用方把单行写爆）。
+   * 与 replaceUserSessionGrants 的上限一致，所以库内集合不可能超过这个规模。
+   */
+  private static normalizeSessionIdSet(ids: readonly string[]): string[] {
+    return [...new Set(
+      ids.filter((id): id is string => typeof id === 'string' && id.length > 0 && id.length <= 200),
+    )].slice(0, 2000);
+  }
+
+  /**
+   * 事务内读 disabled_sessions 现值（归一化 + 排序，与基线口径一致）：
+   * 必须在 BEGIN IMMEDIATE 之后调用，才能保证“读了就没人能改”的 CAS 语义。
+   * 权限行不存在（默认全权限）时视作空集合。
+   */
+  private readDisabledSessionsInTransaction(userId: number): string[] {
+    const row = this.stmt('SELECT disabled_sessions FROM user_permissions WHERE user_id = ?').get(userId) as
+      | { disabled_sessions: string | null }
+      | undefined;
+    return Database.normalizeSessionIdSet(parseJsonArray(row?.disabled_sessions ?? null)).sort();
+  }
+
   getPermissions(userId: number): UserPermissionsRow | null {
     const row = this.stmt(
       'SELECT user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, allow_upload, allow_git_download, allow_workspace_create, allow_ssh, allowed_agent_presets, allowed_models, allow_chat_media, banned, sandbox_mode, disabled_sessions, updated_at FROM user_permissions WHERE user_id = ?',
@@ -1219,6 +1443,12 @@ export class Database {
         }
       | undefined;
     if (!row) return null;
+    // 手工 SQL / 旧版本可能留下未知 sandbox 值。读取侧必须与保存校验同口径：
+    // 无法可靠解释的策略按最严 read-only 处理，不能静默降级为未限制。
+    const sandboxMode = row.sandbox_mode === null || row.sandbox_mode === 'read-only' ||
+      row.sandbox_mode === 'workspace-write' || row.sandbox_mode === 'danger-full-access'
+      ? row.sandbox_mode
+      : 'read-only';
     return {
       user_id: row.user_id,
       allowed_folders: parseAllowedFolders(row.allowed_folders),
@@ -1232,7 +1462,7 @@ export class Database {
       allowed_models: row.allowed_models === null ? null : parseJsonArray(row.allowed_models),
       allow_chat_media: row.allow_chat_media === 1,
       banned: row.banned === 1,
-      sandbox_mode: row.sandbox_mode,
+      sandbox_mode: sandboxMode,
       disabled_sessions: parseJsonArray(row.disabled_sessions),
       updated_at: row.updated_at,
     };
@@ -1254,21 +1484,48 @@ export class Database {
       banned: boolean;
       sandboxMode?: string | null;
       disabledSessions?: string[];
+      /**
+       * 调用方读取草稿时看到的 disabled_sessions 集合（可选）。给出时在事务内做
+       * 基线校验（CAS）：库内集合已被并发改写（另一次权限保存、逐会话开关切换等）
+       * 时整个事务回滚并抛出 SessionGrantsConflictError(scope='disabled_sessions')，
+       * 不用旧草稿覆盖新状态。省略时保持原有「最后写入者赢」语义。
+       * 同一次调用里 disabledSessions 省略时，通过校验后视作「保持现值」。
+       */
+      expectedDisabledSessions?: string[];
       allowedSessionIds?: string[];
+      /** 与本次权限保存原子写入的旧数据迁移标记。省略时保持现值。 */
+      sessionGrantsSeeded?: boolean;
+      /** 调用方读取草稿时看到的 grant 集合（可选）。给出时在事务内做基线校验：
+       *  库内集合已被并发改写（子用户 session/create 追加、工作区清理删除等）时
+       *  整个事务回滚并抛出 SessionGrantsConflictError，绝不用旧集合覆盖新 grant。 */
+      expectedAllowedSessionIds?: string[];
+      /** 请求开始时的非会话权限快照；事务内比较，防止 await 期间覆盖并发收紧。 */
+      expectedPermissionState?: UserPermissionsRow | null;
     },
   ): void {
     // 防御性清洗：空串/当前目录/根目录条目在 folderAllowed 里语义=全盘允许
     // （fail-open 陷阱）——网关端点已拒绝，数据层再兑底一次。
     const allowedFolders = sanitizeAllowedFolders(perms.allowedFolders);
     const current = this.getPermissions(userId);
-    const disabledSessions = [...new Set(
-      (perms.disabledSessions ?? current?.disabled_sessions ?? [])
-        .filter((id) => typeof id === 'string' && id.length > 0 && id.length <= 200),
-    )].slice(0, 2000);
-    const sandboxMode = perms.sandboxMode === undefined ? current?.sandbox_mode ?? null : perms.sandboxMode;
-    const allowedSessionIds = [...new Set(
-      (perms.allowedSessionIds ?? []).filter((id) => typeof id === 'string' && id.length > 0 && id.length <= 200),
-    )].slice(0, 2000);
+    let disabledSessions = Database.normalizeSessionIdSet(
+      perms.disabledSessions ?? current?.disabled_sessions ?? [],
+    );
+    // 与 grant 同一套路：只有调用方声明了基线才做比较替换。事务外读到的
+    // current 可能已过期，真正的 CAS 读在 BEGIN IMMEDIATE 之后（拿住写锁再读）。
+    const expectedDisabled = perms.expectedDisabledSessions === undefined
+      ? null
+      : Database.normalizeSessionIdSet(perms.expectedDisabledSessions).sort();
+    const requestedSandboxMode = perms.sandboxMode === undefined ? current?.sandbox_mode ?? null : perms.sandboxMode;
+    const sandboxMode = requestedSandboxMode === null || requestedSandboxMode === 'read-only' ||
+      requestedSandboxMode === 'workspace-write' || requestedSandboxMode === 'danger-full-access'
+      ? requestedSandboxMode
+      : 'read-only';
+    const allowedSessionIds = Database.normalizeSessionIdSet(perms.allowedSessionIds ?? []);
+    // 只有真的在写 grant 且调用方声明了基线时才做比较替换。未声明基线的调用方
+    // 保持原有的“最后写入者赢”语义（数据层迁移/测试直接调用等）。
+    const expectedGrantIds = perms.allowedSessionIds !== undefined && perms.expectedAllowedSessionIds !== undefined
+      ? Database.normalizeSessionIdSet(perms.expectedAllowedSessionIds)
+      : null;
     const allowSsh = perms.allowSsh ?? current?.allow_ssh ?? false;
     const allowedAgentPresets = perms.allowedAgentPresets === undefined
       ? current?.allowed_agent_presets ?? null
@@ -1283,6 +1540,30 @@ export class Database {
     const allowChatMedia = perms.allowChatMedia ?? current?.allow_chat_media ?? false;
     this.db.exec('BEGIN IMMEDIATE');
     try {
+      if (perms.expectedPermissionState !== undefined &&
+        permissionState(this.getPermissions(userId)) !== permissionState(perms.expectedPermissionState)) {
+        throw new PermissionStateConflictError(userId);
+      }
+      if (expectedDisabled !== null) {
+        // 逐会话开关的 CAS：网关保存权限前会 await 资源核验/沙盒注入，期间另一
+        // 管理员或本进程的会话切换可能已改写 disabled_sessions。基线不一致就整
+        // 个事务回滚（不能把旧草稿的集合覆盖回去，否则会把刚关闭的会话重新打开）。
+        const liveDisabled = this.readDisabledSessionsInTransaction(userId);
+        if (!sameStringSet(liveDisabled, expectedDisabled)) {
+          throw new SessionGrantsConflictError(userId, liveDisabled, expectedDisabled, 'disabled_sessions');
+        }
+        // 基线一致且本次不改集合：以事务内读到的现值落库（事务外的 current 可能
+        // 与此刻不同——CAS 已保证两者相等，这里只是让写入值来源唯一）。
+        if (perms.disabledSessions === undefined) disabledSessions = liveDisabled;
+      }
+      if (expectedGrantIds !== null) {
+        // 基线校验必须在事务内读：网关处理权限保存时会 await 资源核验/沙盒注入，
+        // 这段时间里子用户 session/create 可能已追加 grant。
+        const currentGrantIds = this.listUserSessionGrants(userId);
+        if (!sameStringSet(currentGrantIds, expectedGrantIds)) {
+          throw new SessionGrantsConflictError(userId, currentGrantIds, expectedGrantIds);
+        }
+      }
       this.stmt(
       `INSERT INTO user_permissions (user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, allow_upload, allow_git_download, allow_workspace_create, allow_ssh, allowed_agent_presets, allowed_models, allow_chat_media, banned, sandbox_mode, disabled_sessions)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1322,6 +1603,11 @@ export class Database {
         const insertGrant = this.stmt('INSERT INTO user_session_grants (user_id, session_id) VALUES (?, ?)');
         for (const sessionId of allowedSessionIds) insertGrant.run(userId, sessionId);
       }
+      if (perms.sessionGrantsSeeded !== undefined) {
+        this.stmt(
+          "UPDATE user_permissions SET session_grants_seeded = ?, updated_at = datetime('now') WHERE user_id = ?",
+        ).run(perms.sessionGrantsSeeded ? 1 : 0, userId);
+      }
       this.db.exec('COMMIT');
     } catch (error) {
       this.db.exec('ROLLBACK');
@@ -1359,6 +1645,23 @@ export class Database {
     return this.stmt('SELECT 1 FROM user_session_grants WHERE user_id = ? AND session_id = ?').get(userId, sessionId) !== undefined;
   }
 
+  /**
+   * 单条追加显式会话授权（最小原子 API）：只 INSERT 这一条，既不读取也不重写整张
+   * 授权表，所以同一请求窗口里由其它调用并发追加/回收的授权不会被覆盖（区别于
+   * replaceUserSessionGrants 的整表替换）。单条 INSERT 在 SQLite 里本身就是原子
+   * 操作，无需显式事务；已存在时 OR IGNORE 直接 no-op。
+   *
+   * 返回本次是否真正新增了一条授权：false = 已授权或 ID 非法（空串/超长/非字符串）。
+   */
+  addUserSessionGrant(userId: number, sessionId: string): boolean {
+    const [normalized] = Database.normalizeSessionIdSet([sessionId]);
+    if (normalized === undefined) return false;
+    const result = this.stmt(
+      'INSERT OR IGNORE INTO user_session_grants (user_id, session_id) VALUES (?, ?)',
+    ).run(userId, normalized);
+    return Number(result.changes) === 1;
+  }
+
   /** 原子替换一个用户的全部显式会话授权；任何异常都会保留原集合。 */
   replaceUserSessionGrants(userId: number, sessionIds: string[]): void {
     const normalized = [...new Set(
@@ -1369,6 +1672,64 @@ export class Database {
       this.stmt('DELETE FROM user_session_grants WHERE user_id = ?').run(userId);
       const insert = this.stmt('INSERT INTO user_session_grants (user_id, session_id) VALUES (?, ?)');
       for (const sessionId of normalized) insert.run(userId, sessionId);
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  /**
+   * Issue #19 旧数据种子化（原子）：把「首次可见的既有会话」一次性追加为显式授权。
+   * 与 replaceUserSessionGrants 的关键区别是绝不 DELETE+INSERT——迁移期间由子用户
+   * session/create 或 addUserSessionGrant 并发追加的授权不会被抹掉。迁移标记
+   * （session_grants_seeded）与授权追加在同一事务提交，因此不会出现「授权已写、
+   * 标记未落」而让下次调用重复种子化的中间态。
+   *
+   * 返回本次是否执行了种子化：false = 标记已置位（no-op），或无法可靠置位（见下）。
+   * 已 seed 过就不再追加任何新会话：新会话必须由管理员显式授权。
+   *
+   * 缺 user_permissions 行时整体 no-op：标记只能落在该行上，而隐式补行会把
+   * 「缺行 = 默认拒绝全部目录（fail-closed）」变成「空白名单 = 不限目录」，等于借
+   * 种子化放大权限。此分支不写任何东西（含授权）也不置位，调用方按无权限行处理。
+   * 空/非法集合仍算一次成功的种子化（没有可迁移的会话也是完成态），同样置位。
+   */
+  seedUserSessionGrants(userId: number, sessionIds: readonly string[]): boolean {
+    const normalized = Database.normalizeSessionIdSet(sessionIds);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      // 标记必须在事务内（拿住写锁之后）读：否则两个并发 seed 都会读到「未初始化」
+      // 而各写一次。同一行读取也用于判定权限行是否存在。
+      const row = this.stmt('SELECT session_grants_seeded FROM user_permissions WHERE user_id = ?').get(userId) as
+        | { session_grants_seeded: number }
+        | undefined;
+      if (row === undefined || row.session_grants_seeded === 1) {
+        this.db.exec('COMMIT');
+        return false;
+      }
+      const insert = this.stmt('INSERT OR IGNORE INTO user_session_grants (user_id, session_id) VALUES (?, ?)');
+      for (const sessionId of normalized) insert.run(userId, sessionId);
+      // 同事务置位（markSessionGrantsSeeded 只发一条 UPDATE，不自行提交）
+      this.markSessionGrantsSeeded(userId);
+      this.db.exec('COMMIT');
+      return true;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  /** 只回收显式列出的 grant（沙盒收紧后的定向撤销）。逐 ID 删除而不重写整张表，
+   *  所以同一请求期间由子用户 session/create 并发追加的其它授权不会被抹掉。 */
+  deleteUserSessionGrants(userId: number, sessionIds: readonly string[]): void {
+    const normalized = [...new Set(
+      sessionIds.filter((id): id is string => typeof id === 'string' && id.length > 0 && id.length <= 200),
+    )];
+    if (normalized.length === 0) return;
+    const deleteGrant = this.stmt('DELETE FROM user_session_grants WHERE user_id = ? AND session_id = ?');
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const sessionId of normalized) deleteGrant.run(userId, sessionId);
       this.db.exec('COMMIT');
     } catch (error) {
       this.db.exec('ROLLBACK');
@@ -1953,6 +2314,7 @@ export class Database {
     try {
       this.stmt('DELETE FROM message_media WHERE media_id = ?').run(id);
       this.stmt('DELETE FROM media_assets WHERE id = ?').run(id);
+      this.enqueueMediaRemovalInTransaction(plan.storage_keys);
       this.db.exec('COMMIT');
     } catch (error) {
       this.db.exec('ROLLBACK');
@@ -2159,6 +2521,8 @@ export class Database {
       this.db.exec('ROLLBACK');
       throw error;
     }
+    // 修剪结果不再直接丢弃：被回收的 storage keys 已在同一事务内入队
+    // （见 releaseMessageMedia），调用方用 drainPendingMediaRemovals 取走后 unlink。
     this.maybePruneMessages();
     const stored = this.getMessageForUser(messageId, input.senderId);
     return (
@@ -2222,28 +2586,43 @@ export class Database {
   /**
    * 回收该消息上不再被引用的媒体元数据（回答“谁在删消息”的一致性问题）：
    * 删除后返回待删 storage keys，调用方按需删除文件。
+   * 必须在一个已开启的事务内调用（本层与调用方的删除同一个事务）。
    */
   private releaseMessageMedia(messageIds: readonly number[]): MediaRemovalPlan {
     if (messageIds.length === 0) return { media_ids: [], storage_keys: [] };
-    const placeholders = messageIds.map(() => '?').join(', ');
-    const rows = this.stmt(
-      `SELECT DISTINCT a.id, a.storage_key
-             FROM message_media mm JOIN media_assets a ON a.id = mm.media_id
-            WHERE mm.message_id IN (${placeholders})`,
-    ).all(...messageIds) as { id: string; storage_key: string }[];
-    this.stmt(`DELETE FROM message_media WHERE message_id IN (${placeholders})`).run(...messageIds);
+    // 固定 chunk（见 DYNAMIC_IN_CHUNK）：占位符数量与 statement cache 都不随消息数增长
+    const chunks = Database.chunkIds(messageIds);
+    const rows: { id: string; storage_key: string }[] = [];
+    for (const chunk of chunks) {
+      const placeholders = chunk.map(() => '?').join(', ');
+      rows.push(...(this.stmt(
+        `SELECT DISTINCT a.id, a.storage_key
+               FROM message_media mm JOIN media_assets a ON a.id = mm.media_id
+              WHERE mm.message_id IN (${placeholders})`,
+      ).all(...chunk) as { id: string; storage_key: string }[]));
+    }
+    for (const chunk of chunks) {
+      const placeholders = chunk.map(() => '?').join(', ');
+      this.stmt(`DELETE FROM message_media WHERE message_id IN (${placeholders})`).run(...chunk);
+    }
     const orphaned = rows.filter((row) => !this.mediaAttachedToAnyMessage(row.id));
     for (const row of orphaned) this.stmt('DELETE FROM media_assets WHERE id = ?').run(row.id);
-    return {
+    const plan: MediaRemovalPlan = {
       media_ids: orphaned.map((row) => String(row.id)),
       storage_keys: orphaned.map((row) => String(row.storage_key)).filter((key) => key !== ''),
     };
+    // 元数据一删，storage_key 就不再可从库中查到：所有调用路径（addMessageWithMedia
+    // 内部的自动修剪、clearMessages）的返回值都只属于“顺手可用”的信息，没人消费就
+    // 永久泄漏文件。因此在同一事务内入队，由 drainPendingMediaRemovals 兜底回收。
+    this.enqueueMediaRemovalInTransaction(plan.storage_keys);
+    return plan;
   }
 
   /**
    * 消息历史修剪：每 100 条修剪一次最旧记录，同时清理 message_media 关系与
-   * 不再被引用的媒体资产。返回本次需要删除的 storage keys（可忽略；
-   * 媒体访问按消息鉴权，残留文件不可寻址）。
+   * 不再被引用的媒体资产。返回本次回收的 storage keys（返回值只是顺手信息，
+   * 不依赖调用方消费：被删资产的 storage keys 已在同一事务内入队 pending_media_removals，
+   * 由 drainPendingMediaRemovals 兜底，因此文件不会因为返回值被忽略而永久残留）。
    *
    * 删除集合用 OFFSET 取「第 2000 条之后的旧记录」而不是 `id <= MAX(id) - 2000`：
    * 后者的前提是 id 连续，但消息 id 会因删除用户、手工整理而出现空洞，
@@ -2260,11 +2639,14 @@ export class Database {
       ).all(Database.MESSAGES_MAX_ROWS) as { id: number }[];
       const ids = doomed.map((row) => Number(row.id));
       if (ids.length === 0) return { media_ids: [], storage_keys: [] };
-      const placeholders = ids.map(() => '?').join(', ');
       this.db.exec('BEGIN IMMEDIATE');
       try {
         const plan = this.releaseMessageMedia(ids);
-        this.stmt(`DELETE FROM messages WHERE id IN (${placeholders})`).run(...ids);
+        // 固定 chunk：同上，占位符数量有界
+        for (const chunk of Database.chunkIds(ids)) {
+          const placeholders = chunk.map(() => '?').join(', ');
+          this.stmt(`DELETE FROM messages WHERE id IN (${placeholders})`).run(...chunk);
+        }
         this.db.exec('COMMIT');
         return plan;
       } catch (error) {

@@ -3,15 +3,23 @@
 // 描述 + 子槽卡片列表（renderSlot 渲染注册进 dsh-passwords.plugin.item 的卡片）。
 // 这样 dsh-passwords 的设置不再挤在官方"插件"列表里，而是单独成区。
 import { createElement as h } from 'react';
+import type { PropsLocale, PropsRenderSlots, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots';
+import type {} from '@deepseek-ai/dsh-client-ui-settings/client';
+import type {} from './locales';
 
-// 客户端代码由 esbuild 打包（tsconfig exclude src/client，不经过 tsc 类型检查），
-// 类型只用于编辑器提示；renderSlot 的 key 在运行时是任意字符串槽位名。
-interface SectionProps {
-  /** 词典翻译（由注册时的 locale: 'dshpw' 声明注入） */
-  t: (key: string) => string;
-  /** 渲染声明的子槽（settings.section 的 children 里声明了 dsh-passwords.plugin.item） */
-  renderSlot: (key: string, owner?: unknown) => unknown;
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+  interface SlotMap {
+    'dsh-passwords.plugin.item': {
+      kind: 'list';
+      scope: 'root';
+    };
+  }
 }
+
+// 与官方 settings section 一样按 share 组合 props，不在插件内重写 renderSlot/t。
+type SectionProps = PropsRuntime<'settings.section'>
+  & PropsRenderSlots<'dsh-passwords.plugin.item'>
+  & PropsLocale<'dshpw'>;
 
 const CSS = `
 .dshpw-section-root{display:flex;flex-direction:column;gap:10px}

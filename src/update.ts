@@ -135,9 +135,25 @@ export function compareVersions(a: string, b: string): number | null {
   return 0;
 }
 
+/** 容器判定由更新与紧急清理共用；任一可靠信号命中即按容器处理。 */
+export function isContainerRuntime(
+  env: NodeJS.ProcessEnv = process.env,
+  exists: (candidate: string) => boolean = existsSync,
+): boolean {
+  if (env.DSH_PASSWORDS_RUNTIME?.trim().toLowerCase() === 'docker') return true;
+  for (const marker of ['/.dockerenv', '/run/.containerenv']) {
+    try {
+      if (exists(marker)) return true;
+    } catch {
+      /* 只读挂载等环境读不到该标记时继续检查其他信号 */
+    }
+  }
+  return (env.DSH_HOME?.trim().replace(/\\/g, '/') ?? '').startsWith('/data/');
+}
+
 /**
  * 识别当前运行环境。
- * - docker：/.dockerenv 存在、DSH_HOME 落在 /data/ 下、或显式
+ * - docker：容器标记存在、DSH_HOME 落在 /data/ 下、或显式
  *   DSH_PASSWORDS_RUNTIME=docker（Dockerfile 内置标记，最可靠）
  * - git：安装根含 .git（源码开发目录）
  * - npm-global：安装根恰为 `<npm root -g>` 的子目录
@@ -147,13 +163,7 @@ export function compareVersions(a: string, b: string): number | null {
 export function detectRuntime(installRoot: string, env: NodeJS.ProcessEnv = process.env): UpdateRuntime {
   const explicit = env.DSH_PASSWORDS_RUNTIME?.trim().toLowerCase() ?? '';
   if (explicit === 'docker' || explicit === 'git') return explicit;
-  try {
-    if (existsSync('/.dockerenv')) return 'docker';
-  } catch {
-    /* 只读挂载等环境读不到不算 docker */
-  }
-  const dshHome = env.DSH_HOME?.trim() ?? '';
-  if (dshHome.startsWith('/data/')) return 'docker';
+  if (isContainerRuntime(env)) return 'docker';
   try {
     if (existsSync(path.join(installRoot, '.git'))) return 'git';
   } catch {

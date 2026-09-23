@@ -43,7 +43,7 @@ Do not paste `.env`, `setup-key.txt`, JWTs, cookies, API keys, SSH passwords, pr
 Supported development baseline:
 
 - Node.js `22.19+` or `24+`
-- DSH `0.1.6-alpha.2` — the pinned release of the DSH `0.1.6` line (no stable `0.1.6` release yet); the dependency tree, TypeScript build, full regression suite, and test-server real-profile/server runtime are verified against alpha.2. The compatibility layer retains the `0.1.5` release targets and the tested `0.1.2` / `0.1.3` API boundaries.
+- DSH `0.1.7-alpha.2` — the development and bundled Docker pin for the DSH `0.1.7` line; the dependency tree and lockfile are locked against alpha.2. Runtime compatibility accepts stable `0.1.7` and SemVer prereleases such as alpha, beta, and rc; the version gate is tested against these variants. Alpha.2 runtime, patch, health/readiness, and primary E2E flows have been checked on the test server; the media suite had one existing quota-limited case and destructive purge was not run. The compatibility layer retains the `0.1.6` / `0.1.5` release targets and the tested `0.1.2` / `0.1.3` API boundaries.
 - npm and git
 
 Clone and install:
