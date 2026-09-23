@@ -4,12 +4,22 @@
 // 这样 dsh-passwords 的设置不再挤在官方"插件"列表里，而是单独成区。
 import { createElement as h } from 'react';
 import type { PropsLocale, PropsRenderSlots, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots';
+import type {} from '@deepseek-ai/dsh-client-ui-settings/client';
+import type {} from './locales';
 
-// settings.section supplies the owner and locale seats; this registration owns
-// the declared dsh-passwords.plugin.item child slot.
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+  interface SlotMap {
+    'dsh-passwords.plugin.item': {
+      kind: 'list';
+      scope: 'root';
+    };
+  }
+}
+
+// 与官方 settings section 一样按 share 组合 props，不在插件内重写 renderSlot/t。
 type SectionProps = PropsRuntime<'settings.section'>
-  & PropsLocale<'dshpw'>
-  & PropsRenderSlots<'dsh-passwords.plugin.item'>;
+  & PropsRenderSlots<'dsh-passwords.plugin.item'>
+  & PropsLocale<'dshpw'>;
 
 const CSS = `
 .dshpw-section-root{display:flex;flex-direction:column;gap:10px}

@@ -1,10 +1,12 @@
-// 工作区授权 + 会话例外过滤回归测试
+// F-25 回归测试：会话归属（sessionId 提取 / 枚举源清理 / 会话列表过滤）
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   SESSION_SCOPED_RE,
   AT_FILE_SEARCH_RE,
   extractAgentId,
+  SUBUSER_BLOCKED_API_ENDPOINTS,
+  isSubuserBlockedApiPath,
   extractSessionId,
   stripArchivedSessionIds,
   filterArchivedSessionIds,
@@ -12,7 +14,10 @@ import {
   filterSessionItems,
   collectSessionCwd,
   collectSessionCwdFromWorkspaces,
-  collectSessionParents,} from '../src/permissions.js';
+  collectSessionParents,
+  collectAuthorizedSessionIds,
+} from '../src/permissions.js';
+
 
 test('工作区授权：会话 RPC 路由命中，create/list 单独处理', () => {
   for (const method of ['history', 'prompt', 'respond', 'archive', 'delete', 'rename', 'fork']) {
@@ -179,4 +184,96 @@ test('collectSessionParents：只收集有效的委派链，自指与空值丢�
     },
   });
   assert.deepEqual([...parents.entries()].sort(), [['child', 'parent'], ['deep', 'root']]);
+});
+
+test('F-25：SESSION_SCOPED_RE 命中会读取/写入会话的 RPC，但不命中 create/list', () => {
+  for (const m of ['history', 'prompt', 'respond', 'archive', 'delete', 'rename', 'retitle', 'title', 'resume', 'fork', 'truncate', 'export', 'attachment', 'updateQueue', 'cancel', 'page', 'selectModel']) {
+    assert.equal(SESSION_SCOPED_RE.test(`/api/session.${m}`), true, `session.${m} 应归属校验`);
+    assert.equal(SESSION_SCOPED_RE.test(`/api/session/${m}`), true, `session/${m} 应归属校验`);
+  }
+  assert.equal(SESSION_SCOPED_RE.test('/api/workspace.archiveSession'), true, 'workspace.archiveSession 应归属校验');
+  assert.equal(SESSION_SCOPED_RE.test('/api/workspace/archiveSession'), true, 'workspace/archiveSession 应归属校验');
+  assert.equal(SESSION_SCOPED_RE.test('/api/session.create'), false, 'create 无源会话');
+  assert.equal(SESSION_SCOPED_RE.test('/api/session.list'), false, 'list 单独过滤');
+  assert.equal(SESSION_SCOPED_RE.test('/api/workspace.create'), false, '创建工作区不属于会话作用域');
+  for (const endpoint of [
+    'commands/execute', 'commands/list', 'subagents/list', 'subagents/prompt', 'subagents/interruptByParent',
+    'fileUploads/upload', 'fileReferences/list', 'sessionReferenceResolver/candidates',
+    'skills/list', 'messageFeedback/list', 'messageFeedback/put', 'messageFeedback/delete',
+    'goals/clear', 'goals/complete', 'goals/create', 'goals/edit', 'goals/get', 'goals/pause', 'goals/resume',
+    'sessionFeedback/record',
+  ]) {
+    assert.equal(SESSION_SCOPED_RE.test(`/api/${endpoint}`), true, `${endpoint} 应归属校验`);
+  }
+});
+
+test('0.1.7：宿主桌面动作改为硬拒，新增会话作用域 RPC 纳入归属校验（点号/斜杠同口径）', () => {
+  // session-controller：projections 带 request.sessionId，仍做归属校验。
+  for (const m of ['projections']) {
+    assert.equal(SESSION_SCOPED_RE.test(`/api/session.${m}`), true, `session.${m} 应归属校验`);
+    assert.equal(SESSION_SCOPED_RE.test(`/api/session/${m}`), true, `session/${m} 应归属校验`);
+  }
+  // workspace-controller：三个会话导航状态写与 archiveSession 同类。
+  for (const m of ['pinSession', 'unpinSession', 'unarchiveSession']) {
+    assert.equal(SESSION_SCOPED_RE.test(`/api/workspace.${m}`), true, `workspace.${m} 应归属校验`);
+    assert.equal(SESSION_SCOPED_RE.test(`/api/workspace/${m}`), true, `workspace/${m} 应归属校验`);
+  }
+  // 0.1.7：三个宿主桌面动作的 wire 里没有会话身份（取不到身份，归属校验无意义），
+  // 改为 SUBUSER_BLOCKED_API_ENDPOINTS 硬拒。
+  for (const endpoint of ['session/openWorkspacePath', 'session/canOpenWorkspacePath', 'session/workspacePathApplications']) {
+    assert.equal(SUBUSER_BLOCKED_API_ENDPOINTS.has(endpoint), true, `${endpoint} 应硬拒`);
+    assert.equal(isSubuserBlockedApiPath(`/api/${endpoint}`), true, endpoint);
+    assert.equal(SESSION_SCOPED_RE.test(`/api/${endpoint}`), false, `${endpoint} 不再走归属校验`);
+  }
+  // 前缀相近的方法/命名空间不得被顺带纳入
+  assert.equal(SESSION_SCOPED_RE.test('/api/session/projectionsExtra'), false);
+  assert.equal(SESSION_SCOPED_RE.test('/api/session/openWorkspacePathExtra'), false);
+  assert.equal(SESSION_SCOPED_RE.test('/api/session/canOpenWorkspacePathExtra'), false);
+  assert.equal(SESSION_SCOPED_RE.test('/api/workspace/pinSessions'), false);
+  assert.equal(SESSION_SCOPED_RE.test('/api/workspace/unpinSessionExtra'), false);
+  assert.equal(SESSION_SCOPED_RE.test('/api/session/pinSession'), false, '不可跨命名空间误命中');
+  assert.equal(SESSION_SCOPED_RE.test('/api/pinSession/list'), false);
+  // 硬拒按方法精确匹配：前缀相近不扩散
+  assert.equal(isSubuserBlockedApiPath('/api/session/openWorkspacePathExtra'), false);
+  assert.equal(isSubuserBlockedApiPath('/api/session/workspacePathApplicationsX'), false);
+});
+
+test('0.1.7：新增 RPC 的请求体会话身份可被收集（用于逐会话授权）', () => {
+  const envelope = (method: string, args: Record<string, unknown>): unknown => ({
+    type: 'client-request',
+    rpcId: 'rpc-1',
+    method,
+    payload: { args },
+  });
+  // session/projections、workspace/{pin,unpin,unarchive}Session 的 wire 是 request.sessionId
+  const cases: Array<{ method: string; args: Record<string, unknown>; id: string }> = [
+    { method: 'session/projections', args: { request: { sessionId: 's-proj' } }, id: 's-proj' },
+    { method: 'workspace/pinSession', args: { request: { sessionId: 's-pin' } }, id: 's-pin' },
+    { method: 'workspace/unpinSession', args: { request: { sessionId: 's-unpin' } }, id: 's-unpin' },
+    { method: 'workspace/unarchiveSession', args: { request: { sessionId: 's-unarchive' } }, id: 's-unarchive' },
+  ];
+  for (const item of cases) {
+    assert.deepEqual(
+      [...(collectAuthorizedSessionIds(envelope(item.method, item.args)) ?? [])],
+      [item.id],
+      `${item.method} 必须收集到请求体会话身份`,
+    );
+  }
+  // 形状不符（sessionId 非字符串）→ 整体 null，调用方必须 403
+  assert.equal(
+    collectAuthorizedSessionIds(envelope('workspace/pinSession', { request: { sessionId: 7 } })),
+    null,
+  );
+  // wire 里没有会话身份的两个方法：网关取不到身份就只能硬拒（0.1.7 已改为
+  // SUBUSER_BLOCKED_API_ENDPOINTS），收集结果仍为空、不会凭空造出授权。
+  assert.deepEqual(
+    [...(collectAuthorizedSessionIds(envelope('session/canOpenWorkspacePath', {})) ?? [])],
+    [],
+  );
+  assert.deepEqual(
+    [...(collectAuthorizedSessionIds(envelope('session/workspacePathApplications', { path: '/w/a.txt' })) ?? [])],
+    [],
+  );
+  assert.equal(isSubuserBlockedApiPath('/api/session/canOpenWorkspacePath'), true);
+  assert.equal(isSubuserBlockedApiPath('/api/session/workspacePathApplications'), true);
 });

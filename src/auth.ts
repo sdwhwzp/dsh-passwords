@@ -27,6 +27,8 @@ const LOCK_STEPS = [1, 5, 15, 60] as const;
 const IP_MAX_FAILED = 50;
 const IP_WINDOW_MS = 15 * 60 * 1000;
 const IP_THROTTLE_MINUTES = 15;
+const PURGE_PASSWORD_MAX_FAILED = 5;
+const PURGE_PASSWORD_LOCK_MS = 15 * 60 * 1000;
 /** 时序均衡用空跑哈希：用户不存在时也执行一次 bcrypt，抹平“快=不存在”的枚举差异 */
 const DUMMY_HASH = bcrypt.hashSync('dsh-passwords-timing-equalizer', BCRYPT_ROUNDS);
 
@@ -282,6 +284,35 @@ export class AuthService {
   }
 
   // ── 用户管理（dsh 设置页卡片调用） ────────────────────────────
+
+  /** 验证主用户当前密码；不创建新会话，也不改变 credential_version。 */
+  async verifyAdminPassword(caller: AuthedUser, password: string, meta: RequestMeta = {}): Promise<void> {
+    const ip = meta.ip ?? 'unknown';
+    const attempt = await this.db.getLoginAttempt(caller.username, `purge:${ip}`);
+    if (attempt !== null && attempt.failed_count >= PURGE_PASSWORD_MAX_FAILED &&
+      attempt.locked_until !== null && attempt.locked_until.getTime() > Date.now()) {
+      throw new AuthError('IP_THROTTLED', { minutes: Math.ceil((attempt.locked_until.getTime() - Date.now()) / 60000) }, 429);
+    }
+    const targetUser = await this.db.getUserByUsername(caller.username);
+    const valid = caller.role === 'admin' && targetUser !== null && typeof password === 'string' && password.length <= 256 &&
+      await bcrypt.compare(password, targetUser.password_hash);
+    if (!valid) {
+      const count = this.db.recordLoginFailure(caller.username, `purge:${ip}`);
+      await this.db.audit('purge_auth_failure', {
+        username: caller.username,
+        ip,
+        userAgent: meta.userAgent,
+        detail: `保命技能密码校验失败，第 ${count} 次`,
+      });
+      if (count >= PURGE_PASSWORD_MAX_FAILED) {
+        const until = new Date(Date.now() + PURGE_PASSWORD_LOCK_MS);
+        this.db.lockLoginAttempt(caller.username, `purge:${ip}`, until);
+        throw new AuthError('IP_THROTTLED', { minutes: 15 }, 429);
+      }
+      throw new AuthError('INVALID_CURRENT_PASSWORD', {}, 401);
+    }
+    await this.db.resetLoginAttempts(caller.username, `purge:${ip}`);
+  }
 
   /** 改密：本人可改自己（需提供当前密码）；主用户可重置任何人（无需当前密码）。改后旧会话全部失效。 */
   async changePassword(

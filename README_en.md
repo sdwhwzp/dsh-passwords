@@ -105,7 +105,7 @@ External file services and their accounts, passwords and databases are managed b
 
 ### 0. Prerequisites (three things)
 
-Host installs need Node.js 22.19+ or 24+, a working dsh installation, and git. Keep this plugin on the same Node major line as the dsh host; the host baseline is the DSH 0.1.6 line, currently pinned to alpha.2 (no stable release yet; the alpha.2 dependency tree, build, regression suite, and test-server real-profile validation pass). The compatibility target retains every `0.1.5` release and the `0.1.2` / `0.1.3` API boundaries. Docker installs only need Docker Engine or Docker Desktop and a DeepSeek API key.
+Host installs need Node.js 22.19+ or 24+, git, and the private Harness `0.1.7-rc.1` with native tenant extensions. Within the 0.1.7 line, the gateway accepts only reviewed alpha.2 and rc.1 identities. Public alpha.2 is the inherited installer and Docker default, not an accepted substitute for the private deployment. See the [compatibility notes](docs/compatibility-matrix.md) and deployment records.
 
 ### 1. Install (by platform)
 
@@ -142,10 +142,10 @@ docker run -d \
   -p 127.0.0.1:3088:3088 \
   -v dsh-home:/data/dsh \
   -v dsh-passwords-state:/data/dsh-passwords \
-  skywalker237234/dsh-passwords:2.7.3
+  skywalker237234/dsh-passwords:2.7.4
 ```
 
-`.env` needs at least `DEEPSEEK_API_KEY`. Set `MCP_GATEWAY_PUBLIC_HOST` to the domain you actually use. The host publishes port `127.0.0.1:3088` only while the container listens on `0.0.0.0:3088`; terminate TLS on nginx or Caddy for public access. The image bundles DSH `0.1.6-alpha.2` (the pinned release of the DSH 0.1.6 line; bundled-image runtime acceptance has passed); initialization is complete when healthz and readyz both return `ok:true`.
+`.env` needs at least `DEEPSEEK_API_KEY`. Set `MCP_GATEWAY_PUBLIC_HOST` to the domain you actually use. The host publishes port `127.0.0.1:3088` only while the container listens on `0.0.0.0:3088`; terminate TLS on nginx or Caddy for public access. The image bundles DSH `0.1.7-alpha.2` (the pinned release of the DSH 0.1.7 line; image runtime acceptance has not been performed for this pin); initialization is complete when healthz and readyz both return `ok:true`.
 
 `scripts/profile-plugins.json` is the versioned cross-machine deployment manifest. `dsh-passwords install` idempotently merges its NPM/Git sources, bundle order, Git build permissions, and required profile patches into `~/.dsh/profiles/web`, then runs one `pnpm install`. Existing local `link:` development sources and custom plugins outside the manifest are preserved; retired aggregate packages explicitly named by the manifest are migrated automatically.
 
@@ -426,7 +426,7 @@ The bottleneck is usually the network path to the server.
 
 ## Manual install
 
-> v2.7.3 targets the DSH 0.1.6 line, currently pinned to alpha.2, while retaining compatibility targets for every `0.1.5` release and the `0.1.2` / `0.1.3` API boundaries. The upstream release has separate alpha.2 validation results; this private candidate requires its own acceptance. The installer requires Node.js `22.19+` or `24+`, registers the plugin, detects dsh, and applies the compatibility patch.
+> v2.7.4 is being adapted for the private Harness `0.1.7-rc.1` deployment. The [compatibility notes](docs/compatibility-matrix.md) define account isolation and managed-directory rules. Upstream test-server results do not establish acceptance of this fork.
 
 1. `git clone https://github.com/sdwhwzp/dsh-passwords && cd dsh-passwords`
 2. `npm install && npm run build`
@@ -461,7 +461,7 @@ The UI is bilingual (Chinese/English) and follows dsh's language setting:
 - **CLI**: follows the `LANG` / `LC_ALL` environment variables (`en` prefix = English).
 
 ## Release notes
-Current version: 2.7.3. The DSH baseline target is the 0.1.6 line, currently pinned to alpha.2 (no stable 0.1.6 release yet); upstream test-server results do not certify this private fork. Compatibility targets also retain every DSH `0.1.5` release and the `0.1.2` / `0.1.3` API boundaries. The npm package ships prebuilt dist, TypeScript sources, and all scripts; Docker and npm are built from the same source revision.
+The current candidate is based on 2.7.4. See the [compatibility notes](docs/compatibility-matrix.md) and deployment records for its target and validation status.
 
 ### v2.6.20 (2026-09-08)
 

@@ -57,7 +57,7 @@ async function setup(mobile = false) {
   db.setManagedWorkspace(customer.id, ownRoot);
   const permissions: Parameters<Database['setPermissions']>[1] = {
     allowedFolders: [ownRoot], hourlyTokenLimit: null, dailyMinutesLimit: null,
-    monthlyBudgetMicros: 0, allowUpload: true, allowGitDownload: false, allowedAgentPresets: [], allowWorkspaceCreate: false,
+    monthlyBudgetMicros: 0, allowUpload: true, allowGitDownload: false, allowSsh: true, allowedAgentPresets: [], allowWorkspaceCreate: false,
     banned: false, sandboxMode: 'workspace-write', disabledSessions: [],
   };
   db.setPermissions(customer.id, permissions);
@@ -162,20 +162,20 @@ tenantTest('opening and cancelling file previews keeps the shared history stream
     }));
     await historyOpen;
     const filesOpen = nextMessage(upstream);
-    const payload = { args: { workspaceFileScopeId: 'own-session' } };
+    const payload = { args: { workspaceFileScopeId: 'own-session', path: ownRoot } };
     downstream.send(JSON.stringify({ type: 'open', streamId: 'files', endpoint: 'workspaceFiles/changes', payload }));
     assert.deepEqual(await filesOpen, { type: 'open', streamId: 'files', endpoint: 'workspaceFiles/changes', payload });
     const ready = nextMessage(downstream);
-    upstream.send(muxItem('files', { type: 'ready' }));
-    assert.deepEqual(await ready, { type: 'item', streamId: 'files', value: { type: 'ready' } });
+    upstream.send(muxItem('files', { kind: 'ready' }));
+    assert.deepEqual(await ready, { type: 'item', streamId: 'files', value: { kind: 'ready' } });
     const cancelled = nextMessage(upstream);
     downstream.send(JSON.stringify({ type: 'cancel', streamId: 'files' }));
     await cancelled;
     const historyItem = nextMessage(downstream);
     upstream.send(muxItem('files', { type: 'late' }));
     upstream.send(JSON.stringify({ type: 'end', streamId: 'files' }));
-    upstream.send(muxItem('history', { type: 'snapshot', records: [] }));
-    assert.deepEqual(await historyItem, { type: 'item', streamId: 'history', value: { type: 'snapshot', records: [] } });
+    upstream.send(muxItem('history', { type: 'snapshot', header: { id: 'own-session', origin: 'user' }, records: [] }));
+    assert.deepEqual(await historyItem, { type: 'item', streamId: 'history', value: { type: 'snapshot', header: { id: 'own-session', origin: 'user' }, records: [] } });
     assert.equal(downstream.readyState, WebSocket.OPEN);
   } finally {
     downstream.terminate();
@@ -187,8 +187,8 @@ tenantTest('file change subscriptions reject foreign, disabled, and forged works
   const env = await setup(mobile);
   try {
     for (const payload of [
-      { args: { workspaceFileScopeId: 'other-session' } },
-      { args: { workspaceFileScopeId: 'missing-session' } },
+      { args: { workspaceFileScopeId: 'other-session', path: otherRoot } },
+      { args: { workspaceFileScopeId: 'missing-session', path: ownRoot } },
       { args: { workspaceFileScopeId: 'own-session', workspaceRoot: otherRoot } },
       { args: { workspaceFileScopeId: { sessionId: 'own-session', workspaceRoot: otherRoot } } },
       { args: {} },
@@ -196,23 +196,23 @@ tenantTest('file change subscriptions reject foreign, disabled, and forged works
       const { downstream, upstream } = await env.connect();
       const forwarded: unknown[] = [];
       upstream.on('message', (data) => forwarded.push(JSON.parse(data.toString())));
-      const closed = nextClose(downstream);
-      const upstreamClosed = nextClose(upstream);
+      const rejected = nextMessage(downstream);
       downstream.send(JSON.stringify({ type: 'open', streamId: 'files', endpoint: 'workspaceFiles/changes', payload }));
-      assert.equal(await closed, 1008);
-      await upstreamClosed;
+      assert.equal((await rejected).type, 'error');
+      assert.equal(downstream.readyState, WebSocket.OPEN);
+      downstream.terminate();
       assert.deepEqual(forwarded, []);
     }
     env.disableSession();
     const { downstream, upstream } = await env.connect();
     const forwarded: unknown[] = [];
     upstream.on('message', (data) => forwarded.push(JSON.parse(data.toString())));
-    const closed = nextClose(downstream);
-    const upstreamClosed = nextClose(upstream);
+    const rejected = nextMessage(downstream);
     downstream.send(JSON.stringify({ type: 'open', streamId: 'files', endpoint: 'workspaceFiles/changes',
-      payload: { args: { workspaceFileScopeId: 'own-session' } } }));
-    assert.equal(await closed, 1008);
-    await upstreamClosed;
+      payload: { args: { workspaceFileScopeId: 'own-session', path: ownRoot } } }));
+    assert.equal((await rejected).type, 'error');
+    assert.equal(downstream.readyState, WebSocket.OPEN);
+    downstream.terminate();
     assert.deepEqual(forwarded, []);
   } finally {
     await env.cleanup();
@@ -225,7 +225,7 @@ tenantTest('file change items stop after the session permission is revoked', asy
   try {
     const opened = nextMessage(upstream);
     downstream.send(JSON.stringify({ type: 'open', streamId: 'files', endpoint: 'workspaceFiles/changes',
-      payload: { args: { workspaceFileScopeId: 'own-session' } } }));
+      payload: { args: { workspaceFileScopeId: 'own-session', path: ownRoot } } }));
     await opened;
     const received: unknown[] = [];
     downstream.on('message', (data) => received.push(JSON.parse(data.toString())));
@@ -303,11 +303,13 @@ tenantTest('restricted Remote mux rejects unknown endpoints and malformed frames
   const env = await setup(mobile);
   try {
     const unknown = await env.connect();
-    const unknownClosed = nextClose(unknown.downstream);
+    const unknownError = nextMessage(unknown.downstream);
     unknown.downstream.send(JSON.stringify({
       type: 'open', streamId: 'unknown', endpoint: 'cordis/watch', payload: {},
     }));
-    assert.equal(await unknownClosed, 1008);
+    assert.equal((await unknownError).type, 'error');
+    assert.equal(unknown.downstream.readyState, WebSocket.OPEN);
+    unknown.downstream.terminate();
 
     const malformed = await env.connect();
     const malformedClosed = nextClose(malformed.downstream);
@@ -344,9 +346,9 @@ tenantTest('restricted Remote mux relays ordinary items and logical cancellation
     assert.equal((await opened).endpoint, 'session/follow');
 
     const item = nextMessage(downstream);
-    upstream.send(muxItem('follow', { type: 'snapshot', records: [] }));
+    upstream.send(muxItem('follow', { type: 'snapshot', header: { id: 'own-session', origin: 'user' }, records: [] }));
     assert.deepEqual(await item, {
-      type: 'item', streamId: 'follow', value: { type: 'snapshot', records: [] },
+      type: 'item', streamId: 'follow', value: { type: 'snapshot', header: { id: 'own-session', origin: 'user' }, records: [] },
     });
 
     const cancelled = nextMessage(upstream);
@@ -381,7 +383,7 @@ tenantTest('restoring saved terminals preserves the workspace stream when a term
     upstream.send(JSON.stringify({ type: 'error', streamId: 'terminal', error: { code: 'terminal/unavailable', message: 'Terminal is closing or unavailable', details: {} } }));
     assert.equal((await unavailable).type, 'error');
     const baseline = nextMessage(downstream);
-    upstream.send(muxItem('workspaces', { type: 'baseline', workspaces: [{ workspaceId: 'own' }] }));
+    upstream.send(muxItem('workspaces', { type: 'baseline', value: { items: [{ workspaceId: 'own', path: ownRoot, sessionIds: ['own-session'] }], archivedSessionIds: [] } }));
     assert.equal((await baseline).streamId, 'workspaces');
     assert.equal(downstream.readyState, WebSocket.OPEN);
   } finally {

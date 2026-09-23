@@ -4,6 +4,7 @@
 //   1. ?lang= 查询参数（语言切换链接点出来的）
 //   2. cookie dshpw_lang（用户手动切换后的持久选择）
 //   3. dsh settings.yaml 的 locale.preference —— 跟随 dsh 设置里的语言
+//      （dsh 0.1.7 首次迁移后回退同目录的 settings.yaml.imported）
 //   4. Accept-Language（浏览器语言）
 //   5. 默认 zh
 //
@@ -90,6 +91,7 @@ const DICT: Record<Lang, Record<string, string>> = {
     'gw.upstreamDown': '上游 dsh 不可达',
     'gw.banned': '账号已被主用户封禁，请联系主用户',
     'gw.adminOnly': '该功能仅主用户可用',
+    'gw.noSsh': '主用户未授予 SSH 端点与官方终端权限',
     'gw.noUpload': '你的账号没有上传文件权限',
     'gw.noGit': '你的账号没有 git 下载权限',
     'gw.timeLimit': '今日使用时长已用完',
@@ -214,6 +216,7 @@ const DICT: Record<Lang, Record<string, string>> = {
     'gw.upstreamDown': 'Upstream dsh is unreachable',
     'gw.banned': 'This account has been banned by the owner',
     'gw.adminOnly': 'This feature is only available to the owner account',
+    'gw.noSsh': 'The owner has not granted SSH endpoint and official terminal access',
     'gw.noUpload': 'Your account has no upload permission',
     'gw.noGit': 'Your account has no git download permission',
     'gw.timeLimit': 'Daily usage time has been used up',
@@ -282,6 +285,8 @@ export function t(lang: Lang, key: string, params?: Params): string {
  * 读 dsh 的语言偏好：<dsh home>/settings.yaml 的 locale.preference
  * （zh | en，dsh 设置页 General → Language 写入）。读不到返回 null。
  * 与 gateway.ts 里读 ui-theme.preference 用的是同一套候选路径逻辑。
+ * dsh 0.1.7 首次迁移会把旧 settings.yaml 改名为 settings.yaml.imported，
+ * 候选位置读不到 settings.yaml 时回退读取同目录的 settings.yaml.imported。
  */
 let localePreferenceCache: { value: Lang | null; at: number } | null = null;
 const LOCALE_CACHE_TTL_MS = 5_000;
@@ -296,12 +301,16 @@ function readDshLocalePreference(): Lang | null {
   }
   const explicit = process.env.MCP_DSH_SETTINGS_FILE?.trim();
   const dshHome = process.env.DSH_HOME?.trim();
-  const candidates: string[] = explicit
+  const bases: string[] = explicit
     ? [explicit]
     : [
         ...(dshHome ? [path.join(dshHome, 'settings.yaml')] : []),
         path.join(os.homedir(), '.dsh', 'settings.yaml'),
       ];
+  // dsh 0.1.7 首次迁移会把旧 settings.yaml 改名为 settings.yaml.imported：
+  // 每个候选位置先读 settings.yaml，再回退同目录的 settings.yaml.imported。
+  const candidates: string[] = [];
+  for (const base of bases) candidates.push(base, `${base}.imported`);
   let value: Lang | null = null;
   for (const file of candidates) {
     try {

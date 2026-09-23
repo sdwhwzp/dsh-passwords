@@ -120,7 +120,7 @@ test('通过选择模式旁的新会话控制行注册且 launch 响应经过校
   assert.match(indexSource, /ctx\.uiWorkspace\.openSession\(sessionId\)/);
   assert.match(indexSource, /order: 30/);
   assert.doesNotMatch(launcherSource, /querySelector|MutationObserver/);
-  assert.match(launcherSource, /IconProjectAddOutline16/);
+  assert.match(launcherSource, /IconProjectAddOutlineRegular/);
   assert.match(launcherSource, /onClick: onSummaryClick/);
   assert.match(launcherSource, /details instanceof HTMLDetailsElement && !details\.open/);
   assert.match(launcherSource, /isWindowsClient && !guideSeen/);

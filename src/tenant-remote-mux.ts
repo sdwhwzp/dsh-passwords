@@ -8,22 +8,21 @@ export const TENANT_REMOTE_STREAM_ENDPOINTS: ReadonlySet<string> = new Set([
   'session/control',
   'workspaceFiles/changes',
   'terminal/retain',
+  'terminal/follow',
+  'job/list',
+  'job/follow',
 ] as const);
 
-/**
- * Read the Session identity used by the Host's workspace-file lookup.
- * @param value - untrusted logical stream payload.
- * @returns the Session id requiring gateway ownership and folder authorization.
- */
-export function tenantWorkspaceFileChangesSessionId(value: unknown): string {
+/** Read a terminal output attachment's Session and reject forged argument fields. */
+export function tenantTerminalFollowSessionId(value: unknown): string {
   const payload = record(value);
   const args = record(payload?.args);
-  if (payload === undefined || !exactKeys(payload, ['args']) ||
-      args === undefined || !exactKeys(args, ['workspaceFileScopeId']) ||
-      !nonEmptyString(args.workspaceFileScopeId)) {
-    throw new Error('invalid workspace file changes scope');
+  if (payload === undefined || !exactKeys(payload, ['args']) || args === undefined ||
+      !exactKeys(args, ['agentId', 'id', 'attachmentId']) ||
+      !nonEmptyString(args.agentId) || !nonEmptyString(args.id) || !nonEmptyString(args.attachmentId)) {
+    throw new Error('invalid terminal follow scope');
   }
-  return args.workspaceFileScopeId;
+  return args.agentId;
 }
 
 /**
@@ -45,7 +44,8 @@ export function tenantTerminalRetentionSessionId(value: unknown): string {
 /** One strictly decoded browser-to-Host mux frame. */
 export type TenantRemoteClientFrame =
   | { type: 'open'; streamId: string; endpoint: string; payload: unknown }
-  | { type: 'cancel'; streamId: string };
+  | { type: 'cancel' | 'end'; streamId: string }
+  | { type: 'item'; streamId: string; value?: unknown };
 
 /** One strictly decoded Host-to-browser mux frame. */
 export type TenantRemoteServerFrame =
@@ -204,8 +204,11 @@ export class TenantRemoteEventFilter {
  */
 export function parseTenantRemoteClientFrame(text: string): TenantRemoteClientFrame {
   const frame = parsedRecord(text);
-  if (frame.type === 'cancel' && exactKeys(frame, ['type', 'streamId']) && nonEmptyString(frame.streamId)) {
-    return { type: 'cancel', streamId: frame.streamId };
+  if ((frame.type === 'cancel' || frame.type === 'end') && exactKeys(frame, ['type', 'streamId']) && nonEmptyString(frame.streamId)) {
+    return { type: frame.type, streamId: frame.streamId };
+  }
+  if (frame.type === 'item' && nonEmptyString(frame.streamId) && (exactKeys(frame, ['type', 'streamId']) || exactKeys(frame, ['type', 'streamId', 'value']))) {
+    return Object.hasOwn(frame, 'value') ? { type: 'item', streamId: frame.streamId, value: frame.value } : { type: 'item', streamId: frame.streamId };
   }
   if (
     frame.type === 'open' &&

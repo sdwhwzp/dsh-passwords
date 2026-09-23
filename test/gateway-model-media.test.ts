@@ -89,6 +89,14 @@ let modelCatalogGroups: Array<Record<string, unknown>> = [
   { id: 'deepseek', name: 'DeepSeek', models: [{ id: 'deepseek-chat', name: 'DeepSeek Chat' }] },
 ];
 let modelCatalogDefault: Record<string, unknown> = { provider: 'openai', model: 'gpt-5' };
+/** session/history 与 session/page 的官方 records 窗口；空窗口不代表会话没有模型选择。 */
+let historyPageRecords: unknown[] = [];
+
+/** 权限保存的可分配资源核验快照（会话 ID 列表）：用例可临时替换以模拟归档/并发新增。 */
+let assignableSessionIds: string[] = ['session-visible'];
+/** 资源核验请求到达时的钩子。权限保存会在 `await fetchAssignableResources()` 处让出
+ *  事件循环，钩子用于确定性地模拟该窗口内子用户 session/create 的并发 grant 追加。 */
+let duringAssignableResources: (() => void) | null = null;
 
 /** 全部 catalog 的 provider/model 稳定 ID（不受 allowlist 影响） */
 function allCatalogModelIds(): string[] {
@@ -348,18 +356,9 @@ before(async () => {
     allowedModels: [],
     allowChatMedia: false,
   });
-  // 会话授权：可见会话落在授权目录内。本 fork 的会话归属由原生 principal 与
-  // session_owners 承担，没有源码版的逐会话 grant 表；仅在该 API 存在时种子化。
-  const grants = db as unknown as {
-    replaceUserSessionGrants?: (userId: number, ids: string[]) => void;
-    markSessionGrantsSeeded?: (userId: number) => void;
-  };
-  if (typeof grants.replaceUserSessionGrants === 'function' && typeof grants.markSessionGrantsSeeded === 'function') {
-    grants.replaceUserSessionGrants(restrictedId, ['session-visible']);
-    grants.markSessionGrantsSeeded(restrictedId);
-    grants.replaceUserSessionGrants(otherId, ['session-visible']);
-    grants.markSessionGrantsSeeded(otherId);
-  }
+  db.setManagedWorkspace(restrictedId, '/workspaces/visible');
+  db.claimSessionOwner('session-visible', restrictedId);
+  db.markSessionGrantsSeeded(restrictedId);
 
   // Remote mux：workspace/follow 的 baseline 响应（子用户访问快照的来源）
   const remoteMux = new WebSocketServer({ noServer: true });
@@ -403,8 +402,11 @@ before(async () => {
     request.on('end', () => {
       // 权限保存的可分配资源核验（网关内部通道）：授权目录必须存在于快照中
       if (url.startsWith('/api/dsh-passwords/internal/assignable-resources')) {
+        const hook = duringAssignableResources;
+        duringAssignableResources = null;
+        hook?.();
         res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, folders: ['/workspaces/visible'], sessions: ['session-visible'] }));
+        res.end(JSON.stringify({ ok: true, folders: ['/workspaces/visible'], sessions: assignableSessionIds }));
         return;
       }
       if (url.startsWith('/api/workspace.list')) {
@@ -430,15 +432,14 @@ before(async () => {
         return;
       }
       if (url.startsWith('/api/session.list')) {
+        const hook = duringAssignableResources; duringAssignableResources = null; hook?.();
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(
           JSON.stringify({
             result: {
               ok: true,
               value: {
-                items: [
-                  { sessionId: 'session-visible', cwd: '/workspaces/visible', model: modelId('openai', 'gpt-5') },
-                ],
+                items: assignableSessionIds.map(sessionId => ({ sessionId, cwd: '/workspaces/visible', updatedAt: 0, running: false, blank: false })),
               },
             },
           }),
@@ -460,6 +461,15 @@ before(async () => {
             },
           }),
         );
+        return;
+      }
+      if (/^\/api\/session[.\/](?:history|page)$/.test(url)) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          type: 'server-response',
+          rpcId: 'history-page-mock',
+          result: { ok: true, value: { records: historyPageRecords, hasMore: false } },
+        }));
         return;
       }
       if (/^\/api\/session[.\/]create$/.test(url)) {
@@ -532,9 +542,10 @@ before(async () => {
     internalSecret: 'test-internal',
     patch: { dshRoot: '', restartService: '' },
     endpointRules: [],
+    pluginCompat: false,
   };
 
-  gateway = createGatewayServer(config, new AuthService(config, db), db);
+  gateway = createGatewayServer(config, new AuthService(config, db), db, { upstreamBrowserCookie: 'dsh-auth-test=trusted' });
   await new Promise<void>((resolve) => gateway.listen(0, '127.0.0.1', () => resolve()));
   gatewayPort = (gateway.address() as { port: number }).port;
 
@@ -546,13 +557,7 @@ before(async () => {
   restrictedCookie = subCookie({ id: restrictedId, username: restrictedUsername });
   otherCookie = subCookie({ id: otherId, username: otherUsername });
 
-  // 建立 workspace/session 授权快照（部分用例依赖基线已就绪）。
-  // 子用户的访问快照由 Remote mux 的 workspace/follow 基线建立（与生产同路径），
-  // 仅靠 HTTP workspace.list 不足以建立会话级访问映射。
-  // 本 fork 的子用户 Remote mux 需要真实 Host 引导，mock 上游不提供；基线只服务于
-  // 已跳过的模型白名单用例，这里尽力而为、超时不阻断媒体用例。
-  await seedRemoteBaseline(restrictedCookie).catch(() => undefined);
-  await seedRemoteBaseline(otherCookie).catch(() => undefined);
+
 });
 
 after(() => {
@@ -816,6 +821,81 @@ test('session/prompt：网关登记的会话模型被撤销后旧会话 prompt �
 
   // 恢复现场，避免影响后续用例
   setPerms(restrictedId, { allowedModels: [modelId('openai', 'gpt-5')], allowChatMedia: true });
+});
+
+test('session/history：旧分页窗口不得覆盖实时模型授权状态', async () => {
+  setPerms(restrictedId, { allowedModels: [modelId('openai', 'gpt-5')], allowChatMedia: true });
+  await seedRemoteBaseline(restrictedCookie);
+  const catalog = await req('POST', '/api/session/modelCatalog', { cookie: restrictedCookie, body: {} });
+  assert.equal(catalog.status, 200, catalog.body);
+  const selected = await req('POST', '/api/session/selectModel', {
+    cookie: restrictedCookie,
+    body: rpcEnvelope('session/selectModel', { sessionId: 'session-visible', provider: 'openai', model: 'gpt-5' }),
+  });
+  assert.equal(selected.status, 200, selected.body);
+
+  historyPageRecords = [
+    { type: 'event', event: { type: 'session-log-deepseek/delivery-accepted', seq: 4, data: { sessionId: 'session-visible' } } },
+    { type: 'event', event: { type: 'model/selection', seq: 5, data: { provider: 'anthropic', model: 'claude-sonnet-4' } } },
+  ];
+  try {
+    const history = await req('POST', '/api/session/history', {
+      cookie: restrictedCookie,
+      body: rpcEnvelope('session/history', { sessionId: 'session-visible' }),
+    });
+    assert.equal(history.status, 200, history.body);
+
+    upstreamCalls = [];
+    const prompt = await req('POST', '/api/session/prompt', {
+      cookie: restrictedCookie,
+      body: rpcEnvelope('session/prompt', { requestId: 'history-model-check', sessionId: 'session-visible', content: { type: 'text', text: 'hi' } }),
+    });
+    assert.equal(prompt.status, 200, `旧 history 窗口不得覆盖实时已授权模型：${prompt.body}`);
+    assert.equal(upstreamSaw('session.prompt'), true, '实时模型仍允许时 prompt 应正常转发');
+  } finally {
+    historyPageRecords = [];
+    setPerms(restrictedId, { allowedModels: [modelId('openai', 'gpt-5')], allowChatMedia: true });
+  }
+});
+
+test('session/page：窗口没有 model/selection 时不得把已知模型降级为 Host 默认', async () => {
+  setPerms(restrictedId, {
+    allowedModels: [modelId('openai', 'gpt-5'), modelId('deepseek', 'deepseek-chat')],
+    allowChatMedia: true,
+  });
+  await seedRemoteBaseline(restrictedCookie);
+  const catalog = await req('POST', '/api/session/modelCatalog', { cookie: restrictedCookie, body: {} });
+  assert.equal(catalog.status, 200, catalog.body);
+  const selected = await req('POST', '/api/session/selectModel', {
+    cookie: restrictedCookie,
+    body: rpcEnvelope('session/selectModel', { sessionId: 'session-visible', provider: 'deepseek', model: 'deepseek-chat' }),
+  });
+  assert.equal(selected.status, 200, selected.body);
+
+  setPerms(restrictedId, { allowedModels: [modelId('openai', 'gpt-5')], allowChatMedia: true });
+  await seedRemoteBaseline(restrictedCookie);
+  historyPageRecords = [
+    { type: 'event', event: { type: 'session-log-deepseek/delivery-accepted', seq: 9, data: { sessionId: 'session-visible' } } },
+    { type: 'event', event: { type: 'user/message', seq: 10, data: 'hi' } },
+  ];
+  try {
+    const page = await req('POST', '/api/session/page', {
+      cookie: restrictedCookie,
+      body: rpcEnvelope('session/page', { sessionId: 'session-visible', throughSeq: 10, maxMessages: 2 }),
+    });
+    assert.equal(page.status, 200, page.body);
+
+    upstreamCalls = [];
+    const prompt = await req('POST', '/api/session/prompt', {
+      cookie: restrictedCookie,
+      body: rpcEnvelope('session/prompt', { requestId: 'page-model-check', sessionId: 'session-visible', content: { type: 'text', text: 'hi' } }),
+    });
+    assert.equal(prompt.status, 403, `分页窗口未见选择事件不得放宽为 Host 默认：${prompt.body}`);
+    assert.equal(upstreamSaw('session.prompt'), false, '被拒绝的 prompt 不得转发到上游');
+  } finally {
+    historyPageRecords = [];
+    setPerms(restrictedId, { allowedModels: [modelId('openai', 'gpt-5')], allowChatMedia: true });
+  }
 });
 
 test('session/selectModel：[] 白名单拒绝任何模型（包括主机默认）', { skip: '本 fork 用自有的客户模型策略（src/model-policy.ts）限制模型，不携带源码版的逐用户 allowed_models 白名单' }, async () => {
@@ -1290,4 +1370,141 @@ test('/gateway/api/message-media/* 是网关自有路由：未知子路径不得
     false,
     '网关自有媒体前缀不得透传到上游 dsh',
   );
+});
+
+// ══════════════════════════════════════════════════════════════════════
+// 三、会话授权并发保护（POST /gateway/api/permissions）
+//
+// 网关把 `allowedSessionIds` 当作全量集合做 DELETE+INSERT，而子用户
+// session/create 会在任意时刻追加 grant。管理员草稿只是某个时间点的快照，
+// 直接写入会静默撤销自己从未见过的会话。约定：
+//   - 任何「删除了仍然可分配的既有 grant 且未在 disabledSessions 中显式禁用」
+//     的提交都是冲突 → 409 SESSION_GRANTS_CONFLICT，绝不写入；
+//   - 请求 `await` 资源核验期间被并发改写的集合也走同一错误（DB 层基线校验）；
+//   - 省略 allowedSessionIds 的部分更新、以及「显式 [] + 逐个禁用」的
+//     fail-closed 撤销语义保持不变。
+// ══════════════════════════════════════════════════════════════════════
+
+test('Issue #25：过期权限草稿不得静默撤销并发新增的会话授权', async () => {
+  const user = db.createUser('grant-stale-draft-user', HASH, 'user');
+  for (const id of ['cas-0-session-visible', 'cas-0-session-concurrent', 'cas-0-session-raced']) db.claimSessionOwner(id, user.id);
+  assignableSessionIds = ['session-visible', 'cas-0-session-visible', 'cas-0-session-concurrent', 'cas-0-session-raced'];
+  setPerms(user.id, { allowedSessionIds: ['cas-0-session-visible', 'cas-0-session-concurrent'] });
+  db.markSessionGrantsSeeded(user.id);
+  const originalSessions = assignableSessionIds;
+  assignableSessionIds = ['cas-0-session-visible', 'cas-0-session-concurrent'];
+  try {
+    // 管理员草稿只见过 cas-0-session-visible；cas-0-session-concurrent 既不在草稿里，
+    // 也不在 disabledSessions 中（UI 撤销必然同时写 disabledSessions）。
+    const res = await req('POST', '/gateway/api/permissions', {
+      body: {
+        userId: user.id,
+        allowedFolders: [],
+        allowedSessionIds: ['cas-0-session-visible'],
+        disabledSessions: [],
+      },
+    });
+    assert.equal(res.status, 409, res.body);
+    assert.equal(res.json.code, 'SESSION_GRANTS_CONFLICT');
+    assert.deepEqual(
+      db.listUserSessionGrants(user.id),
+      ['cas-0-session-concurrent', 'cas-0-session-visible'],
+      '冲突必须保留服务端 grant，不得按旧草稿覆盖',
+    );
+    assert.deepEqual(
+      res.json.allowedSessionIds,
+      ['cas-0-session-concurrent', 'cas-0-session-visible'],
+      '409 响应必须回显服务端当前授权供客户端重新同步',
+    );
+  } finally {
+    assignableSessionIds = originalSessions;
+  }
+});
+
+test('Issue #25：显式空授权仍可 fail-closed 撤销，但必须逐个显式禁用', async () => {
+  const user = db.createUser('grant-explicit-empty-user', HASH, 'user');
+  for (const id of ['cas-1-session-visible', 'cas-1-session-concurrent', 'cas-1-session-raced']) db.claimSessionOwner(id, user.id);
+  assignableSessionIds = ['session-visible', 'cas-1-session-visible', 'cas-1-session-concurrent', 'cas-1-session-raced'];
+  setPerms(user.id, { allowedSessionIds: ['cas-1-session-visible'] });
+  db.markSessionGrantsSeeded(user.id);
+
+  // 未显式禁用的既有 grant → 视为过期草稿，拒绝
+  const conflict = await req('POST', '/gateway/api/permissions', {
+    body: {
+      userId: user.id,
+      allowedFolders: [],
+      allowedSessionIds: [],
+      disabledSessions: [],
+    },
+  });
+  assert.equal(conflict.status, 409, conflict.body);
+  assert.equal(conflict.json.code, 'SESSION_GRANTS_CONFLICT');
+  assert.deepEqual(db.listUserSessionGrants(user.id), ['cas-1-session-visible']);
+
+  // 显式 [] + 逐个禁用 → 必须是权威撤销，不能退化为 no-op
+  const revoked = await req('POST', '/gateway/api/permissions', {
+    body: {
+      userId: user.id,
+      allowedFolders: [],
+      allowedSessionIds: [],
+      disabledSessions: ['cas-1-session-visible'],
+    },
+  });
+  assert.equal(revoked.status, 200, revoked.body);
+  assert.deepEqual(db.listUserSessionGrants(user.id), []);
+});
+
+test('Issue #25：不带 allowedSessionIds 的部分更新不触碰会话授权', async () => {
+  const user = db.createUser('grant-partial-update-user', HASH, 'user');
+  for (const id of ['cas-2-session-visible', 'cas-2-session-concurrent', 'cas-2-session-raced']) db.claimSessionOwner(id, user.id);
+  assignableSessionIds = ['session-visible', 'cas-2-session-visible', 'cas-2-session-concurrent', 'cas-2-session-raced'];
+  setPerms(user.id, { allowedSessionIds: ['cas-2-session-visible', 'cas-2-session-concurrent'] });
+  db.markSessionGrantsSeeded(user.id);
+  const originalSessions = assignableSessionIds;
+  assignableSessionIds = ['cas-2-session-visible', 'cas-2-session-concurrent'];
+  try {
+    const res = await req('POST', '/gateway/api/permissions', {
+      body: { userId: user.id, allowedFolders: [], allowSsh: true },
+    });
+    assert.equal(res.status, 200, res.body);
+    assert.equal(db.getPermissions(user.id)?.allow_ssh, true);
+    assert.deepEqual(
+      db.listUserSessionGrants(user.id),
+      ['cas-2-session-concurrent', 'cas-2-session-visible'],
+      '省略 allowedSessionIds 时并发新增的 grant 必须原样保留',
+    );
+  } finally {
+    assignableSessionIds = originalSessions;
+  }
+});
+
+test('Issue #25：资源核验期间并发追加的 grant 不被整表替换覆盖', async () => {
+  const user = db.createUser('grant-race-user', HASH, 'user');
+  for (const id of ['cas-3-session-visible', 'cas-3-session-concurrent', 'cas-3-session-raced']) db.claimSessionOwner(id, user.id);
+  assignableSessionIds = ['session-visible', 'cas-3-session-visible', 'cas-3-session-concurrent', 'cas-3-session-raced'];
+  setPerms(user.id, { allowedSessionIds: ['cas-3-session-visible'] });
+  db.markSessionGrantsSeeded(user.id);
+  // 模拟权限保存 `await fetchAssignableResources()` 期间子用户 session/create 追加 grant
+  duringAssignableResources = () => {
+    db.replaceUserSessionGrants(user.id, ['cas-3-session-visible', 'cas-3-session-raced']);
+  };
+  try {
+    const res = await req('POST', '/gateway/api/permissions', {
+      body: {
+        userId: user.id,
+        allowedFolders: [],
+        allowedSessionIds: ['cas-3-session-visible'],
+        disabledSessions: [],
+      },
+    });
+    assert.equal(res.status, 409, res.body);
+    assert.equal(res.json.code, 'SESSION_GRANTS_CONFLICT');
+    assert.deepEqual(
+      db.listUserSessionGrants(user.id),
+      ['cas-3-session-raced', 'cas-3-session-visible'],
+      '请求窗口内追加的 grant 必须保留',
+    );
+  } finally {
+    duringAssignableResources = null;
+  }
 });

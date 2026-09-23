@@ -155,6 +155,7 @@ test('媒体生命周期：pending → failed；按 owner/ready/未过期 查询
       storage_keys: ['objects/live.bin'],
     });
     assert.equal(db.getMediaAsset('m-live'), null);
+    assert.deepEqual(db.drainPendingMediaRemovals(), ['objects/live.bin'], '删除元数据时必须保留文件回收凭证');
     assert.throws(() => db.deleteMediaAsset('m-live'), (error: unknown) => (error as MediaError).code === 'MEDIA_NOT_FOUND');
   });
 });
@@ -283,6 +284,11 @@ test('过期/pending 清理返回待删 storage keys，被占用的资产不清�
       'objects/expired-free.bin',
       'objects/stale.bin',
     ]);
+    assert.deepEqual(
+      db.drainPendingMediaRemovals().sort(),
+      ['objects/expired-free.bin', 'objects/stale.bin'],
+      'pruneMedia 提交元数据删除时必须保留文件回收凭证，且忽略占位键',
+    );
     assert.equal(db.getMediaAsset('held-live')?.id, 'held-live', '被消息占用的资产保留');
     assert.equal(db.listMessageMediaIds(kept.id).length, 1, '已绑定媒体仍可正常展示');
 

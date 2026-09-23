@@ -6,24 +6,12 @@ import http, { type IncomingMessage, type IncomingHttpHeaders } from 'node:http'
 import https from 'node:https';
 import { createSecureContext } from 'node:tls';
 import {
-  readFileSync,
-  readdirSync,
-  statSync,
-  createReadStream,
-  createWriteStream,
-  realpathSync,
-  openSync,
-  readSync,
-  fstatSync,
-  closeSync,
-  mkdirSync,
-  renameSync,
-  unlinkSync,
-  rmSync,
-  constants as fsConstants,
+  readSync, readFileSync, createReadStream, createWriteStream, realpathSync, openSync, fstatSync, closeSync,
+  mkdirSync, renameSync, statSync, unlinkSync, readdirSync, rmSync, copyFileSync, writeFileSync, mkdtempSync, existsSync, constants as fsConstants,
 } from 'node:fs';
 import { cp, link, lstat, mkdir, realpath, rename, rm, unlink } from 'node:fs/promises';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -54,13 +42,16 @@ import {
 import type { PlatformConfig } from './config.js';
 import { hardenSecretsAfterSetup, readEndpointRuntimeConfig } from './config.js';
 import { AuthService, AuthError, type RequestMeta } from './auth.js';
-import { Database, MediaError, MEDIA_IN_USE, pathWithinDeletedTree, samePathForMatch, type UserPermissionsRow, type MessageRow, type WorkspaceCleanupIntent } from './db.js';
+import { Database, MediaError, MEDIA_IN_USE, PermissionStateConflictError, SessionGrantsConflictError, canonicalForMatch, pathWithinDeletedTree, samePathForMatch, type UserPermissionsRow, type MessageRow, type WorkspaceCleanupIntent } from './db.js';
 import {
+  clientConnectionArgs,
+  parseSessionAddress,
   folderAllowed,
   normalizePath,
   isUploadRequest,
   isGitRequest,
   isAdminOnlyPluginEndpoint,
+  isSubuserBlockedApiPath,
   isSshPluginEndpoint,
   isUnscopedSshEndpoint,
   isSshAliasQueryEndpoint,
@@ -73,6 +64,7 @@ import {
   isAionuiPanel,
   aionuiRootFrom,
   isWorkspaceWrite,
+  isWorkspaceOrderWrite,
   isWorkspaceCreate,
   isWorkspaceDirectoryCreate,
   isWorkspaceDeleteOrRename,
@@ -124,17 +116,15 @@ import {
   TenantRemoteEventFilter,
   parseTenantRemoteClientFrame,
   parseTenantRemoteServerFrame,
-  tenantWorkspaceFileChangesSessionId,
   tenantTerminalRetentionSessionId,
+  tenantTerminalFollowSessionId,
 } from './tenant-remote-mux.js';
-
 export const DEFAULT_USER_REQUEST_BODY_BYTES = 64 * 1024 * 1024;
 export const ADMIN_REQUEST_BODY_BYTES = 300 * 1024 * 1024;
 export const DEFAULT_RPC_REQUEST_BODY_BYTES = 64 * 1024;
 export const SESSION_SCOPED_REQUEST_BODY_BYTES = 1024 * 1024;
 export const AIONUI_REQUEST_BODY_BYTES = 4 * 1024 * 1024;
 
-/** Resolve the streamed upload carrier ceiling for one authenticated account. */
 export function requestBodyLimitFor(role: 'admin' | 'user', allowLargeBody: boolean): number {
   return role === 'admin' || allowLargeBody ? ADMIN_REQUEST_BODY_BYTES : DEFAULT_USER_REQUEST_BODY_BYTES;
 }
@@ -161,6 +151,7 @@ function isSafeSshAlias(value: string): boolean {
 function isPlainJsonRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value) && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
 }
+import { isContainerRuntime, type UpdateEngine } from './update.js';
 
 type Req = Request & {
   dshpwUser?: number;
@@ -174,11 +165,23 @@ type Req = Request & {
   dshpwSessionCwd?: string;
   /** Explicit session.create identity, retained for response-id verification. */
   dshpwRequestedSessionId?: string;
+  dshpwSelectedModelSessionId?: string;
   /** An explicit identity absent from the trusted session registry before forwarding. */
   dshpwSessionClaimCandidate?: string;
   /** Releases the per-id create reservation after the upstream operation settles. */
   dshpwReleaseSessionReservation?: () => void;
   /** Agent preset approved for the current create, fork, or selection request. */
+  /** fork 的源会话已通过逐会话授权校验，响应中的新会话可登记到当前用户快照。 */
+  dshpwForkAuthorized?: boolean;
+  /** 工作区管理请求通过白名单校验后的目标路径。 */
+  dshpwWorkspacePath?: string;
+  dshpwWorkspaceCreate?: boolean;
+  dshpwWorkspaceOrderId?: string;
+  dshpwWorkspaceOrderPath?: string;
+  dshpwWorkspaceOldPath?: string;
+  dshpwWorkspaceNewPath?: string;
+  dshpwCreatedSessionId?: string;
+  /** 当前 create/fork 请求已验证的 agent preset，供成功响应登记。 */
   dshpwAgentPreset?: string;
   /** Session whose preset selection is committed only after a successful Host response. */
   dshpwSelectedSessionId?: string;
@@ -193,7 +196,241 @@ const DIRECTORY_PICKER_CREATE_RE = /^\/api\/(?:host[.\/]createDirectory|director
 const DIRECTORY_PICKER_NATIVE_RE = /^\/api\/directoryPicker[.\/]pick$/;
 const WORKSPACE_CREATE_RE = /^\/api\/workspace[.\/]create$/;
 const WORKSPACE_REMOVE_RE = /^\/api\/workspace[.\/](?:remove|delete)$/;
+
+/** DSH alpha.2 官方 terminal 的 HTTP unary RPC 面；主用户直接透传，子用户由 allowSsh 控制。 */
+const OFFICIAL_TERMINAL_HTTP_RE = /^\/api\/terminal[.\/](?:environment|shells|list|create|write|resize|rename|close)$/;
+/** DSH alpha.2 官方 terminal 的 Remote mux 流；主用户直接透传，子用户由 allowSsh 控制。 */
+const OFFICIAL_TERMINAL_REMOTE_ENDPOINTS = new Set(['terminal/follow', 'terminal/retain']);
+/** 子用户 terminal UX 桩路径（点号/斜杠两种官方写法）：list / environment /
+ *  shells / close。allowSsh 关闭时只回一个「不放开能力」的 server-response，
+ * 见下方中间件；allowSsh 开启后这些请求也原样透传。 */
+const TERMINAL_STUB_RE = /^\/api\/terminal[.\/](list|environment|shells|close)$/;
+
+/** 与 Remote mux 侧共用：两条通道对同一个「terminal 不可用」失败给出同一文案。 */
+const TERMINAL_UNAVAILABLE_MESSAGE = 'Remote terminal is not available for this user';
+const OFFICIAL_JOB_REMOTE_ENDPOINTS = new Set(['job/list', 'job/follow']);
+const OFFICIAL_ACCOUNT_REMOTE_ENDPOINTS = new Set(['account/watch']);
+
+export function systemdPurgeLaunchArgs(
+  unitName: string,
+  executable: string,
+  helperPath: string,
+  planPath: string,
+  temporaryDirectory = os.tmpdir(),
+): string[] {
+  return ['--unit', unitName, '--collect', '--quiet', '--property=Type=exec', `--setenv=TMPDIR=${temporaryDirectory}`, executable, helperPath, planPath];
+}
+
+/**
+ * alpha.2 官方 workspaceFiles 只读 RPC（点号/斜杠两种写法）。
+ *
+ * 上游对 read/readAll/readBytes/readRelated/stat 明确不做工作区包含检查
+ * （README："The service does not impose workspace containment on file reads"），
+ * 且请求只带 workspaceFileScopeId（会话身份）+ path（绝对路径或相对工作区根），
+ * 因此「用哪个会话的 scope 读哪个绝对路径」完全由请求方决定：子用户可借官方
+ * 通道读取宿主任意可读文件。网关必须在这里做会话授权 + 目标路径归属校验。
+ *
+ * `changes` 在 0.1.7-alpha.1 里是带 path 的 Remote 流（不是 HTTP unary RPC）。
+ * 子用户 Remote 面按 workspaceFileScopeId + path 做会话/工作区授权，并过滤上游
+ * 返回的绝对路径；HTTP unary 面仍由 WORKSPACE_FILES_CHANGES_ROUTE_RE 显式 403
+ * （不依赖上游对 Remote-only 端点的 signature-invalid 报错）。
+ */
+const WORKSPACE_FILES_RPC_RE =
+  /^\/api\/workspaceFiles[.\/](?:read|readAll|readBytes|readRelated|stat|list|changes)$/;
+
+/**
+ * 0.1.7-alpha.1 的 workspaceFiles/changes（Remote 流）HTTP unary 面的精确路径。
+ * 子用户一律 403：该能力只经 Remote mux 提供；Remote 面按会话与路径单独授权。
+ */
+const WORKSPACE_FILES_CHANGES_ROUTE_RE = /^\/api\/workspaceFiles[.\/]changes$/;
+
+/**
+ * 会话日志导出路由（GET/HEAD ?sessionId=…）：上游只按 query 的 sessionId 查会话、
+ * 不校验归属，且该路由同时属于 official 面与 isGitRequest，因此必须单独做会话
+ * 归属校验（缺失/未授权一律 403），不能只靠 allow_git_download 开关。
+ */
+const SESSION_EXPORT_ROUTE_RE = /^\/api\/session[.\/]export$/;
+
+/**
+ * alpha.2 官方交付物路由：变更摘要 / 变更差异 / 在宿主桌面打开变更文件。
+ * 坐标全部在 query（sessionId + seq [+ index]），上游只用 sessionId 查会话，
+ * 不校验归属——因此不能把 `changes` 命名空间整体当官方面放行。
+ */
+const CHANGES_ROUTE_RE = /^\/api\/changes[.\/](summary|diff|open)$/;
+
+
+/**
+ * 从 terminal UX 桩请求体里提取可回显的 rpcId；任何不满足严格 client-request
+ * 信封的输入返回空串，调用方回落到常规 403：
+ *   · body 必须是 JSON 对象且 type === 'client-request'；
+ *   · rpcId 必须是 1..200 字符的字符串；
+ *   · method 必须与本路径的 RPC 一致（`terminal/<action>`，点号写法归一化）。
+ * 刻意只读信封字段：不解析、不回显 payload/args，避免把子用户输入透传出去。
+ */
+function terminalStubRpcId(chunks: Buffer[], action: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  } catch {
+    return '';
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return '';
+  const envelope = parsed as Record<string, unknown>;
+  if (envelope.type !== 'client-request') return '';
+  const rpcId = envelope.rpcId;
+  if (typeof rpcId !== 'string' || rpcId.length === 0 || rpcId.length > 200) return '';
+  const method = envelope.method;
+  if (typeof method !== 'string') return '';
+  const canonical = method.startsWith('terminal.') ? `terminal/${method.slice('terminal.'.length)}` : method;
+  return canonical === `terminal/${action}` ? rpcId : '';
+}
+
+/**
+ * 0.1.7-alpha.1 readBytes 的 wire `options`（{ range?, baseFile? }）。
+ * 只有 `baseFile` 会改变真实读取目标（上游按 `resolve(dirname(baseFile), path)`
+ * 解析），因此必须与上游同名 schema 同口径地严格解析：未知键、数组、标量、
+ * 非法 baseFile（空/超长/含 NUL）或非整数 range 一律返回 null，调用方 fail-closed。
+ * 缺省（undefined）与 `{}` 都表示「无基准文件」，不能凭缺省放宽后续判定。
+ */
+function workspaceFileByteOptions(value: unknown): { baseFile: string | null } | null {
+  if (value === undefined) return { baseFile: null };
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const options = value as Record<string, unknown>;
+  for (const key of Object.keys(options)) {
+    if (key !== 'range' && key !== 'baseFile') return null;
+  }
+  const range = options.range;
+  if (range !== undefined) {
+    if (range === null || typeof range !== 'object' || Array.isArray(range)) return null;
+    const window = range as Record<string, unknown>;
+    for (const key of Object.keys(window)) {
+      if (key !== 'offset' && key !== 'length') return null;
+    }
+    for (const bound of [window.offset, window.length]) {
+      if (bound !== undefined && (typeof bound !== 'number' || !Number.isSafeInteger(bound) || bound < 0)) return null;
+    }
+  }
+  const baseFile = options.baseFile;
+  if (baseFile === undefined) return { baseFile: null };
+  if (typeof baseFile !== 'string' || baseFile.length === 0 || baseFile.length > 4096) return null;
+  if (baseFile.includes('\0')) return null;
+  return { baseFile };
+}
+
+/**
+ * workspaceFiles RPC 的授权输入：会话作用域身份 + 目标路径（readBytes 还带
+ * options.baseFile）。只从 client-request 信封的 payload.args 读取（DSH 同源解码，
+ * 外层同名字段会被 DSH 丢弃，绝不能作为授权依据）；任何缺失/超长/形状不符返回 null。
+ */
+function workspaceFileScopeRequest(
+  value: unknown,
+  readBytes: boolean,
+): { scopeId: string; path: string; relativePath: string | null; baseFile: string | null } | null {
+  const args = clientConnectionArgs(value);
+  if (args === null) return null;
+  const scopeId = args.workspaceFileScopeId;
+  const requestedPath = args.path;
+  if (typeof scopeId !== 'string' || scopeId.length === 0 || scopeId.length > 200) return null;
+  if (typeof requestedPath !== 'string' || requestedPath.length === 0 || requestedPath.length > 4096) return null;
+  if (requestedPath.includes('\0')) return null;
+  const relativePath = args.relativePath;
+  if (relativePath !== undefined) {
+    if (typeof relativePath !== 'string' || relativePath.length === 0 || relativePath.length > 4096) return null;
+    if (relativePath.includes('\0')) return null;
+  }
+  // options 只属于 0.1.7-alpha.1 的 readBytes；其它方法带 options 不参与路径解析，
+  // 不能因为它而改变（或放宽）判定，因此只在该方法上解析。
+  let baseFile: string | null = null;
+  if (readBytes) {
+    const options = workspaceFileByteOptions(args.options);
+    if (options === null) return null;
+    baseFile = options.baseFile;
+  }
+  return {
+    scopeId,
+    path: requestedPath,
+    relativePath: typeof relativePath === 'string' ? relativePath : null,
+    baseFile,
+  };
+}
+
+/**
+ * 把 workspaceFiles 的目标路径解析成归一化绝对路径：绝对路径（与上游同一个
+ * path.isAbsolute 口径）按原样归一化，相对路径按该会话的工作区根拼接；
+ * readRelated 的第二个文件与 readBytes 的 options.baseFile 一样，相对「基准文件
+ * 所在目录」解析（与上游 resolve(dirname(base), relative) 逐字一致）。
+ * 拼接刻意用字符串 + normalizePath（而不是 path.resolve）：后者的相对解析
+ * 依赖进程所在平台（Windows 会把 `/root` 解析成当前盘符下的 `D:\root`），
+ * 而网关所有路径比较都以 normalizePath 为准，两者必须同口径。
+ */
+function resolveWorkspaceFileTarget(root: string, requestedPath: string, relativePath: string | null): string | null {
+  const normalizedRoot = normalizePath(root);
+  const base = path.isAbsolute(requestedPath)
+    ? normalizePath(requestedPath)
+    : normalizePath(`${normalizedRoot}/${requestedPath}`);
+  if (relativePath === null) return base;
+  const relative = relativePath.replace(/\\/g, '/');
+  // 上游对 readRelated 的 relativePath 与 readBytes 的 baseFile 相对目标使用同一条口径：
+  // 必须是相对文件系统路径，绝对路径、盘符路径和 URL scheme 都由上游拒绝。网关必须
+  // 使用同一口径，不能把绝对参数拼成工作区内的假路径后误放行。
+  if (
+    relative.startsWith('/') ||
+    /^[a-z][a-z\\d+.-]*:/iu.test(relative)
+  ) return null;
+  const separator = base.lastIndexOf('/');
+  const directory = separator < 0 ? '' : base.slice(0, separator);
+  return normalizePath(`${directory}/${relative}`);
+}
+
+/** 官方交付物路由的 query 坐标字段（与上游 NUMERIC 口径一致：纯十进制安全整数）。 */
+function routeCoordinate(raw: string | null): number | null {
+  if (raw === null || !/^\d+$/.test(raw)) return null;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) ? value : null;
+}
+
+/**
+ * alpha.2 changes.summary|diff|open 与 present.open 的坐标：sessionId + seq
+ * （diff/open 还要 index）。任何不可解析的坐标返回 null，调用方 fail-closed。
+ */
+function deliveryRouteCoordinates(
+  searchParams: URLSearchParams,
+  needsIndex: boolean,
+): { sessionId: string; seq: number; index: number | null } | null {
+  const sessionId = searchParams.get('sessionId');
+  if (sessionId === null || sessionId.length === 0 || sessionId.length > 200) return null;
+  const seq = routeCoordinate(searchParams.get('seq'));
+  if (seq === null) return null;
+  const index = needsIndex ? routeCoordinate(searchParams.get('index')) : null;
+  if (needsIndex && index === null) return null;
+  return { sessionId, seq, index };
+}
+
+/**
+ * alpha.2 的 Remote waterfall 结果信封：payload.args = { clientId, eventId, outcome }，
+ * outcome = { kind: 'result', value }，审批类 value 就是 ApprovalOutcome 字符串
+ * （'allowed-once' 是唯一的授权结果）。受限子用户必须被取消，因此这里把
+ * 'allowed-once' 改写为 'rejected'；user-questions 的 value 是 { answers: [...] }
+ * 对象，不含任何审批字段，保持可用。返回是否有实际改动。
+ */
+function forceRejectRemoteEventOutcome(value: unknown): boolean {
+  const args = clientConnectionArgs(value);
+  const outcome = args === null ? null : args.outcome;
+  if (outcome === null || typeof outcome !== 'object' || Array.isArray(outcome)) return false;
+  const row = outcome as Record<string, unknown>;
+  if (row.kind !== 'result') return false;
+  let changed = false;
+  if (row.value === 'allowed-once') {
+    row.value = 'rejected';
+    changed = true;
+  }
+  // 兼容把审批结果再包一层 { approvalId, outcome } 的形状：复用与旧 /api/respond
+  // 完全相同的改写口径，避免两条通道的审批语义漂移。
+  if (forceRejectApproval(row.value)) changed = true;
+  return changed;
+}
 const MODEL_CATALOG_RE = /^\/api\/(?:(?:llm|session)[.\/]models|session[.\/]modelCatalog)$/;
+
 const AGENT_PRESET_SELECT_RE = /^\/api\/agentPresets?[.\/]select$/;
 const SESSION_OPEN_WORKSPACE_PATH_RE = /^\/api\/session[.\/]openWorkspacePath$/;
 const SESSION_SELECT_MODEL_RE = /^\/api\/session[.\/]selectModel$/;
@@ -266,7 +503,6 @@ function decodeSidebarHtmlRoute(pathname: string): { sessionId: string; filePath
   return path.isAbsolute(filePath) ? { sessionId, filePath } : null;
 }
 
-/** Background update polling does not count as interactive gateway activity. */
 export function isBackgroundUpdateRequest(gatePath: string): boolean {
   return gatePath === '/api/dsh-passwords/update/status' || gatePath === '/gateway/internal/update';
 }
@@ -424,7 +660,7 @@ function rpcPayloadOf(value: unknown, expectedMethod?: string | null): Record<st
   if (envelope.type !== 'client-request') return envelope;
   if (
     typeof envelope.method !== 'string' ||
-    (expectedMethod !== undefined && expectedMethod !== null && envelope.method !== expectedMethod) ||
+    (expectedMethod !== undefined && expectedMethod !== null && envelope.method.replace('.', '/') !== expectedMethod.replace('.', '/')) ||
     envelope.payload === null ||
     typeof envelope.payload !== 'object' ||
     Array.isArray(envelope.payload)
@@ -555,12 +791,17 @@ function decodedQueryKey(rawKey: string): string | null {
   }
 }
 
-/** Remove gateway credentials without normalizing plugin combo-query bytes. */
 function stripGatewayAuthQuery(rawUrl: string, pathname: string): string {
   const queryIndex = rawUrl.indexOf('?');
   if (queryIndex < 0) return '';
   const rawQuery = rawUrl.slice(queryIndex + 1);
   if (rawQuery === '') return '';
+
+  // DSH uses /plugins/??<module-list>&rev=<hash>. URLSearchParams normalizes the
+  // second '?' to %3F and rewrites otherwise-valid business query bytes. Decode
+  // keys only for credential matching; output always keeps the original bytes.
+  // `token` is an alpha launch credential only at the index entrypoint. Plugins
+  // commonly use a business `token` query parameter, which must not be removed.
   const stripLaunchToken = pathname === '/' || pathname === '/index.html';
   const kept = rawQuery.split('&').filter((part) => {
     const equalsIndex = part.indexOf('=');
@@ -644,7 +885,8 @@ function setCsrfCookie(res: Response, token: string, secure: boolean): void {
 // （light|dark|system，默认 system）。网关在渲染登录/配置页时读取该文件，
 // 注入引导脚本在浏览器端解析（system 走 prefers-color-scheme，与 dsh 的
 // boot-theme 逻辑一致）。文件不可读时回退 system；可用 MCP_DSH_SETTINGS_FILE
-// 显式指定 dsh 设置文件路径（网关与 dsh 不同机时用）。
+// 显式指定 dsh 设置文件路径（网关与 dsh 不同机时用）。dsh 0.1.7 首次迁移会把旧
+// settings.yaml 改名为 settings.yaml.imported，网关在候选位置回退读取该文件。
 type ThemePreference = 'light' | 'dark' | 'system';
 
 // 主题偏好每 5 秒最多读一次 settings.yaml：登录/配置页每次渲染都调用本函数，
@@ -659,12 +901,16 @@ function readDshThemePreference(): ThemePreference {
   }
   const explicit = process.env.MCP_DSH_SETTINGS_FILE?.trim();
   const dshHome = process.env.DSH_HOME?.trim();
-  const candidates: string[] = explicit
+  const bases: string[] = explicit
     ? [explicit]
     : [
         ...(dshHome ? [path.join(dshHome, 'settings.yaml')] : []),
         path.join(os.homedir(), '.dsh', 'settings.yaml'),
       ];
+  // dsh 0.1.7 首次迁移会把旧 settings.yaml 改名为 settings.yaml.imported：
+  // 每个候选位置先读 settings.yaml，再回退同目录的 settings.yaml.imported。
+  const candidates: string[] = [];
+  for (const base of bases) candidates.push(base, `${base}.imported`);
   let value: ThemePreference = 'system';
   for (const file of candidates) {
     try {
@@ -966,7 +1212,7 @@ function renderSetupPage(params: { lang: Lang; error?: string; csrf: string }): 
 }
 
 /**
- * F-A2 隐藏 Unicode 清洗的字节级流（aionui-panel/raw 文本内容用）：
+ * F-A2 隐藏 Unicode 清洗的字节级流（插件面板流式文本内容用）：
  * 按 UTF-8 字节模式剥离零宽/bidi 等隐形字符序列，跨 chunk 安全。
  * 用 latin1 做 1:1 字节映射，正则匹配字节序列，不破坏任何非目标字节。
  *
@@ -1114,6 +1360,105 @@ function lowerSafetyLimit(requested: number | undefined, fixed: number): number 
     : fixed;
 }
 
+
+
+function hasImageAttachment(value: unknown): boolean {
+  const visit = (current: unknown, depth: number): boolean => {
+    if (depth > 8 || current === null || typeof current !== 'object') return false;
+    if (Array.isArray(current)) return current.some((item) => visit(item, depth + 1));
+    const row = current as Record<string, unknown>;
+    if (row.type === 'image' && typeof row.data === 'string') return true;
+    return Object.values(row).some((item) => visit(item, depth + 1));
+  };
+  return visit(value, 0);
+}
+
+
+/** 规范化后的 `provider/model` 允许项：provider 无斜杠/空白；model 允许含 `/`
+ *  （DSH 官方目录 795/1354 个模型 ID 含斜杠，如 openrouter/anthropic/claude-…、
+ *  baseten/deepseek-ai/…，自定义模型名同样不受字符集限制），只禁空白。 */
+type AllowedModelSpec = { readonly provider: string; readonly model: string };
+
+
+/**
+ * 解析一条 allowlist 记录。允许列表由主用户在权限页保存，必须能在网关侧
+ * 单独判定合法性，不能依赖上游（`session/model-unavailable`）报错才发现越权。
+ * 分隔符是第一个 `/`：provider 段禁止斜杠（UI 与预设路由恒满足），剩余全部归 model。
+ */
+function parseAllowedModelSpec(value: unknown): AllowedModelSpec | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (trimmed.length === 0 || trimmed.length > 300) return null;
+  const separator = trimmed.indexOf('/');
+  if (separator <= 0 || separator === trimmed.length - 1) return null;
+  const provider = trimmed.slice(0, separator);
+  const model = trimmed.slice(separator + 1);
+  if (!/^[^/\s]{1,100}$/.test(provider) || !/^[^\s]{1,200}$/.test(model)) return null;
+  return { provider, model };
+}
+
+
+/** 规范化并去重 allowlist（保持提交顺序，模型选择器的收敛结果可预测）。 */
+function normalizeAllowedModels(value: readonly string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    const spec = parseAllowedModelSpec(entry);
+    if (spec === null) continue;
+    const canonical = `${spec.provider}/${spec.model}`;
+    if (seen.has(canonical)) continue;
+    seen.add(canonical);
+    out.push(canonical);
+    if (out.length >= 512) break;
+  }
+  return out;
+}
+
+
+/** 从官方形状里读取一个模型选择：ModelCatalog.default / ModelSelectionProjection.next
+ * / model/selection 事件 data。字段名必须完全一致，避免把任意请求字段当成模型依据。 */
+function modelSelectionFrom(value: unknown): AllowedModelSpec | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  if (typeof row.provider !== 'string' || typeof row.model !== 'string') return null;
+  return parseAllowedModelSpec(`${row.provider}/${row.model}`);
+}
+
+
+/**
+ * 从官方会话数据里收集 `model/selection` 事件（session/follow 的 snapshot.records 与
+ * 后续 event 帧、session/page 与 session/history 的 records）。按 seq 取最新一条，
+ * 与 DSH 的 ModelSelectionProjection（lastUsed / pending→next）语义一致。
+ */
+function latestModelSelectionInRecords(value: unknown, depth = 0): { spec: AllowedModelSpec; seq: number } | null {
+  if (depth > 6 || value === null || typeof value !== 'object') return null;
+  if (Array.isArray(value)) {
+    let best: { spec: AllowedModelSpec; seq: number } | null = null;
+    for (const item of value) {
+      const found = latestModelSelectionInRecords(item, depth + 1);
+      if (found === null) continue;
+      if (best === null || found.seq >= best.seq) best = found;
+    }
+    return best;
+  }
+  const row = value as Record<string, unknown>;
+  // 事件形状：{ type: 'model/selection', seq, time, data: {provider, model, ...} }
+  if (row.type === 'model/selection') {
+    const data = modelSelectionFrom(row.data);
+    if (data !== null) {
+      const seq = typeof row.seq === 'number' && Number.isSafeInteger(row.seq) ? row.seq : -1;
+      return { spec: data, seq };
+    }
+  }
+  let found: { spec: AllowedModelSpec; seq: number } | null = null;
+  for (const key of ['records', 'event', 'events', 'items']) {
+    if (!Object.hasOwn(row, key)) continue;
+    const nested = latestModelSelectionInRecords(row[key], depth + 1);
+    if (nested === null) continue;
+    if (found === null || nested.seq >= found.seq) found = nested;
+  }
+  return found;
+}
 export function createGatewayServer(
   config: PlatformConfig,
   auth: AuthService,
@@ -1124,6 +1469,242 @@ export function createGatewayServer(
   trailingOptions?: GatewayServerOptions,
 ): http.Server {
   const options: GatewayServerOptions = { ...(optionsParam ?? {}), ...(trailingOptions ?? {}) };
+
+
+  const upstreamTransport = new URL(config.gateway.upstream).protocol === 'https:' ? https : http;
+  const fetchAssignableResources = async (): Promise<AssignableResources | null> => {
+    try {
+      await ensureAlphaSessionOwnershipBootstrap();
+      await ensureWorkspaceAccessSnapshot();
+      await refreshSessionIdentitySnapshot();
+      return {
+        folders: new Set([...workspacePathById.values()].map(normalizePath)),
+        sessions: new Set([...sessionCwdById.keys()].filter((id) => !archivedWorkspaceSessionIds.has(id))),
+      };
+    } catch {
+      return null;
+    }
+  };
+
+
+  // 子用户默认 64 MiB；勾选 allowUpload（大请求体权限）后与 rc.2
+  // 上游 carrier cap 对齐到 300 MiB。管理员始终使用 300 MiB。
+
+  // dsh rc.8 将归档状态放在全局 workspace registry；session.list 自身经常不带该字段，
+  // 因此在网关实例内保存最近一次可信 workspace.list 快照，避免归档会话掉进 Ungrouped。
+  const archivedSessionSnapshot = new Set<string>();
+
+  // 只负责「同一用户多个 workspace.list 响应之间的先后顺序」（较早的慢响应不得回滚
+  // 更新的快照）。它不是授权版本：授权回写栅栏必须用 userAccessEpoch，绝不能把
+  // 这个全局计数器当作授权 revision（详见 replaceUserSessionAccess 的注释）。
+  let workspaceListRequestRevision = 0;
+
+
+  // 普通用户各自独立的会话授权快照：不能用全局 sessionId → cwd 映射，
+  // 否则一个用户的 workspace.list 会给另一个用户的 session RPC 提供授权依据。
+  // A subuser's filtered workspace baseline is the authority for all later
+  // workspaceId and sessionId checks. alpha.3 obtains it through Remote
+  // workspace/follow, whereas older clients can still populate it via HTTP.
+  const userSessionAccess = new Map<number, Map<string, string>>();
+
+  const userWorkspaceIds = new Map<number, Set<string>>();
+
+  const userWorkspacePaths = new Map<number, Map<string, string>>();
+
+  const userArchivedSessionIds = new Map<number, Set<string>>();
+
+  /** Session/create has passed path validation but its DSH response is still pending. */
+  const pendingCreatedSessions = new Map<number, Map<string, { cwd: string; expiresAt: number }>>();
+
+  const clearPendingCreatedSession = (userId: number, sessionId: string): void => {
+    const pending = pendingCreatedSessions.get(userId);
+    pending?.delete(sessionId);
+    if (pending?.size === 0) pendingCreatedSessions.delete(userId);
+  };
+
+  const recordPendingCreatedDirectory = (userId: number, canonicalPath: string): void => {
+    let pending = pendingCreatedDirectories.get(userId);
+    if (pending === undefined) {
+      pending = new Map();
+      pendingCreatedDirectories.set(userId, pending);
+    }
+    if (pending.size >= 256 && !pending.has(canonicalPath)) {
+      const oldest = pending.keys().next().value;
+      if (typeof oldest === 'string') pending.delete(oldest);
+    }
+    pending.set(canonicalPath, { expiresAt: Date.now() + PENDING_DIRECTORY_TTL_MS });
+  };
+
+  const userSessionAccessWaiters = new Map<number, Set<() => void>>();
+
+  const userSessionAccessFor = (userId: number): Map<string, string> => userSessionAccess.get(userId) ?? new Map();
+
+  // Remote workspace/session 订阅在单条 WebSocket 上长期存活。所有已认证用户（含
+  // 主用户）都登记，确保登出、改密、改名和删除账户时能立即终止升级时身份。
+  const remoteMuxClientsByUser = new Map<number, Set<RemoteMuxUserConnection>>();
+
+  const recordSessionModelSelection = (sessionId: string, selection: AllowedModelSpec | null): void => {
+    if (sessionId.length === 0 || sessionId.length > 200) return;
+    if (selection === null) {
+      // 明确观测到「无选择」时才写 default；无法判读时保留旧状态（不能把
+      // 旧会话的已知选择降级成更宽松的 default）。
+      sessionModelById.set(sessionId, { kind: 'default' });
+    } else {
+      sessionModelById.set(sessionId, { kind: 'selection', provider: selection.provider, model: selection.model });
+    }
+    if (sessionModelById.size > SESSION_MODEL_STATE_MAX) {
+      const oldest = sessionModelById.keys().next().value;
+      if (typeof oldest === 'string') sessionModelById.delete(oldest);
+    }
+  };
+
+  /**
+   * 从 session/follow 帧读取官方模型状态：
+   *   · snapshot：projections.values.modelSelection.next（null = 无选择 → Host 默认）
+   *   · 后续帧：model/selection 事件（event.data 就是完整 ModelSelection）
+   * 只在能明确读到时才写入；形状不符（旧版/异常）不篡改已有状态。
+   */
+  const recordSessionFollowModelSelection = (sessionId: string, value: unknown): void => {
+    if (!isPlainJsonRecord(value)) return;
+    if (value.type === 'snapshot') {
+      const projections = value.projections;
+      if (!isPlainJsonRecord(projections)) return;
+      const values = projections.values;
+      if (!isPlainJsonRecord(values) || !Object.hasOwn(values, 'modelSelection')) return;
+      const projection = values.modelSelection;
+      if (!isPlainJsonRecord(projection) || !Object.hasOwn(projection, 'next')) return;
+      // next 为空（null）= 该会话没有模型选择，Host 用共享默认。
+      recordSessionModelSelection(sessionId, modelSelectionFrom(projection.next));
+      return;
+    }
+    const latest = latestModelSelectionInRecords(value);
+    if (latest !== null) recordSessionModelSelection(sessionId, latest.spec);
+  };
+
+  /** 尽力规范化：优先文件系统真实路径（解析符号链接），失败退回字符串归一。 */
+  const canonicalizePathBestEffort = (candidate: string): string => {
+    try {
+      return normalizePath(realpathSync(candidate));
+    } catch {
+      return normalizePath(candidate);
+    }
+  };
+
+  const isRemoteMuxStreamId = (value: unknown): value is string =>
+    typeof value === 'string' && value.length > 0 && value.length <= 200 && /^[A-Za-z0-9_-]+$/.test(value);
+
+  // DSH routes a waterfall answer through a separate HTTP request. Retain the
+  // exact browser generation and session that received it so a subuser cannot
+  // submit another user's eventId through /api/$events/result.
+  const remoteEventOwnership = new Map<string, RemoteEventOwnership>();
+
+  const REMOTE_EVENT_MAX_AGE_MS = 12 * 60 * 60 * 1000;
+
+  const REMOTE_EVENT_MAX_PENDING = 10_000;
+
+  // DSH may deliver one pending waterfall to multiple explicitly authorized
+  // Remote clients for a shared session. The Host independently correlates
+  // replies by both ids, so the gateway must retain that same compound key.
+  const remoteEventOwnershipKey = (eventId: string, clientId: string): string => JSON.stringify([eventId, clientId]);
+
+  const sessionAuthorizationId = (address: NonNullable<ReturnType<typeof parseSessionAddress>>): string =>
+    address.kind === 'session' ? address.sessionId : address.parentSessionId;
+
+  const sessionFollowTargetId = (address: NonNullable<ReturnType<typeof parseSessionAddress>>): string =>
+    address.kind === 'session' ? address.sessionId : address.childSessionId;
+
+  const sessionFollowSnapshotMatches = (address: NonNullable<ReturnType<typeof parseSessionAddress>>, value: unknown): boolean => {
+    if (!isPlainJsonRecord(value) || value.type !== 'snapshot' || !isPlainJsonRecord(value.header)) return false;
+    const header = value.header;
+    const targetId = sessionFollowTargetId(address);
+    if (header.id !== targetId) return false;
+    if (address.kind === 'subagent') {
+      return header.origin === 'subagent' && header.parentSession === address.parentSessionId;
+    }
+    return header.origin !== 'subagent';
+  };
+
+  const remoteMuxEventSessionId = (event: string, args: unknown[]): string | null => {
+    if (event === 'api-session/added') {
+      const summary = args[0];
+      if (!isPlainJsonRecord(summary)) return null;
+      return typeof summary.sessionId === 'string'
+        ? summary.sessionId
+        : typeof summary.id === 'string'
+          ? summary.id
+          : null;
+    }
+    if (
+      event === 'api-session/activity' ||
+      event === 'api-session/error' ||
+      event === 'api-session/removed' ||
+      event === 'api-session/status'
+    ) return typeof args[0] === 'string' ? args[0] : null;
+    return null;
+  };
+
+
+  /**
+   * Do not serialize up to 2,000 internal requests behind a permission-save HTTP
+   * request. A small fixed pool bounds upstream pressure while preserving the
+   * fail-closed contract: every failed confirmation is returned for grant revocation.
+   */
+  async function applySandboxToSessions(sessionIds: readonly string[], mode: string): Promise<string[]> {
+    const failed: string[] = [];
+    let cursor = 0;
+    const workerCount = Math.min(16, sessionIds.length);
+    const worker = async (): Promise<void> => {
+      while (true) {
+        const index = cursor;
+        cursor += 1;
+        if (index >= sessionIds.length) return;
+        const sessionId = sessionIds[index];
+        if (!(await applySandboxToSession(sessionId, mode))) failed.push(sessionId);
+      }
+    };
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    return failed;
+  }
+
+
+  type AssignableResources = { folders: Set<string>; sessions: Set<string> };
+
+  // 子用户刚通过目录选择器成功创建、可登记为工作区的目录（带过期）。
+  // workspace/create 只接受「显式分配的精确目录 / 自己创建的工作区子树 / 本表命中」，
+  // 杜绝把任意预存在目录登记进自己的白名单（D1 工作流收紧）。
+  const pendingCreatedDirectories = new Map<number, Map<string, { expiresAt: number }>>();
+
+  const PENDING_DIRECTORY_TTL_MS = 30 * 60 * 1000;
+
+  const sessionModelById = new Map<string, SessionModelState>();
+
+  const SESSION_MODEL_STATE_MAX = 20_000;
+
+  type RemoteMuxUserConnection = {
+    socket: any;
+    publishSessionAttachment: (sessionId: string, cwd: string) => void;
+    publishWorkspaceUpsert: (workspace: Record<string, unknown>) => void;
+  };
+
+  type RemoteEventOwnership = {
+    userId: number;
+    clientId: string;
+    sessionId: string;
+    expiresAt: number;
+  };
+
+
+  // ── 会话有效模型状态（网关侧授权依据）─────────────────────────────
+  // DSH 的 create/fork/prompt 请求体里没有模型字段（模型由 Host 从会话投影或
+  // agentDefaultModel 解析），所以网关必须自己维护「这个会话接下来会用哪个
+  // provider/model」才能在权限收紧后拦住旧会话。状态只来自官方来源：
+  //   1. session/selectModel 成功响应的 result.value.selected（官方规范化结果）
+  //   2. session/follow 的 snapshot.projections.values.modelSelection（next）
+  //   3. session/follow 事件流里的 model/selection 事件（按 seq 取最新一条）
+  // session/page 与 session/history 只是分页窗口，不能作为当前模型的权威来源：
+  // 旧窗口可能包含过时选择，响应里的嵌套 ID 也可能来自 fork/插件数据。
+  // `default` 表示已通过 follow snapshot 或 create/fork 明确观测到「无选择」。
+  type SessionModelState = { kind: 'selection'; provider: string; model: string } | { kind: 'default' };
   const app = express();
   const managedFileUploadMaxBytes = lowerSafetyLimit(
     options.managedFileUploadMaxBytes,
@@ -1251,7 +1832,7 @@ export function createGatewayServer(
   };
   upstreamBrowserCookieHeader();
 
-  // Orchestrators use these minimal endpoints without receiving tenant, path, or secret data.
+  // 受反代/编排器调用的最小健康端点：不返回密钥、用户或上游详情。
   app.get('/gateway/healthz', (_req, res) => {
     res.status(200).json({ ok: true, service: 'dsh-passwords' });
   });
@@ -1287,15 +1868,143 @@ export function createGatewayServer(
     });
   }
 
-  // workspaceId → 规范路径 映射：从 workspace.list 响应里收集，供 session.create 用 workspaceId 时解析路径
+  // workspaceId → 规范路径映射：从 workspace.list 响应里收集，供 session.create 用 workspaceId 时解析路径
   const workspacePathById = new Map<string, string>();
+  // 每用户授权 epoch：唯一权威、单调递增的「授权/权限已变更」计数。只有实际改变
+  // 会话可见性的变更（grant、disabled_sessions、目录白名单、封禁、沙盒、workspace
+  // 清理）才推进它；workspace.list / Remote baseline 只是可见性投影，替换快照绝不
+  // 推进它——否则在途的 create/fork 响应会借一次列表刷新重新获得回写资格。
+  // 请求开始时记录 epoch，响应/回写时与当前 epoch 比对：不相等即授权已变，
+  // 旧请求一律不得回写（权限实际变化时旧请求不能回写）。
+  const userAccessEpoch = new Map<number, number>();
+  // 同一用户 workspace.list 响应的顺序水位（workspaceListRequestRevision 的
+  // 用户投影）。与 epoch 完全独立：只用于丢弃乱序的旧列表响应，不参与授权判定。
+  const userAccessListOrder = new Map<number, number>();
+  const notifyUserSessionAccessWaiters = (userId: number): void => {
+    const waiters = userSessionAccessWaiters.get(userId);
+    if (waiters === undefined) return;
+    for (const resolve of [...waiters]) resolve();
+  };
+  // alpha.3 opens session.list and workspace/follow independently. session.list must
+  // wait for the latter's filtered baseline, but an invalidated old baseline is not a
+  // valid replacement. Only replaceUserSessionAccess may wake this wait.
+  const waitForUserSessionAccess = (userId: number, timeoutMs = 5_000, requireWorkspacePaths = false): Promise<boolean> => {
+    const ready = () => userSessionAccess.has(userId) && (!requireWorkspacePaths || userWorkspacePaths.has(userId));
+    if (!ready() && workspaceSnapshotReady) {
+      const perms = effectivePermissions(userId);
+      userSessionAccess.set(userId, new Map([...sessionCwdById].filter(([id]) => subuserCanAccessSession(userId, perms, id))));
+      const paths = new Map([...workspacePathById].filter(([, candidate]) => pathAllowedFor(userId, candidate, perms.allowed_folders)));
+      userWorkspacePaths.set(userId, paths);
+      userWorkspaceIds.set(userId, new Set(paths.keys()));
+    }
+    if (ready()) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (available: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        const waiters = userSessionAccessWaiters.get(userId);
+        waiters?.delete(onReady);
+        if (waiters?.size === 0) userSessionAccessWaiters.delete(userId);
+        resolve(available);
+      };
+      const onReady = () => {
+        if (ready()) finish(true);
+      };
+      const timeout = setTimeout(() => finish(false), timeoutMs);
+      const waiters = userSessionAccessWaiters.get(userId) ?? new Set<() => void>();
+      waiters.add(onReady);
+      userSessionAccessWaiters.set(userId, waiters);
+    });
+  };
+  const userAccessEpochFor = (userId: number): number => userAccessEpoch.get(userId) ?? 0;
+  /** 推进该用户的授权 epoch（授权/权限实际变更时调用）；单调递增，绝不回退。 */
+  const bumpUserAccessEpoch = (userId: number): number => {
+    const next = userAccessEpochFor(userId) + 1;
+    userAccessEpoch.set(userId, next);
+    return next;
+  };
+  /**
+   * 用一份可信可见性快照替换该用户的会话授权快照。
+   *   · epoch 必须是调用方在「取得该快照的请求开始时」记录的授权 epoch。授权在
+   *     请求途中发生过变更（epoch 已推进）时，旧请求一律不得回写。
+   *   · order 只做同一用户 workspace.list 响应的先后排序（0 = 不参与排序，例如
+   *     Remote baseline）：更旧的响应不得回滚更新的快照。
+   * 本函数绝不推进 epoch —— 快照替换不是授权变更，不能改变授权版本。
+   */
+  const replaceUserSessionAccess = (userId: number, access: Map<string, string>, epoch: number, order = 0): void => {
+    if (epoch < userAccessEpochFor(userId)) return;
+    if (order !== 0 && order < (userAccessListOrder.get(userId) ?? 0)) return;
+    userSessionAccess.set(userId, access);
+    if (order !== 0) userAccessListOrder.set(userId, order);
+    notifyUserSessionAccessWaiters(userId);
+  };
+  /** 授权变更后失效内存快照：先推进 epoch（旧请求/旧 baseline 随即失去回写资格），
+   *  再清空快照，等待新 baseline 重建。 */
+  const invalidateUserSessionAccess = (userId: number): void => {
+    bumpUserAccessEpoch(userId);
+    userSessionAccess.delete(userId);
+    pendingCreatedSessions.delete(userId);
+    userWorkspaceIds.delete(userId);
+    userWorkspacePaths.delete(userId);
+    userArchivedSessionIds.delete(userId);
+  };
+  /**
+   * 权限行已经提交、但后续还要 await 上游沙盒收紧时，立即让在途 create/fork
+   * 响应失去回写 grant/access 的资格。刻意不清快照或关闭 mux：待沙盒定向撤销
+   * 结束后仍由 invalidateUserSessionAccess 统一刷新，避免窗口内 baseline 读到未撤销 grant。
+   */
+  const fenceUserAccessEpoch = (userId: number): void => {
+    bumpUserAccessEpoch(userId);
+  };
+  const replaceUserWorkspacePaths = (userId: number, paths: Map<string, string>, epoch: number, order = 0): void => {
+    if (epoch < userAccessEpochFor(userId)) return;
+    if (order !== 0 && order < (userAccessListOrder.get(userId) ?? 0)) return;
+    userWorkspacePaths.set(userId, paths);
+    userWorkspaceIds.set(userId, new Set(paths.keys()));
+    notifyUserSessionAccessWaiters(userId);
+  };
+  const userWebSocketClients = new Map<number, Set<{ close: (code?: number, reason?: string) => void }>>();
+  const registerUserWebSocketClient = (userId: number, client: { close: (code?: number, reason?: string) => void }): (() => void) => {
+    const clients = userWebSocketClients.get(userId) ?? new Set<{ close: (code?: number, reason?: string) => void }>();
+    clients.add(client);
+    userWebSocketClients.set(userId, clients);
+    return () => {
+      clients.delete(client);
+      if (clients.size === 0 && userWebSocketClients.get(userId) === clients) userWebSocketClients.delete(userId);
+    };
+  };
+  const closeUserWebSocketClients = (userId: number, code = 1012, reason = 'Permissions changed'): void => {
+    const clients = userWebSocketClients.get(userId);
+    if (clients === undefined) return;
+    userWebSocketClients.delete(userId);
+    // close 回调会注销自身；遍历快照避免同步修改 Set 时跳过其它旧连接。
+    for (const client of [...clients]) {
+      try { client.close(code, reason); } catch {}
+    }
+  };
+  const closeUserRemoteMuxClients = (userId: number, code = 1012, reason = 'Permissions changed'): void => {
+    const clients = remoteMuxClientsByUser.get(userId);
+    if (clients === undefined) return;
+    remoteMuxClientsByUser.delete(userId);
+    // 同上：连接关闭会回调 unregisterClient，必须先复制后逐个关闭。
+    for (const connection of [...clients]) {
+      try {
+        if (connection.socket.readyState === WebSocket.OPEN) connection.socket.close(code, reason);
+        else connection.socket.terminate();
+      } catch {
+        // The close event removes already-closed clients; a racing close needs no recovery.
+      }
+    }
+  };
 
-  // sessionId → cwd 映射：从 session.list/workspace.list/session.create 响应里收集，
+  // sessionId → cwd 映射: 从 session.list/workspace.list/session.create 响应里收集，
   // 供受限子用户的会话作用域 RPC（history/prompt 等）做 cwd 白名单校验——
   // 权限撤销后仍能按 sessionId 直读旧目录会话必须封堵
   const sessionCwdById = new Map<string, string>();
-  // Preset state is tenant-local. Unknown state fails closed for prompt/fork so a
-  // session list observed by one account cannot authorize another account.
+  // 受限子用户的 prompt/fork 必须继承已授权的 agent preset；未知状态不放行。
+  // 缓存按用户隔离，避免同一 sessionId 或不同用户的列表响应互相污染授权判断。
   const sessionAgentPresetByUser = new Map<number, Map<string, string>>();
   const sessionAgentPresetMapFor = (userId: number): Map<string, string> => {
     let map = sessionAgentPresetByUser.get(userId);
@@ -1328,6 +2037,12 @@ export function createGatewayServer(
     return target;
   };
   const sessionOwnerRows = db.listSessionOwners();
+  for (const user of db.listUsers()) {
+    if (user.role === 'user' && db.getPermissions(user.id) !== null && !db.isSessionGrantsSeeded(user.id)) {
+      const disabled = new Set(db.getPermissions(user.id)!.disabled_sessions);
+      db.seedUserSessionGrants(user.id, sessionOwnerRows.filter((row) => row.user_id === user.id && !disabled.has(row.session_id)).map((row) => row.session_id));
+    }
+  }
   const sessionOwnerById = new Map(
     sessionOwnerRows.map((row) => [row.session_id, row.user_id] as const),
   );
@@ -1413,8 +2128,8 @@ export function createGatewayServer(
   }
 
   /** Claim once; an existing owner always wins in the database. */
-  function claimSessionOwner(sessionId: string, userId: number): number {
-    const owner = db.claimSessionOwner(sessionId, userId);
+  function claimSessionOwner(sessionId: string, userId: number, grantAccess = true): number {
+    const owner = db.claimSessionOwner(sessionId, userId, grantAccess);
     sessionOwnerById.set(sessionId, owner);
     return owner;
   }
@@ -2226,6 +2941,7 @@ export function createGatewayServer(
         allow_workspace_create: false,
         allow_ssh: false,
         allowed_agent_presets: null,
+      allowed_models: null,
         allow_chat_media: false,
         banned: false,
         sandbox_mode: null,
@@ -2665,7 +3381,13 @@ export function createGatewayServer(
     // F-04：服务端吊销——登出的 token 立即失效（黑名单 12h），
     // 即使 Cookie 已被攻击者复制，该 token 也无法再通过认证门卫
     const token = readCookie(req.headers.cookie, COOKIE_NAME);
+    // 必须在吊销前解析会话：revokeToken 会清 sessionCache，之后无法可靠定位旧 WS。
+    const session = sessionOf(req);
     if (token) revokeToken(token);
+    if (session !== null) {
+      closeUserWebSocketClients(session.userId, 1008, 'Session ended');
+      closeUserRemoteMuxClients(session.userId, 1008, 'Session ended');
+    }
     res.setHeader('Set-Cookie', `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
     res.redirect(302, '/gateway/login');
   });
@@ -2769,6 +3491,10 @@ export function createGatewayServer(
         if (entry.user.userId === userId) sessionCache.delete(token);
       }
       closeTenantConnections(tenantConnectionsByUserId.get(userId), 'session invalidated');
+      // 插件只会在改密/改名/删除已完成后调用此端点；旧 WS 的升级时身份必须
+      // 同步失效，避免 HTTP 已 401 而持续订阅仍读取旧数据。
+      closeUserWebSocketClients(userId, 1008, 'Credentials changed');
+      closeUserRemoteMuxClients(userId, 1008, 'Credentials changed');
     }
     res.status(200).json({ ok: true });
   });
@@ -2789,6 +3515,21 @@ export function createGatewayServer(
       return Number.isSafeInteger(n) && n >= 0 ? n : null;
     }
     return null;
+  };
+  type NullableIntResult = { ok: true; value: number | null } | { ok: false };
+  const parseNullableIntStrict = (v: unknown): NullableIntResult => {
+    if (v === undefined || v === null) return { ok: true, value: null };
+    if (typeof v === 'number') {
+      return Number.isSafeInteger(v) && v >= 0 ? { ok: true, value: v } : { ok: false };
+    }
+    if (typeof v === 'string') {
+      const trimmed = v.trim();
+      if (trimmed === '') return { ok: true, value: null };
+      if (!/^\d+$/.test(trimmed)) return { ok: false };
+      const value = Number(trimmed);
+      return Number.isSafeInteger(value) && value >= 0 ? { ok: true, value } : { ok: false };
+    }
+    return { ok: false };
   };
   const stringArray = (v: unknown, max = 64): string[] =>
     Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string').slice(0, max) : [];
@@ -2854,6 +3595,259 @@ export function createGatewayServer(
   });
   registerTenantServiceRoutes(app, config, db, apiAuth);
 
+  // ── 主用户紧急清理（十次头像点击后显示；密码验证后异步执行） ──
+  // 清理器从临时目录启动，先停止宿主与网关，再删除 DSH/dsh-passwords 的全部
+  // 配置、profile、数据和程序路径。网关不会在请求线程里删除自身文件。
+  const purgeRate = new Map<number, number[]>();
+  let purgeInProgress = false;
+  const monitorPurgeReceipt = (receiptPath: string, transactionId: string): void => {
+    const deadline = Date.now() + 10 * 60_000;
+    const timer = setInterval(() => {
+      try {
+        const parsed: unknown = JSON.parse(readFileSync(receiptPath, 'utf8'));
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return;
+        const receipt = parsed as Record<string, unknown>;
+        if (receipt.transactionId !== transactionId || receipt.finished !== true) return;
+        clearInterval(timer);
+        purgeInProgress = false;
+        if (receipt.ok !== true) {
+          const errors = Array.isArray(receipt.errors) ? receipt.errors.filter((entry): entry is string => typeof entry === 'string') : [];
+          console.error(`[dsh-passwords] 紧急清理未完成（transaction=${transactionId}）: ${errors.join('; ') || 'unknown error'}`);
+        }
+      } catch {
+        // helper 尚未写回执或正在原子替换；继续等待。超时也保持锁定，避免重复删除竞态。
+      }
+      if (Date.now() >= deadline) {
+        clearInterval(timer);
+        console.error(`[dsh-passwords] 紧急清理回执等待超时（transaction=${transactionId}）；保持并发锁，请检查 ${receiptPath}`);
+      }
+    }, 250);
+    timer.unref();
+  };
+  const purgeServiceName = config.patch.restartService.trim();
+  const purgeServiceNameValid = purgeServiceName === '' || /^[A-Za-z0-9_.@-]+$/.test(purgeServiceName);
+  app.post('/gateway/api/dsh-passwords/purge', jsonBody, async (req, res) => {
+    const me = apiAuth(req, res, true);
+    if (!me) return;
+    if (purgeInProgress) {
+      res.status(409).json({ ok: false, code: 'PURGE_IN_PROGRESS', error: '清理已在进行中' });
+      return;
+    }
+    const now = Date.now();
+    const recent = (purgeRate.get(me.userId) ?? []).filter((timestamp) => now - timestamp < 10 * 60_000);
+    if (recent.length >= 3) {
+      purgeRate.set(me.userId, recent);
+      res.status(429).json({ ok: false, code: 'PURGE_RATE_LIMITED', error: '尝试过于频繁，请稍后再试' });
+      return;
+    }
+    purgeInProgress = true;
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const password = typeof body.password === 'string' ? body.password : '';
+    if (password === '') {
+      purgeInProgress = false;
+      res.status(400).json({ ok: false, code: 'INVALID', error: '请输入主用户密码' });
+      return;
+    }
+    if (body.confirm !== true) {
+      purgeInProgress = false;
+      res.status(400).json({ ok: false, code: 'INVALID', error: '请确认删除全部本地数据' });
+      return;
+    }
+    try {
+      await auth.verifyAdminPassword(me, password, { ip: req.ip, userAgent: req.headers['user-agent'] ?? null });
+    } catch (error) {
+      const status = error instanceof AuthError ? error.status : 401;
+      purgeInProgress = false;
+      res.status(status).json({ ok: false, code: error instanceof AuthError ? error.code : 'INVALID_CURRENT_PASSWORD', error: '主用户密码错误' });
+      return;
+    }
+    const parentPidRaw = process.env.DSH_GATEWAY_PARENT_PID ?? '';
+    const parentPid = Number(parentPidRaw);
+    const dshRoot = findDshRoot(config.patch.dshRoot);
+    const helperSource = path.join(gatewayRoot, 'scripts', 'purge.mjs');
+    let upstreamPort: number | null = null;
+    try {
+      const upstreamUrl = new URL(config.gateway.upstream);
+      const candidate = Number(upstreamUrl.port || (upstreamUrl.protocol === 'https:' ? 443 : 80));
+      upstreamPort = Number.isInteger(candidate) && candidate > 0 && candidate <= 65535 ? candidate : null;
+    } catch {
+      upstreamPort = null;
+    }
+    const canStopHost = process.platform === 'win32'
+      ? (Number.isInteger(parentPid) && parentPid > 0) || upstreamPort !== null
+      : purgeServiceNameValid && purgeServiceName !== '';
+    const isDockerRuntime = isContainerRuntime();
+    if (isDockerRuntime || !canStopHost || dshRoot === null || !existsSync(helperSource)) {
+      purgeInProgress = false;
+      res.status(422).json({ ok: false, code: 'PURGE_UNAVAILABLE', error: '当前部署没有可靠的 DSH 停止策略，未执行删除' });
+      return;
+    }
+    recent.push(now);
+    purgeRate.set(me.userId, recent);
+    const transactionId = `${process.pid}-${Date.now()}-${randomUUID()}`;
+    const tempDir = mkdtempSync(path.join(os.tmpdir(), 'dsh-passwords-purge-'));
+    const planPath = path.join(tempDir, 'plan.json');
+    const startSignalPath = path.join(tempDir, 'start.signal');
+    const helperPath = path.join(tempDir, 'purge.mjs');
+    const receiptPath = path.join(os.tmpdir(), `dsh-passwords-purge-${transactionId}.receipt.json`);
+    const dshHome = path.resolve(process.env.DSH_HOME?.trim() || path.join(os.homedir(), '.dsh'));
+    const configuredEnvFile = process.env.DSH_PASSWORDS_ENV_FILE?.trim()
+      ? path.resolve(process.env.DSH_PASSWORDS_ENV_FILE.trim())
+      : path.join(configuredRoot, '.env');
+    const plan = {
+      transactionId,
+      gatewayPid: process.pid,
+      parentPid: Number.isInteger(parentPid) && parentPid > 0 ? parentPid : null,
+      upstreamPort,
+      serviceName: purgeServiceNameValid ? purgeServiceName : '',
+      creatorUid: typeof process.getuid === 'function' ? process.getuid() : null,
+      creatorGid: typeof process.getgid === 'function' ? process.getgid() : null,
+      packageRoot: gatewayRoot,
+      configuredRoot,
+      dshHome,
+      dshRoot,
+      envFile: configuredEnvFile,
+      dbPath: config.dbPath,
+      receiptPath,
+      startSignalPath,
+      deleteConfiguredRoot: path.resolve(configuredRoot) === path.resolve(gatewayRoot),
+      dryRun: process.env.NODE_ENV !== 'production' && process.env.DSH_PASSWORDS_PURGE_DRY_RUN === '1',
+    };
+    let helperLaunched = false;
+    let launchOutcomeUnknown = false;
+    try {
+      copyFileSync(helperSource, helperPath);
+      writeFileSync(planPath, `${JSON.stringify(plan)}\n`, { mode: 0o600 });
+      if (process.platform !== 'win32' && purgeServiceName !== '') {
+        const unit = spawnSync('systemctl', ['cat', purgeServiceName], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+        const unitText = String(unit.stdout ?? '').toLowerCase();
+        const runner = spawnSync('systemd-run', ['--version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+        const runnerText = `${String(runner.stdout ?? '')}\n${String(runner.stderr ?? '')}`;
+        const runnerVersion = /systemd\s+(\d+)/i.exec(runnerText);
+        const fragment = spawnSync('systemctl', ['show', purgeServiceName, '--property=FragmentPath', '--value'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+        const fragmentPath = String(fragment.stdout ?? '').trim();
+        const privateTmp = spawnSync('systemctl', ['show', purgeServiceName, '--property=PrivateTmp', '--value'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+        const privateTmpEnabled = String(privateTmp.stdout ?? '').trim().toLowerCase() === 'yes';
+        const expectedUnitFile = purgeServiceName.endsWith('.service') ? purgeServiceName : `${purgeServiceName}.service`;
+        const supportedUnitDirectories = ['/etc/systemd/system', '/usr/lib/systemd/system', '/lib/systemd/system'];
+        if (unit.error !== undefined || unit.status !== 0 || !unitText.includes('dsh') ||
+          fragment.error !== undefined || fragment.status !== 0 || !path.isAbsolute(fragmentPath) || path.basename(fragmentPath) !== expectedUnitFile ||
+          !supportedUnitDirectories.includes(path.dirname(fragmentPath)) || privateTmp.error !== undefined || privateTmp.status !== 0 || privateTmpEnabled ||
+          runner.error !== undefined || runner.status !== 0 || runnerVersion === null || Number(runnerVersion[1]) < 240) {
+          purgeInProgress = false;
+          try { rmSync(tempDir, { recursive: true, force: true }); } catch { /* best effort */ }
+          res.status(422).json({ ok: false, code: 'PURGE_UNAVAILABLE', error: '当前部署无法启动独立清理器，未执行删除' });
+          return;
+        }
+      }
+      const unitName = `dsh-passwords-purge-${transactionId.replace(/[^A-Za-z0-9_-]/g, '-')}`;
+      const usesSystemdRunner = process.platform !== 'win32' && purgeServiceName !== '';
+      const launch = usesSystemdRunner
+        ? { command: 'systemd-run', args: systemdPurgeLaunchArgs(unitName, process.execPath, helperPath, planPath, os.tmpdir()) }
+        : { command: process.execPath, args: [helperPath, planPath] };
+      const child = spawn(launch.command, launch.args, {
+        cwd: tempDir,
+        detached: true,
+        windowsHide: true,
+        stdio: 'ignore',
+      });
+      const launchConfirmed = new Promise<void>((resolve, reject) => {
+        let settled = false;
+        let spawned = false;
+        const timer = setTimeout(() => {
+          if (usesSystemdRunner && spawned) launchOutcomeUnknown = true;
+          child.kill();
+          rejectLaunch(new Error('清理执行器启动确认超时'));
+        }, 30_000);
+        timer.unref();
+        const confirmLaunch = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve();
+        };
+        const rejectLaunch = (error: Error) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          if (!helperLaunched && !launchOutcomeUnknown) purgeInProgress = false;
+          reject(error);
+        };
+        child.once('spawn', () => {
+          spawned = true;
+          if (!usesSystemdRunner) {
+            helperLaunched = true;
+            confirmLaunch();
+          }
+        });
+        child.once('error', (error) => {
+          if (!helperLaunched) rejectLaunch(error);
+          else console.error('[dsh-passwords] 紧急清理执行器运行失败:', String(error));
+        });
+        child.once('exit', (code, signal) => {
+          if (!spawned) {
+            rejectLaunch(new Error(`清理执行器在启动前退出（code=${String(code)}, signal=${String(signal)}）`));
+          } else if (usesSystemdRunner) {
+            if (code === 0) confirmLaunch();
+            else rejectLaunch(new Error(`systemd-run 未能启动清理器（code=${String(code)}, signal=${String(signal)}）`));
+          } else if (code !== null) {
+            console.error(`[dsh-passwords] 紧急清理执行器退出，code=${String(code)}`);
+          }
+        });
+      });
+      child.unref();
+      await launchConfirmed;
+      launchOutcomeUnknown = true;
+      const readyDeadline = Date.now() + 10_000;
+      let helperReady = false;
+      while (Date.now() < readyDeadline) {
+        try {
+          const parsed: unknown = JSON.parse(readFileSync(receiptPath, 'utf8'));
+          if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            const readyReceipt = parsed as Record<string, unknown>;
+            if (readyReceipt.transactionId === transactionId && readyReceipt.ready === true) {
+              helperReady = true;
+              break;
+            }
+            if (readyReceipt.transactionId === transactionId && readyReceipt.finished === true) {
+              throw new Error('清理器未能完成启动校验');
+            }
+          }
+        } catch (error) {
+          if (error instanceof Error && error.message === '清理器未能完成启动校验') throw error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      if (!helperReady) throw new Error('清理器未能确认计划已校验');
+      helperLaunched = true;
+      launchOutcomeUnknown = false;
+      monitorPurgeReceipt(receiptPath, transactionId);
+      db.audit('purge_started', {
+        username: me.username,
+        ip: req.ip,
+        userAgent: req.headers['user-agent'] ?? null,
+        detail: JSON.stringify({ transactionId, dryRun: plan.dryRun }),
+      });
+      res.once('finish', () => {
+        try {
+          writeFileSync(startSignalPath, `${transactionId}\n`, { mode: 0o600, flag: 'wx' });
+        } catch (error) {
+          console.error('[dsh-passwords] 无法确认清理请求已送达，清理器将超时退出:', String(error));
+        }
+      });
+      res.status(202).json({ ok: true, code: 'PURGE_STARTED', notice: '清理已开始，服务将停止且所有本地数据不可恢复' });
+    } catch (error) {
+      if (!helperLaunched && !launchOutcomeUnknown) {
+        purgeInProgress = false;
+        try { rmSync(tempDir, { recursive: true, force: true }); } catch { /* best effort */ }
+      } else if (launchOutcomeUnknown) {
+        monitorPurgeReceipt(receiptPath, transactionId);
+      }
+      console.error('[dsh-passwords] 启动紧急清理失败:', String(error));
+      if (!res.headersSent) res.status(500).json({ ok: false, code: 'INTERNAL', error: '清理启动失败' });
+    }
+  });
+
   // token 用量上报节流（客户端 15 秒 flush 一次；这里再加 5 秒最小间隔，防高频自刷）。
   // 声明在权限路由之前：permissions 路由改配额时会清理该缓存。
   const usageReportThrottle = new Map<number, number>();
@@ -2880,6 +3874,9 @@ export function createGatewayServer(
           allowWorkspaceCreate: perms.allow_workspace_create,
           allowSsh: perms.allow_ssh,
           allowedAgentPresets: perms.allowed_agent_presets,
+          allowedModels: perms.allowed_models,
+          allowedSessionIds: db.listUserSessionGrants(u.id),
+          ownedSessionIds: db.listSessionOwners().filter((row) => row.user_id === u.id).map((row) => row.session_id),
           allowChatMedia: perms.allow_chat_media,
           banned: perms.banned,
           sandboxMode: perms.sandbox_mode,
@@ -3530,10 +4527,595 @@ export function createGatewayServer(
     res.json({ ok: true, output });
   });
 
+  // user_workspaces records subuser-created private workspaces and historical
+  // administrator workspaces. Administrators are trusted sharers. An ownership
+  // row whose user no longer exists is an orphan from a deleted account: no
+  // live tenant remains to protect, and treating it as a conflict would hide
+  // the folder from baseline and 403 every registration for it.
+  const workspaceOwnedByAnotherSubuser = (userId: number, workspacePath: string): boolean => {
+    const owners = db.listWorkspaceOwners();
+    if (owners.length === 0) return false;
+    // 等值语义保持不变（不是「父工作区包含他人工作区」），但比较改走 canonical 口径：
+    // 归一化 + realpath（解析符号链接 / junction）+ Windows 大小写折叠，避免同一目录
+    // 用别名/大小写形态出现时被当成「另一路径」而绕过所有权判定。
+    return owners.some((owner) =>
+      owner.userId !== userId &&
+      db.getUserById(owner.userId)?.role === 'user' &&
+      samePathForMatch(owner.path, workspacePath),
+    );
+  };
+
+  /** 一条会话授权快照条目当前是否仍然完全合法（grant + 未逐会话关闭 + 目录白名单 +
+   *  非其它子用户创建的工作区）。baseline 合并与快照回写共用这一套口径。 */
+  const sessionAccessStillAuthorized = (
+    userId: number,
+    perms: UserPermissionsRow,
+    grants: ReadonlySet<string>,
+    sessionId: string,
+    workspacePath: string,
+  ): boolean =>
+    sessionOwner(sessionId) === userId &&
+    grants.has(sessionId) &&
+    !perms.disabled_sessions.includes(sessionId) &&
+    folderAllowed(workspacePath, perms.allowed_folders) &&
+    !workspaceOwnedByAnotherSubuser(userId, workspacePath);
+
+  /**
+   * 合并「上一份可信快照里仍然合法的条目」与「本次 baseline 新观测到的可见条目」。
+   * baseline 只是一次可见性投影：一次不完整/乱序的列表响应不得把仍在授权内的会话
+   * 从 HTTP/Remote 授权快照里抹掉，但 grant/禁用/白名单/所有权任一不满足的条目
+   * 仍会被丢弃（不构成放宽）。
+   */
+  const mergeAuthorizedAccess = (
+    userId: number,
+    perms: UserPermissionsRow,
+    grants: ReadonlySet<string>,
+    visible: ReadonlyMap<string, string>,
+  ): Map<string, string> => {
+    const merged = new Map<string, string>();
+    for (const [sessionId, workspacePath] of userSessionAccess.get(userId) ?? new Map<string, string>()) {
+      if (sessionAccessStillAuthorized(userId, perms, grants, sessionId, workspacePath)) merged.set(sessionId, workspacePath);
+    }
+    for (const [sessionId, workspacePath] of visible) {
+      if (sessionAccessStillAuthorized(userId, perms, grants, sessionId, workspacePath)) merged.set(sessionId, workspacePath);
+    }
+    return merged;
+  };
+
+  /** 同上口径的 workspaceId → path 投影合并：旧映射只在路径仍在白名单内且非其它
+   *  子用户的工作区时保留，避免一次不完整 baseline 把仍合法的映射抹掉。 */
+  const mergeWorkspacePaths = (
+    userId: number,
+    perms: UserPermissionsRow,
+    visible: ReadonlyMap<string, string>,
+  ): Map<string, string> => {
+    const merged = new Map<string, string>();
+    for (const [workspaceId, workspacePath] of userWorkspacePaths.get(userId) ?? new Map<string, string>()) {
+      if (folderAllowed(workspacePath, perms.allowed_folders) && !workspaceOwnedByAnotherSubuser(userId, workspacePath)) {
+        merged.set(workspaceId, workspacePath);
+      }
+    }
+    for (const [workspaceId, workspacePath] of visible) merged.set(workspaceId, workspacePath);
+    return merged;
+  };
+
+  /**
+   * RC.1 Remote mux bridge. Administrators may use registered Remote endpoints;
+   * subusers additionally pass the per-stream resource filters below.
+   * The carrier is intentionally terminated here so authentication and ownership
+   * checks remain enforceable, while heartbeat and payload limits mirror DSH.
+   */
+  const remoteMuxStreamEndpoints = new Set([
+    'session/control', 'session/follow', 'workspace/follow', '$events',
+    ...OFFICIAL_JOB_REMOTE_ENDPOINTS,
+    ...OFFICIAL_ACCOUNT_REMOTE_ENDPOINTS,
+  ]);
+  /**
+   * 子用户 mux 上会被解析、但按逻辑流拒绝的端点（端点 → 拒绝码/文案）。
+   * 官方 terminal/follow 与 terminal/retain 由 allowSsh 在下方按连接判断；
+   * workspaceFiles/changes 是受会话/路径授权的特殊流，不放进拒绝表。
+   * 这里把拒绝从「未知端点 → 关整条 carrier」降级为「该逻辑流 error」，避免一条
+   * 被拒流把同 carrier 的 workspace/session/$events 一起重启。
+   */
+  const remoteMuxSubuserRejectedEndpoints = new Map<string, { code: string; message: string }>([
+    ...[...OFFICIAL_TERMINAL_REMOTE_ENDPOINTS].map((endpoint) => [
+      endpoint,
+      { code: 'terminal/unavailable', message: TERMINAL_UNAVAILABLE_MESSAGE },
+    ] as const),
+
+  ]);
+  /**
+   * 逻辑端点名的安全形状（与 DSH 的 segment 字符约束同口径）。
+   * 子用户上报的合法形状端点仍会在 allowlist/rejection map 中二次判定；未知端点
+   * 只结束该逻辑流，不关闭同一 carrier。真正畸形的帧（空段、点段、非法字符或
+   * 超长）才按 carrier-level 拒绝，避免一条合法但未适配的未来端点造成重连风暴。
+   */
+  const isRemoteMuxEndpointName = (value: unknown): value is string => {
+    if (typeof value !== 'string' || value.length === 0 || value.length > 200) return false;
+    const segments = value.split('/');
+    return segments.every(
+      (segment) => segment !== '' && segment !== '.' && segment !== '..' && /^[A-Za-z0-9_$.-]+$/.test(segment),
+    );
+  };
+  const parseRemoteMuxClientFrame = (data: Buffer, allowAnyEndpoint: boolean):
+    | { type: 'open'; streamId: string; endpoint: string; payload: unknown }
+    | { type: 'cancel'; streamId: string }
+    | { type: 'item'; streamId: string; value?: unknown }
+    | { type: 'end'; streamId: string }
+    | null => {
+    let value: unknown;
+    try { value = JSON.parse(data.toString('utf8')); } catch { return null; }
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+    const row = value as Record<string, unknown>;
+    const keyCount = Object.keys(row).length;
+    if (row.type === 'cancel' && keyCount === 2 && isRemoteMuxStreamId(row.streamId)) {
+      return { type: 'cancel', streamId: row.streamId };
+    }
+    // alpha.1 Remote 上行帧（与官方 parseRemoteStreamClientMessage 同口径）：
+    // item 是 { type, streamId[, value] }，end 是 { type, streamId }；额外的键、
+    // 缺失的 value 位（3 键却不是 value）都算畸形 → 返回 null → carrier 1008。
+    if (row.type === 'item' && (keyCount === 2 || keyCount === 3) && isRemoteMuxStreamId(row.streamId)) {
+      if (keyCount === 3 && !Object.hasOwn(row, 'value')) return null;
+      return { type: 'item', streamId: row.streamId, ...(Object.hasOwn(row, 'value') ? { value: row.value } : {}) };
+    }
+    if (row.type === 'end' && keyCount === 2 && isRemoteMuxStreamId(row.streamId)) {
+      return { type: 'end', streamId: row.streamId };
+    }
+    if (
+      row.type === 'open' && keyCount === 4 && isRemoteMuxStreamId(row.streamId) &&
+      (allowAnyEndpoint
+        ? typeof row.endpoint === 'string' && row.endpoint.length > 0
+        : isRemoteMuxEndpointName(row.endpoint)) &&
+      row.payload !== undefined
+    ) {
+      return { type: 'open', streamId: row.streamId, endpoint: row.endpoint as string, payload: row.payload };
+    }
+    return null;
+  };
+
+  type RemoteMuxUserStreamState = {
+    streamId: string;
+    endpoint: 'session/control' | 'session/follow' | 'workspace/follow' | '$events' | 'workspaceFiles/changes' | 'job/list' | 'job/follow' | 'account/watch';
+    jobSessionId?: string;
+    jobId?: string;
+    jobOwnerConfirmed?: boolean;
+    /** Workspace path is retained only to re-check the current permission on each delta. */
+    workspaceFileScopeId?: string;
+    workspaceFileRoot?: string;
+    workspaceFileTarget?: string;
+    workspaceFileRootCanonical?: string;
+    workspaceFileTargetCanonical?: string;
+    workspaceFileReady?: boolean;
+    visibleWorkspaces: Map<string, string>;
+    /** Authorized ordinary session or child session identity for session/follow. */
+    followAddress?: ReturnType<typeof parseSessionAddress>;
+    /** Exactly one alpha.1 snapshot must precede history/live frames. */
+    followSnapshotSeen?: boolean;
+    /** Last filtered workspace rows, used for a compensating attach after session/create. */
+    visibleWorkspaceRows: Map<string, Record<string, unknown>>;
+    /** The protocol has one bootstrap item; later ready frames are never data-plane events. */
+    remoteEventsReady?: boolean;
+    /** The DSH Remote generation that may submit a result for its waterfall events. */
+    remoteEventsClientId?: string;
+  };
+  const sessionFollowIdentityAllowed = (userId: number, address: NonNullable<ReturnType<typeof parseSessionAddress>>): boolean =>
+    authorizedSubuserSessionRoot(userId, sessionAuthorizationId(address), effectivePermissions(userId)) !== null;
+  /**
+   * 子用户「该会话现在可否被访问」的唯一判定（HTTP 与 Remote 两条通道同口径）：
+   *   · 必须命中该用户的会话授权快照（baseline 已给出可信 cwd）；
+   *   · 必须持有持久化 grant（快照可能比 DB 新）；
+   *   · 未被管理员逐会话关闭（disabled_sessions）；
+   *   · cwd 在文件夹白名单内，且不是另一子用户创建的工作区。
+   * 任何一项不可解析/不命中都返回 null，调用方必须 fail-closed（403 或丢弃帧），
+   * 不得把「拿不到会话」当作不限制。
+   */
+  function authorizedSubuserSessionRoot(userId: number, sessionId: unknown, perms: UserPermissionsRow): string | null {
+    if (typeof sessionId !== 'string' || sessionId.length === 0 || sessionId.length > 200) return null;
+    return subuserCanAccessSession(userId, perms, sessionId) ? sessionCwdById.get(sessionId) ?? null : null;
+  }
+  /**
+   * 把一个只剩绝对路径的官方接口参数（/api/file 的 ?path=）绑回租户工作区：
+   * 必须落在某个「仍然授权的会话工作区根」内，且在文件夹白名单内、不属于其他
+   * 子用户创建的工作区。只在命中包含关系时才查 grant，避免逐请求全表扫描。
+   */
+  const pathBoundToAuthorizedWorkspace = (userId: number, perms: UserPermissionsRow, candidate: string): boolean => {
+    const access = userSessionAccess.get(userId);
+    if (access === undefined) return false;
+    if (!folderAllowed(candidate, perms.allowed_folders) &&
+        !folderAllowed(canonicalizePathBestEffort(candidate), perms.allowed_folders)) return false;
+    if (workspaceOwnedByAnotherSubuser(userId, candidate)) return false;
+    for (const [sessionId, sessionRoot] of access) {
+      // 词法与真实路径两种形态都做包含性比较：候选路径由请求方给出时（官方
+      // /api/file?path=），调用方已对两种形态分别判定；这里同样不因别名/大小写/
+      // junction 形态差异而整段误拒一个确实在授权内的路径。
+      if (!pathWithin(sessionRoot, candidate) && !pathWithin(canonicalizePathBestEffort(sessionRoot), candidate)) continue;
+      if (authorizedSubuserSessionRoot(userId, sessionId, perms) !== null) return true;
+    }
+    return false;
+  };
+  const remoteJobRequest = (payload: unknown, endpoint: 'job/list' | 'job/follow'): { sessionId?: string; jobId?: string; from?: number } | null => {
+    if (!isPlainJsonRecord(payload) || !isPlainJsonRecord(payload.args)) return null;
+    const args = payload.args;
+    if (!isPlainJsonRecord(args.request) || Object.keys(args).length !== 1) return null;
+    const request = args.request;
+    const sessionId = request.sessionId;
+    const jobId = request.jobId;
+    const from = request.from;
+    if (sessionId !== undefined && (typeof sessionId !== 'string' || sessionId.length === 0 || sessionId.length > 200)) return null;
+    if (endpoint === 'job/list') {
+      return typeof sessionId === 'string' && Object.keys(request).length === 1 ? { sessionId } : null;
+    }
+    if (typeof jobId !== 'string' || jobId.length === 0 || jobId.length > 200) return null;
+    if (from !== undefined && (typeof from !== 'number' || !Number.isSafeInteger(from) || from < 0)) return null;
+    return { ...(sessionId === undefined ? {} : { sessionId }), jobId, ...(from === undefined ? {} : { from }) };
+  };
+  const remoteAccountRequestIsEmpty = (payload: unknown): boolean =>
+    isPlainJsonRecord(payload) && isPlainJsonRecord(payload.args) && Object.keys(payload.args).length === 0;
+
+  const remoteWorkspaceFileChangeRequest = (payload: unknown): { scopeId: string; path: string } | null => {
+    if (!isPlainJsonRecord(payload) || !isPlainJsonRecord(payload.args)) return null;
+    const args = payload.args;
+    if (Object.keys(args).length !== 2 || typeof args.workspaceFileScopeId !== 'string' || typeof args.path !== 'string') return null;
+    if (args.workspaceFileScopeId.length === 0 || args.workspaceFileScopeId.length > 200 ||
+      args.path.length === 0 || args.path.length > 4096 || args.path.includes('\0')) return null;
+    return { scopeId: args.workspaceFileScopeId, path: args.path };
+  };
+  const authorizedWorkspaceFileChangeTarget = (
+    userId: number,
+    perms: UserPermissionsRow,
+    request: { scopeId: string; path: string },
+  ): { scopeId: string; root: string; target: string; rootCanonical: string; targetCanonical: string } | null => {
+    const root = authorizedSubuserSessionRoot(userId, request.scopeId, perms);
+    if (root === null) return null;
+    const target = resolveWorkspaceFileTarget(root, request.path, null);
+    if (target === null) return null;
+    const rootCanonical = canonicalizePathBestEffort(root);
+    const targetCanonical = canonicalizePathBestEffort(target);
+    if (!pathWithin(root, target) || !pathWithin(rootCanonical, targetCanonical) ||
+      !folderAllowed(target, perms.allowed_folders) || !folderAllowed(targetCanonical, perms.allowed_folders) ||
+      workspaceOwnedByAnotherSubuser(userId, target)) return null;
+    return { scopeId: request.scopeId, root, target, rootCanonical, targetCanonical };
+  };
+
+  /**
+   * Filter alpha workspace/session Remote stream items for one subuser.
+   * A missing/invalid resource identity is dropped rather than guessed. The
+   * caller keeps the physical stream alive, but never forwards the unfiltered
+   * value. Workspace IDs are retained per logical stream so later remove/order
+   * frames cannot reintroduce an unseen workspace.
+   */
+  const filterRemoteMuxUserItem = (
+    userId: number,
+    fallbackPerms: UserPermissionsRow,
+    state: RemoteMuxUserStreamState,
+    value: unknown,
+  ): unknown | null => {
+    const perms = db.getPermissions(userId) ?? fallbackPerms;
+    if (state.endpoint === 'job/list' || state.endpoint === 'job/follow') {
+      if (!isPlainJsonRecord(value)) return null;
+      if (state.endpoint === 'job/list') {
+        if (value.type !== 'rows' || !Array.isArray(value.jobs)) return null;
+        const sessionId = state.jobSessionId;
+        if (sessionId === undefined || authorizedSubuserSessionRoot(userId, sessionId, perms) === null) return null;
+        const jobs = value.jobs.filter((job): job is Record<string, unknown> =>
+          isPlainJsonRecord(job) && typeof job.id === 'string' && job.owner === sessionId,
+        );
+        return { type: 'rows', jobs };
+      }
+      if (value.type !== 'opened' && value.type !== 'output' && value.type !== 'status') return null;
+      if (value.type === 'opened' || value.type === 'status') {
+        if (!isPlainJsonRecord(value.job) || value.job.id !== state.jobId ||
+          state.jobSessionId === undefined || value.job.owner !== state.jobSessionId) return null;
+        state.jobOwnerConfirmed = true;
+      }
+      if (value.type === 'output' && (!state.jobOwnerConfirmed || !Array.isArray(value.chunks))) return null;
+      return value;
+    }
+    if (state.endpoint === 'account/watch') {
+      return isPlainJsonRecord(value) ? value : null;
+    }
+    // `$events` establishes the browser connection, but it is also a broadcast
+    // carrier. Never transparently forward its later notifications: a Remote
+    // event stream is shared by every DSH session on the Host.
+    if (state.endpoint === '$events') {
+      if (!isPlainJsonRecord(value)) return null;
+      if (value.type === 'ready') {
+        if (state.remoteEventsReady || Object.keys(value).length !== 3 || typeof value.clientId !== 'string' ||
+          value.clientId.length === 0 || value.clientId.length > 200 ||
+          !isPlainJsonRecord(value.host) || Object.keys(value.host).length !== 1 || typeof value.host.home !== 'string') return null;
+        state.remoteEventsReady = true;
+        state.remoteEventsClientId = value.clientId;
+        return value;
+      }
+      if (!state.remoteEventsReady || state.remoteEventsClientId === undefined) return null;
+      const currentGrants = new Set(db.listUserSessionGrants(userId));
+      const access = userSessionAccess.get(userId);
+      const sessionAllowed = (sessionId: string): boolean => {
+        const sessionPath = access?.get(sessionId);
+        return sessionPath !== undefined &&
+          currentGrants.has(sessionId) &&
+          !perms.disabled_sessions.includes(sessionId) &&
+          folderAllowed(sessionPath, perms.allowed_folders) &&
+          !workspaceOwnedByAnotherSubuser(userId, sessionPath);
+      };
+      const pendingSessionAllowedForEvent = (sessionId: string, args: unknown[]): boolean => {
+        const pending = pendingCreatedSessions.get(userId)?.get(sessionId);
+        if (pending === undefined || pending.expiresAt <= Date.now()) return false;
+        const summary = args[0];
+        if (!isPlainJsonRecord(summary) || typeof summary.cwd !== 'string') return false;
+        return normalizePath(summary.cwd) === normalizePath(pending.cwd) &&
+          folderAllowed(pending.cwd, perms.allowed_folders) && !workspaceOwnedByAnotherSubuser(userId, pending.cwd);
+      };
+      if (value.type === 'cancel') {
+        if (Object.keys(value).length !== 2 || typeof value.eventId !== 'string' || value.eventId.length === 0 || value.eventId.length > 200) return null;
+        const ownership = remoteEventOwnership.get(remoteEventOwnershipKey(value.eventId, state.remoteEventsClientId));
+        if (ownership === undefined || ownership.userId !== userId || ownership.clientId !== state.remoteEventsClientId) return null;
+        remoteEventOwnership.delete(remoteEventOwnershipKey(value.eventId, state.remoteEventsClientId));
+        return value;
+      }
+      if (value.type === 'waterfall') {
+        if (
+          Object.keys(value).length !== 5 ||
+          (value.event !== 'user-questions/request' && value.event !== 'approval/request') ||
+          typeof value.eventId !== 'string' || value.eventId.length === 0 || value.eventId.length > 200 ||
+          typeof value.agentId !== 'string' || value.agentId.length === 0 || value.agentId.length > 200 ||
+          !isPlainJsonRecord(value.request) || Object.hasOwn(value.request, 'agent') || Object.hasOwn(value.request, 'signal') ||
+          !sessionAllowed(value.agentId)
+        ) return null;
+        const ownershipKey = remoteEventOwnershipKey(value.eventId, state.remoteEventsClientId);
+        if (remoteEventOwnership.size >= REMOTE_EVENT_MAX_PENDING && !remoteEventOwnership.has(ownershipKey)) return null;
+        remoteEventOwnership.set(ownershipKey, {
+          userId,
+          clientId: state.remoteEventsClientId,
+          sessionId: value.agentId,
+          expiresAt: Date.now() + REMOTE_EVENT_MAX_AGE_MS,
+        });
+        return value;
+      }
+      if (value.type !== 'emit' || Object.keys(value).length !== 3 ||
+        typeof value.event !== 'string' || !Array.isArray(value.args)) return null;
+      const sessionId = remoteMuxEventSessionId(value.event, value.args);
+      if (sessionId === null || (!sessionAllowed(sessionId) &&
+        (value.event !== 'api-session/added' || !pendingSessionAllowedForEvent(sessionId, value.args)))) return null;
+      if (value.event !== 'api-session/added') return value;
+      const summary = value.args[0] as Record<string, unknown>;
+      const { cwd: _cwd, parentSessionId: _parentSessionId, ...safeSummary } = summary;
+      return { ...value, args: [safeSummary, ...value.args.slice(1)] };
+    }
+    // session/follow is opened only after its request address was checked. The
+    // alpha.1 snapshot still carries the authoritative target header, so verify
+    // it before forwarding any v2 records or assistant-stream state. Later
+    // frames stay bound to the same authorized stream; if the grant is revoked,
+    // the carrier is closed by the permission-save path and this check drops
+    // anything racing behind that close.
+    if (state.endpoint === 'session/follow') {
+      const address = state.followAddress;
+      if (address === null || address === undefined || !sessionFollowIdentityAllowed(userId, address)) return null;
+      if (!state.followSnapshotSeen) {
+        if (!sessionFollowSnapshotMatches(address, value)) return null;
+        state.followSnapshotSeen = true;
+      }
+      // 官方模型状态来源（授权依据，只读不写）：
+      //   · snapshot.projections.values.modelSelection.next：DSH 权威的“下一个请求
+      //     将使用的选择”，null 表示没有选择（用 Host 共享默认）。
+      //   · 后续 event 帧里的 model/selection 事件（含 data: {provider, model}）。
+      // 子代理流不对应一个普通会话，不写入（其授权按父会话走）。
+      if (address.kind === 'session') {
+        const target = sessionFollowTargetId(address);
+        recordSessionFollowModelSelection(target, value);
+      }
+      return value;
+    }
+    const access = userSessionAccess.get(userId);
+    const currentGrants = new Set(db.listUserSessionGrants(userId));
+    const pending = pendingCreatedSessions.get(userId);
+    const pendingSessionAllowed = (id: unknown, workspacePath?: string): id is string => {
+      if (typeof id !== 'string' || workspacePath === undefined) return false;
+      const candidate = pending?.get(id);
+      return candidate !== undefined && candidate.expiresAt > Date.now() && normalizePath(candidate.cwd) === normalizePath(workspacePath) &&
+        folderAllowed(candidate.cwd, perms.allowed_folders) && !workspaceOwnedByAnotherSubuser(userId, candidate.cwd);
+    };
+    const allowedSession = (id: unknown): id is string =>
+      typeof id === 'string' && subuserCanAccessSession(userId, perms, id);
+    const workspacePathAllowed = (row: Record<string, unknown>): boolean => {
+      const pathValue = row.path;
+      if (typeof row.workspaceId !== 'string' || typeof pathValue !== 'string' || !folderAllowed(pathValue, perms.allowed_folders)) return false;
+      return !workspaceOwnedByAnotherSubuser(userId, pathValue);
+    };
+    const workspaceAllowed = (row: Record<string, unknown>): boolean => {
+      if (!workspacePathAllowed(row)) return false;
+      const id = row.workspaceId as string;
+      const pathValue = row.path as string;
+      const owners = db.listWorkspaceOwners();
+      // 增量 upsert 允许当前用户新建且尚未出现在本连接 baseline 的工作区；
+      // 但未知 workspaceId 必须有当前用户的持久化登记，不能只凭目录白名单放行。
+      return state.visibleWorkspaces.has(id) || owners.some(
+        (owner) => owner.userId === userId && normalizePath(owner.path) === normalizePath(pathValue),
+      );
+    };
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+    const frame = value as Record<string, unknown>;
+    if (state.endpoint === 'workspaceFiles/changes') {
+      if (frame.kind === 'ready' && Object.keys(frame).length === 1 && state.workspaceFileReady !== true) {
+        state.workspaceFileReady = true;
+        return frame;
+      }
+      if (frame.kind !== 'change' || Object.keys(frame).length !== 2 || state.workspaceFileReady !== true ||
+        !isPlainJsonRecord(frame.change)) return null;
+      const change = frame.change;
+      const absolutePath = change.absolutePath;
+      const validChange = typeof absolutePath === 'string' && absolutePath.length > 0 && absolutePath.length <= 4096 &&
+        (Object.keys(change).length === 2 && typeof change.version === 'string' && change.version.length <= 200 ||
+          Object.keys(change).length === 2 && change.absent === true);
+      if (!validChange || state.workspaceFileScopeId === undefined || state.workspaceFileRoot === undefined ||
+        state.workspaceFileTarget === undefined || state.workspaceFileRootCanonical === undefined ||
+        state.workspaceFileTargetCanonical === undefined) return null;
+      const currentRoot = authorizedSubuserSessionRoot(userId, state.workspaceFileScopeId, perms);
+      if (currentRoot === null || normalizePath(currentRoot) !== normalizePath(state.workspaceFileRoot)) return null;
+      const changedPath = normalizePath(absolutePath);
+      const changedCanonical = canonicalizePathBestEffort(changedPath);
+      const withinTarget = pathWithin(state.workspaceFileTarget, changedPath) &&
+        pathWithin(state.workspaceFileTargetCanonical, changedCanonical);
+      const withinRoot = pathWithin(state.workspaceFileRoot, changedPath) &&
+        pathWithin(state.workspaceFileRootCanonical, changedCanonical);
+      if (!withinTarget || !withinRoot ||
+        (!folderAllowed(changedPath, perms.allowed_folders) && !folderAllowed(changedCanonical, perms.allowed_folders)) ||
+        workspaceOwnedByAnotherSubuser(userId, changedPath)) return null;
+      return frame;
+    }
+    if (state.endpoint === 'workspace/follow') {
+      if (frame.type === 'baseline') {
+        const baseline = frame.value;
+        if (baseline === null || typeof baseline !== 'object' || Array.isArray(baseline)) return null;
+        const source = baseline as Record<string, unknown>;
+        if (!Array.isArray(source.items) || !Array.isArray(source.archivedSessionIds)) return null;
+        // 0.1.7-alpha.1 的 WorkspaceBaseline 新增 pinnedSessionIds（与 archivedSessionIds
+        // 同级的租户枚举面）；出现就必须是数组并逐会话过滤，缺失（0.1.6 及更早）则
+        // 不下发该字段，保持旧客户端口径。字段存在但形状不符一律 fail-closed。
+        if (Object.hasOwn(source, 'pinnedSessionIds') && !Array.isArray(source.pinnedSessionIds)) return null;
+        const hasPinnedIds = Object.hasOwn(source, 'pinnedSessionIds');
+        const grantsSeeded = db.isSessionGrantsSeeded(userId);
+        // seed 前的授权集合只用于「seed 完成前的可见性过滤」（迁移口径）；
+        // seed 之后会重新复读一份最新的 grant 集合（见下方 authorizedAccess）。
+        const baselineGrants = new Set(db.listUserSessionGrants(userId));
+        state.visibleWorkspaces.clear();
+        state.visibleWorkspaceRows.clear();
+        const visibleAccess = new Map<string, string>();
+        const items: Record<string, unknown>[] = [];
+        for (const item of source.items) {
+          if (item === null || typeof item !== 'object' || Array.isArray(item)) continue;
+          const workspace = { ...(item as Record<string, unknown>) };
+          // 首个 baseline 本身就是 DSH 提供的全量工作区快照；管理员授予的
+          // 既有工作区不会预先出现在 state.visibleWorkspaces 或 user_workspaces，
+          // 不能套用增量 upsert 的“已知 workspaceId”门槛，否则新授权工作区会
+          // 连同其会话一起被全部过滤掉（Issue #25）。baseline 只需执行路径白名单
+          // 与跨用户所有权校验；后续 upsert 继续使用更严格的 workspaceAllowed。
+          if (!workspacePathAllowed(workspace) || !Array.isArray(workspace.sessionIds)) continue;
+          const id = workspace.workspaceId;
+          const workspacePath = workspace.path;
+          if (typeof id !== 'string' || typeof workspacePath !== 'string') continue;
+          const sessionIds = workspace.sessionIds.filter((sessionId): sessionId is string => typeof sessionId === 'string' && sessionOwner(sessionId) === userId);
+          // A session/create pending response is not a durable grant. Do not seed
+          // it from a concurrent baseline; its later upsert is admitted by path.
+          for (const sessionId of sessionIds) {
+            if (!pendingSessionAllowed(sessionId, workspacePath)) visibleAccess.set(sessionId, workspacePath);
+          }
+          // 首次迁移旧用户时，workspace baseline 本身就是旧行为的可见性来源；
+          // seed 完成后则严格回到持久化 grant，不能把后续新会话自动加入。
+          workspace.sessionIds = sessionIds.filter((sessionId) =>
+            !perms.disabled_sessions.includes(sessionId) &&
+            (pendingSessionAllowed(sessionId, workspacePath) || !grantsSeeded || baselineGrants.has(sessionId)),
+          );
+          state.visibleWorkspaces.set(id, workspacePath);
+          state.visibleWorkspaceRows.set(id, workspace);
+          items.push(workspace);
+        }
+        // Remote baseline 是 alpha 客户端建立权限快照的第一条可靠数据源；
+        // 首次迁移旧用户时沿用 workspace.list 的一次性 seed 语义：只追加、绝不
+        // 整表替换（同一窗口里子用户 session/create 追加的 grant 不得被抹掉），
+        // 标记与追加在同一事务提交。
+        if (!grantsSeeded) {
+          db.seedUserSessionGrants(userId, [...visibleAccess.keys()].filter((id) => !perms.disabled_sessions.includes(id)));
+        }
+        // seed 之后复读最新 grant：baseline 里可见但从未被显式授权的会话不得回写。
+        const grants = new Set(db.listUserSessionGrants(userId));
+        // baseline 只是一次可见性投影：合并「旧快照里仍然合法的条目」与「本次可见
+        // 条目」，避免一次不完整/乱序的 baseline 把仍在授权内的会话抹掉；grant/
+        // 禁用/白名单/所有权任一不满足的条目仍被丢弃。
+        const allowedAccess = mergeAuthorizedAccess(userId, perms, grants, visibleAccess);
+        const epoch = userAccessEpochFor(userId);
+        replaceUserSessionAccess(userId, allowedAccess, epoch);
+        const visibleWorkspacePaths = new Map<string, string>();
+        for (const item of items) {
+          const workspaceId = item.workspaceId;
+          const workspacePath = item.path;
+          if (typeof workspaceId === 'string' && typeof workspacePath === 'string') visibleWorkspacePaths.set(workspaceId, workspacePath);
+        }
+        replaceUserWorkspacePaths(userId, mergeWorkspacePaths(userId, perms, visibleWorkspacePaths), epoch);
+        userArchivedSessionIds.set(userId, new Set(
+          source.archivedSessionIds.filter((id): id is string =>
+            typeof id === 'string' && allowedAccess.has(id) && !perms.disabled_sessions.includes(id),
+          ),
+        ));
+        return { type: 'baseline', value: {
+          items,
+          archivedSessionIds: source.archivedSessionIds.filter((id) => allowedAccess.has(id) && !perms.disabled_sessions.includes(id)),
+          // pinned 与 archived 同口径：只暴露当前用户可见且未被逐会话关闭的身份，
+          // 不能让子用户借 pin 集合枚举其他租户的会话 ID。
+          ...(hasPinnedIds ? {
+            pinnedSessionIds: (source.pinnedSessionIds as unknown[]).filter((id): id is string =>
+              typeof id === 'string' && allowedAccess.has(id) && !perms.disabled_sessions.includes(id),
+            ),
+          } : {}),
+        } };
+      }
+      if (frame.type === 'upsert') {
+        const workspace = frame.workspace;
+        if (workspace === null || typeof workspace !== 'object' || Array.isArray(workspace)) return null;
+        const row = { ...(workspace as Record<string, unknown>) };
+        if (!workspaceAllowed(row) || !Array.isArray(row.sessionIds) || typeof row.workspaceId !== 'string') return null;
+        const workspacePath = String(row.path);
+        row.sessionIds = row.sessionIds.filter((id): id is string => allowedSession(id) || pendingSessionAllowed(id, workspacePath));
+        state.visibleWorkspaces.set(row.workspaceId, workspacePath);
+        state.visibleWorkspaceRows.set(row.workspaceId, row);
+        return { type: 'upsert', workspace: row };
+      }
+      if (frame.type === 'remove' && typeof frame.workspaceId === 'string') {
+        const workspacePath = state.visibleWorkspaces.get(frame.workspaceId);
+        if (workspacePath === undefined || !folderAllowed(workspacePath, perms.allowed_folders) ||
+          workspaceOwnedByAnotherSubuser(userId, workspacePath)) return null;
+        state.visibleWorkspaces.delete(frame.workspaceId);
+        state.visibleWorkspaceRows.delete(frame.workspaceId);
+        return { type: 'remove', workspaceId: frame.workspaceId };
+      }
+      if (frame.type === 'order' && Array.isArray(frame.workspaceIds)) {
+        const ids = frame.workspaceIds.filter((id): id is string => {
+          if (typeof id !== 'string') return false;
+          const workspacePath = state.visibleWorkspaces.get(id);
+          return workspacePath !== undefined && folderAllowed(workspacePath, perms.allowed_folders) &&
+            !workspaceOwnedByAnotherSubuser(userId, workspacePath);
+        });
+        return { type: 'order', workspaceIds: ids };
+      }
+      if (frame.type === 'archived' && Array.isArray(frame.archivedSessionIds)) {
+        return { type: 'archived', archivedSessionIds: frame.archivedSessionIds.filter(allowedSession) };
+      }
+      if (frame.type === 'pinned' && Array.isArray(frame.pinnedSessionIds)) {
+        return { type: 'pinned', pinnedSessionIds: frame.pinnedSessionIds.filter(allowedSession) };
+      }
+      return null;
+    }
+    if (frame.type === 'baseline') {
+      const baseline = frame.value;
+      if (baseline === null || typeof baseline !== 'object' || Array.isArray(baseline)) return null;
+      const source = baseline as Record<string, unknown>;
+      // RC.1 的 control baseline 是 { queues, jobs, projections }；alpha.2 只发
+      // { jobs, projections }。queues 缺失就不能再当成 shape 不符——否则子用户
+      // 的 session/control 流永远拿不到基线（顶栏 jobs/投影一直空）。逐表过滤：
+      // 存在的表必须是 plain record 且逐会话过滤后才下发；出现但形状不符时
+      // 宁可不发整个基线（fail-closed），也不把未过滤内容透传。
+      const filtered: Record<string, unknown> = {};
+      for (const key of ['queues', 'jobs', 'projections']) {
+        if (!Object.hasOwn(source, key)) continue;
+        const table = source[key];
+        if (!isPlainJsonRecord(table)) return null;
+        const out: Record<string, unknown> = {};
+        for (const [id, item] of Object.entries(table)) if (allowedSession(id)) out[id] = item;
+        filtered[key] = out;
+      }
+      if (Object.keys(filtered).length === 0) return null;
+      return { type: 'baseline', value: filtered };
+    }
+    if ((frame.type === 'queue' || frame.type === 'jobs' || frame.type === 'projection') && allowedSession(frame.sessionId)) {
+      return frame;
+    }
+    return null;
+  };
   const gatewayRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const configuredRoot = process.env.DSH_PASSWORDS_ENV_FILE?.trim()
     ? path.dirname(path.resolve(process.env.DSH_PASSWORDS_ENV_FILE.trim()))
     : gatewayRoot;
+
   // ── 敏感目录基列表（下载与目录删除共用）────────────────────
   // 部署根（盖 .env/dist/scripts）、数据库及其 data/ 父两级、DSH 安装根、
   // DSH 家目录（会话/设置/凭据）、本机 SSH 凭据、OS 系统目录。
@@ -4177,6 +5759,16 @@ export function createGatewayServer(
         rebuildActiveWorkspaceSessions();
         workspaceSnapshotReady = false;
         workspaceSnapshotUpdatedAt = 0;
+        if (deletedWorkspaceIds.length > 0) {
+          const removedIds = new Set(deletedWorkspaceIds);
+          for (const [userId, paths] of [...userWorkspacePaths]) {
+            let changed = false;
+            for (const workspaceId of removedIds) {
+              if (paths.delete(workspaceId)) changed = true;
+            }
+            if (changed) replaceUserWorkspacePaths(userId, new Map(paths), userAccessEpochFor(userId));
+          }
+        }
         for (const [workspaceId, workspacePath] of [...workspacePathById]) {
           if (pathWithinDeletedTree(workspacePath, deletedRoot)) workspacePathById.delete(workspaceId);
         }
@@ -4238,6 +5830,12 @@ export function createGatewayServer(
         for (const userId of invalidateUserIds) {
           sessionAgentPresetByUser.delete(userId);
           closeTenantConnections(tenantConnectionsByUserId.get(userId), 'workspace removed');
+          const row = db.getUserById(userId);
+          if (row === null || row.role === 'admin') continue;
+          // Remote mux 不会因 DB 变更自动刷新；关掉旧订阅令其重建 workspace baseline。
+          invalidateUserSessionAccess(userId);
+          closeUserRemoteMuxClients(userId);
+          closeUserWebSocketClients(userId);
         }
         const warnings: string[] = [];
         if (recoveryOnly) {
@@ -4373,7 +5971,7 @@ export function createGatewayServer(
 
 
   // ── 更新某子用户权限（仅主用户） ─────────────────────────────
-  app.post('/gateway/api/permissions', jsonBody, (req, res) => {
+  app.post('/gateway/api/permissions', jsonBody, async (req, res) => {
     const me = apiAuth(req, res, true);
     if (!me) return;
     const body = (req.body ?? {}) as Record<string, unknown>;
@@ -4391,11 +5989,19 @@ export function createGatewayServer(
       res.status(400).json({ ok: false, code: 'FORBIDDEN', error: '不能修改主用户权限' });
       return;
     }
-    if (!Array.isArray(body.allowedFolders) || body.allowedFolders.some((folder) => typeof folder !== 'string')) {
+    try {
+    const currentPermissions = effectivePermissions(userId);
+    const expectedPermissionState = db.getPermissions(userId);
+    // `__deny__` 是本插件用于表达“不给任何工作区”的唯一内部哨兵值。前端在
+    // allowedFolders 表示部分更新，必须保留当前值，避免旧草稿覆盖并发修改。
+    if (body.allowedFolders !== undefined &&
+      (!Array.isArray(body.allowedFolders) || body.allowedFolders.some((folder) => typeof folder !== 'string'))) {
       res.status(400).json({ ok: false, code: 'INVALID', error: '允许的工作区必须是路径数组' });
       return;
     }
-    const requestedFolders = stringArray(body.allowedFolders);
+    const requestedFolders = body.allowedFolders === undefined
+      ? [...currentPermissions.allowed_folders]
+      : stringArray(body.allowedFolders);
     // 空字符串、当前目录和根目录会被 folderAllowed 归一为“全盘允许”，与 UI 的
     // “允许的工作区”语义相反；显式拒绝，管理员应使用空数组表示不限制。
     // UI 用精确的单元素 __deny__ 列表表示关闭全部工作区；它是权限模型已经支持
@@ -4434,11 +6040,20 @@ export function createGatewayServer(
         : requestedFolders.some((folder) => normalizePath(folder) === normalizePath(managedWorkspace.path))
           ? requestedFolders
           : [...requestedFolders, managedWorkspace.path];
-    // 0 归一为 null（=不限）：避免"每日 0 分钟"被误当作"首次使用即封禁"
-    const rawToken = nullableInt(body.hourlyTokenLimit);
-    const rawMinutes = nullableInt(body.dailyMinutesLimit);
-    const hourlyTokenLimit = rawToken === 0 ? null : rawToken;
-    const dailyMinutesLimit = rawMinutes === 0 ? null : rawMinutes;
+    // 0 归一为 null（=不限）：避免"每日 0 分钟"被误当作"首次使用即封禁"。
+    // 但非法输入必须 400，不能沿用 nullableInt 的兼容性 null 语义而静默放宽限制。
+    const parsedHourlyTokenLimit = parseNullableIntStrict(body.hourlyTokenLimit);
+    const parsedDailyMinutesLimit = parseNullableIntStrict(body.dailyMinutesLimit);
+    if (!parsedHourlyTokenLimit.ok || !parsedDailyMinutesLimit.ok) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: '配额必须是非负整数' });
+      return;
+    }
+    const hourlyTokenLimit = body.hourlyTokenLimit === undefined
+      ? currentPermissions.hourly_token_limit
+      : parsedHourlyTokenLimit.value === 0 ? null : parsedHourlyTokenLimit.value;
+    const dailyMinutesLimit = body.dailyMinutesLimit === undefined
+      ? currentPermissions.daily_minutes_limit
+      : parsedDailyMinutesLimit.value === 0 ? null : parsedDailyMinutesLimit.value;
     const existingMonthlyBudgetMicros = db.getPermissions(userId)?.monthly_budget_micros ?? 0;
     const rawMonthlyBudget = typeof body.monthlyBudgetYuan === 'number'
       ? String(body.monthlyBudgetYuan)
@@ -4453,7 +6068,6 @@ export function createGatewayServer(
           const [whole, fraction = ''] = rawMonthlyBudget.split('.');
           return Number(whole) * 1_000_000 + Number(fraction.padEnd(2, '0')) * 10_000;
         })();
-    const currentPermissions = effectivePermissions(userId);
     const readBooleanPermission = (name: string, value: unknown, current: boolean): boolean | null => {
       if (value === undefined) return current;
       if (typeof value !== 'boolean') {
@@ -4514,6 +6128,23 @@ export function createGatewayServer(
       : submittedAgentPresets === null
         ? null
         : [...new Set(submittedAgentPresets as string[])];
+    const submittedModels = body.allowedModels;
+    if (submittedModels !== undefined && submittedModels !== null && !Array.isArray(submittedModels)) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: '模型权限必须是数组或 null' });
+      return;
+    }
+    if (
+      Array.isArray(submittedModels) &&
+      (submittedModels.length > 512 || submittedModels.some((entry) => parseAllowedModelSpec(entry) === null))
+    ) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: '模型权限列表无效，必须是 provider/model' });
+      return;
+    }
+    const allowedModels = submittedModels === undefined
+      ? currentPermissions.allowed_models
+      : submittedModels === null
+        ? null
+        : normalizeAllowedModels(submittedModels as string[]);
     let disabledSessions: string[];
     if (body.disabledSessions === undefined) {
       // 同样遵循部分更新语义。省略 disabledSessions 不得恢复此前被主用户
@@ -4529,31 +6160,220 @@ export function createGatewayServer(
     } else {
       disabledSessions = [...new Set(body.disabledSessions as string[])];
     }
+    const expectedDisabledSessions = body.expectedDisabledSessions;
+    if (
+      expectedDisabledSessions !== undefined &&
+      (!Array.isArray(expectedDisabledSessions) ||
+        expectedDisabledSessions.length > 2000 ||
+        expectedDisabledSessions.some((id) => typeof id !== 'string' || id.length === 0 || id.length > 200))
+    ) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: '禁用会话基线无效' });
+      return;
+    }
+    const disabledSessionsBaseline = expectedDisabledSessions === undefined
+      ? [...currentPermissions.disabled_sessions]
+      : [...new Set(expectedDisabledSessions as string[])];
+    if (body.allowedSessionIds !== undefined && !Array.isArray(body.allowedSessionIds)) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: '允许的会话必须是数组' });
+      return;
+    }
+    if (
+      Array.isArray(body.allowedSessionIds) &&
+      (body.allowedSessionIds.length > 2000 || body.allowedSessionIds.some(
+        (id) => typeof id !== 'string' || id.length === 0 || id.length > 200,
+      ))
+    ) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: '允许的会话列表无效' });
+      return;
+    }
+    const sessionAssignmentSubmitted = body.allowedSessionIds !== undefined;
+    if (Array.isArray(body.allowedSessionIds) && body.allowedSessionIds.some((id) => typeof id !== 'string' || sessionOwner(id) !== userId)) {
+      res.status(400).json({ ok: false, code: 'SESSION_NOT_ASSIGNABLE', error: '只能管理该账号拥有的会话' });
+      return;
+    }
+    const previousAllowedSessionIds = db.listUserSessionGrants(userId);
+    let allowedSessionIds = sessionAssignmentSubmitted
+      ? [...new Set(body.allowedSessionIds as string[])]
+      : previousAllowedSessionIds;
+    // 旧草稿冲突侦察：UI 撤销会话时必然同时写入 disabledSessions，所以“丢弃了一个
+    // 仍然可分配、又未被显式禁用的既有 grant”只可能是另一来源的并发写入（子用户
+    // session/create 追加了会话），或者前端拿的是过期快照。两种都必须 fail-closed：
+    // 保留服务端 grant 并回 409，让管理员重新同步，而不是静默撤销自己未见过的会话。
+    let unackedDroppedGrants: string[] = [];
+    // Explicit assignment is a security-sensitive write. The DSH plugin owns
+    // the live registry and archive state, so a gateway cache or client draft
+    // cannot authorize a deleted/archived session. A missing authority is a
+    // 502, never an implicit allow.
+    if (body.allowedSessionIds !== undefined || allowedFolders.length > 0 && !deniesAllWorkspaces) {
+      const resources = await fetchAssignableResources();
+      if (resources === null) {
+        res.status(502).json({ ok: false, code: 'RESOURCES_UNAVAILABLE', error: '可分配资源暂不可用' });
+        return;
+      }
+      const previousGrants = new Set(previousAllowedSessionIds);
+      const staleSessionIds = allowedSessionIds.filter((id) => !resources.sessions.has(id) && previousGrants.has(id));
+      const invalidSession = allowedSessionIds.find((id) => !resources.sessions.has(id) && !previousGrants.has(id));
+      if (invalidSession !== undefined) {
+        res.status(400).json({ ok: false, code: 'SESSION_NOT_ASSIGNABLE', error: '会话不存在、已归档或当前不可分配' });
+        return;
+      }
+      if (staleSessionIds.length > 0) {
+        // 历史 grant 可能在 DSH 中被归档/删除后仍留在数据库，或被旧客户端
+        // 保存回草稿。清理这类永不生效的授权，避免它阻塞同一请求中的有效会话；
+        // 从未授权过的未知 ID 仍在上面 fail-closed，不能借此扩大授权。
+        const stale = new Set(staleSessionIds);
+        allowedSessionIds = allowedSessionIds.filter((id) => !stale.has(id));
+      }
+      if (sessionAssignmentSubmitted) {
+        const submitted = new Set(allowedSessionIds);
+        const disabled = new Set(disabledSessions);
+        unackedDroppedGrants = previousAllowedSessionIds.filter((id) =>
+          resources.sessions.has(id) && !submitted.has(id) && !disabled.has(id),
+        );
+      }
+      if (!deniesAllWorkspaces && allowedFolders.some((folder) => !resources.folders.has(normalizePath(folder)) && managedPathFor(userId, folder) === null)) {
+        res.status(400).json({ ok: false, code: 'WORKSPACE_NOT_ASSIGNABLE', error: '工作区不存在或当前不可分配' });
+        return;
+      }
+    }
+    if (unackedDroppedGrants.length > 0) {
+      res.status(409).json({
+        ok: false,
+        code: 'SESSION_GRANTS_CONFLICT',
+        error: '会话授权已被并发修改，请刷新后重试',
+        allowedSessionIds: db.listUserSessionGrants(userId),
+      });
+      return;
+    }
     // 配额语义："改配额 = 重新给额度"——当 token/时长上限发生变化时
     // 重置该子用户已累计的用量（不同子用户每时段用量不同，改上限应重新计）。
     // 只改文件夹/上传/封禁等非配额字段时不重置（避免误清用量）。
     const prevPerms = effectivePermissions(userId);
+    const previousDisabledSessions = disabledSessionsBaseline;
     const quotaChanged =
       prevPerms.hourly_token_limit !== hourlyTokenLimit || prevPerms.daily_minutes_limit !== dailyMinutesLimit;
-    db.setPermissions(userId, {
-      allowedFolders,
-      hourlyTokenLimit,
-      dailyMinutesLimit,
-      monthlyBudgetMicros,
-      allowUpload,
-      allowGitDownload,
-      allowWorkspaceCreate,
-      allowSsh,
-      ...(allowedAgentPresets === undefined ? {} : { allowedAgentPresets }),
-      allowChatMedia,
-      banned,
-      sandboxMode,
-      disabledSessions,
-    });
-    closeTenantConnections(
-      tenantConnectionsByUserId.get(userId),
-      banned ? 'account unavailable' : 'permissions changed',
-    );
+    const sameStringSet = (left: readonly string[], right: readonly string[]): boolean => {
+      if (left.length !== right.length) return false;
+      const a = new Set(left);
+      return right.every((value) => a.has(value));
+    };
+    const sameFolderSet = (left: readonly string[], right: readonly string[]): boolean => {
+      const normalize = (value: string): string => value === '__deny__' ? value : normalizePath(value);
+      return sameStringSet(left.map(normalize), right.map(normalize));
+    };
+    const sameNullableStringSet = (left: readonly string[] | null, right: readonly string[] | null): boolean => {
+      if (left === null || right === null) return left === right;
+      return sameStringSet(left, right);
+    };
+    const foldersChanged = !sameFolderSet(prevPerms.allowed_folders, allowedFolders);
+    const disabledSessionsChanged = !sameStringSet(prevPerms.disabled_sessions, disabledSessions);
+    const sessionGrantsChanged = sessionAssignmentSubmitted && !sameStringSet(previousAllowedSessionIds, allowedSessionIds);
+    const sshChanged = prevPerms.allow_ssh !== allowSsh;
+    const sandboxChanged = prevPerms.sandbox_mode !== sandboxMode;
+    const modelsChanged = !sameNullableStringSet(prevPerms.allowed_models, allowedModels);
+    const mediaChanged = prevPerms.allow_chat_media !== allowChatMedia;
+    const accessChanged = foldersChanged || disabledSessionsChanged || sessionGrantsChanged || prevPerms.banned !== banned || sandboxChanged;
+    const otherPermissionChanged =
+      quotaChanged ||
+      prevPerms.allow_upload !== allowUpload ||
+      prevPerms.allow_git_download !== allowGitDownload ||
+      prevPerms.allow_workspace_create !== allowWorkspaceCreate ||
+      sshChanged ||
+      mediaChanged ||
+      modelsChanged ||
+      !sameNullableStringSet(prevPerms.allowed_agent_presets, allowedAgentPresets);
+    try {
+      db.setPermissions(userId, {
+        allowedFolders,
+        hourlyTokenLimit,
+        dailyMinutesLimit,
+        monthlyBudgetMicros,
+        allowUpload,
+        allowGitDownload,
+        allowWorkspaceCreate,
+        allowSsh,
+        allowedAgentPresets,
+        allowedModels,
+        allowChatMedia,
+        banned,
+        sandboxMode,
+        disabledSessions,
+        ...(sessionAssignmentSubmitted ? { allowedSessionIds, sessionGrantsSeeded: true } : {}),
+        // 基线 = 本请求开始时的集合。上面的 await（资源核验/沙盒注入）期间子用户
+        // 可能已追加 grant，或另一管理员已切换 disabled session；数据层在事务内复读
+        // 并拒绝用旧集合覆盖任何一类安全集合。
+        expectedDisabledSessions: previousDisabledSessions,
+        expectedPermissionState,
+        ...(sessionAssignmentSubmitted ? { expectedAllowedSessionIds: previousAllowedSessionIds } : {}),
+      });
+    } catch (error) {
+      if (error instanceof PermissionStateConflictError) {
+        res.status(409).json({ ok: false, code: 'PERMISSIONS_CONFLICT', error: '权限已被并发修改，请同步后重试' });
+        return;
+      }
+      if (error instanceof SessionGrantsConflictError) {
+        if (error.scope === 'disabled_sessions') {
+          res.status(409).json({
+            ok: false,
+            code: 'DISABLED_SESSIONS_CONFLICT',
+            error: '禁用会话列表已被并发修改，请刷新后重试',
+            disabledSessions: error.currentSessionIds,
+          });
+        } else {
+          res.status(409).json({
+            ok: false,
+            code: 'SESSION_GRANTS_CONFLICT',
+            error: '会话授权已被并发修改，请刷新后重试',
+            allowedSessionIds: error.currentSessionIds,
+          });
+        }
+        return;
+      }
+      throw error;
+    }
+    // DB 已提交后先设版本栅栏：后续沙盒收紧存在 await，不能让旧请求快照的
+    // create/fork 响应在该窗口把新会话写回刚保存的授权集合。
+    if (accessChanged) fenceUserAccessEpoch(userId);
+    // alpha.3 在每次工具执行时从 session log 的 sandbox/mode 折叠真实策略。
+    // 只在确定为收紧时改写已有会话，绝不由权限保存隐式提升旧 session.
+    // A null historical setting predates this control and may have inherited DSH's
+    // broadest mode, so an explicit restrictive setting must be applied to old grants.
+    const previousSandboxRank = prevPerms.sandbox_mode === 'read-only'
+      ? SANDBOX_RANK['read-only']
+      : prevPerms.sandbox_mode === 'workspace-write'
+        ? SANDBOX_RANK['workspace-write']
+        : SANDBOX_RANK['danger-full-access'];
+    const sandboxTightened = sandboxMode !== null && SANDBOX_RANK[sandboxMode] < previousSandboxRank;
+    let sandboxRevokedSessionIds: string[] = [];
+    if (sandboxTightened && sandboxMode !== null) {
+      // A newly shared session can belong to the administrator. Do not mutate its
+      // global DSH sandbox merely because it was granted to this child account.
+      // Only propagate a tightening to sessions this child could already access.
+      const previouslyGranted = new Set(previousAllowedSessionIds);
+      const existingGrantedSessions = allowedSessionIds.filter((id) => previouslyGranted.has(id));
+      sandboxRevokedSessionIds = await applySandboxToSessions(existingGrantedSessions, sandboxMode);
+      if (sandboxRevokedSessionIds.length > 0) {
+        // 只回收被沙盒策略拒绝的会话；整表替换会抹掉本次 await 期间子用户
+        // session/create 并发追加（且并未被拒绝）的会话授权。
+        db.deleteUserSessionGrants(userId, sandboxRevokedSessionIds);
+      }
+    }
+    // 只有显式提交会话集合时才完成一次性旧数据迁移/初始化；该标记已与权限行和
+    // grant 集合在同一事务提交，避免沙盒 await 窗口被首次 baseline 全表种子覆盖。
+    // 仅在实际影响会话可见性的权限变化后失效旧快照；同值保存必须是 no-op，
+    // 否则设置页的重复提交会反复撕裂 Remote mux 并触发 DSH 无限重连。
+    if (accessChanged || sshChanged) {
+      if (accessChanged) invalidateUserSessionAccess(userId);
+      // Remote mux 现在也承载官方 terminal 流。SSH 开关变化必须关闭旧 carrier，
+      // 让 DSH 重新认证并重新建立允许的逻辑流，避免撤销后继续持有宿主终端。
+      closeUserRemoteMuxClients(userId);
+    }
+    // SSH 开关变化、封禁或其它实际权限变化都要撤销旧的 legacy/登记 WS；
+    // 没有实际变化时不触碰连接。
+    if (accessChanged || otherPermissionChanged) closeUserWebSocketClients(userId);
+    if (accessChanged || otherPermissionChanged || prevPerms.monthly_budget_micros !== monthlyBudgetMicros) {
+      closeTenantConnections(tenantConnectionsByUserId.get(userId), banned ? 'account unavailable' : 'permissions changed');
+    }
     if (quotaChanged) {
       db.resetUsage(userId);
       // 清掉内存节流缓存：否则 15 秒节流可能跳过新记录的创建，配额暂时不生效
@@ -4578,7 +6398,20 @@ export function createGatewayServer(
         disabledSessions,
       }),
     });
-    res.json({ ok: true });
+    res.json({
+      ok: true,
+      allowedFolders,
+      allowedSessionIds: db.listUserSessionGrants(userId),
+      disabledSessions,
+      sandboxRevokedSessionIds,
+      // 回显规范化后的值：管理员看到的就是实际生效的白名单
+      allowedModels,
+      allowChatMedia,
+    });
+    } catch (error) {
+      console.error('[dsh-passwords] 权限保存异常:', String(error));
+      if (!res.headersSent) res.status(500).json({ ok: false, code: 'INTERNAL', error: '权限保存失败' });
+    }
   });
 
 
@@ -5239,7 +7072,6 @@ export function createGatewayServer(
   app.get('/gateway/api/message-media/:id', serveMessageMedia);
   app.head('/gateway/api/message-media/:id', serveMessageMedia);
 
-
   // ── 留言列表（所有登录用户；可见性在 SQL 层按用户过滤） ─────
   // 支持 ?since=<id> 增量拉取（客户端轮询只取新增消息，避免每次全量下载）。
   // reset：游标超前于【当前用户可见】的最新 id（数据库重建/消息清空后自增从头
@@ -5548,6 +7380,7 @@ export function createGatewayServer(
           gatePath === '/gateway/api/permissions' ||
           gatePath === '/gateway/api/usage/report' ||
           gatePath === '/gateway/api/fs/delete-directory' ||
+          gatePath === '/gateway/api/dsh-passwords/purge' ||
           gatePath === '/gateway/api/messages' ||
           gatePath.startsWith('/gateway/api/messages/') ||
           // 聊天媒体：只放行精确的 init 路径与「合法形状的媒体 ID」子路径——
@@ -5647,6 +7480,144 @@ export function createGatewayServer(
           denyRequest(req, res, lang, t(lang, 'gw.banned'));
           return;
         }
+        // ── alpha.2 交付物路由的对象级授权（changes.summary|diff|open）──────────
+        // 这三个官方路由的坐标全部在 query（sessionId + seq [+ index]），而上游只用
+        // sessionId 查会话、不校验归属：把它归入官方面（或加进白名单）等于让任何
+        // 子用户读走别人的变更摘要/差异，甚至触发宿主应用的打开动作。因此这里做
+        // 对象级授权（会话快照 + 持久化 grant + 逐会话关闭 + 白名单目录 + 所有权），
+        // 通过后才在分类分支里放行转发；否则直接 403。
+        const changesRoute = req.method === 'GET' || req.method === 'POST'
+          ? CHANGES_ROUTE_RE.exec(requestPath)
+          : null;
+        if (changesRoute !== null) {
+          // 0.1.7-alpha.1 的 summary/diff 只支持 GET；open 支持 GET 查询关联应用，
+          // 也支持 POST 执行打开。两种 open 方法都必须经过同一套会话归属校验。
+          const methodAllowed = changesRoute[1] === 'open'
+            ? req.method === 'GET' || req.method === 'POST'
+            : req.method === 'GET';
+          const coordinates = methodAllowed
+            ? deliveryRouteCoordinates(parsed.searchParams, changesRoute[1] !== 'summary')
+            : null;
+          const sessionRoot = coordinates === null
+            ? null
+            : authorizedSubuserSessionRoot(user.userId, coordinates.sessionId, perms);
+          if (sessionRoot === null) {
+            res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+            return;
+          }
+        }
+        // ── 会话日志导出（GET/HEAD /api/session.export）的对象级授权 ──────────────
+        // 该路由把会话身份放在 query 的 sessionId 里，上游只按它查会话、不校验归属；
+        // 它同时属于 session 命名空间（→ official）与 isGitRequest，因此子用户只要
+        // 开了 allow_git_download 就能拿到任意其它租户的会话日志。与 changes.* 同口径
+        // 做会话归属校验：缺失/不可解析/未授权的 sessionId 一律 403，绝不下载。
+        // 主用户不受此限制（上面的分支只对非管理员生效）。
+        if (
+          (req.method === 'GET' || req.method === 'HEAD') &&
+          SESSION_EXPORT_ROUTE_RE.test(requestPath)
+        ) {
+          const exportSessionId = parsed.searchParams.get('sessionId');
+          if (
+            exportSessionId === null ||
+            authorizedSubuserSessionRoot(user.userId, exportSessionId, perms) === null
+          ) {
+            res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+            return;
+          }
+        }
+        // ── 0.1.7-alpha.1 workspaceFiles/changes：带 path 的 Remote 流 ──────────────
+        // 子用户在 HTTP unary 面一律 403，不依赖上游对 Remote-only 端点报
+        // signature-invalid（那是上游行为，不是授权判定，且不保证长期存在）。
+        // Remote mux 面在开流时按 workspaceFileScopeId + path 做授权，主用户不受限制。
+        if (WORKSPACE_FILES_CHANGES_ROUTE_RE.test(requestPath)) {
+          res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+          return;
+        }
+        // ── alpha.2 官方 /api/file 直读宿主绝对路径（GET/HEAD ?path=）──
+        // 上游只用绝对路径读文件，不做任何工作区包含检查；子用户必须能用
+        // 「已授权会话的工作区根」把目标路径绑定住，否则任何宿主可读文件（包括
+        // .env、数据库、他人工作区）都能被直接拿走。未提供/无法解析路径一律 403。
+        if ((req.method === 'GET' || req.method === 'HEAD') && requestPath === '/api/file') {
+          const requestedPath = parsed.searchParams.get('path');
+          // 字符串路径与真实路径必须同时绑定到同一授权工作区；否则工作区内的
+          // 符号链接可能把 /api/file 读请求带出租户边界。
+          const normalizedPath = requestedPath === null ? null : normalizePath(requestedPath);
+          const canonicalPath = requestedPath === null ? null : canonicalizePathBestEffort(requestedPath);
+          const allowed = requestedPath !== null && requestedPath !== '' &&
+            !requestedPath.includes('\0') && path.isAbsolute(requestedPath) &&
+            normalizedPath !== null && canonicalPath !== null &&
+            pathBoundToAuthorizedWorkspace(user.userId, perms, normalizedPath) &&
+            pathBoundToAuthorizedWorkspace(user.userId, perms, canonicalPath);
+          if (!allowed) {
+            res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+            return;
+          }
+        }
+        // ── alpha.2 官方 /api/present.open（在宿主桌面打开声明过的文件）──
+        // 请求只带坐标（sessionId + seq + index）而不带目标路径，因此网关可见的
+        // 授权面只有「这是哪个会话的声明」：必须把动作绑定到一个仍然授权的会话
+        // （快照 + grant + 未关闭 + 白名单目录 + 所有权），坐标/action 不可解析一律
+        // 403。上游只注册了 POST，GET 会被上游以 405 拒绝；但归属校验不能依赖
+        // 上游的方法表——两条方法走同一套 sessionId/seq/index 判定，避免 GET 成为
+        // 绕过路径。action 仍只在 POST（真正执行动作的那条）上校验。
+        // 目标路径的解析与工作区包含性由上游的 fs/sandbox 负责。
+        if (
+          (req.method === 'POST' || req.method === 'GET') &&
+          requestPath === '/api/present.open'
+        ) {
+          const coordinates = deliveryRouteCoordinates(parsed.searchParams, true);
+          const action = parsed.searchParams.get('action') ?? 'open';
+          const sessionRoot = coordinates === null
+            ? null
+            : authorizedSubuserSessionRoot(user.userId, coordinates.sessionId, perms);
+          if (
+            sessionRoot === null ||
+            (req.method === 'POST' && action !== 'open' && action !== 'reveal')
+          ) {
+            res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+            return;
+          }
+        }
+        const officialTerminalHttp = req.method === 'POST' && OFFICIAL_TERMINAL_HTTP_RE.test(requestPath);
+        const terminalStub = officialTerminalHttp ? TERMINAL_STUB_RE.exec(requestPath) : null;
+        if (officialTerminalHttp && !perms.allow_ssh) {
+          if (terminalStub !== null) {
+            const action = terminalStub[1];
+            const chunks: Buffer[] = [];
+            let size = 0;
+            let oversized = false;
+            req.on('data', (chunk: Buffer) => {
+              if (oversized) return;
+              size += chunk.length;
+              if (size > 64 * 1024) {
+                oversized = true;
+                return;
+              }
+              chunks.push(chunk);
+            });
+            req.on('end', () => {
+              if (res.writableEnded) return;
+              const rpcId = oversized ? '' : terminalStubRpcId(chunks, action);
+              if (rpcId === '') {
+                res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.adminOnly')));
+                return;
+              }
+              const result =
+                action === 'list' ? { ok: true, value: [] } :
+                action === 'close' ? { ok: true } :
+                { ok: false, error: { code: 'terminal/unavailable', message: TERMINAL_UNAVAILABLE_MESSAGE, details: {} } };
+              res.status(200).type('application/json').send(
+                JSON.stringify({ type: 'server-response', rpcId, result }),
+              );
+            });
+            req.on('error', () => {
+              if (!res.writableEnded) res.destroy();
+            });
+            return;
+          }
+          denyRequest(req, res, lang, t(lang, 'gw.noSsh'));
+          return;
+        }
         // The editor's file writes use its WebSocket protocol, so require write
         // permission for the entire editor instead of filtering HTTP methods.
         if (editorPath && !perms.allow_upload) {
@@ -5685,7 +7656,8 @@ export function createGatewayServer(
         }
         // F-09/F-12：第三方插件“运维面”端点（skin-center、modlens、
         // dsh-uploads 列表/删除等）不在网关权限模型内，对子用户一律 403（仅主用户可访问）
-        if (isAdminOnlyPluginEndpoint(req.method, requestPath)) {
+        if (isAdminOnlyPluginEndpoint(req.method, requestPath) ||
+            (isSubuserBlockedApiPath(requestPath) && !(officialTerminalHttp && perms.allow_ssh))) {
           denyRequest(req, res, lang, t(lang, 'gw.adminOnly'));
           return;
         }
@@ -5729,6 +7701,7 @@ export function createGatewayServer(
         const privateWorkspaceRemoval = WORKSPACE_REMOVE_RE.test(requestPath);
         if (
           isWorkspaceWrite(requestPath) &&
+          !isWorkspaceOrderWrite(requestPath) &&
           !WORKSPACE_ARCHIVE_SESSION_RE.test(requestPath) &&
           !privateWorkspaceRemoval &&
           !managedWorkspaceMutation &&
@@ -5964,7 +7937,7 @@ export function createGatewayServer(
   const MAX_BUFFER_BYTES = 16 * 1024 * 1024;
   /** session.history 会携带大型工具输出，仅该改写分支允许更大的原始响应。 */
   const MAX_SESSION_HISTORY_BUFFER_BYTES = 32 * 1024 * 1024;
-  /** gunzip 解压后的上限：原始缓冲体有界，但高压缩比炸弹仍可能膨胀数百 MB——过滤前拒绝 */
+  /** gunzip 解压后的上限：缓冲体本身有界，但 16MB 高压缩比炸弹可解压出数百 MB——过滤前拒绝 */
   const MAX_DECOMPRESSED_BYTES = 64 * 1024 * 1024;
   /** 安全过滤分支专属：解压超限时 fail-closed（502），不得透传未过滤内容 */
   class OversizeResponseError extends Error {}
@@ -6069,13 +8042,6 @@ export function createGatewayServer(
     }
   }
 
-  /**
-   * 缓冲上游响应：正常路径在 'end' 时调用 onEnd(body) 做改写/过滤；
-   * 超过调用上限时，安全过滤分支失败关闭，只有明确传入 `stream` 的兼容
-   * 分支才退化为流式透传。调用方可为已知的大响应分支传入更高上限，
-   * 不影响其他响应。
-   * 上游中途出错时销毁客户端连接（头未发出，无法再写错误页）。
-   */
   function decodeUpstreamBody(input: Buffer, contentEncoding: string): Buffer {
     const encoding = contentEncoding.trim().toLowerCase();
     if (encoding === '' || encoding === 'identity') return input;
@@ -6086,7 +8052,7 @@ export function createGatewayServer(
   function bufferUpstream(
     upstreamRes: http.IncomingMessage,
     res: Response,
-    onEnd: (body: Buffer) => void,
+    onEnd: (body: Buffer) => void | Promise<void>,
     onOversize: 'stream' | 'fail' = 'fail',
     maxBufferBytes = MAX_BUFFER_BYTES,
   ): void {
@@ -6126,7 +8092,11 @@ export function createGatewayServer(
     const onEndHandler = () => {
       if (settled) return;
       settled = true;
-      onEnd(Buffer.concat(chunks));
+      Promise.resolve().then(() => onEnd(Buffer.concat(chunks))).catch((error: unknown) => {
+        console.warn('[dsh-passwords] upstream response rewrite failed:', error instanceof Error ? error.message : String(error));
+        if (!res.headersSent) sendApiError(res, 502, 'UPSTREAM_UNAVAILABLE', 'upstream response could not be processed');
+        else if (!res.writableEnded) res.destroy();
+      });
     };
     const onError = () => {
       if (settled) return;
@@ -6779,6 +8749,7 @@ export function createGatewayServer(
   ): boolean {
     const cwd = sessionCwdById.get(sessionId);
     return sessionOwner(sessionId) === userId &&
+      (!db.isSessionGrantsSeeded(userId) || db.hasUserSessionGrant(userId, sessionId)) &&
       !perms.disabled_sessions.includes(sessionId) &&
       cwd !== undefined &&
       pathAllowedFor(userId, cwd, perms.allowed_folders);
@@ -6953,37 +8924,50 @@ export function createGatewayServer(
   }
 
   /**
-   * F-26：向 dsh 注入会话沙盒（loopback + 内部密钥，fire-and-forget）。
-   * 受限子用户（sandbox_mode 非空）建会话后，dsh 默认给 workspace-write 沙盒——
-   * 这里通知 dsh 插件把该会话的 sandbox/mode 事件追加为其真实授权级别。
-   * 插件侧校验 loopback + x-internal-secret（与 SETUP_KEY 同源派生）。
+   * F-26：向 dsh 注入会话沙盒，并等待插件确认。
+   * 受限子用户的新会话在确认前仍是 DSH 默认 sandbox；若此处 fire-and-forget，
+   * 内部调用失败后会把比授权更宽松的会话成功交给用户。因此失败必须让创建请求
+   * 失败，不能把未确认的会话当作可用会话返回。
    */
-  function applySandboxToSession(sessionId: string, mode: string): void {
-    const body = JSON.stringify({ sessionId, mode });
-    const r = http.request(
-      {
-        hostname: upstreamHost,
-        port: upstreamPort,
-        path: '/api/dsh-passwords/internal/sandbox',
-        method: 'POST',
-        headers: {
-          host: upstreamAuthority,
-          'content-type': 'application/json',
-          'content-length': String(Buffer.byteLength(body)),
-          'x-internal-secret': config.internalSecret,
-          ...upstreamAuthenticationHeaders(),
+  function applySandboxToSession(sessionId: string, mode: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      const body = JSON.stringify({ sessionId, mode });
+      let settled = false;
+      const finish = (ok: boolean) => {
+        if (settled) return;
+        settled = true;
+        resolve(ok);
+      };
+      const r = upstreamTransport.request(
+        {
+          hostname: upstreamHost,
+          port: upstreamPort,
+          path: '/api/dsh-passwords/internal/sandbox',
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'content-length': String(Buffer.byteLength(body)),
+            'x-internal-secret': config.internalSecret,
+            host: upstreamAuthority,
+            ...upstreamAuthenticationHeaders(),
+          },
+          timeout: 3000,
         },
-        timeout: 3000,
-      },
-      () => {},
-    );
-    r.on('error', (error) => {
-      // 沙盒注入失败（dsh 重启窗口期/插件未部署）静默 = 受限子用户新会话拿到默认
-      // workspace-write 沙盒（比授权高一档的提权）且无人知晓——必须留日志
-      console.error(`[dsh-passwords] 沙盒注入失败 session=${sessionId} mode=${mode}: ${error?.message ?? error}`);
+        (response) => {
+          response.resume();
+          finish((response.statusCode ?? 500) >= 200 && (response.statusCode ?? 500) < 300);
+        },
+      );
+      r.on('error', (error) => {
+        console.error(`[dsh-passwords] 沙盒注入失败 session=${sessionId} mode=${mode}: ${error?.message ?? error}`);
+        finish(false);
+      });
+      r.on('timeout', () => {
+        r.destroy();
+        finish(false);
+      });
+      r.end(body);
     });
-    r.on('timeout', () => r.destroy());
-    r.end(body);
   }
 
   app.use((req, res) => {
@@ -7074,6 +9058,16 @@ export function createGatewayServer(
       denyRequest(req, res, langOf(req), t(langOf(req), 'gw.bodyTooLarge'), 413);
       return;
     }
+    // 序号在请求发出前分配：并发 workspace.list 返回乱序时，较早请求的旧快照
+    // 不能覆盖较晚请求对应的新状态。
+    const archiveRequestRevision = req.method === 'POST' && /^\/api\/workspace[.\/]list$/.test(proxyPath)
+      ? ++workspaceListRequestRevision
+      : 0;
+    // fork/create 的响应可能在权限修改后才返回；记录请求开始时的授权 epoch，
+    // 这样慢响应不能在管理员撤销权限后把新会话重新写回旧快照。
+    const sessionAccessRequestEpoch = reqAs.dshpwUser === undefined
+      ? 0
+      : userAccessEpochFor(reqAs.dshpwUser);
     const responseWritable = () => !res.headersSent && !res.writableEnded && !res.destroyed;
     const getListRpcMethod = req.method === 'GET'
       ? /^\/api\/workspace[.\/]list$/.test(proxyPath)
@@ -7208,7 +9202,7 @@ export function createGatewayServer(
           bufferUpstream(upstreamRes, res, (raw) => {
             try {
               const decoded = encoding.includes('gzip') ? gunzipBounded(raw) : raw;
-              const filtered = filterCustomerModelCatalogResponse(JSON.parse(decoded.toString('utf8')));
+              const filtered = filterCustomerModelCatalogResponse(JSON.parse(decoded.toString('utf8')), reqAs.dshpwPerms!.allowed_models);
               if (filtered === null) {
                 res.status(502).type('text/plain').send('502 Upstream response unprocessable');
                 return;
@@ -7361,6 +9355,92 @@ export function createGatewayServer(
           return;
         }
 
+        // ── workspace 管理响应：成功后同步工作区登记 ──
+        // DSH Remote business failures also use HTTP 200. In particular,
+        // workspace/create reports { created: false } when resolving an existing
+        // administrator workspace; that must never turn a shared workspace into a
+        // subuser-owned one.
+        if (reqAs.dshpwWorkspacePath !== undefined && reqAs.dshpwUser !== undefined) {
+          bufferUpstream(upstreamRes, res, (raw) => {
+            let businessOk = false;
+            let created = false;
+            let createdPath: string | null = null;
+            let createdWorkspaceId: string | null = null;
+            let createdWorkspaceRow: Record<string, unknown> | null = null;
+            try {
+              const body = decodeUpstreamBody(raw, String(upstreamRes.headers['content-encoding'] ?? ''));
+              const parsed = JSON.parse(body.toString('utf8')) as Record<string, unknown>;
+              const result = parsed.result;
+              if (isPlainJsonRecord(result) && result.ok === true) {
+                businessOk = true;
+                const value = result.value;
+                if (isPlainJsonRecord(value) && value.created === true && isPlainJsonRecord(value.workspace) && typeof value.workspace.path === 'string') {
+                  created = true;
+                  createdPath = value.workspace.path;
+                  createdWorkspaceRow = value.workspace;
+                  if (typeof value.workspace.workspaceId === 'string') createdWorkspaceId = value.workspace.workspaceId;
+                }
+              }
+            } catch {
+              // No ownership state may be changed from an unparseable result.
+            }
+            if (businessOk) {
+              if (reqAs.dshpwWorkspaceCreate === true) {
+                if (created && createdPath !== null && normalizePath(createdPath) === reqAs.dshpwWorkspacePath) {
+                  db.addUserWorkspace(reqAs.dshpwUser!, reqAs.dshpwWorkspacePath);
+                  db.addAllowedFolder(reqAs.dshpwUser!, reqAs.dshpwWorkspacePath);
+                  // 立即更新该用户的 workspaceId→path 映射并向已建立的 Remote mux
+                  // 连接补发过滤后的 upsert：否则紧随其后的 session.create（带
+                  // workspaceId）会因映射缺失被 403，早到的上游 upsert 也已被丢弃。
+                  if (createdWorkspaceId !== null && createdWorkspaceRow !== null) {
+                    const epoch = userAccessEpochFor(reqAs.dshpwUser!);
+                    const paths = new Map(userWorkspacePaths.get(reqAs.dshpwUser!) ?? new Map<string, string>());
+                    paths.set(createdWorkspaceId, createdPath);
+                    replaceUserWorkspacePaths(reqAs.dshpwUser!, paths, epoch);
+                    for (const muxConnection of remoteMuxClientsByUser.get(reqAs.dshpwUser!) ?? []) {
+                      muxConnection.publishWorkspaceUpsert(createdWorkspaceRow);
+                    }
+                  }
+                }
+              } else if (reqAs.dshpwWorkspaceOldPath !== undefined && reqAs.dshpwWorkspaceNewPath !== undefined) {
+                db.renameUserWorkspace(reqAs.dshpwUser!, reqAs.dshpwWorkspaceOldPath, reqAs.dshpwWorkspaceNewPath);
+              } else if (/(?:remove|delete)(?:[./]|$)/.test(proxyPath) && reqAs.dshpwWorkspacePath !== undefined) {
+                db.removeUserWorkspace(reqAs.dshpwUser!, reqAs.dshpwWorkspacePath);
+              }
+            }
+            const respHeaders = headersForStreaming(upstreamRes.headers);
+            if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+            if (!res.writableEnded) res.end(raw);
+          });
+          return;
+        }
+
+        // ── directoryPicker/createDirectory 成功记账（子用户）：把 DSH 返回的新目录
+        // 写入 pending 表，供后续 workspace/create 的「刚创建目录」登记通道使用。
+        // 解析失败只影响记账（登记变得更严格），响应本身原样透传。
+        if (reqAs.dshpwUser !== undefined && reqAs.dshpwIsAdmin !== true &&
+          req.method === 'POST' && isWorkspaceDirectoryCreate(proxyPath)) {
+          bufferUpstream(upstreamRes, res, (raw) => {
+            try {
+              const body = decodeUpstreamBody(raw, String(upstreamRes.headers['content-encoding'] ?? ''));
+              const parsed = JSON.parse(body.toString('utf8')) as Record<string, unknown>;
+              const result = parsed.result;
+              if (isPlainJsonRecord(result) && result.ok === true && typeof result.value === 'string' && result.value.length > 0) {
+                // __deny__（禁止所有工作区）下不记账：哨兵用户不应获得可登记凭据。
+                if (!effectivePermissions(reqAs.dshpwUser!).allowed_folders.includes('__deny__')) {
+                  recordPendingCreatedDirectory(reqAs.dshpwUser!, canonicalizePathBestEffort(result.value));
+                }
+              }
+            } catch {
+              // 记账失败 fail-safe：后续登记会因不在 pending 表而被拒绝。
+            }
+            const respHeaders = headersForStreaming(upstreamRes.headers);
+            if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+            if (!res.writableEnded) res.end(raw);
+          });
+          return;
+        }
+
         // ── host.listDirectory 响应：子用户只看到本人专属根目录及其内容 ──
         if (
           req.method === 'POST' &&
@@ -7422,6 +9502,19 @@ export function createGatewayServer(
                 const disabled = new Set(reqAs.dshpwPerms.disabled_sessions);
                 const archived = collectArchivedSessionIds(parsed);
                 const visibleSessionIds = new Set(collectSessionCwdFromWorkspaces(outBody).keys());
+                // Issue #19 旧数据迁移：显式会话授权上线前就已获授权工作区的子用户，
+                // 第一次成功拿到 workspace.list 时，把可见工作区内“未禁用”的既有会话一次性
+                // 写入显式授权，保持旧行为；之后新出现的会话不会自动加入授权。归档会话也
+                // 一并授权——归档是展示状态，不是放弃授权的依据（仍保留在工作区槽位）。
+                if (reqAs.dshpwPerms !== undefined && !db.isSessionGrantsSeeded(reqAs.dshpwUser!)) {
+                  // 只追加、绝不整表替换：同一窗口里子用户 session/create 追加的
+                  // grant 不得被这次迁移 seed 抹掉（标记同事务提交）。
+                  const seedIds = [...visibleSessionIds].filter((id) => sessionOwner(id) === reqAs.dshpwUser && !disabled.has(id));
+                  db.seedUserSessionGrants(reqAs.dshpwUser!, seedIds);
+                }
+                const grants = new Set(db.listUserSessionGrants(reqAs.dshpwUser!));
+                // 只暴露当前可见工作区中的归档标记，避免借 archivedSessionIds 枚举
+                // 其他用户的会话；归档槽位本身仍保留在 sessionIds。
                 filterArchivedSessionIds(
                   outBody,
                   (id) => archived.has(id)
@@ -7429,10 +9522,38 @@ export function createGatewayServer(
                     && sessionOwner(id) === reqAs.dshpwUser
                     && !disabled.has(id),
                 );
-                filterOwnedSessionIds(
-                  outBody,
-                  (id) => sessionOwner(id) === reqAs.dshpwUser && !disabled.has(id),
+                // 普通用户只看到显式 grant 的会话；归档会话仍保留在已授权工作区槽位。
+                filterOwnedSessionIds(outBody, (id) => sessionOwner(id) === reqAs.dshpwUser && grants.has(id) && !disabled.has(id));
+                const visibleAccess = new Map<string, string>();
+                collectSessionCwdFromWorkspaces(outBody, visibleAccess);
+                for (const [id] of visibleAccess) {
+                  if (disabled.has(id)) visibleAccess.delete(id);
+                }
+                // 合并旧快照里仍然合法的条目：一次不完整/乱序的列表响应不得把仍在
+                // 授权内的会话抹掉（grant/禁用/白名单/所有权不满足的仍丢弃）。
+                const authorizedAccess = mergeAuthorizedAccess(
+                  reqAs.dshpwUser!,
+                  reqAs.dshpwPerms,
+                  grants,
+                  visibleAccess,
                 );
+                // 授权回写栅栏用请求开始时的 epoch（授权在途中变更则不回写）；
+                // requestRevision 只做同一用户 workspace.list 响应之间的排序。
+                replaceUserSessionAccess(
+                  reqAs.dshpwUser!,
+                  authorizedAccess,
+                  sessionAccessRequestEpoch,
+                  archiveRequestRevision,
+                );
+                replaceUserWorkspacePaths(
+                  reqAs.dshpwUser!,
+                  mergeWorkspacePaths(reqAs.dshpwUser!, reqAs.dshpwPerms, collectIdPathPairs(outBody)),
+                  sessionAccessRequestEpoch,
+                  archiveRequestRevision,
+                );
+                userArchivedSessionIds.set(reqAs.dshpwUser!, new Set(
+                  [...archivedSessionSnapshot].filter((id) => authorizedAccess.has(id)),
+                ));
               }
               const out = Buffer.from(JSON.stringify(outBody), 'utf8');
               const respHeaders = headersForRewrittenBody(upstreamRes.headers);
@@ -7502,10 +9623,120 @@ export function createGatewayServer(
           return;
         }
 
-        // ── session.create / fork 响应：缓存 cwd + 注入真实沙盒（F-26） ──
-        // 响应体不变；新会话是否可见由工作区开关与逐会话禁用覆盖决定。
-        if (req.method === 'POST' && /^\/api\/session[.\/](create|fork)$/.test(proxyPath)) {
+        // ── workspace ordering responses: never return global workspace/session order to a subuser ──
+        if (reqAs.dshpwUser !== undefined && reqAs.dshpwIsAdmin !== true && req.method === 'POST' &&
+          /^\/api\/workspace[.\/](?:insertBefore|insertSessionBefore)$/.test(proxyPath)) {
           bufferUpstream(upstreamRes, res, (raw) => {
+            try {
+              const body = decodeUpstreamBody(raw, String(upstreamRes.headers['content-encoding'] ?? ''));
+              const parsed = JSON.parse(body.toString('utf8')) as unknown;
+              const result = isPlainJsonRecord(parsed) && isPlainJsonRecord(parsed.result) ? parsed.result : null;
+              if (result?.ok === true && !isPlainJsonRecord(result.value)) throw new Error('workspace order response shape invalid');
+              if (result?.ok === true && isPlainJsonRecord(result.value)) {
+                if (/insertBefore$/.test(proxyPath)) {
+                  if (!Array.isArray(result.value.workspaceIds)) throw new Error('workspace order response shape invalid');
+                  const visible = userWorkspaceIds.get(reqAs.dshpwUser!);
+                  if (visible === undefined) throw new Error('workspace order authority unavailable');
+                  result.value.workspaceIds = result.value.workspaceIds.filter((id): id is string => typeof id === 'string' && visible.has(id));
+                } else if (/insertSessionBefore$/.test(proxyPath)) {
+                  if (!isPlainJsonRecord(result.value.workspace)) throw new Error('workspace session order response shape invalid');
+                  const workspace = result.value.workspace;
+                  const workspaceId = workspace.workspaceId;
+                  const sessionIds = workspace.sessionIds;
+                  const access = userSessionAccess.get(reqAs.dshpwUser!);
+                  const visibleWorkspacePath = typeof workspaceId === 'string'
+                    ? userWorkspacePaths.get(reqAs.dshpwUser!)?.get(workspaceId) ?? null
+                    : null;
+                  if (typeof workspaceId !== 'string' || workspaceId !== reqAs.dshpwWorkspaceOrderId ||
+                    !Array.isArray(sessionIds) || access === undefined || visibleWorkspacePath === null ||
+                    reqAs.dshpwWorkspaceOrderPath === undefined ||
+                    normalizePath(visibleWorkspacePath) !== normalizePath(reqAs.dshpwWorkspaceOrderPath)) {
+                    throw new Error('workspace session order authority unavailable');
+                  }
+                  workspace.sessionIds = sessionIds.filter((id): id is string => {
+                    if (typeof id !== 'string') return false;
+                    const sessionPath = access.get(id);
+                    return sessionPath !== undefined && normalizePath(sessionPath) === normalizePath(visibleWorkspacePath) &&
+                      authorizedSubuserSessionRoot(reqAs.dshpwUser!, id, db.getPermissions(reqAs.dshpwUser!) ?? reqAs.dshpwPerms!) !== null;
+                  });
+                }
+              }
+              const out = Buffer.from(JSON.stringify(parsed), 'utf8');
+              const headers = headersForRewrittenBody(upstreamRes.headers);
+              headers['content-length'] = String(out.length);
+              if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, headers);
+              if (!res.writableEnded) res.end(out);
+            } catch (error) {
+              if (error instanceof OversizeResponseError) {
+                if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response too large');
+                return;
+              }
+              if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response unprocessable');
+            }
+          });
+          return;
+        }
+
+        // ── workspace/pinSession|unpinSession 响应（子用户）：pinnedSessionIds 收租 ──
+        // 0.1.7-alpha.1 的 pin 集合是宿主机 registry 全局状态，上游把完整
+        // pinnedSessionIds 放在成功响应里。请求侧已由 SESSION_SCOPED_RE 报归属，
+        // 但响应若不过滤，任一子用户 pin 一次就能枚举其他租户的会话 ID（与
+        // workspace.list 的 archivedSessionIds 同一类枚举面）。形状不符时
+        // fail-closed（502），绝不回放未过滤集合。
+        if (reqAs.dshpwUser !== undefined && reqAs.dshpwIsAdmin !== true &&
+          req.method === 'POST' && /^\/api\/workspace[.\/](?:pinSession|unpinSession)$/.test(proxyPath)) {
+          const pinnedUserId = reqAs.dshpwUser;
+          bufferUpstream(upstreamRes, res, (raw) => {
+            try {
+              const body = decodeUpstreamBody(raw, String(upstreamRes.headers['content-encoding'] ?? ''));
+              const parsed = JSON.parse(body.toString('utf8')) as unknown;
+              const result = isPlainJsonRecord(parsed) && isPlainJsonRecord(parsed.result) ? parsed.result : null;
+              // 业务失败不带会话集合，原样透传；成功结果必须是完整 pin 集合。
+              if (result !== null && result.ok === true) {
+                const value = isPlainJsonRecord(result.value) ? result.value : null;
+                const pinned = value === null ? undefined : value.pinnedSessionIds;
+                if (value === null || !Array.isArray(pinned)) throw new Error('invalid pin value');
+                const pinnedPerms = effectivePermissions(pinnedUserId);
+                value.pinnedSessionIds = pinned.filter((id): id is string =>
+                  typeof id === 'string' && authorizedSubuserSessionRoot(pinnedUserId, id, pinnedPerms) !== null,
+                );
+              }
+              const out = Buffer.from(JSON.stringify(parsed), 'utf8');
+              const respHeaders = headersForRewrittenBody(upstreamRes.headers);
+              respHeaders['content-length'] = String(out.length);
+              if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+              if (!res.writableEnded) res.end(out);
+            } catch (error) {
+              if (error instanceof OversizeResponseError) {
+                if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response too large');
+                return;
+              }
+              if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response unprocessable');
+            }
+          });
+          return;
+        }
+
+        if (req.method === 'POST' && SESSION_SELECT_MODEL_RE.test(proxyPath)) {
+          bufferUpstream(upstreamRes, res, raw => {
+            try {
+              const parsed = JSON.parse(encoding.includes('gzip') ? gunzipBounded(raw).toString('utf8') : raw.toString('utf8'));
+              if (parsed.result?.ok === true && reqAs.dshpwSelectedModelSessionId !== undefined) {
+                const selection = modelSelectionFrom(parsed.result.value?.selected);
+                if (selection !== null) recordSessionModelSelection(reqAs.dshpwSelectedModelSessionId, selection);
+              }
+              const headers = headersForStreaming(upstreamRes.headers);
+              res.writeHead(upstreamRes.statusCode ?? 200, headers); res.end(raw);
+            } catch { sendApiError(res, 502, 'UPSTREAM_UNAVAILABLE', 'model selection response is invalid'); }
+          });
+          return;
+        }
+
+        // ── session.create / fork 响应：登记当前用户会话 + 注入真实沙盒（F-26） ──
+        // 响应体不变；已通过目录/源会话校验的新会话写入显式授权（未禁用时），
+        // 其可见性由显式 grant + 工作区白名单 + 逐会话禁用共同决定。
+        if (req.method === 'POST' && /^\/api\/session[.\/](create|fork)$/.test(proxyPath)) {
+          bufferUpstream(upstreamRes, res, async (raw) => {
             try {
               const enc = String(upstreamRes.headers['content-encoding'] ?? '');
               const decoded = enc.includes('gzip') ? gunzipBounded(raw) : raw;
@@ -7529,13 +9760,40 @@ export function createGatewayServer(
                 const shouldClaim = requestedSessionId === undefined ||
                   reqAs.dshpwSessionClaimCandidate === sessionId;
                 const owner = shouldClaim
-                  ? claimSessionOwner(sessionId, reqAs.dshpwUser)
+                  ? claimSessionOwner(sessionId, reqAs.dshpwUser, reqAs.dshpwIsAdmin === true)
                   : sessionOwner(sessionId);
                 if (reqAs.dshpwPerms !== undefined && owner !== reqAs.dshpwUser) {
                   if (!res.headersSent) {
                     sendApiError(res, 403, 'OWNER_CONFLICT', 'session identity belongs to another account');
                   }
                   return;
+                }
+                // dsh create/fork 都用 agentDefaultModel.currentSelection() 给新会话
+                // 配模型（fork 不继承源会话模型），所以新会话的初始有效模型就是 Host
+                // 共享默认。这里记为 'default'（而不是把它当成未知）：后续 prompt 时
+                // 与白名单比对，默认不在允许列表就会 fail-closed，用户选一个允许模型后即可。
+                recordSessionModelSelection(sessionId, null);
+                // 沙盒必须先确认，再建立子用户的 session grant/access 快照。
+                // 若注入失败，不能留下一个可由该子用户继续访问的默认 workspace-write 会话。
+                if (reqAs.dshpwPerms !== undefined) {
+                  // 请求进入后管理员可能收紧沙盒。响应期重读当前行并取两者更严
+                  // 档位，绝不让一个在途 create/fork 留在任一时刻策略之外的宽权限。
+                  const snapshotMode = reqAs.dshpwPerms.sandbox_mode;
+                  const currentMode = db.getPermissions(reqAs.dshpwUser)?.sandbox_mode ?? null;
+                  const modes = [snapshotMode, currentMode].filter(
+                    (mode): mode is keyof typeof SANDBOX_RANK => mode !== null && Object.hasOwn(SANDBOX_RANK, mode),
+                  );
+                  const sandboxMode = modes.reduce<keyof typeof SANDBOX_RANK | null>(
+                    (strictest, mode) => strictest === null || SANDBOX_RANK[mode] < SANDBOX_RANK[strictest] ? mode : strictest,
+                    null,
+                  );
+                  const applied = sandboxMode === null || await applySandboxToSession(sessionId, sandboxMode);
+                  if (!applied) {
+                    if (reqAs.dshpwCreatedSessionId !== undefined) clearPendingCreatedSession(reqAs.dshpwUser, reqAs.dshpwCreatedSessionId);
+                    closeUserRemoteMuxClients(reqAs.dshpwUser!);
+                    if (!res.headersSent) res.status(502).type('text/plain').send('502 Sandbox enforcement failed');
+                    return;
+                  }
                 }
                 if (resolvedPreset !== undefined) {
                   recordSessionAgentPreset(reqAs.dshpwUser, sessionId, resolvedPreset);
@@ -7544,12 +9802,39 @@ export function createGatewayServer(
                 const cwd = typeof reqCwd === 'string' && reqCwd.length > 0
                   ? reqCwd
                   : collectSessionCwd(parsed).get(sessionId);
-                if (cwd) sessionCwdById.set(sessionId, cwd);
                 pendingWorkspaceSessionIds.add(sessionId);
                 accountedWorkspaceSessionIds.add(sessionId);
                 activeWorkspaceSessionIds.add(sessionId);
-                if (reqAs.dshpwPerms !== undefined && reqAs.dshpwPerms.sandbox_mode !== null) {
-                  applySandboxToSession(sessionId, reqAs.dshpwPerms.sandbox_mode);
+                if (cwd) {
+                  if (reqAs.dshpwCreatedSessionId !== undefined) clearPendingCreatedSession(reqAs.dshpwUser!, reqAs.dshpwCreatedSessionId);
+                  sessionCwdById.set(sessionId, cwd);
+                  if (
+                    reqAs.dshpwIsAdmin !== true &&
+                    reqAs.dshpwPerms !== undefined &&
+                    (reqAs.dshpwSessionCwd !== undefined || reqAs.dshpwForkAuthorized === true) &&
+                    sessionAccessRequestEpoch === userAccessEpochFor(reqAs.dshpwUser)
+                  ) {
+                    const access = new Map(userSessionAccessFor(reqAs.dshpwUser));
+                    // epoch 相等只说明授权行在本请求期间未变；仍按最新权限行复核一次
+                    // disabled/folder，双重保险（未来新增权限入口忘记推进 epoch 时也不放行）。
+                    const currentPerms = db.getPermissions(reqAs.dshpwUser) ?? reqAs.dshpwPerms;
+                    if (!currentPerms.disabled_sessions.includes(sessionId) &&
+                        folderAllowed(cwd, currentPerms.allowed_folders)) {
+                      // 增量追加单条 grant：不读取也不重写整张授权表，所以同一窗口内
+                      // 其它调用（管理员保存、沙盒定向回收）并发写入的 grant 不会被
+                      // 这次回写抹掉（epoch 已保证期间没有授权变更，故不回写异常数据）。
+                      db.addUserSessionGrant(reqAs.dshpwUser, sessionId);
+                      access.set(sessionId, cwd);
+                    }
+                    replaceUserSessionAccess(reqAs.dshpwUser!, access, sessionAccessRequestEpoch);
+                    // The durable workspace upsert can be lost or arrive before the
+                    // browser has installed its baseline. Publish a compensating
+                    // filtered upsert after the grant is committed so the client
+                    // cannot leave the new session under Ungrouped.
+                    for (const connection of remoteMuxClientsByUser.get(reqAs.dshpwUser!) ?? []) {
+                      connection.publishSessionAttachment(sessionId, cwd);
+                    }
+                  }
                 }
               }
               const respHeaders = headersForStreaming(upstreamRes.headers);
@@ -7891,6 +10176,10 @@ export function createGatewayServer(
     // 受限子用户的请求体缓冲检查（尽力而为）：
     //   1) 文件夹白名单：会话目录及子用户目录浏览/创建必须在授权根内
     //   2) 沙盒权限：settings.mutate 试图把 defaultPreset 切到高于授权级别 → 403
+    const workspaceManagementRequest = isWorkspaceCreate(proxyPath) || isWorkspaceDeleteOrRename(proxyPath);
+    const workspaceOrderRequest = isWorkspaceOrderWrite(proxyPath);
+    const workspaceDirectoryCreateRequest = isWorkspaceDirectoryCreate(proxyPath);
+    const needsDirectoryListCheck = reqAs.dshpwPerms !== undefined && req.method === 'POST' && DIRECTORY_PICKER_LIST_RE.test(proxyPath);
     const needsManagedWorkspaceCheck =
       reqAs.dshpwManagedWorkspaceRoot !== undefined &&
       req.method === 'POST' &&
@@ -7904,6 +10193,7 @@ export function createGatewayServer(
       reqAs.dshpwPerms !== undefined &&
       (req.method === 'POST' || req.method === 'PUT' || (req.method === 'DELETE' && isAionuiPanel(proxyPath))) &&
       (
+        workspaceOrderRequest || workspaceManagementRequest || workspaceDirectoryCreateRequest ||
         needsManagedWorkspaceCheck ||
         isWorkspaceDeleteOrRename(proxyPath) ||
         WORKSPACE_ENDPOINT_RE.test(proxyPath) ||
@@ -7946,6 +10236,16 @@ export function createGatewayServer(
         AGENT_PRESET_SELECT_RE.test(proxyPath) ||
         WORKSPACE_ARCHIVE_SESSION_RE.test(proxyPath)
       );
+    const needsWorkspaceOrderCheck =
+      reqAs.dshpwPerms !== undefined &&
+      reqAs.dshpwIsAdmin !== true &&
+      req.method === 'POST' &&
+      workspaceOrderRequest;
+    // ── 已登记 SSH 端点的 SSRF 纵深防御（与任何具体插件无关）──
+    // 命中已登记 SSH 端点（HTTP 通道）的写请求若带 host 字段：私网/回环
+    // 地址一律拒绝（插件源码不在我们控制内，网关拦一层；所有登录用户含主用户
+    // 都拦，管理员同样可能被诱导连接内网）。F-27：PATCH/PUT 同样要拦——只拦
+    // POST 时 PATCH 可直接把已有主机的 host 改成 127.0.0.1 等私网地址（实测可改）。
     const needsAgentPresetCheck =
       reqAs.dshpwPerms !== undefined &&
       reqAs.dshpwPerms.allowed_agent_presets !== null &&
@@ -7976,10 +10276,34 @@ export function createGatewayServer(
         // 已登记端点（HTTP 通道）的写请求若带 host 字段同样做私网/回环判定。
         endpointAllowed(proxyPath, endpointRules, { transport: 'http' }));
 
+    // The official open-in-app host route accepts an absolute directory path and
+    // launches a server-side application. For a child account, bind that path
+    // to a workspace already present in the child's filtered Remote baseline;
+    // allowed_folders alone must not turn this into an arbitrary directory launcher.
+    const needsImageAttachmentCheck = reqAs.dshpwPerms !== undefined && !reqAs.dshpwPerms.allow_upload && req.method === 'POST';
+    const needsOpenInAppCheck =
+      reqAs.dshpwPerms !== undefined &&
+      reqAs.dshpwIsAdmin !== true &&
+      req.method === 'POST' &&
+      proxyPath === '/open-in-app/open';
+    // ── workspaceFiles 会话作用域 + 目标路径守卫 ──
+    // 上游 read/readAll/readBytes/readRelated/stat 接受绝对路径且明确不做工作区
+    // 包含检查，list 只保证在会话根内；请求里的 workspaceFileScopeId 完全由客户端
+    // 指定。子用户只有在「该 scope 会话已授权」且「目标路径（含 readBytes 的
+    // baseFile）同时通过词法口径（pathWithin + folderAllowed）与 canonical 口径
+    // （realpath 后与 canonical 化的会话根比较）」时才能转发，其余（含无法解析
+    // scope/path）一律 403。`changes` 是带 path 的 Remote 流，其 HTTP unary 面
+    // 已在前面显式 403；保留在这里是纵深防御。
+    const needsWorkspaceFilesCheck =
+      reqAs.dshpwPerms !== undefined &&
+      reqAs.dshpwIsAdmin !== true &&
+      req.method === 'POST' &&
+      WORKSPACE_FILES_RPC_RE.test(proxyPath);
+
     if (getListRpcBody !== null) {
       completeProxyRequestBody();
       upstreamReq.end(getListRpcBody);
-    } else if (needsFolderCheck || needsSandboxCheck || needsCommandCheck || needsApprovalCheck || needsOwnershipCheck || needsAgentPresetCheck || needsSshHostCheck || needsSshPermissionCheck) {
+    } else if (needsFolderCheck || needsSandboxCheck || needsCommandCheck || needsApprovalCheck || needsOwnershipCheck || needsAgentPresetCheck || needsSshHostCheck || needsSshPermissionCheck || needsWorkspaceOrderCheck || needsImageAttachmentCheck || needsRemoteEventResultCheck || needsOpenInAppCheck || needsWorkspaceFilesCheck || needsDirectoryListCheck) {
       const chunks: Buffer[] = [];
       let size = 0;
       let settled = false;
@@ -8044,6 +10368,89 @@ export function createGatewayServer(
           return;
         }
         // 转发体默认原样；SSRF 校验或审批改写时会整体重建（重建必须同步更新 content-length）
+
+        if (needsImageAttachmentCheck && hasImageAttachment(bodyObj)) {
+          upstreamReq.destroy();
+          res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.noUpload')));
+          return;
+        }
+
+        if (needsOpenInAppCheck) {
+          const requestedPath = isPlainJsonRecord(bodyObj) && typeof bodyObj.path === 'string'
+            ? bodyObj.path
+            : null;
+          const normalizedRequestedPath = requestedPath !== null && path.isAbsolute(requestedPath)
+            ? normalizePath(requestedPath)
+            : null;
+          const access = userSessionAccess.get(reqAs.dshpwUser!);
+          const authorizedWorkspace = normalizedRequestedPath !== null && access !== undefined &&
+            [...access.values()].some((workspacePath) => normalizePath(workspacePath) === normalizedRequestedPath) &&
+            folderAllowed(normalizedRequestedPath, reqAs.dshpwPerms!.allowed_folders) &&
+            !workspaceOwnedByAnotherSubuser(reqAs.dshpwUser!, normalizedRequestedPath);
+          if (!authorizedWorkspace) {
+            upstreamReq.destroy();
+            res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+            return;
+          }
+        }
+
+        if (needsWorkspaceFilesCheck) {
+          // 只从官方 wire 位置取授权输入（payload.args 的 workspaceFileScopeId/path；
+          // 0.1.7-alpha.1 readBytes 另有 options.baseFile/options.range）；任一字段缺失或
+          // 形状不符就 fail-closed，绝不回退到信封外层字段。
+          const isRelated = /^\/api\/workspaceFiles[.\/]readRelated$/.test(proxyPath);
+          const isReadBytes = /^\/api\/workspaceFiles[.\/]readBytes$/.test(proxyPath);
+          const request = workspaceFileScopeRequest(bodyObj, isReadBytes);
+          if (request !== null) {
+            try { await ensureSessionAccessSnapshot(request.scopeId); }
+            catch { upstreamReq.destroy(); sendApiError(res, 502, 'UPSTREAM_UNAVAILABLE', 'workspace registry is unavailable'); return; }
+          }
+          // relativePath 只属于 readRelated；其它 RPC 带第二个文件参数就是形状不符。
+          const relativePath = request === null || !isRelated ? null : request.relativePath;
+          const sessionRoot = request === null ||
+            (isRelated && request.relativePath === null) ||
+            (!isRelated && request.relativePath !== null)
+            ? null
+            : authorizedSubuserSessionRoot(reqAs.dshpwUser!, request.scopeId, reqAs.dshpwPerms!);
+          // readBytes 带 baseFile 时，上游按 resolve(dirname(baseFile), path) 读取；网关必须
+          // 用同一口径解析真实目标（baseFile 为选定路径、path 为相对路径），否则
+          // `{ path: 'x', options: { baseFile: '/etc/file' } }` 会以“工作区内的 x”通过校验，
+          // 而上游实际读的是 /etc/x。baseFile 自身也必须在同一会话根内，不能只验证最终
+          // 目标恰好回到工作区。绝对/scheme 形状的 path 在这里直接解析成 null。
+          // 归属判定同时走两套口径：
+          //   · 词法：归一化 + pathWithin + folderAllowed（段边界与白名单原样判定；
+          //     __deny__ 仍由 folderAllowed 直接拒掉，fail-closed 不变）；
+          //   · canonical：realpath 解析符号链接/junction 后与 canonical 化的会话根
+          //     比较，且同一份白名单仍要命中。
+          // 只做词法判定会被工作区内的符号链接/junction 带出根外；只做 canonical 判定
+          // 则在 realpath 失败时失去边界保护。canonicalizePathBestEffort 失败时回退为
+          // 字符串归一，因此第二套判定不会比词法更宽松（不把失败 realpath 变成放宽）。
+          const canonicalSessionRoot = sessionRoot === null ? null : canonicalizePathBestEffort(sessionRoot);
+          const targetAllowed = (candidate: string | null): candidate is string => {
+            if (candidate === null || sessionRoot === null || canonicalSessionRoot === null) return false;
+            const canonicalCandidate = canonicalizePathBestEffort(candidate);
+            return pathWithin(sessionRoot, candidate) &&
+              pathWithin(canonicalSessionRoot, canonicalCandidate) &&
+              folderAllowed(candidate, reqAs.dshpwPerms!.allowed_folders) &&
+              folderAllowed(canonicalCandidate, reqAs.dshpwPerms!.allowed_folders) &&
+              !workspaceOwnedByAnotherSubuser(reqAs.dshpwUser!, candidate);
+          };
+          const baseFileTarget = request === null || sessionRoot === null || request.baseFile === null
+            ? null
+            : resolveWorkspaceFileTarget(sessionRoot, request.baseFile, null);
+          const baseFileAllowed = targetAllowed(baseFileTarget);
+          const target = request === null || sessionRoot === null
+            ? null
+            : request.baseFile !== null
+              ? (!baseFileAllowed ? null : resolveWorkspaceFileTarget(sessionRoot, request.baseFile, request.path))
+              : resolveWorkspaceFileTarget(sessionRoot, request.path, relativePath);
+          if (!targetAllowed(target)) {
+            upstreamReq.destroy();
+            res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+            return;
+          }
+        }
+
 
         if (needsAgentPresetCheck) {
           const allowedPresets = new Set(reqAs.dshpwPerms!.allowed_agent_presets ?? []);
@@ -8418,13 +10825,66 @@ export function createGatewayServer(
           }
         }
 
+        if (needsWorkspaceOrderCheck && reqAs.dshpwUser !== undefined &&
+          (!userSessionAccess.has(reqAs.dshpwUser) || !userWorkspacePaths.has(reqAs.dshpwUser))) {
+          if (!(await waitForUserSessionAccess(reqAs.dshpwUser, 5_000, true))) {
+            upstreamReq.destroy();
+            res.status(503).json({ ok: false, code: 'BASELINE_PENDING', retryable: true, error: '工作区会话基线尚未就绪，请重试' });
+            return;
+          }
+        }
+
+        if (needsWorkspaceOrderCheck && bodyObj !== null) {
+          const request = isPlainJsonRecord(bodyObj) && isPlainJsonRecord(bodyObj.payload) && isPlainJsonRecord(bodyObj.payload.args)
+            ? bodyObj.payload.args.request : null;
+          const validId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 200;
+          const workspaceId = isPlainJsonRecord(request) && validId(request.workspaceId) ? request.workspaceId : null;
+          const beforeWorkspaceId = isPlainJsonRecord(request) && request.beforeWorkspaceId !== undefined
+            ? (validId(request.beforeWorkspaceId) ? request.beforeWorkspaceId : null) : undefined;
+          const sessionId = isPlainJsonRecord(request) && validId(request.sessionId) ? request.sessionId : null;
+          const beforeSessionId = isPlainJsonRecord(request) && request.beforeSessionId !== undefined
+            ? (validId(request.beforeSessionId) ? request.beforeSessionId : null) : undefined;
+          const workspacePath = workspaceId === null ? null : userWorkspacePaths.get(reqAs.dshpwUser!)?.get(workspaceId) ?? null;
+          const beforePath = beforeWorkspaceId === undefined || beforeWorkspaceId === null
+            ? null
+            : userWorkspacePaths.get(reqAs.dshpwUser!)?.get(beforeWorkspaceId) ?? null;
+          const sessionPath = sessionId === null ? null : userSessionAccess.get(reqAs.dshpwUser!)?.get(sessionId) ?? null;
+          const beforeSessionPath = beforeSessionId === undefined || beforeSessionId === null
+            ? null
+            : userSessionAccess.get(reqAs.dshpwUser!)?.get(beforeSessionId) ?? null;
+          const validWorkspace = workspacePath !== null && folderAllowed(workspacePath, reqAs.dshpwPerms!.allowed_folders) && !workspaceOwnedByAnotherSubuser(reqAs.dshpwUser!, workspacePath);
+          const validBeforeWorkspace = beforeWorkspaceId === undefined || (beforePath !== null && folderAllowed(beforePath, reqAs.dshpwPerms!.allowed_folders) && !workspaceOwnedByAnotherSubuser(reqAs.dshpwUser!, beforePath));
+          const isSessionOrder = /insertSessionBefore$/.test(proxyPath);
+          const validSession = !isSessionOrder || (sessionId !== null && sessionPath !== null && authorizedSubuserSessionRoot(reqAs.dshpwUser!, sessionId, reqAs.dshpwPerms!) !== null);
+          const validBeforeSession = !isSessionOrder || beforeSessionId === undefined || (beforeSessionId !== null && beforeSessionPath !== null && authorizedSubuserSessionRoot(reqAs.dshpwUser!, beforeSessionId, reqAs.dshpwPerms!) !== null);
+          const sameWorkspace = !isSessionOrder || (workspacePath !== null && sessionPath !== null && normalizePath(workspacePath) === normalizePath(sessionPath) && (beforeSessionId === undefined || (beforeSessionPath !== null && normalizePath(workspacePath) === normalizePath(beforeSessionPath))));
+          if (!validWorkspace || !validBeforeWorkspace || !validSession || !validBeforeSession || !sameWorkspace) {
+            upstreamReq.destroy();
+            res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+            return;
+          }
+          if (/insertSessionBefore$/.test(proxyPath)) {
+            reqAs.dshpwWorkspaceOrderId = workspaceId!;
+            reqAs.dshpwWorkspaceOrderPath = workspacePath!;
+          }
+        }
+
+        if (reqAs.dshpwPerms !== undefined && /^\/api\/session[.\/]prompt$/.test(proxyPath)) {
+          const id = extractSessionId(bodyObj);
+          const selection = id === null ? undefined : sessionModelById.get(id);
+          if (selection?.kind === 'selection' && !customerModelAllowed(selection.provider, selection.model, reqAs.dshpwPerms.allowed_models)) {
+            upstreamReq.destroy(); denyRequest(req, res, lang, t(lang, 'gw.folderDenied')); return;
+          }
+        }
         if (reqAs.dshpwPerms !== undefined && SESSION_SELECT_MODEL_RE.test(proxyPath)) {
+          reqAs.dshpwSelectedModelSessionId = extractSessionId(bodyObj) ?? undefined;
           const selection = rpcPayloadOf(bodyObj, rpcMethodForPath(proxyPath));
           if (
             selection === null ||
             typeof selection.provider !== 'string' ||
             typeof selection.model !== 'string' ||
-            !customerModelAllowed(selection.provider, selection.model)
+            (!customerModelAllowed(selection.provider, selection.model) ||
+              (reqAs.dshpwPerms.allowed_models !== null && !reqAs.dshpwPerms.allowed_models.includes(`${selection.provider}/${selection.model}`)))
           ) {
             upstreamReq.destroy();
             denyRequest(req, res, lang, t(lang, 'gw.folderDenied'));
@@ -8444,7 +10904,9 @@ export function createGatewayServer(
 
         // 会话访问校验：逐会话关闭优先；Workspace 外的自有会话可作为 Ungrouped 读取。
         if (needsOwnershipCheck && bodyObj !== null) {
-          const sessionId = AT_FILE_SEARCH_RE.test(proxyPath)
+          const sessionId = WORKSPACE_FILES_RPC_RE.test(proxyPath)
+            ? workspaceFileScopeRequest(bodyObj, /readBytes$/.test(proxyPath))?.scopeId ?? null
+            : AT_FILE_SEARCH_RE.test(proxyPath)
             ? extractAgentId(bodyObj)
             : SUBAGENT_SCOPED_RE.test(proxyPath)
               ? findStringField(bodyObj, 'parentSessionId')
@@ -8479,6 +10941,10 @@ export function createGatewayServer(
             upstreamReq.destroy();
             denyRequest(req, res, lang, t(lang, 'gw.folderDenied'));
             return;
+          }
+          if (/^\/api\/session[.\/]fork$/.test(proxyPath)) {
+            reqAs.dshpwForkAuthorized = true;
+            reqAs.dshpwSessionCwd = sessionCwdById.get(sessionId);
           }
           if (SESSION_OPEN_WORKSPACE_PATH_RE.test(proxyPath)) {
             const cwd = sessionCwdById.get(sessionId);
@@ -8842,6 +11308,7 @@ export function createGatewayServer(
         readonly endpoint: string;
         readonly events: TenantRemoteEventFilter | null;
         readonly authorizedSessionId: string | null;
+        readonly filtered: RemoteMuxUserStreamState | null;
       };
       const streams = new Map<string, LogicalStream>();
       const cancelledStreamIds = new Set<string>();
@@ -8922,7 +11389,7 @@ export function createGatewayServer(
         }
         const perms = effectivePermissions(userId);
         if (perms.banned || isBinary) {
-          closeBoth(1008, isBinary ? 'text messages required' : 'account unavailable');
+          closeBoth(isBinary ? 1003 : 1008, isBinary ? 'text messages required' : 'account unavailable');
           return;
         }
         try {
@@ -8930,7 +11397,6 @@ export function createGatewayServer(
           const frame = parseTenantRemoteClientFrame(text);
           if (frame.type === 'open') {
             if (
-              !TENANT_REMOTE_STREAM_ENDPOINTS.has(frame.endpoint) ||
               streams.has(frame.streamId) ||
               cancelledStreamIds.has(frame.streamId) ||
               streams.size + cancelledStreamIds.size >= 256 ||
@@ -8938,11 +11404,37 @@ export function createGatewayServer(
             ) {
               throw new Error('Remote stream open is not allowed');
             }
+            const rejectStream = (code: string, message = 'Stream is unavailable for this account') => {
+              cancelledStreamIds.add(frame.streamId);
+              sendDownstream(JSON.stringify({ type: 'error', streamId: frame.streamId,
+                error: { code, message, details: {} } }));
+            };
+            if (!TENANT_REMOTE_STREAM_ENDPOINTS.has(frame.endpoint)) { rejectStream('gateway/forbidden', 'Remote endpoint is not available for this user'); return; }
+            if (OFFICIAL_TERMINAL_REMOTE_ENDPOINTS.has(frame.endpoint) && !perms.allow_ssh) {
+              rejectStream('terminal/unavailable'); return;
+            }
+            const args = clientConnectionArgs({ type: 'client-request', method: frame.endpoint, payload: frame.payload });
+            const request = args !== null && isPlainJsonRecord(args.request) ? args.request : null;
+            const followAddress = frame.endpoint === 'session/follow' ? parseSessionAddress(request?.address) : null;
+            const jobRequest = frame.endpoint === 'job/list' || frame.endpoint === 'job/follow' ? remoteJobRequest(frame.payload, frame.endpoint) : null;
+            const jobSessionId = jobRequest?.sessionId ?? null;
+            if (frame.endpoint.startsWith('job/') && (jobSessionId === null ||
+              !subuserCanAccessSession(userId, perms, jobSessionId) ||
+              (frame.endpoint === 'job/follow' && (typeof request?.jobId !== 'string' || request.jobId.length === 0)))) {
+              rejectStream('remote/forbidden'); return;
+            }
+            if (frame.endpoint === 'session/follow' && (followAddress === null || !sessionFollowIdentityAllowed(userId, followAddress))) {
+              rejectStream('session/forbidden'); return;
+            }
+            const fileRequest = frame.endpoint === 'workspaceFiles/changes' ? remoteWorkspaceFileChangeRequest(frame.payload) : null;
+            const fileTarget = fileRequest === null ? null : authorizedWorkspaceFileChangeTarget(userId, perms, fileRequest);
+            if (frame.endpoint === 'workspaceFiles/changes' && fileTarget === null) { rejectStream('gateway/forbidden'); return; }
             const authorizedSessionId = frame.endpoint === 'workspaceFiles/changes'
-              ? tenantWorkspaceFileChangesSessionId(frame.payload)
+              ? fileTarget!.scopeId
               : frame.endpoint === 'terminal/retain'
                 ? tenantTerminalRetentionSessionId(frame.payload)
-                : null;
+                : frame.endpoint === 'terminal/follow' ? tenantTerminalFollowSessionId(frame.payload)
+                : followAddress !== null ? sessionAuthorizationId(followAddress) : jobSessionId;
             if (authorizedSessionId !== null &&
                 !subuserCanAccessSession(userId, perms, authorizedSessionId)) {
               throw new Error('Remote stream session is not allowed');
@@ -8951,10 +11443,23 @@ export function createGatewayServer(
               endpoint: frame.endpoint,
               events: frame.endpoint === '$events' ? new TenantRemoteEventFilter() : null,
               authorizedSessionId,
+              filtered: frame.endpoint === 'workspaceFiles/changes' || frame.endpoint === 'workspace/follow' || frame.endpoint === 'session/follow' || frame.endpoint === 'job/list' || frame.endpoint === 'job/follow'
+                ? { streamId: frame.streamId, endpoint: frame.endpoint, followAddress,
+                    ...(fileTarget === null ? {} : { workspaceFileScopeId: fileTarget.scopeId, workspaceFileRoot: fileTarget.root, workspaceFileTarget: fileTarget.target, workspaceFileRootCanonical: fileTarget.rootCanonical, workspaceFileTargetCanonical: fileTarget.targetCanonical }),
+                    ...(jobSessionId === null ? {} : { jobSessionId }),
+                    ...(typeof request?.jobId === 'string' ? { jobId: request.jobId } : {}),
+                    visibleWorkspaces: new Map(), visibleWorkspaceRows: new Map() }
+                : null,
             });
-          } else {
+          } else if (frame.type === 'cancel') {
+            if (cancelledStreamIds.has(frame.streamId)) return;
             if (!streams.delete(frame.streamId)) throw new Error('unknown Remote stream cancellation');
             cancelledStreamIds.add(frame.streamId);
+          } else {
+            const stream = streams.get(frame.streamId);
+            if (stream === undefined || stream.filtered !== null || stream.events !== null) return;
+            if (stream.authorizedSessionId !== null && !subuserCanAccessSession(userId, perms, stream.authorizedSessionId)) { closeBoth(1008, 'Remote stream session access revoked'); return; }
+            if (OFFICIAL_TERMINAL_REMOTE_ENDPOINTS.has(stream.endpoint) && !perms.allow_ssh) { closeBoth(1008, 'terminal permission revoked'); return; }
           }
           sendUpstream(text);
         } catch {
@@ -9019,7 +11524,7 @@ export function createGatewayServer(
           const stream = streams.get(frame.streamId);
           if (stream === undefined) {
             if (cancelledStreamIds.has(frame.streamId)) {
-              if (frame.type !== 'item') cancelledStreamIds.delete(frame.streamId);
+              // Keep bounded tombstones so late end/item frames cannot close other streams.
               return;
             }
             throw new Error('unknown upstream Remote stream id');
@@ -9050,7 +11555,17 @@ export function createGatewayServer(
             }
             return;
           }
-          if (frame.type !== 'item') streams.delete(frame.streamId);
+          if (frame.type === 'item' && stream.filtered !== null) {
+            const value = filterRemoteMuxUserItem(userId, effectivePermissions(userId), stream.filtered, frame.value);
+            if (value !== null) sendDownstream(JSON.stringify({ type: 'item', streamId: frame.streamId, value }));
+            else if (stream.endpoint !== 'workspace/follow' && stream.endpoint !== 'workspaceFiles/changes') {
+              streams.delete(frame.streamId); cancelledStreamIds.add(frame.streamId);
+              sendUpstream(JSON.stringify({ type: 'cancel', streamId: frame.streamId }));
+              sendDownstream(JSON.stringify(stream.endpoint === 'session/follow' ? { type: 'error', streamId: frame.streamId, error: { code: 'gateway/invalid-snapshot', message: 'Remote session follow snapshot rejected', details: {} } } : { type: 'end', streamId: frame.streamId }));
+            }
+            return;
+          }
+          if (frame.type !== 'item') { streams.delete(frame.streamId); cancelledStreamIds.add(frame.streamId); }
           sendDownstream(text);
         } catch {
           closeBoth(1011, 'invalid upstream Remote stream frame');
@@ -9122,6 +11637,9 @@ export function createGatewayServer(
         pendingCutoff: new Date(now - MEDIA_UPLOAD_TTL_MS * 2),
       });
       unlinkMediaFiles(mediaPlan.storage_keys);
+      // 消费消息历史修剪/clearMessages 在数据库事务内留下的待回收队列。
+      // 读取并删除队列是同一事务，多个清理调用方不会重复领取同一 key。
+      unlinkMediaFiles(db.drainPendingMediaRemovals());
       // 意外中断的 PUT 留下的临时文件（进程崩溃时来不及清理）
       pruneStaleMediaTemps(now);
     } catch (error) {

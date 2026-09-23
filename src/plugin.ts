@@ -630,13 +630,13 @@ export function apply(ctx: Context): void {
         throw new Error('无法验证当前账号的模型权限，请重新登录后再试。');
       }
       if (user.role === 'admin') return config;
-      if (customerModelAllowed(config.provider, config.model)) return config;
+      if (customerModelAllowed(config.provider, config.model, db!.getPermissions(user.id)?.allowed_models ?? null)) return config;
       db!.audit('customer_model_denied', {
         username: user.username,
         detail: JSON.stringify({ provider: config.provider, model: config.model }),
       });
       throw new Error(
-        '该子账号在 ChatGPT 服务商下仅可使用 GPT-5.6 及以上模型，请先切换模型后重试。',
+        '当前模型不在该子账号的授权范围内；ChatGPT 服务商须选择 GPT-5.6 及以上的已授权模型。',
       );
     });
   }

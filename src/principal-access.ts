@@ -53,6 +53,7 @@ function defaultPermissions(userId: number): UserPermissionsRow {
     allow_ssh: false,
     // 缺行时由 DENY_ALL_WORKSPACES 拦截；空数组会隐式变成“一个 preset 都不许用”
     allowed_agent_presets: null,
+    allowed_models: null,
     banned: false,
     sandbox_mode: null,
     disabled_sessions: [],
@@ -143,7 +144,7 @@ export class DshPasswordsPrincipalAccessProvider {
           if (header?.cwd === undefined || !await pathAllowed(header.cwd)) break;
           const owner = this.db.getSessionOwner(current);
           if (owner !== null) {
-            if (owner === user.id) readableSessionIds.add(sessionId);
+            if (owner === user.id && (!this.db.isSessionGrantsSeeded(user.id) || this.db.hasUserSessionGrant(user.id, current))) readableSessionIds.add(sessionId);
             break;
           }
           current = header.origin === 'subagent' ? header.parentSession : undefined;
@@ -174,7 +175,9 @@ export class DshPasswordsPrincipalAccessProvider {
    */
   modelAllowed(principal: AuthenticatedPrincipal, provider: string, model: string): boolean {
     this.assertAuthenticated(principal);
-    return principal.role === 'admin' || customerModelAllowed(provider, model);
+    if (principal.role === 'admin') return true;
+    const models = this.db.getPermissions(Number(principal.id))?.allowed_models ?? null;
+    return customerModelAllowed(provider, model) && (models === null || models.includes(provider + '/' + model));
   }
 
   /**

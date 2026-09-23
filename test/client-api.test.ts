@@ -70,12 +70,15 @@ test('api does not treat a nested gateway path as the login redirect', async (t)
   );
 });
 
-test('api preserves structured HTTP errors for localized messages', async (t) => {
-  t.mock.method(globalThis, 'fetch', async () => Response.json({
-    error: 'Authentication required', code: 'NOT_AUTHENTICATED',
-  }, { status: 401 }));
-  await assert.rejects(api('/test'), {
-    message: 'Authentication required', code: 'NOT_AUTHENTICATED',
+test('api preserves structured HTTP errors for localized messages and conflict recovery', async (t) => {
+  const response = { error: 'Session grants changed', code: 'SESSION_GRANTS_CONFLICT', allowedSessionIds: ['session-a'] };
+  t.mock.method(globalThis, 'fetch', async () => Response.json(response, { status: 409 }));
+  await assert.rejects(api('/test'), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.equal(error.message, 'Session grants changed');
+    assert.equal((error as Error & { code?: string }).code, 'SESSION_GRANTS_CONFLICT');
+    assert.deepEqual((error as Error & { details?: unknown }).details, response);
+    return true;
   });
 });
 

@@ -30,7 +30,7 @@ test('通用设置退出条目使用 body 直属 POST 表单并由服务器原�
   assert.match(logout, /t\('logoutConfirm'\)/);
   assert.doesNotMatch(card, /dshpw-logout/);
   assert.doesNotMatch(card, /fetch\('\/gateway\/logout'/);
-  assert.doesNotMatch(card, /window\.location\.(?:replace|assign)/);
+  assert.doesNotMatch(logout, /window\.location\.(?:replace|assign)/);
   assert.doesNotMatch(logout, /about:blank/);
 });
 

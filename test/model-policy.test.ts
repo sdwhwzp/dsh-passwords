@@ -79,3 +79,23 @@ test('extended Codex models follow the same customer policy as the original plug
   assert.equal(filtered.result.value.groups[0]!.id, 'subscriptions-codex');
   assert.equal(filtered.result.value.groups[0]!.models.some(model => model.id === 'gpt-5.5'), false);
 });
+
+test('account model grants intersect the GPT floor and remove unavailable catalog defaults', () => {
+  assert.equal(customerModelAllowed('codex', 'gpt-5.5', ['codex/gpt-5.5']), false);
+  assert.equal(customerModelAllowed('codex', 'gpt-6-astra', ['codex/gpt-6-astra']), true);
+  assert.equal(customerModelAllowed('codex', 'gpt-6-astra', []), false);
+  assert.equal(customerModelAllowed('deepseek-official', 'deepseek-v4', []), false);
+  const catalog = { ...response, result: { ...response.result, value: {
+    ...response.result.value, default: { provider: 'codex', model: 'gpt-6-astra' },
+    routableProviders: ['codex', 'deepseek-official', 'private-provider'],
+  } } };
+  const filtered = filterCustomerModelCatalogResponse(catalog, ['deepseek-official/deepseek-v4']) as typeof catalog;
+  assert.equal(filtered.result.value.default, null);
+  assert.deepEqual(filtered.result.value.routableProviders, ['deepseek-official']);
+  assert.deepEqual(filtered.result.value.failures, []);
+  assert.deepEqual(filtered.result.value.groups.map(group => group.id), ['deepseek-official']);
+  const empty = filterCustomerModelCatalogResponse(catalog, []) as typeof catalog;
+  assert.deepEqual(empty.result.value.groups, []);
+  assert.equal(empty.result.value.default, null);
+  assert.equal(catalog.result.value.default.model, 'gpt-6-astra');
+});

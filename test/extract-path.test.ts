@@ -1,8 +1,8 @@
 // "未分组/新会话" 修复回归测试
 // 覆盖三类根因修复：
-//  1) extractPathFromBody / extractWorkspaceId 递归跳过 args 伪包裹
-//     （dsh 只消费顶层 payload.cwd/workspaceId，args 是客户端不用的假字段；
-//      若把 args.cwd 当白名单依据 → fail-open 越权到默认工作区 /opt）
+//  1) alpha.2 ClientConnection 的真实业务参数只存在于 payload.args（部分 Session
+//     endpoint 再使用 args.request）。已识别信封不得回退扫描外层诱导字段；否则网关
+//     可能校验 A 路径而 DSH 实际执行 B 路径，形成 fail-open 越权。
 //  2) WORKSPACE_ENDPOINT_RE 只匹配 create、不再拦 fork
 //     （fork 继承源会话 cwd，归属已由 SESSION_SCOPED_RE/needsOwnershipCheck 校验）
 //  3) collectIdPathPairs 同时收集 obj.workspaceId 与 obj.id
@@ -24,7 +24,7 @@ import {
   endpointAllowed,
 } from '../src/permissions.js';
 
-// ── 1) args 伪包裹跳过 ─────────────────────────────────────────────
+// ── 1) ClientConnection 参数边界 ───────────────────────────────────
 
 test('端点登记表：只支持精确路径与尾部 /* 通配', () => {
   assert.deepEqual(parseEndpointAllowlist('/api/plugin/ws/terminal, /api/plugin/ws/terminal, /api/plugin/ws/*', 'TEST'), [
@@ -49,31 +49,41 @@ test('endpointAllowed：精确路径与尾部通配的匹配口径一致（通�
   assert.equal(endpointAllowed('/api/plugin/ws/terminal', []), false, '空规则集 fail-closed');
 });
 
-test('R-A：extractPathFromBody 跳过 args 伪包裹（防 fail-open 越权）', () => {
-  // dsh 信封：payload 顶层 cwd 是真参数；args 下的 cwd 是 dsh 不消费的伪字段
-  const wire = { type: 'client-request', rpcId: 1, method: 'session.create', payload: { cwd: '/root/11' } };
-  assert.equal(extractPathFromBody(wire), '/root/11', 'payload 顶层 cwd 命中');
+test('R-A：extractPathFromBody 只采信 alpha.2 的 payload.args（防外层 decoy 越权）', () => {
+  // session/create 的真实参数位于 args.request。
+  const wire = {
+    type: 'client-request', rpcId: 'wire-path', method: 'session/create',
+    payload: { args: { request: { cwd: '/root/11' } } },
+  };
+  assert.equal(extractPathFromBody(wire), '/root/11', 'args.request.cwd 必须被识别为真实路径');
 
-  // 攻击形态：只有 args.cwd（被 dsh 忽略，会用默认工作区 /opt）
-  // 网关应视为无合法路径字段 → 返回 null（fail-closed 403）
-  const evil = { type: 'client-request', rpcId: 1, method: 'session.create', payload: { args: { cwd: '/root/11' } } };
-  assert.equal(extractPathFromBody(evil), null, 'args.cwd 必须被跳过');
+  // directoryPicker/list 的 path 直接位于 args；信封外同名字段会被 DSH strip，
+  // 因而绝不能参与网关的授权判定。
+  const direct = {
+    type: 'client-request', rpcId: 'direct-path', method: 'directoryPicker/list',
+    payload: { args: { path: '/root/22' } }, path: '/outside-decoy',
+  };
+  assert.equal(extractPathFromBody(direct), '/root/22', 'args.path 必须优先于外层诱导字段');
 
-  // 混合：payload.cwd 在、args.cwd 也在 → 取真参数
-  const mixed = { ...evil, payload: { cwd: '/root/22', args: { cwd: '/root/11' } } };
-  assert.equal(extractPathFromBody(mixed), '/root/22', '真参数优先，忽略 args.cwd');
+  const decoy = {
+    type: 'client-request', rpcId: 'decoy-path', method: 'directoryPicker/list',
+    payload: { args: {} }, path: '/root/11', cwd: '/root/11',
+  };
+  assert.equal(extractPathFromBody(decoy), null, 'args 无路径时不得回退到信封外层字段');
 });
 
-test('R-A：extractWorkspaceId 跳过 args 伪包裹', () => {
-  const wire = { type: 'client-request', rpcId: 1, method: 'session.create', payload: { workspaceId: 'ws-1' } };
-  assert.equal(extractWorkspaceId(wire), 'ws-1', 'payload 顶层 workspaceId 命中');
+test('R-A：extractWorkspaceId 只采信 alpha.2 的 payload.args', () => {
+  const wire = {
+    type: 'client-request', rpcId: 'wire-workspace', method: 'session/create',
+    payload: { args: { request: { workspaceId: 'ws-1' } } },
+  };
+  assert.equal(extractWorkspaceId(wire), 'ws-1', 'args.request.workspaceId 必须被识别');
 
-  const evil = { type: 'client-request', rpcId: 1, method: 'session.create', payload: { args: { workspaceId: 'ws-3' } } };
-  assert.equal(extractWorkspaceId(evil), null, 'args.workspaceId 必须被跳过');
-
-  // 顶层 workspaceId 与 args 嵌套并存 → 取真参数
-  const mixed = { ...evil, payload: { workspaceId: 'ws-2', args: { workspaceId: 'ws-3' } } };
-  assert.equal(extractWorkspaceId(mixed), 'ws-2', '真参数优先');
+  const decoy = {
+    type: 'client-request', rpcId: 'decoy-workspace', method: 'session/create',
+    payload: { args: {} }, workspaceId: 'ws-allowed',
+  };
+  assert.equal(extractWorkspaceId(decoy), null, 'args 无 workspaceId 时不得回退到信封外层字段');
 });
 
 // ── 2) WORKSPACE_ENDPOINT_RE 只拦 create ───────────────────────────

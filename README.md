@@ -108,7 +108,7 @@ MySQL 模式会在空闲超时、服务重启或短暂网络断开后自动替�
 
 ### 0. 前置条件（三样）
 
-宿主机安装需要 Node.js 22.19+ 或 24+、可正常运行的 dsh 和 git。主机基线为 DSH 0.1.6 线，当前锁定 alpha.2（0.1.6 正式版尚未发布）；上游已发布 alpha.2 验收记录；本 fork 的候选包须单独验收。同时保留对 DSH `0.1.5` 全系列与 `0.1.2` / `0.1.3` 接口边界的兼容声明。Docker 安装只需要 Docker Engine 或 Docker Desktop 和一个 DeepSeek API key。
+宿主机安装需要 Node.js 22.19+ 或 24+、git 和带本 fork 租户扩展的 Harness。当前部署目标为私有 Harness `0.1.7-rc.1`；0.1.7 线仅接受已审查的 `0.1.7-alpha.2` 与 `0.1.7-rc.1`。安装器与 bundled Docker 继承上游的公开 alpha.2 默认值，不能代替本部署的私有构建。实际检查与部署状态见部署记录及 [兼容说明](docs/compatibility-matrix.md)。
 
 ### 1. 安装（按平台）
 
@@ -145,10 +145,10 @@ docker run -d \
   -p 127.0.0.1:3088:3088 \
   -v dsh-home:/data/dsh \
   -v dsh-passwords-state:/data/dsh-passwords \
-  skywalker237234/dsh-passwords:2.7.3
+  skywalker237234/dsh-passwords:2.7.4
 ```
 
-`.env` 至少包含 `DEEPSEEK_API_KEY`。`MCP_GATEWAY_PUBLIC_HOST` 建议填实际访问的域名。宿主端口只发布在回环地址 `127.0.0.1:3088`，容器内监听 `0.0.0.0:3088`；公网访问由 nginx 或 Caddy 终结 TLS 后转发。镜像内置 DSH `0.1.6-alpha.2`（DSH 0.1.6 线当前锁定版本，官方镜像不包含本 fork 所需的租户扩展）；初始化完成以 healthz/readyz 均返回 `ok:true` 为准。
+`.env` 至少包含 `DEEPSEEK_API_KEY`。`MCP_GATEWAY_PUBLIC_HOST` 建议填实际访问的域名。宿主端口只发布在回环地址 `127.0.0.1:3088`，容器内监听 `0.0.0.0:3088`；公网访问由 nginx 或 Caddy 终结 TLS 后转发。镜像默认内置公开 DSH `0.1.7-alpha.2`（不包含本 fork 所需的租户扩展）；初始化完成以 healthz/readyz 均返回 `ok:true` 为准。
 
 `scripts/profile-plugins.json` 是跨机器部署的版本化插件清单。运行 `dsh-passwords install` 会把清单中的 NPM/Git 来源、bundle 顺序、Git 构建授权和必要的 profile patch 幂等合并到 `~/.dsh/profiles/web`，然后统一执行 `pnpm install`。已有本地 `link:` 开发源和未纳入清单的自定义插件不会被覆盖或删除；只有链接实际指向清单声明的相邻源码时才构建其配套工作区，指向独立发布目录的链接不会误用相邻路径。清单明确标记的旧聚合包会自动迁移。
 
@@ -434,7 +434,7 @@ curl -so /dev/null -w "TLS:%{time_appconnect}s\n" https://地址/gateway/login
 
 ### 手动安装
 
-> v2.7.3 以 DSH 0.1.6 线为基线目标，当前锁定 alpha.2；`0.1.5` 全系列与 `0.1.2` / `0.1.3` 接口边界保留兼容。上游已发布 alpha.2 验收记录；本 fork 的候选包须单独验收。宿主机安装器会检查 Node.js `22.19+` 或 `24+`，注册插件并应用兼容补丁。
+> v2.7.4 的上游功能已进入本 fork 的适配流程；本部署使用私有 Harness `0.1.7-rc.1`，账号隔离和受管目录规则见 [兼容说明](docs/compatibility-matrix.md)。上游测试服务器的结果不代表本 fork 已部署。
 
 1. `git clone https://github.com/sdwhwzp/dsh-passwords && cd dsh-passwords`
 2. `npm install && npm run build`
@@ -469,7 +469,7 @@ curl -so /dev/null -w "TLS:%{time_appconnect}s\n" https://地址/gateway/login
 - **命令行（CLI）**：跟随 `LANG` / `LC_ALL` 环境变量（`en` 开头即英文）。
 
 ## 更新日志
-当前版本 2.7.3。DSH 基线目标为 0.1.6 线，当前锁定 alpha.2（0.1.6 正式版尚未发布）；本 fork 的实际检查与部署状态见部署记录。同时保留对 DSH `0.1.5` 全系列及 `0.1.2`、`0.1.3` 接口边界的兼容验证目标。
+当前候选版本基于 2.7.4；当前运行目标、检查和部署记录见 [兼容说明](docs/compatibility-matrix.md)。
 
 ### v2.6.20（2026-09-08）
 

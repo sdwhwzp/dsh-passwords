@@ -25,6 +25,8 @@ export interface UserInfo {
   last_login_at: string | null;
 }
 
+type DshpwCardProps = PropsLocale<'dshpw'>;
+
 export interface StateData {
   me: { username: string; role: 'admin' | 'user' };
   users: UserInfo[];
@@ -40,6 +42,20 @@ export interface PatchState {
 
 export interface PermOverview {
   me: { id: number; username: string; role: 'admin' | 'user' };
+  /**
+   * DSH LLM 注册表投影（`session/modelCatalog`），由网关按当前主用户过滤后透传。
+   * 模型稳定 ID 为 `provider/model`。旧服务端不返回时视为“目录不可用”，
+   * 前端保留已保存的 allowlist 并标为失效项，不静默放宽。
+   */
+  modelCatalog?: {
+    default?: { provider: string; model: string };
+    groups?: Array<{
+      id: string;
+      name?: string;
+      models?: Array<{ id: string; name?: string; description?: string }>;
+    }>;
+    failures?: Array<{ id: string; name?: string; message?: string }>;
+  } | null;
   users: Array<{
     id: number;
     username: string;
@@ -52,6 +68,11 @@ export interface PermOverview {
       allowUpload: boolean;
       allowGitDownload: boolean;
       allowSsh: boolean;
+      allowWorkspaceCreate?: boolean;
+      allowedAgentPresets?: string[] | null;
+      allowedModels?: string[] | null;
+      allowedSessionIds?: string[];
+      ownedSessionIds?: string[];
       /** 聊天媒体（表情包/图片/视频）开关；旧服务端不返回时按 false 处理 */
       allowChatMedia?: boolean;
       banned: boolean;
@@ -76,10 +97,21 @@ interface PermDraft {
   upload: boolean;
   git: boolean;
   ssh: boolean;
+  workspaceCreate: boolean;
   chatMedia: boolean;
   banned: boolean;
   sandbox: string;
   disabledSessions: string[];
+  /** 服务端快照中的禁用会话集合；保存时作为 CAS 基线提交。 */
+  disabledSessionsBaseline: string[];
+  allowedSessionIds: string[];
+  /** 是否显式编辑过会话授权。false 时保存不提交 allowedSessionIds，避免仅切换
+   *  工作区/SSH 等其它字段就把服务端 grants 清空并 markSessionGrantsSeeded。 */
+  sessionsTouched: boolean;
+  agentPresets: string[] | null;
+  /** NULL = 不限；[] = 禁用全部；非空 = allowlist（均为 provider/model 稳定 ID） */
+  models: string[] | null;
+  touched: Set<keyof PermDraft>;
 }
 
 /** Validate the patch status response before presenting a healthy state. */
@@ -165,6 +197,18 @@ function fmtTime(iso: string): string {
 
 /** 错误文案：有 code 走本地词典，未知 code / 无 code 回退服务端文案。
  *  词典项含占位符（{minutes}/{count} 等）时客户端无参数可填，回退服务端已插值文案。 */
+function apiErrorDetails(error: unknown): Record<string, unknown> | null {
+  if (!(error instanceof Error)) return null;
+  const details = (error as Error & { details?: unknown }).details;
+  return typeof details === 'object' && details !== null && !Array.isArray(details)
+    ? details as Record<string, unknown>
+    : null;
+}
+
+function stringArray(value: unknown): string[] | null {
+  return Array.isArray(value) && value.every((entry) => typeof entry === 'string') ? value : null;
+}
+
 function errText(error: unknown, tr: (key: string, params?: Record<string, string | number>) => string): string {
   if (error instanceof Error) {
     const code = (error as Error & { code?: string }).code;
@@ -196,7 +240,13 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
-
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [updateChecking, setUpdateChecking] = useState(false);
+  const [purgeOpen, setPurgeOpen] = useState(false);
+  const [purgePassword, setPurgePassword] = useState('');
+  const [purgeConfirmed, setPurgeConfirmed] = useState(false);
+  const [purgeBusy, setPurgeBusy] = useState(false);
+  const purgeClicksRef = useRef({ count: 0, firstAt: 0 });
 
   // 改密表单
   const [pwTarget, setPwTarget] = useState('');
@@ -261,10 +311,17 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
                   upload: u.permissions.allowUpload,
                   git: u.permissions.allowGitDownload,
                   ssh: u.permissions.allowSsh,
+                  workspaceCreate: u.permissions.allowWorkspaceCreate === true,
+                  agentPresets: u.permissions.allowedAgentPresets ?? null,
+                  models: u.permissions.allowedModels ?? null,
                   chatMedia: u.permissions.allowChatMedia === true,
                   banned: u.permissions.banned,
                   sandbox: u.permissions.sandboxMode ?? '',
                   disabledSessions: [...(u.permissions.disabledSessions ?? [])],
+                  disabledSessionsBaseline: [...(u.permissions.disabledSessions ?? [])],
+                  allowedSessionIds: [...(u.permissions.allowedSessionIds ?? [])],
+                  sessionsTouched: false,
+                  touched: new Set(),
                 };
                 if (!(u.id in drafts) || !dirtyUsersRef.current.has(u.id)) {
                   drafts[u.id] = fresh;
@@ -322,6 +379,7 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
     // 成功文案投递目标：不传则进页面底部全局提示栏；传了则只投递到指定 sink
     // （如权限块内的就地确认条），不再重复刷全局提示。
     noticeSink?: (message: string) => void,
+    errorSink?: (error: unknown) => Promise<void> | void,
   ) => {
     setBusy(true);
     setError('');
@@ -341,7 +399,12 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
       if (accounts) { setEditor(null); clearForm(); }
       refresh();
     } catch (e) {
-      setError(errText(e, trErr));
+      try {
+        if (errorSink !== undefined) await errorSink(e);
+        else setError(errText(e, trErr));
+      } catch (syncError) {
+        setError(errText(syncError, trErr));
+      }
     } finally {
       setBusy(false);
     }
@@ -378,6 +441,64 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
       },
     );
   };
+
+  const clearPurgeForm = () => {
+    setPurgePassword('');
+    setPurgeConfirmed(false);
+  };
+
+  const closePurge = () => {
+    setPurgeOpen(false);
+    clearPurgeForm();
+    setPurgeBusy(false);
+  };
+
+  const handleAvatarClick = () => {
+    if (!isAdmin || purgeBusy) return;
+    const now = Date.now();
+    const current = purgeClicksRef.current;
+    if (current.firstAt === 0 || now - current.firstAt > 3000) {
+      purgeClicksRef.current = { count: 1, firstAt: now };
+      return;
+    }
+    const count = current.count + 1;
+    if (count >= 10) {
+      purgeClicksRef.current = { count: 0, firstAt: 0 };
+      setPurgeOpen(true);
+      clearPurgeForm();
+      setError('');
+      setNotice('');
+      return;
+    }
+    purgeClicksRef.current = { count, firstAt: now };
+  };
+
+  const purgeEverything = async () => {
+    if (purgeBusy) return;
+    if (purgePassword === '') {
+      setError(t('purgePasswordRequired'));
+      return;
+    }
+    if (!purgeConfirmed) {
+      setError(t('purgeConfirmRequired'));
+      return;
+    }
+    setPurgeBusy(true);
+    setError('');
+    try {
+      await api('/gateway/api/dsh-passwords/purge', { password: purgePassword, confirm: true });
+      closePurge();
+      setNotice(t('purgeStarted'));
+      window.setTimeout(() => window.location.assign('/gateway/login'), 1200);
+    } catch (e) {
+      clearPurgeForm();
+      setError(errText(e, trErr));
+      setPurgeBusy(false);
+    }
+  };
+
+  /** 空闲窗剩余毫秒 → 模板需要的分钟数 */
+  const idleMinutes = (ms: number): string => String(Math.max(1, Math.ceil(ms / 60000)));
 
   /** 聊天入口按账号跨设备同步；保存成功后立即通知 overlay，无需刷新页面。 */
   const toggleChatEntry = () => {
@@ -444,7 +565,13 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
     setPermsNotice((prev) => ({ ...prev, [userId]: '' }));
     dirtyUsersRef.current.add(userId);
     setDirtyUsers([...dirtyUsersRef.current]);
-    setPermDrafts((prev) => ({ ...prev, [userId]: { ...prev[userId], ...patch } }));
+    setPermDrafts((prev) => {
+      const current = prev[userId];
+      if (!current) return prev;
+      const touched = new Set(current.touched);
+      for (const key of Object.keys(patch) as Array<keyof PermDraft>) touched.add(key);
+      return { ...prev, [userId]: { ...current, ...patch, touched } };
+    });
   };
 
   const enabledFolderSet = (draft: PermDraft): Set<string> => {
@@ -453,13 +580,18 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
     return new Set(draft.folders);
   };
 
+  const sessionsForUser = (workspace: WorkspaceInfo, userId: number) => {
+    const owned = overview?.users.find(user => user.id === userId)?.permissions.ownedSessionIds;
+    return workspace.sessions.filter(session => owned === undefined || owned.includes(session.id));
+  };
+
   const toggleWorkspace = (userId: number, workspace: WorkspaceInfo, enabled: boolean) => {
     const draft = permDrafts[userId];
     if (!draft) return;
     const enabledFolders = enabledFolderSet(draft);
     if (enabled) enabledFolders.add(workspace.path);
     else enabledFolders.delete(workspace.path);
-    const workspaceSessionIds = new Set(workspace.sessions.map((session) => session.id));
+    const workspaceSessionIds = new Set(sessionsForUser(workspace, userId).map((session) => session.id));
     setDraft(userId, {
       folders: enabledFolders.size === 0 ? ['__deny__'] : [...enabledFolders],
       disabledSessions: draft.disabledSessions.filter((id) => !workspaceSessionIds.has(id)),
@@ -469,10 +601,20 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
   const toggleSession = (userId: number, sessionId: string, enabled: boolean) => {
     const draft = permDrafts[userId];
     if (!draft) return;
+    const allowed = new Set(draft.allowedSessionIds);
     const disabled = new Set(draft.disabledSessions);
-    if (enabled) disabled.delete(sessionId);
-    else disabled.add(sessionId);
-    setDraft(userId, { disabledSessions: [...disabled] });
+    if (enabled) {
+      allowed.add(sessionId);
+      disabled.delete(sessionId);
+    } else {
+      allowed.delete(sessionId);
+      disabled.add(sessionId);
+    }
+    setDraft(userId, {
+      allowedSessionIds: [...allowed],
+      disabledSessions: [...disabled],
+      sessionsTouched: true,
+    });
   };
 
   const savePermissions = (userId: number) => {
@@ -497,32 +639,115 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
     const liveEnabledSessions = new Set(
       workspaces
         .filter((workspace) => enabledFolders.has(workspace.path))
-        .flatMap((workspace) => workspace.sessions.map((session) => session.id)),
+        .flatMap((workspace) => sessionsForUser(workspace, userId).map((session) => session.id)),
     );
     setPermsNotice((prev) => ({ ...prev, [userId]: '' }));
+    // 会话授权只在被显式编辑过时才提交：网关把「提交了 allowedSessionIds」视为
+    // 一次性会话集合迁移（清空 grants 并 markSessionGrantsSeeded）。仅切换工作区、
+    // SSH 等其它字段却提交 stale 草稿（哪怕是 []）会清空子用户 grants，也会覆盖
+    // 网关期间新增的 grant。显式取消全部会话仍提交 []（fail-closed，不退化为不提交）。
+    const sessionsTouched = d.sessionsTouched;
     void run(
       () =>
-        api('/gateway/api/permissions', {
+        api<{
+          allowedFolders?: string[];
+          allowedSessionIds?: string[];
+          disabledSessions?: string[];
+          sandboxRevokedSessionIds?: string[];
+        }>('/gateway/api/permissions', {
           userId,
-          allowedFolders: d.folders,
-          hourlyTokenLimit: tokenNum,
-          dailyMinutesLimit: minutesNum,
-          monthlyBudgetYuan: d.monthlyBudget.trim(),
-          allowUpload: d.upload,
-          allowGitDownload: d.git,
-          allowSsh: d.ssh,
-          allowChatMedia: d.chatMedia,
-          banned: d.banned,
-          sandboxMode: d.sandbox === '' ? null : d.sandbox,
-          disabledSessions: d.disabledSessions.filter((id) => liveEnabledSessions.has(id)),
-        }).then(() => {
-          // 保存成功：草稿与服务端一致，解除 dirty（后续 30s 刷新可覆盖）
+          ...(d.touched.has('folders') ? { allowedFolders: d.folders } : {}),
+          ...(d.touched.has('token') ? { hourlyTokenLimit: tokenNum } : {}),
+          ...(d.touched.has('monthlyBudget') ? { monthlyBudgetYuan: d.monthlyBudget.trim() } : {}),
+          ...(d.touched.has('minutes') ? { dailyMinutesLimit: minutesNum } : {}),
+          ...(d.touched.has('upload') ? { allowUpload: d.upload } : {}),
+          ...(d.touched.has('git') ? { allowGitDownload: d.git } : {}),
+          ...(d.touched.has('workspaceCreate') ? { allowWorkspaceCreate: d.workspaceCreate } : {}),
+          ...(d.touched.has('ssh') ? { allowSsh: d.ssh } : {}),
+          ...(d.touched.has('agentPresets') ? { allowedAgentPresets: d.agentPresets } : {}),
+          // NULL = 不限；[] = 禁用全部；非空 = allowlist。保持三态语义原样提交。
+          ...(d.touched.has('models') ? { allowedModels: d.models } : {}),
+          ...(d.touched.has('chatMedia') ? { allowChatMedia: d.chatMedia } : {}),
+          ...(d.touched.has('banned') ? { banned: d.banned } : {}),
+          ...(d.touched.has('sandbox') ? { sandboxMode: d.sandbox === '' ? null : d.sandbox } : {}),
+          ...(sessionsTouched ? {
+            disabledSessions: d.disabledSessions,
+            expectedDisabledSessions: d.disabledSessionsBaseline,
+            allowedSessionIds: d.allowedSessionIds,
+          } : {}),
+        }).then((saved: { allowedFolders?: string[]; allowedSessionIds?: string[]; disabledSessions?: string[]; sandboxRevokedSessionIds?: string[] }) => {
+          // 先采用服务端规范化结果，再执行刷新；避免保存成功后短暂显示旧草稿。
+          setPermDrafts((prev) => {
+            const current = prev[userId];
+            if (!current) return prev;
+            const next: PermDraft = {
+              ...current,
+              folders: saved.allowedFolders ?? current.folders,
+              // 标记在成功响应里复位：此后再次保存（未再编辑会话）不应重新提交集合。
+              sessionsTouched: false,
+              touched: new Set(),
+            };
+            // 未提交会话集合时，响应里的会话字段是网关快照，可能落后于本地；
+            // 不合并以免用陈旧值覆盖，交由下一次非 dirty 刷新同步。
+            if (sessionsTouched) {
+              next.allowedSessionIds = saved.allowedSessionIds ?? current.allowedSessionIds;
+              next.disabledSessions = saved.disabledSessions ?? current.disabledSessions;
+            }
+            const revoked = new Set(saved.sandboxRevokedSessionIds ?? []);
+            if (revoked.size > 0) {
+              next.allowedSessionIds = next.allowedSessionIds.filter((id) => !revoked.has(id));
+            }
+            next.disabledSessionsBaseline = saved.disabledSessions ?? current.disabledSessionsBaseline;
+            return { ...prev, [userId]: next };
+          });
           dirtyUsersRef.current.delete(userId);
           setDirtyUsers([...dirtyUsersRef.current]);
+          const revokedCount = saved.sandboxRevokedSessionIds?.length ?? 0;
+          return revokedCount > 0
+            ? { notice: t('permsSandboxRevoked', { count: revokedCount }) }
+            : undefined;
         }),
       t('permsSaved'),
       async () => { refresh(); },
       (message) => setPermsNotice((prev) => ({ ...prev, [userId]: message })),
+      async (error: unknown) => {
+        const code = error instanceof Error ? (error as Error & { code?: string }).code : undefined;
+        const details = apiErrorDetails(error);
+        if (code === 'DISABLED_SESSIONS_CONFLICT' || code === 'SESSION_GRANTS_CONFLICT' || code === 'PERMISSIONS_CONFLICT') {
+          const serverDisabled = stringArray(details?.disabledSessions);
+          const serverAllowed = stringArray(details?.allowedSessionIds);
+          const latest = await api<PermOverview>('/gateway/api/overview');
+          const user = latest.users.find((item) => item.id === userId);
+          if (!user) throw new Error('Target user no longer exists');
+          const workspaceResult = await api<{ workspaces: WorkspaceInfo[] }>('/api/dsh-passwords/workspaces');
+          setOverview(latest);
+          setWorkspaces(workspaceResult.workspaces ?? []);
+          setPermDrafts((prev) => {
+            const current = prev[userId];
+            if (!current) return prev;
+            const touched = new Set(current.touched);
+            touched.delete('sessionsTouched');
+            touched.delete('disabledSessions');
+            touched.delete('disabledSessionsBaseline');
+            touched.delete('allowedSessionIds');
+            return { ...prev, [userId]: {
+              ...current,
+              sessionsTouched: false,
+              disabledSessions: serverDisabled ?? user.permissions.disabledSessions,
+              disabledSessionsBaseline: serverDisabled ?? user.permissions.disabledSessions,
+              allowedSessionIds: serverAllowed ?? user.permissions.allowedSessionIds ?? [],
+              touched,
+            } };
+          });
+          setPermsNotice((prev) => ({
+            ...prev,
+            [userId]: code === 'DISABLED_SESSIONS_CONFLICT' ? t('permsDisabledConflict')
+              : code === 'PERMISSIONS_CONFLICT' ? t('permsStateConflict') : t('permsSessionConflict'),
+          }));
+          return;
+        }
+        setError(errText(error, trErr));
+      },
     );
   };
 
@@ -534,6 +759,7 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
     patchState.workspaceSearch;
   const patchText =
     patchState === null ? t('patchUnknown') : patchOk ? t('patchOk') : t('patchBad');
+  const managedUsers = overview?.users.filter((u) => u.role === 'user') ?? [];
   const clearForm = () => {
     setPwCurrent(''); setPwNew(''); setPwConfirm(''); setNameNew(''); setAddName(''); setAddPw('');
   };
@@ -790,15 +1016,15 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
                           ? h(
                               'div',
                               { className: 'dshpw-session-list' },
-                              ...(workspace.sessions.length === 0
+                              ...(sessionsForUser(workspace, u.id).length === 0
                                 ? [h('span', { className: 'dshpw-hint' }, t('permsNoSessions'))]
-                                : workspace.sessions.map((session) =>
+                                : sessionsForUser(workspace, u.id).map((session) =>
                                     h(
                                       'label',
                                       { className: 'dshpw-session-check', key: session.id },
                                       h('input', {
                                         type: 'checkbox',
-                                        checked: !d.disabledSessions.includes(session.id),
+                                        checked: d.allowedSessionIds.includes(session.id) && !d.disabledSessions.includes(session.id),
                                         disabled: busy,
                                         onChange: (e: { target: { checked: boolean } }) =>
                                           toggleSession(u.id, session.id, e.target.checked),
@@ -898,7 +1124,10 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
                 ),
                 h('label', { className: 'dshpw-check' },
                   h('input', {
-                    type: 'checkbox', checked: d.ssh,
+                    type: 'checkbox',
+                    checked: d.ssh,
+                    disabled: busy,
+                    'aria-label': t('permsSsh'),
                     onChange: (e: { target: { checked: boolean } }) => setDraft(u.id, { ssh: e.target.checked }),
                   }), t('permsSsh')),
                 h('label', { className: 'dshpw-check', title: t('permsChatMediaDesc') },
@@ -951,7 +1180,8 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
     h(
       'div',
       { className: 'dshpw-identity' },
-      h('span', { className: 'dshpw-avatar', 'aria-hidden': 'true' }, initial(me)),
+      isAdmin ? h('button', { className: 'dshpw-avatar dshpw-avatar-trigger', type: 'button', title: t('purgeTitle'), 'aria-label': t('purgeTitle'), onClick: handleAvatarClick, disabled: purgeBusy }, initial(me))
+        : h('span', { className: 'dshpw-avatar', 'aria-hidden': 'true' }, initial(me)),
       h(
         'span',
         { className: 'dshpw-identity-copy' },
@@ -966,6 +1196,40 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
         ),
       ),
     ),
+    purgeOpen && isAdmin
+      ? h(
+          'div',
+          { className: 'dshpw-purge', role: 'alertdialog', 'aria-live': 'assertive' },
+          h('strong', null, t('purgeTitle')),
+          h('p', { className: 'dshpw-purge-warning' }, t('purgeWarning')),
+          h('input', {
+            className: 'dshpw-input',
+            type: 'password',
+            autoComplete: 'current-password',
+            placeholder: t('purgePasswordPh'),
+            value: purgePassword,
+            disabled: purgeBusy,
+            onChange: (e: { target: { value: string } }) => setPurgePassword(e.target.value),
+          }),
+          h(
+            'label',
+            { className: 'dshpw-check' },
+            h('input', {
+              type: 'checkbox',
+              checked: purgeConfirmed,
+              disabled: purgeBusy,
+              onChange: (e: { target: { checked: boolean } }) => setPurgeConfirmed(e.target.checked),
+            }),
+            t('purgeConfirmLabel'),
+          ),
+          h(
+            'div',
+            { className: 'dshpw-purge-actions' },
+            h('button', { className: 'dshpw-btn danger', disabled: purgeBusy, onClick: purgeEverything }, t('purgeSubmit')),
+            h('button', { className: 'dshpw-btn', disabled: purgeBusy, onClick: closePurge }, t('purgeCancel')),
+          ),
+        )
+      : null,
     // 操作结果紧跟身份区展示，长表单下方的按钮点击后无需回到页尾查看
     error !== '' && h('div', { className: 'dshpw-banner err', role: 'alert' }, error),
     notice !== '' && h('div', { className: 'dshpw-banner ok', role: 'status' }, notice),
