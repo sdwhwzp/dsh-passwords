@@ -142,6 +142,8 @@ test('Host launch URL exchange rejects deterministic response failures without l
   const responses: Array<{ status: number; location?: string; cookies?: string[] }> = [
     { status: 401 },
     { status: 303, location: '/wrong', cookies: ['dsh-auth-a=secret-cookie'] },
+    { status: 303, location: '//outside.example/', cookies: ['dsh-auth-a=secret-cookie'] },
+    { status: 303, location: './?token=leaked', cookies: ['dsh-auth-a=secret-cookie'] },
     { status: 303, location: '/' },
     { status: 303, location: '/', cookies: ['dsh-auth-a=one', 'dsh-auth-b=two'] },
   ];
@@ -169,6 +171,21 @@ test('Host launch URL exchange rejects deterministic response failures without l
         },
       );
     }
+  } finally {
+    await closeServer(server);
+  }
+});
+
+// Harness 0.1.7 makes its root redirect relative for mounted reverse proxies.
+test('Host launch exchange accepts a same-root relative redirect without following it', async () => {
+  let requests = 0;
+  const { server, origin } = await listeningServer((_req, res) => {
+    requests += 1;
+    res.writeHead(303, { location: './', 'set-cookie': 'dsh-auth-root=value; Path=/; HttpOnly' }).end();
+  });
+  try {
+    assert.equal(await exchangeUpstreamBrowserCookie(`${origin}/?token=process-secret`, origin), 'dsh-auth-root=value');
+    assert.equal(requests, 1);
   } finally {
     await closeServer(server);
   }

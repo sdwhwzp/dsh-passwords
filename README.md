@@ -620,3 +620,5 @@ Linux 部署由管理员将 `scripts/tenant-terminal-launcher.py` 安装为 root
 扩展订阅插件 `@goodandready/dsh-subscriptions` 的账号管理界面和 `/dsh-subscriptions/*` 接口仅管理员可用。普通账号使用 `subscriptions-codex` 模型时同样要求 GPT 5.6 或以上。
 
 桌面端通过 `terminal/retain` 恢复终端标签时，网关校验会话归属、文件夹权限和禁用状态；终端已失效只结束该终端的逻辑流，不会断开工作区与会话共用的连接。
+
+Host 登录交换兼容根目录重定向 `/` 与 `./`；不跟随跳转，拒绝外部地址和带查询参数的目标。

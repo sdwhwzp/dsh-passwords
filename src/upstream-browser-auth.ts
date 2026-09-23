@@ -126,7 +126,7 @@ function exchangeOnce(url: URL, timeoutMs: number): Promise<string> {
       timeout: timeoutMs,
     }, (response) => {
       response.resume();
-      if (response.statusCode !== 303 || response.headers.location !== '/') {
+      if (response.statusCode !== 303 || !['/', './'].includes(response.headers.location ?? '')) {
         const status = response.statusCode ?? 0;
         const error = new Error(`upstream browser session exchange returned HTTP ${String(status)}`);
         reject(status === 404 || status === 503 ? new RetryableExchangeError(error.message) : error);
