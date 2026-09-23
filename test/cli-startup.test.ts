@@ -33,7 +33,7 @@ test('patch command uses a stable exit code when the configured DSH root is abse
   }
 });
 
-for (const version of ['0.1.2-alpha.4', '0.1.7-alpha.2']) test(`native ${version} reports compatibility ready without bundle rewriting`, () => {
+for (const version of ['0.1.2-alpha.4', '0.1.7-alpha.2', '0.1.7-rc.1', '0.1.7-rc.1+build.1']) for (const action of ['status', 'on']) test(`native ${version} ${action} reports compatibility ready without bundle rewriting`, () => {
   const root = mkdtempSync(path.join(tmpdir(), 'dshpw-cli-native-'));
   const dshRoot = path.join(root, 'dsh');
   mkdirSync(dshRoot, { recursive: true });
@@ -42,7 +42,7 @@ for (const version of ['0.1.2-alpha.4', '0.1.7-alpha.2']) test(`native ${version
     `${JSON.stringify({ name: '@deepseek-ai/dsh', version })}\n`,
   );
   try {
-    const result = spawnSync(process.execPath, [cli, 'patch', 'status'], {
+    const result = spawnSync(process.execPath, [cli, 'patch', action], {
       cwd: projectRoot,
       env: {
         ...process.env,
@@ -52,13 +52,13 @@ for (const version of ['0.1.2-alpha.4', '0.1.7-alpha.2']) test(`native ${version
       encoding: 'utf8',
     });
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-    assert.match(result.stdout, /patched/i);
+    assert.match(result.stdout, action === 'status' ? /patched/i : /unchanged/i);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-for (const version of ['0.1.7-alpha.1', '0.1.6-alpha.02', 'v0.1.6-alpha.2']) {
+for (const version of ['0.1.7-rc.2', '0.1.8-alpha.1', '0.1.7-alpha.1', '0.1.6-alpha.02', 'v0.1.6-alpha.2']) {
   test(`unreviewed or malformed ${version} is rejected before patching`, () => {
     const root = mkdtempSync(path.join(tmpdir(), 'dshpw-cli-version-'));
     const dshRoot = path.join(root, 'dsh');
