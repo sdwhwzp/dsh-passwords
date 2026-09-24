@@ -19,6 +19,7 @@ let upstream: http.Server;
 let gateway: http.Server;
 let port = 0;
 let cookie = '';
+let adminCookie = '';
 let restrictedCookie = '';
 let otherCookie = '';
 let upstreamCalls: string[] = [];
@@ -30,10 +31,11 @@ function request(
   body = '{}',
   tokenCookie = cookie,
   extraHeaders: Record<string, string> = {},
+  method = 'POST',
 ): Promise<{ status: number; body: string; headers: http.IncomingHttpHeaders }> {
   return new Promise((resolve, reject) => {
     const req = http.request({
-      host: '127.0.0.1', port, path: pathname, method: 'POST',
+      host: '127.0.0.1', port, path: pathname, method,
       headers: {
         cookie: tokenCookie,
         'content-type': 'application/json',
@@ -60,13 +62,14 @@ before(async () => {
   tempDir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-preset-'));
   db = new Database(path.join(tempDir, 'test.db'), createFieldCrypto('test-key', 'test-key'));
   db.init();
-  db.createUser('admin', '$2a$10$dummyhashdummyhashdummyhashdu', 'admin');
+  const admin = db.createUser('admin', '$2a$10$dummyhashdummyhashdummyhashdu', 'admin');
   const user = db.createUser('preset-user', '$2a$10$dummyhashdummyhashdummyhashdu');
   const restricted = db.createUser('restricted-user', '$2a$10$dummyhashdummyhashdummyhashdu');
   const other = db.createUser('other-user', '$2a$10$dummyhashdummyhashdummyhashdu');
   db.setPermissions(user.id, {
     allowedFolders: ['/work/allowed'], hourlyTokenLimit: null, dailyMinutesLimit: null,
     allowUpload: true, allowGitDownload: false, allowWorkspaceCreate: false,
+    allowSsh: true,
     allowedAgentPresets: ['preset/allowed'], disabledSessions: [], banned: false, sandboxMode: null,
   });
   db.setPermissions(restricted.id, {
@@ -137,8 +140,9 @@ before(async () => {
       acmeEmail: '', acmeStaging: false,
     },
     jwtSecret: 'test-secret', internalSecret: 'test-internal',
-    patch: { dshRoot: '', restartService: '' }, endpointRules: [],
+    patch: { dshRoot: '', restartService: '' }, endpointRules: ['http:/api/preset-center/*'],
   };
+  adminCookie = `dsh_gateway_token=${jwt.sign({ sub: String(admin.id), username: admin.username, cv: 0 }, config.jwtSecret, { expiresIn: '12h' })}`;
   cookie = `dsh_gateway_token=${jwt.sign({ sub: String(user.id), username: user.username, cv: 0 }, config.jwtSecret, { expiresIn: '12h' })}`;
   restrictedCookie = `dsh_gateway_token=${jwt.sign({ sub: String(restricted.id), username: restricted.username, cv: 0 }, config.jwtSecret, { expiresIn: '12h' })}`;
   otherCookie = `dsh_gateway_token=${jwt.sign({ sub: String(other.id), username: other.username, cv: 0 }, config.jwtSecret, { expiresIn: '12h' })}`;
@@ -156,6 +160,40 @@ after(() => {
   upstream?.close();
   db?.close();
   try { rmSync(tempDir, { recursive: true, force: true }); } catch { /* Windows cleanup is best effort */ }
+});
+
+test('shared preset management rejects subusers before proxying despite SSH endpoint grants', async () => {
+  for (const [method, pathname] of [
+    ['GET', '/api/preset-center/state'],
+    ['GET', '/api/preset-center/composition?id=shared-preset'],
+    ['POST', '/api/preset-center/install'],
+    ['POST', '/api/preset-center/disable'],
+    ['POST', '/api/preset-center/uninstall'],
+    ['GET', '/api/preset-center'],
+    ['GET', '/api/preset-center/'],
+    ['GET', '/api/%70reset-center/state'],
+    ['GET', '/remote/api/preset-center/state'],
+  ]) {
+    upstreamCalls = [];
+    const response = await request(pathname, JSON.stringify({ id: 'shared-preset', confirm: true }), cookie, {}, method);
+    assert.equal(response.status, 403, `${method} ${pathname}: ${response.body}`);
+    assert.deepEqual(upstreamCalls, [], `${method} ${pathname} must never reach the shared Host`);
+  }
+});
+
+test('administrators retain shared preset reads and mutations', async () => {
+  for (const [method, pathname] of [
+    ['GET', '/api/preset-center/state'],
+    ['GET', '/api/preset-center/composition?id=shared-preset'],
+    ['POST', '/api/preset-center/install'],
+    ['POST', '/api/preset-center/disable'],
+    ['POST', '/api/preset-center/uninstall'],
+  ]) {
+    upstreamCalls = [];
+    const response = await request(pathname, JSON.stringify({ id: 'shared-preset', confirm: true }), adminCookie, {}, method);
+    assert.equal(response.status, 200, `${method} ${pathname}: ${response.body}`);
+    assert.deepEqual(upstreamCalls, [pathname]);
+  }
 });
 
 test('Issue #22: restricted subuser cannot create a session with an unapproved agent preset', async () => {

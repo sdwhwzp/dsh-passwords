@@ -1207,6 +1207,7 @@ export function containsSessionReference(value: unknown, depth = 0): boolean {
 /**
  * 第三方插件“运维面”端点（仅主用户可访问）：
  *   - skin-center —— 皮肤中心（未纳入网关权限模型）；
+ *   - preset-center —— 共享预设库、组合源码与全局注册表的管理，不影响会话预设选择；
  *   - modlens —— 模型透镜（未纳入网关权限模型）；
  *   - dsh-usage —— 提供商余额、订阅计划和用量总览仅管理员可见；
  *   - dsh-at-file 设置写入 —— 修改共享 Web Profile 的全局设置与工作区过滤规则；
@@ -1283,6 +1284,8 @@ export function isAdminOnlyPluginEndpoint(method: string, pathname: string): boo
     pathname === '/api/sessionReferenceResolver/candidates' ||
     pathname === '/api/skin-center' ||
     pathname.startsWith('/api/skin-center/') ||
+    pathname === '/api/preset-center' ||
+    pathname.startsWith('/api/preset-center/') ||
     pathname === '/modlens' ||
     pathname.startsWith('/modlens/') ||
     pathname === '/api/dsh-usage' ||

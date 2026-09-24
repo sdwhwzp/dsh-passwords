@@ -55,6 +55,23 @@ test('第三方插件权限：子用户不能修改共享的 dsh-at-file 设置'
   assert.equal(isAdminOnlyPluginEndpoint('POST', '/api/atFile/search'), false);
 });
 
+test('shared preset library reads and mutations are owner-only without blocking preset selection', () => {
+  for (const pathname of [
+    '/api/preset-center', '/api/preset-center/', '/api/preset-center/state',
+    '/api/preset-center/composition', '/api/preset-center/install',
+    '/api/preset-center/disable', '/api/preset-center/uninstall',
+    '/api/preset-center/future/nested-operation',
+  ]) {
+    for (const method of ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE']) {
+      assert.equal(isAdminOnlyPluginEndpoint(method, pathname), true, `${method} ${pathname}`);
+    }
+  }
+  for (const pathname of [
+    '/api/preset-center-other/state', '/api/agentPreset.list', '/api/agentPreset.select',
+    '/api/agentPresets/list', '/api/agentPresets/select',
+  ]) assert.equal(isAdminOnlyPluginEndpoint('POST', pathname), false, pathname);
+});
+
 test('alpha.1：原始 session 上传路径纳入上传权限门卫', () => {
   assert.equal(isUploadRequest('POST', '/api/session/uploadFileBinary'), true);
   assert.equal(isUploadRequest('POST', '/api/fileUploads/upload'), true);
