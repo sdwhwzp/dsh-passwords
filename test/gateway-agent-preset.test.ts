@@ -21,9 +21,11 @@ let port = 0;
 let cookie = '';
 let restrictedCookie = '';
 let otherCookie = '';
+let unrestrictedCookie = '';
 let upstreamCalls: string[] = [];
 let selectBlocked = false;
 let gzipAgentPresetResponses = false;
+let promptBusinessFailure = false;
 
 function request(pathname: string, body = '{}', tokenCookie = cookie): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
@@ -47,6 +49,7 @@ before(async () => {
   const user = db.createUser('preset-user', '$2a$10$dummyhashdummyhashdummyhashdu');
   const restricted = db.createUser('restricted-user', '$2a$10$dummyhashdummyhashdummyhashdu');
   const other = db.createUser('other-user', '$2a$10$dummyhashdummyhashdummyhashdu');
+  const unrestricted = db.createUser('unrestricted-user', '$2a$10$dummyhashdummyhashdummyhashdu');
   db.setPermissions(user.id, {
     allowedFolders: ['/work/allowed'], hourlyTokenLimit: null, dailyMinutesLimit: null,
     allowUpload: true, allowGitDownload: false, allowWorkspaceCreate: false,
@@ -62,6 +65,12 @@ before(async () => {
     allowUpload: true, allowGitDownload: false, allowWorkspaceCreate: false,
     allowedAgentPresets: ['preset/other-only'], disabledSessions: [], banned: false, sandboxMode: null,
   });
+  // NULL = 不限：子用户不受 Agent preset 白名单约束。
+  db.setPermissions(unrestricted.id, {
+    allowedFolders: ['/work/allowed'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: true, allowGitDownload: false, allowWorkspaceCreate: false,
+    allowedAgentPresets: null, disabledSessions: [], banned: false, sandboxMode: null,
+  });
   upstream = http.createServer((req, res) => {
     upstreamCalls.push(req.url ?? '');
     if (req.url?.startsWith('/api/workspace.list')) {
@@ -70,6 +79,10 @@ before(async () => {
       res.end(JSON.stringify({ result: { value: { items: [{ sessionId: 'existing-session', cwd: '/work/allowed', agentPreset: 'preset/allowed' }] } } }));
     } else if (req.url?.startsWith('/api/session.create')) {
       res.end(JSON.stringify({ result: { value: { sessionId: 'new-session', cwd: '/work/allowed' } } }));
+    } else if (req.url?.startsWith('/api/session.prompt')) {
+      res.end(promptBusinessFailure
+        ? JSON.stringify({ result: { ok: false, error: { message: 'upstream boom' } } })
+        : JSON.stringify({ result: { ok: true } }));
     } else if (req.url?.startsWith('/api/agentPresets/list')) {
       const response = JSON.stringify({ result: { value: { items: [{ id: 'preset/allowed' }, { id: 'preset/blocked' }] } } });
       if (gzipAgentPresetResponses) {
@@ -102,11 +115,12 @@ before(async () => {
       acmeEmail: '', acmeStaging: false,
     },
     jwtSecret: 'test-secret', internalSecret: 'test-internal',
-    patch: { dshRoot: '', restartService: '' }, endpointRules: [],
+    patch: { dshRoot: '', restartService: '' }, endpointRules: [], pluginCompat: false,
   };
   cookie = `dsh_gateway_token=${jwt.sign({ sub: String(user.id), username: user.username, cv: 0 }, config.jwtSecret, { expiresIn: '12h' })}`;
   restrictedCookie = `dsh_gateway_token=${jwt.sign({ sub: String(restricted.id), username: restricted.username, cv: 0 }, config.jwtSecret, { expiresIn: '12h' })}`;
   otherCookie = `dsh_gateway_token=${jwt.sign({ sub: String(other.id), username: other.username, cv: 0 }, config.jwtSecret, { expiresIn: '12h' })}`;
+  unrestrictedCookie = `dsh_gateway_token=${jwt.sign({ sub: String(unrestricted.id), username: unrestricted.username, cv: 0 }, config.jwtSecret, { expiresIn: '12h' })}`;
   gateway = createGatewayServer(config, new AuthService(config, db), db);
   await new Promise<void>((resolve) => gateway.listen(0, '127.0.0.1', resolve));
   port = (gateway.address() as { port: number }).port;
@@ -114,6 +128,7 @@ before(async () => {
   assert.equal(snapshot.status, 200);
   await request('/api/workspace.list', '{}', restrictedCookie);
   await request('/api/workspace.list', '{}', otherCookie);
+  await request('/api/workspace.list', '{}', unrestrictedCookie);
 });
 
 after(() => {
@@ -137,6 +152,17 @@ test('Issue #22: 默认空白名单用户无 preset 创建会话时不被网关�
   assert.equal(upstreamCalls.some((url) => url.startsWith('/api/session.create')), true);
   const anyPreset = await request('/api/session.create', JSON.stringify({ cwd: '/work/allowed', agentPreset: 'preset/whatever' }), restrictedCookie);
   assert.equal(anyPreset.status, 403);
+});
+
+test('Issue #22: restricted subuser cannot fork without an approved preset', async () => {
+  upstreamCalls = [];
+  const response = await request(
+    '/api/session.fork',
+    JSON.stringify({ sessionId: 'existing-session' }),
+    restrictedCookie,
+  );
+  assert.equal(response.status, 403, response.body);
+  assert.equal(upstreamCalls.some((url) => url.startsWith('/api/session.fork')), false);
 });
 
 test('Issue #22: 授权 preset 允许创建会话，并登记缓存供 prompt 使用', async () => {
@@ -223,6 +249,47 @@ test('Issue #22: approved preset permits session creation and a large prompt wit
   assert.equal(upstreamCalls.some((url) => url.startsWith('/api/session.prompt')), true);
 });
 
+
+test('Issue #22: allowedAgentPresets=null（不限）子用户带 agentPreset 创建会话不被网关 403', async () => {
+  upstreamCalls = [];
+  const response = await request(
+    '/api/session.create',
+    JSON.stringify({ cwd: '/work/allowed', agentPreset: 'preset/anything' }),
+    unrestrictedCookie,
+  );
+  assert.equal(response.status, 200, response.body);
+  assert.equal(upstreamCalls.some((url) => url.startsWith('/api/session.create')), true);
+});
+
+test('Issue #22: allowedAgentPresets=null（不限）子用户 session/prompt 与 session/fork 到达上游', async () => {
+  upstreamCalls = [];
+  const prompt = await request(
+    '/api/session.prompt',
+    JSON.stringify({ sessionId: 'existing-session', text: 'hi' }),
+    unrestrictedCookie,
+  );
+  assert.equal(prompt.status, 200, prompt.body);
+  assert.equal(upstreamCalls.some((url) => url.startsWith('/api/session.prompt')), true);
+
+  const fork = await request(
+    '/api/session.fork',
+    JSON.stringify({ sessionId: 'existing-session' }),
+    unrestrictedCookie,
+  );
+  assert.equal(fork.status, 200, fork.body);
+  assert.equal(upstreamCalls.some((url) => url.startsWith('/api/session.fork')), true);
+});
+
+test('Issue #22: allowedAgentPresets=null 仍禁止子用户修改宿主 preset profile', async () => {
+  upstreamCalls = [];
+  const response = await request(
+    '/api/agentPresets/remove',
+    JSON.stringify({ type: 'client-request', rpcId: 'preset-remove-unrestricted', method: 'agentPresets/remove', payload: { args: { id: 'preset/anything' } } }),
+    unrestrictedCookie,
+  );
+  assert.equal(response.status, 403, response.body);
+  assert.equal(upstreamCalls.some((url) => url.startsWith('/api/agentPresets/remove')), false);
+});
 
 test('Issue #22: preset 被管理员撤销后已有会话 prompt 拒绝', async () => {
   // 撤销 preset（保留会话授权），重建快照后 prompt 因 preset 白名单拒绝

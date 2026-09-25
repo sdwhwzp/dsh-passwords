@@ -122,8 +122,8 @@ function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   });
 }
 
-/** 通知网关进程：重载补丁 + 延迟重启 dsh-web（fire-and-forget） */
-function notifyGateway(cfg: PlatformConfig): void {
+/** 通知网关进程：重载补丁 + 延迟重启 dsh-web（fire-and-forget）。导出供定向测试使用。 */
+export function notifyGateway(cfg: PlatformConfig): void {
   const mod = cfg.gateway.tls !== null ? https : http;
   const url = `${cfg.gateway.tls !== null ? 'https' : 'http'}://127.0.0.1:${String(cfg.gateway.port)}/gateway/internal/patch`;
   const body = JSON.stringify({ action: 'apply' });
@@ -146,6 +146,11 @@ function notifyGateway(cfg: PlatformConfig): void {
   );
   req.on('error', () => {
     // 网关没起来时静默：下次网关启动会自动应用补丁
+  });
+  // 网关进程存活但卡住不回包时，timeout 选项只设置 socket 空闲上限、不会自动
+  // 关闭连接；到点主动销毁，避免请求与 socket 被永久挂住。同属静默失败。
+  req.on('timeout', () => {
+    req.destroy();
   });
   req.end(body);
 }

@@ -18,7 +18,7 @@ test('Issue #23: 请求体上限按角色和大请求体权限分档', () => {
   assert.equal(requestBodyLimitFor('admin', false), ADMIN_REQUEST_BODY_BYTES);
 });
 
-test('Issue #22: 正常新增子用户默认 allowed_agent_presets 为空数组（不允许任何 Agent preset）', async () => {
+test('新增子用户默认 allowed_agent_presets 为 NULL（不限制 Agent preset）', async () => {
   const tempDir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-preset-perms-'));
   const dbPath = path.join(tempDir, 'test.db');
   const crypto = createFieldCrypto('test-key', 'test-key');
@@ -35,6 +35,7 @@ test('Issue #22: 正常新增子用户默认 allowed_agent_presets 为空数组�
       jwtSecret: 'test-secret', internalSecret: 'test-internal',
       patch: { dshRoot: '', restartService: '' },
       endpointRules: [],
+      pluginCompat: false,
     };
     const auth = new AuthService(config, db);
     const admin = db.createUser('admin', '$2a$10$dummyhashdummyhashdummyhashdu', 'admin');
@@ -48,10 +49,40 @@ test('Issue #22: 正常新增子用户默认 allowed_agent_presets 为空数组�
     const user = db.getUserByUsername('new-subuser');
     assert.ok(user, '子用户应已创建');
     const perms = db.getPermissions(user.id);
-    assert.deepEqual(perms?.allowed_agent_presets, [], '新子用户默认不允许任何 Agent preset');
+    assert.equal(perms?.allowed_agent_presets, null, '新子用户默认不限制 Agent preset（工作区授权后可用会话）');
     assert.equal(perms?.allow_upload, false, '新子用户默认使用 64 MiB 请求体档位');
 
-    // 历史数据兼容：显式 NULL 仍表示不限制
+    // 显式 [] 仍表示「禁止全部」：管理员在权限面板取消勾选全部 preset 后必须保持禁止。
+    db.setPermissions(user.id, {
+      allowedFolders: ['/work'],
+      hourlyTokenLimit: null,
+      dailyMinutesLimit: null,
+      allowUpload: true,
+      allowGitDownload: false,
+      allowWorkspaceCreate: false,
+      allowedAgentPresets: [],
+      banned: false,
+      sandboxMode: null,
+      disabledSessions: [],
+    });
+    assert.deepEqual(db.getPermissions(user.id)?.allowed_agent_presets, [], '显式 [] 必须保留禁止全部语义');
+
+    // 非空数组仍为白名单。
+    db.setPermissions(user.id, {
+      allowedFolders: ['/work'],
+      hourlyTokenLimit: null,
+      dailyMinutesLimit: null,
+      allowUpload: true,
+      allowGitDownload: false,
+      allowWorkspaceCreate: false,
+      allowedAgentPresets: ['preset-alpha'],
+      banned: false,
+      sandboxMode: null,
+      disabledSessions: [],
+    });
+    assert.deepEqual(db.getPermissions(user.id)?.allowed_agent_presets, ['preset-alpha'], '非空数组必须保留白名单语义');
+
+    // 显式 NULL 仍表示不限制。
     db.setPermissions(user.id, {
       allowedFolders: ['/work'],
       hourlyTokenLimit: null,
@@ -64,7 +95,7 @@ test('Issue #22: 正常新增子用户默认 allowed_agent_presets 为空数组�
       sandboxMode: null,
       disabledSessions: [],
     });
-    assert.equal(db.getPermissions(user.id)?.allowed_agent_presets, null, '历史 NULL 必须保留不限制语义');
+    assert.equal(db.getPermissions(user.id)?.allowed_agent_presets, null, '显式 NULL 必须保留不限制语义');
   } finally {
     db.close();
     rmSync(tempDir, { recursive: true, force: true });

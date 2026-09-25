@@ -22,11 +22,12 @@ let gateway: http.Server;
 let gatewayPort = 0;
 let adminCookie = '';
 let userCookie = '';
+let userId = 0;
 let archiveIds: string[] | undefined;
 let malformedWorkspace = false;
 let extraSessionIds: string[] = [];
 let showLegacyWorkspace = false;
-let workspaceResponsePlan: Array<{ archived: string[]; delayMs: number }> = [];
+let workspaceResponsePlan: Array<{ archived: string[]; delayMs: number; gate?: Promise<void> }> = [];
 
 const sessionListBody = () => {
   const value = [
@@ -103,6 +104,7 @@ before(async () => {
   db.init();
   const admin = db.createUser('admin', '$2a$10$dummyhashdummyhashdummyhashdu', 'admin');
   const user = db.createUser('archiveuser', '$2a$10$dummyhashdummyhashdummyhashdu');
+  userId = user.id;
   const otherOwner = db.createUser('other-owner', '$2a$10$dummyhashdummyhashdummyhashdu');
   db.addUserWorkspace(user.id, workspaceDir);
   db.addUserWorkspace(otherOwner.id, otherWorkspaceDir);
@@ -125,16 +127,28 @@ before(async () => {
       res.end(JSON.stringify({ result: { value: { sessionId: 's-forked', cwd: otherWorkspaceDir } } }));
       return;
     }
+    if (req.url?.startsWith('/api/dsh-passwords/internal/assignable-resources')) {
+      // 权限保存的资源核验：目录与可分配会话必须能在快照中找到。
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        ok: true,
+        folders: [workspaceDir, otherWorkspaceDir],
+        sessions: ['s-active', 's-archived', 's-other'],
+      }));
+      return;
+    }
     if (req.url?.startsWith('/api/workspace.list')) {
       const plan = workspaceResponsePlan.shift();
       if (plan !== undefined) {
         archiveIds = plan.archived;
         body = workspaceListBody();
         const out = Buffer.from(JSON.stringify(body), 'utf8');
-        setTimeout(() => {
+        const send = () => {
           res.writeHead(200, { 'content-type': 'application/json', 'content-length': String(out.length) });
           res.end(out);
-        }, plan.delayMs);
+        };
+        if (plan.gate !== undefined) void plan.gate.then(send);
+        else setTimeout(send, plan.delayMs);
         return;
       }
       body = workspaceListBody();
@@ -328,6 +342,59 @@ test('Issue #16: older concurrent workspace response cannot restore stale archiv
   assert.equal(sessions.status, 200);
   const sessionItems = (sessions.json as { result: { value: Array<{ sessionId: string }> } }).result.value;
   assert.deepEqual(sessionItems.map((item) => item.sessionId), ['s-active']);
+});
+
+test('Issue #16: 授权 epoch 变化后，在途旧 workspace.list 响应不得复活归档标记', async () => {
+  // 初始：s-archived 被逐会话禁用，因此此刻发出的请求其权限视图不含 s-archived。
+  const disabled = await request('POST', '/gateway/api/permissions', adminCookie, JSON.stringify({
+    userId,
+    disabledSessions: ['s-archived'],
+  }));
+  assert.equal(disabled.status, 200, disabled.text);
+  archiveIds = ['s-archived'];
+  assert.equal((await request('POST', '/api/workspace.list', userCookie)).status, 200);
+
+  // 在途旧响应：携带「s-archived 被禁用」的权限/epoch 视图；用 gate 精确控制它
+  // 在上面的授权放宽与新基线建立之后才返回。
+  let releaseStale = (): void => {};
+  const staleGate = new Promise<void>((resolve) => { releaseStale = resolve; });
+  workspaceResponsePlan = [{ archived: ['s-archived'], delayMs: 0, gate: staleGate }];
+  const stale = request('POST', '/api/workspace.list', userCookie);
+  for (let i = 0; i < 200 && workspaceResponsePlan.length > 0; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(workspaceResponsePlan.length, 0, '在途请求必须已抵达上游并占用延迟计划');
+
+  // 授权放宽（解除禁用）：推进 epoch、失效旧快照，在途旧响应随即失去回写资格。
+  const widened = await request('POST', '/gateway/api/permissions', adminCookie, JSON.stringify({
+    userId,
+    disabledSessions: [],
+  }));
+  assert.equal(widened.status, 200, widened.text);
+
+  // 新基线重建授权与归档快照：s-archived 已授权且处于归档态，对子用户不可见。
+  archiveIds = ['s-archived'];
+  assert.equal((await request('POST', '/api/workspace.list', userCookie)).status, 200);
+  const fresh = await request('POST', '/api/session.list', userCookie);
+  assert.equal(fresh.status, 200);
+  assert.deepEqual(
+    (fresh.json as { result: { value: Array<{ sessionId: string }> } }).result.value.map((item) => item.sessionId),
+    ['s-active'],
+    '新基线下归档会话不可见',
+  );
+
+  // 放行在途旧响应：它必须被栅栏拒绝，不能把旧权限视图算出的（空）归档集合覆盖回去。
+  releaseStale();
+  assert.equal((await stale).status, 200);
+  const after = await request('POST', '/api/session.list', userCookie);
+  assert.equal(after.status, 200);
+  assert.deepEqual(
+    (after.json as { result: { value: Array<{ sessionId: string }> } }).result.value.map((item) => item.sessionId),
+    ['s-active'],
+    '旧响应不得让已归档会话重新出现在 session.list',
+  );
+  archiveIds = [];
+  workspaceResponsePlan = [];
 });
 
 test('Issue #16: authorized fork registers the new session for the same user', async () => {

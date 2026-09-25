@@ -252,7 +252,7 @@ test('0.1.6 line variants all refuse startup when the Cookie bridge is unavailab
 
 test('supported 0.1.7 line variants pass the version gate and then require the Cookie bridge', async () => {
   const settings = 'const persistence = ctx.remote.$host.isLoopback ? "host" : "memory";\n';
-  for (const version of ['0.1.7-alpha.1', '0.1.7-alpha.2', '0.1.7-alpha.12', '0.1.7-beta.1', '0.1.7-rc.1', '0.1.7-preview.4', '0.1.7+build.1', '0.1.7']) {
+  for (const version of ['0.1.7-alpha.1', '0.1.7-alpha.2', '0.1.7-alpha.12', '0.1.7-beta.1', '0.1.7-rc.1', '0.1.7-rc.2', '0.1.7-preview.4', '0.1.7+build.1', '0.1.7']) {
     const root = mkdtempSync(path.join(tmpdir(), 'dshpw-cli-017-'));
     const dshRoot = makeAlpha3Root(root, settings, 'export class Connection {}\n', version);
     const blocker = createServer();

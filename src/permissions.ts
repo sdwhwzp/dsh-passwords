@@ -213,6 +213,7 @@ export const OFFICIAL_API_NAMESPACES: ReadonlySet<string> = new Set([
   'messageFeedback',
   'permissionPresets',
   'pluginInventory',
+  'schedule', // 0.1.7-rc.2 dsh-schedule；catalog 由网关按条目 sessionId 过滤（见 proxy）
   'session',
   'sessionFeedback',
   'sessionReferenceResolver',
@@ -368,6 +369,15 @@ export const SUBUSER_BLOCKED_API_NAMESPACES: ReadonlySet<string> = new Set([
  *     host half 生命周期、宿主代码执行、运行状态枚举与插件控制。其请求面无法由
  *     网关可靠收敛到子用户的沙盒/工作区权限，因此 0.1.7 起对子用户整体硬拒绝；
  *     未知或未来新增方法也必须保持 fail-closed。
+ *   - `schedule/catalog`（dsh-schedule，0.1.7-rc.2）：无参（`() => …`），返回宿主
+ *     全局的活跃/非活跃提醒及其**原始 Session id**。wire 里没有任何会话身份，本集合
+ *     曾据此硬拒绝；现行做法改为**官方放行 + 网关逐条响应过滤**：gateway 解析
+ *     `result.value` 数组，按每个条目的 `sessionId` 调
+ *     `authorizedSubuserSessionRoot`，sessionId 缺失/非法/未授权一律丢弃，因此子用户
+ *     只能看到自己已授权会话的提醒（与 workspace.list 的 archivedSessionIds 同一
+ *     判定口径）。响应不可解析时 fail-closed（502），绝不回放未过滤的全局清单。
+ *     同命名空间的 list / history / update / delete 都带 `request.sessionId`，走
+ *     SESSION_SCOPED_RE 的逐会话归属校验。
  */
 export const SUBUSER_BLOCKED_API_ENDPOINTS: ReadonlySet<string> = new Set([
   'directoryPicker/pick',
@@ -1293,6 +1303,13 @@ export const WORKSPACE_ENDPOINT_RE = /^\/api\/session[.\/](create)([.\/]|$)/;
  *   - `workspace/pinSession` / `unpinSession` / `unarchiveSession`：请求体带
  *     `request.sessionId`，与已在表内的 `workspace/archiveSession` 同类（改的是
  *     某个会话在工作区导航里的状态），必须逐会话做归属校验。
+ *
+ * 0.1.7-rc.2 增补（dsh-schedule）：`schedule/list` / `history` / `update` / `delete`
+ * 的 wire 请求都带 `request.sessionId`（ScheduleListRequest 及其扩展），读/改的是
+ * 绑定到某个会话的提醒任务，因此必须逐会话归属校验：否则子用户可读甚至删除其它
+ * 会话的提醒。`schedule/catalog` **不**进本 RE——它无参、返回宿主全局提醒及其原始
+ * Session id，wire 里没有任何会话身份可取；对子用户由官方分类放行，并由 gateway
+ * 按每个条目的 sessionId 逐条响应过滤（见 proxy 的 SCHEDULE_CATALOG_RE）。
  * ⚠ 0.1.7 起 `session/openWorkspacePath` / `canOpenWorkspacePath` /
  * `workspacePathApplications` 不再进本 RE：它们的 wire 里没有会话身份（分别只带
  * `request.path` 或无参），本 RE 的归属校验取不到身份、判定无意义，已改为
@@ -1304,7 +1321,7 @@ export const WORKSPACE_ENDPOINT_RE = /^\/api\/session[.\/](create)([.\/]|$)/;
  * 开流校验，account 的登录写操作由 SUBUSER_BLOCKED_API_ENDPOINTS 硬拒绝。
  */
 export const SESSION_SCOPED_RE =
-  /^\/api\/(?:session[.\/](?:history|prompt|respond|archive|delete|rename|retitle|title|resume|fork|truncate|export|attachment|updateQueue|cancel|page|projections|selectModel)|workspace[.\/](?:archiveSession|pinSession|unpinSession|unarchiveSession)|commands[.\/](?:list|execute)|subagents[.\/](?:list|prompt|interruptByParent)|fileUploads[.\/](?:upload)|fileReferences[.\/](?:list)|sessionReferenceResolver[.\/](?:candidates)|skills[.\/](?:list)|messageFeedback[.\/](?:list|put|delete)|sessionFeedback[.\/](?:record)|goals[.\/](?:clear|complete|create|edit|get|pause|resume)|workspaceFiles[.\/](?:read|readAll|readBytes|stat|readRelated|list|changes)|present[.\/](?:open)|changes[.\/](?:open)|job[.\/](?:kill))([.\/]|$)/;
+  /^\/api\/(?:schedule[.\/](?:list|history|update|delete)|session[.\/](?:history|prompt|respond|archive|delete|rename|retitle|title|resume|fork|truncate|export|attachment|updateQueue|cancel|page|projections|selectModel)|workspace[.\/](?:archiveSession|pinSession|unpinSession|unarchiveSession)|commands[.\/](?:list|execute)|subagents[.\/](?:list|prompt|interruptByParent)|fileUploads[.\/](?:upload)|fileReferences[.\/](?:list)|sessionReferenceResolver[.\/](?:candidates)|skills[.\/](?:list)|messageFeedback[.\/](?:list|put|delete)|sessionFeedback[.\/](?:record)|goals[.\/](?:clear|complete|create|edit|get|pause|resume)|workspaceFiles[.\/](?:read|readAll|readBytes|stat|readRelated|list|changes)|present[.\/](?:open)|changes[.\/](?:open)|job[.\/](?:kill))([.\/]|$)/;
 
 /**
  * workspaceFiles 的会话作用域方法（与 SESSION_SCOPED_RE 里的方法列表一致）。

@@ -160,6 +160,40 @@ test('媒体生命周期：pending → failed；按 owner/ready/未过期 查询
   });
 });
 
+test('上传配额统计：只计未绑定资产（ready 未挂消息 + pending），已发送/失败/过期/他人不计', () => {
+  withDb((db) => {
+    const owner = db.createUser('quota-owner', HASH);
+    const other = db.createUser('quota-other', HASH);
+
+    const ready = (id: string, ownerId: number): void => {
+      addPending(db, id, ownerId);
+      db.finalizeMediaAsset(id, { storageKey: `objects/${id}.bin`, sha256: id, byteSize: 10 });
+    };
+
+    // pending（已签发但未 PUT）计入：堵住只 init 不 PUT 绕过配额
+    addPending(db, 'q-pending', owner.id);
+    // 未绑定的 ready 计入
+    ready('q-ready', owner.id);
+    // 已发送（挂到消息上）不计入：否则正常聊天会逐步耗尽配额
+    ready('q-bound', owner.id);
+    db.addMessageWithMedia({ senderId: owner.id, recipientId: other.id, content: '', tags: [], mediaIds: ['q-bound'] });
+    // failed / 过期 / 他人的资产都不计入
+    addPending(db, 'q-failed', owner.id);
+    db.markMediaFailed('q-failed');
+    addPending(db, 'q-expired', owner.id, '2000-01-01T00:00:00.000Z');
+    db.finalizeMediaAsset('q-expired', { storageKey: 'objects/q-expired.bin', sha256: 'x', byteSize: 10 });
+    ready('q-other', other.id);
+
+    assert.equal(db.countUnboundMediaForUser(owner.id), 2, '只统计自己的未绑定（pending + ready 未挂消息）资产');
+    assert.equal(db.countUnboundMediaForUser(other.id), 1, '不串用户，且已绑定资产不计入');
+
+    // 未绑定资产减少后配额随之释放：pending 转 failed、ready 挂到消息上
+    db.markMediaFailed('q-pending');
+    db.addMessageWithMedia({ senderId: owner.id, recipientId: other.id, content: '', tags: [], mediaIds: ['q-ready'] });
+    assert.equal(db.countUnboundMediaForUser(owner.id), 0, '未绑定资产发送/失败后不再占配额');
+  });
+});
+
 test('addMessageWithMedia：事务原子，失败全回滚且消息投影不泄露内部字段', () => {
   withDb((db) => {
     const sender = db.createUser('sender', HASH);

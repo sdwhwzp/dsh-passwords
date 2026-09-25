@@ -29,7 +29,7 @@ function makePlan(): { planPath: string; receiptPath: string; paths: Record<stri
   writeFileSync(path.join(configuredRoot, 'sentinel.txt'), 'config');
   writeFileSync(path.join(dshHome, 'sentinel.txt'), 'home');
   writeFileSync(path.join(dshRoot, 'sentinel.txt'), 'dsh');
-  writeFileSync(path.join(dshRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.7-alpha.2' }));
+  writeFileSync(path.join(dshRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.7-rc.2' }));
   writeFileSync(dbPath, Buffer.concat([Buffer.from('SQLite format 3\0', 'binary'), Buffer.alloc(100)]));
   writeFileSync(path.join(externalMedia, 'sentinel.txt'), 'shared media');
   writeFileSync(path.join(externalAcme, 'sentinel.txt'), 'shared acme');

@@ -81,6 +81,8 @@ let workspaceOrderResponseWorkspaceId = 'ws-visible';
 let delaySessionCreateResponse = false;
 let dropDelayedWorkspaceUpsert = false;
 let sessionSearchResponseMode: 'valid' | 'malformed' = 'valid';
+/** schedule/catalog 响应形状：'malformed' 模拟官方成功信封下 value 不是数组（子用户必须 fail-closed）。 */
+let scheduleCatalogResponseMode: 'ok' | 'malformed' = 'ok';
 let releaseSessionCreateResponse: (() => void) | null = null;
 let createdSessionIdForMock = 'created-session';
 let wireCreatedSessionId = '';
@@ -112,6 +114,10 @@ let remoteMuxSnapshotHeaderId: string | null = null;
 let lastRawUploadBody = Buffer.alloc(0);
 let lastSelectModelBody: Record<string, unknown> | null = null;
 let lastScopedRequestBody: Record<string, unknown> | null = null;
+/** 响应头超时回归：上游接受请求后不回响应头也不断开（模拟上游卡死）。 */
+let holdResponseHeaders = false;
+/** 响应头超时回归：上游先回响应头，再延迟该毫秒数结束 body（模拟 SSE/长响应）。 */
+let slowResponseBodyMs = 0;
 let mockSshHosts: Array<{ alias: string; host: string }> = [
   { alias: 'admin-host', host: '198.51.100.10' },
 ];
@@ -551,6 +557,26 @@ function startMockUpstream(): Promise<http.Server> {
           { sessionId: 'session-visible', label: 'Visible session', cwd: '/workspaces/visible', createdAt: 1, mention: '@visible' },
           { sessionId: 'session-hidden', label: 'Hidden session', cwd: '/workspaces/hidden', createdAt: 1, mention: '@hidden' },
         ] } }));
+      } else if (/^\/api\/schedule[.\/]catalog(?:[?]|$)/.test(req.url ?? '')) {
+        // rc.2 ScheduleCatalogEntry：宿主全局提醒数组，每条带原始 sessionId。
+        // 官方 remote 信封（server-response）——子用户由网关逐条按 sessionId 过滤。
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          type: 'server-response',
+          rpcId: 'schedule-catalog-mock',
+          result: {
+            ok: true,
+            value: scheduleCatalogResponseMode === 'malformed'
+              ? { not: 'an array' }
+              : [
+                { id: 'schedule-visible', title: 'Visible reminder', sessionId: 'session-visible', status: 'active', lastDelivery: { at: 1 } },
+                { id: 'schedule-hidden', title: 'Hidden reminder', sessionId: 'session-hidden', status: 'active' },
+                { id: 'schedule-no-session', title: 'No session binding', status: 'inactive' },
+                { id: 'schedule-bad-session', title: 'Invalid session binding', sessionId: 42, status: 'active' },
+                { id: 'schedule-long-session', title: 'Over-long session binding', sessionId: 'x'.repeat(201), status: 'active' },
+              ],
+          },
+        }));
       } else if ((req.url ?? '').startsWith('/sidebar/bundle/')) {
         res.writeHead(200, { 'content-type': 'text/javascript' });
         res.end('console.log("mock sidebar chunk");');
@@ -612,6 +638,19 @@ function startMockUpstream(): Promise<http.Server> {
               : WORKSPACES_JSON,
         );
         res.end();
+      } else if ((req.url ?? '').startsWith('/api/gateway-timeout-probe')) {
+        // 上游响应头超时回归专用探针：holdResponseHeaders 时不回响应头也不断开；
+        // slowResponseBodyMs 时先回响应头（网关应清除计时器）再延迟结束 body。
+        req.resume();
+        if (holdResponseHeaders) return;
+        res.writeHead(200, { 'content-type': 'application/json' });
+        if (slowResponseBodyMs > 0) {
+          // Node 只有在首个 write/end 才真正把响应头写进 socket，先写一段头部字节。
+          res.write('{"ok":true,');
+          setTimeout(() => res.end('"slow":true}'), slowResponseBodyMs).unref();
+        } else {
+          res.end(JSON.stringify({ ok: true }));
+        }
       } else {
         res.writeHead(200, { 'content-type': 'application/json' });
         res.write(JSON.stringify({ ok: true, method: req.method, url: req.url }));
@@ -4343,6 +4382,82 @@ test('权限：workspace.pinSession 响应只回子用户已授权会话的 pin 
   }
 });
 
+test('rc.2 schedule/catalog：子用户不再 403，只保留已授权会话的条目，主用户原样透传', async () => {
+  const fixture = await authorizedSubuserFixture('schedule-catalog-user');
+  const originalCookie = cookie;
+  try {
+    cookie = fixture.cookie;
+    const sub = await gatewayReq(
+      'POST',
+      '/api/schedule/catalog',
+      { 'content-type': 'application/json' },
+      JSON.stringify({ type: 'client-request', rpcId: 'schedule-catalog-sub', method: 'schedule/catalog', payload: { args: {} } }),
+    );
+    assert.equal(sub.status, 200, sub.body);
+    const subValue = (JSON.parse(sub.body) as { result?: { ok?: boolean; value?: Array<{ id?: unknown; sessionId?: unknown }> } }).result;
+    assert.equal(subValue?.ok, true);
+    assert.deepEqual(
+      (subValue?.value ?? []).map((entry) => entry.id),
+      ['schedule-visible'],
+      '只保留已授权会话的条目：他人/缺失/非法 sessionId 一律丢弃',
+    );
+    // 保留条目除过滤外不改写：官方字段原样保留。
+    assert.equal(subValue?.value?.[0]?.sessionId, 'session-visible');
+    assert.equal(subValue?.value?.[0]?.status, 'active');
+
+    // 点号形状同口径（兼容 /api/schedule.catalog）。
+    const dotted = await gatewayReq(
+      'POST',
+      '/api/schedule.catalog',
+      { 'content-type': 'application/json' },
+      JSON.stringify({ type: 'client-request', rpcId: 'schedule-catalog-dotted', method: 'schedule.catalog', payload: { args: {} } }),
+    );
+    assert.equal(dotted.status, 200, dotted.body);
+    assert.deepEqual(
+      ((JSON.parse(dotted.body) as { result?: { value?: Array<{ id?: unknown }> } }).result?.value ?? []).map((entry) => entry.id),
+      ['schedule-visible'],
+    );
+
+    // 主用户：同一上游响应原样透传，不做任何解析/过滤。
+    cookie = originalCookie;
+    const admin = await gatewayReq(
+      'POST',
+      '/api/schedule/catalog',
+      { 'content-type': 'application/json' },
+      JSON.stringify({ type: 'client-request', rpcId: 'schedule-catalog-admin', method: 'schedule/catalog', payload: { args: {} } }),
+    );
+    assert.equal(admin.status, 200, admin.body);
+    const adminValue = (JSON.parse(admin.body) as { result?: { value?: Array<{ id?: unknown }> } }).result?.value ?? [];
+    assert.equal(adminValue.length, 5, '主用户看到原始全局提醒清单');
+    assert.ok(adminValue.some((entry) => entry.id === 'schedule-hidden'), '主用户不受会话过滤');
+  } finally {
+    cookie = originalCookie;
+    fixture.connection.client.close();
+  }
+});
+
+test('rc.2 schedule/catalog：子用户响应结构异常时 fail-closed（502），不透传全局清单', async () => {
+  const fixture = await authorizedSubuserFixture('schedule-catalog-malformed-user');
+  const originalCookie = cookie;
+  const originalMode = scheduleCatalogResponseMode;
+  scheduleCatalogResponseMode = 'malformed';
+  try {
+    cookie = fixture.cookie;
+    const sub = await gatewayReq(
+      'POST',
+      '/api/schedule/catalog',
+      { 'content-type': 'application/json' },
+      JSON.stringify({ type: 'client-request', rpcId: 'schedule-catalog-bad', method: 'schedule/catalog', payload: { args: {} } }),
+    );
+    assert.equal(sub.status, 502, sub.body);
+    assert.equal(sub.body.includes('schedule-hidden'), false, '不得回放未过滤的全局清单');
+  } finally {
+    scheduleCatalogResponseMode = originalMode;
+    cookie = originalCookie;
+    fixture.connection.client.close();
+  }
+});
+
 test('权限：present.open 的 GET 与 POST 都做会话归属校验，POST 仍校验 action', async () => {
   const fixture = await authorizedSubuserFixture('present-open-user');
   const originalCookie = cookie;
@@ -4845,5 +4960,48 @@ test('Remote mux：不完整的 baseline 不抹掉仍合法的会话授权快照
     remoteMuxBaselineOmitVisibleWorkspace = false;
     cookie = originalCookie;
     fixture.connection.client.close();
+  }
+});
+
+// 上游响应头超时回归：上游卡死（既不回响应头也不断开）必须被有界地结束在 504，
+// 而不是让客户端永久挂起；已收到响应头的慢响应（SSE/长响应）必须不受该窗口约束。
+function withUpstreamResponseHeaderTimeoutMs<T>(value: string, run: () => Promise<T>): Promise<T> {
+  const previous = process.env.MCP_GATEWAY_UPSTREAM_HEADER_TIMEOUT_MS;
+  process.env.MCP_GATEWAY_UPSTREAM_HEADER_TIMEOUT_MS = value;
+  return run().finally(() => {
+    if (previous === undefined) delete process.env.MCP_GATEWAY_UPSTREAM_HEADER_TIMEOUT_MS;
+    else process.env.MCP_GATEWAY_UPSTREAM_HEADER_TIMEOUT_MS = previous;
+  });
+}
+
+test('上游响应头超时：接受请求后不回响应头时，网关有界返回 504 并中止上游请求', async () => {
+  holdResponseHeaders = true;
+  const startedAt = Date.now();
+  try {
+    const response = await withUpstreamResponseHeaderTimeoutMs('300', () =>
+      gatewayReq('POST', '/api/gateway-timeout-probe', { 'content-type': 'application/json' }, JSON.stringify({ probe: true })),
+    );
+    const elapsed = Date.now() - startedAt;
+    assert.equal(response.status, 504, '未收到响应头且上游不断开时必须返回 504');
+    assert.match(response.body, /timeout/i);
+    assert.ok(elapsed >= 250, `必须真的等到超时窗口而不是立刻失败（实际 ${elapsed}ms）`);
+  } finally {
+    holdResponseHeaders = false;
+  }
+});
+
+test('上游响应头超时：已收到响应头的慢响应（SSE/长响应）不被计时器误杀', async () => {
+  slowResponseBodyMs = 700;
+  const startedAt = Date.now();
+  try {
+    const response = await withUpstreamResponseHeaderTimeoutMs('300', () =>
+      gatewayReq('GET', '/api/gateway-timeout-probe'),
+    );
+    const elapsed = Date.now() - startedAt;
+    assert.equal(response.status, 200, '响应头已到达后不得因响应头计时器被中断');
+    assert.deepEqual(JSON.parse(response.body), { ok: true, slow: true });
+    assert.ok(elapsed >= 600, `慢响应应完整结束 body（实际 ${elapsed}ms）`);
+  } finally {
+    slowResponseBodyMs = 0;
   }
 });

@@ -1,7 +1,7 @@
 
 FROM node:22.19.0-slim
 
-ARG DSH_VERSION=0.1.7-alpha.2
+ARG DSH_VERSION=0.1.7-rc.2
 WORKDIR /opt/dsh-passwords
 
 RUN apt-get update \

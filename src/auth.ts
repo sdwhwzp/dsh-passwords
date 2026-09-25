@@ -404,7 +404,10 @@ export class AuthService {
       allowGitDownload: false,
       allowWorkspaceCreate: false,
       allowSsh: false,
-      allowedAgentPresets: [],
+      // NULL = 不限制：工作区被授权后，子用户应能正常创建会话并使用 Agent preset，
+      // 与 allowed_models 的空默认值语义一致。只有主用户在权限面板显式选择时
+      // 才写入白名单（非空）或「禁止全部」（[]）。
+      allowedAgentPresets: null,
       banned: false,
       sandboxMode: null,
       disabledSessions: [],

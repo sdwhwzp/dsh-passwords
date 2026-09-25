@@ -16,6 +16,7 @@ import {
   renameSync,
   rmSync,
   writeFileSync,
+  chmodSync,
   statSync,
   unlinkSync,
 } from 'node:fs';
@@ -934,7 +935,17 @@ export class UpdateEngine {
       const updated = /^MCP_DB_PATH=/m.test(raw)
         ? raw.replace(/^MCP_DB_PATH=.*$/m, line)
         : `${raw.trimEnd()}\n${line}\n`;
-      if (updated !== raw) writeFileSync(envFile, updated);
+      if (updated !== raw) {
+        const temporary = `${envFile}.tmp-${randomBytes(8).toString('hex')}`;
+        const mode = statSync(envFile).mode & 0o777;
+        try {
+          writeFileSync(temporary, updated);
+          chmodSync(temporary, mode);
+          renameSync(temporary, envFile);
+        } finally {
+          rmSync(temporary, { force: true });
+        }
+      }
       return true;
     } catch (error) {
       this.setError(`无法持久化数据库路径，已停止安装：${error instanceof Error ? error.message : String(error)}`);

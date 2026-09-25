@@ -360,6 +360,16 @@ test('源码契约：扫描行时排除注入按钮（原生 button 不会被当
   );
 });
 
+test('源码契约：兼容 rc.2 XMLHttpRequest 目录列表，并保留绝对路径安全边界', () => {
+  const source = pickerSource();
+  assert.match(source, /function wrapXhrForListings\(\)/);
+  assert.match(source, /Xhr\.prototype\.open/);
+  assert.match(source, /Xhr\.prototype\.send/);
+  assert.match(source, /captureListingEnvelope/);
+  assert.match(source, /parsed\.pathname === LIST_ENDPOINT_SUFFIX/);
+  assert.match(source, /wrapXhrForListings\(\);/);
+});
+
 test('源码契约：行复用重绑路径时同步解除在途 pending（修复永久 disabled 死锁）', () => {
   const source = pickerSource();
   // 旧实现因 pending 直接跳过整次注入：重绑后的新路径会带着旧请求的锁；该早退必须消失

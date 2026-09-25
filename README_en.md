@@ -17,7 +17,7 @@
   &nbsp;
   <a href="https://github.com/slywalker2006/dsh-passwords/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/slywalker2006/dsh-passwords/ci.yml?style=flat-square&label=CI" alt="CI"></a>
   &nbsp;
-  <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/DSH-0.1.7--alpha.2-4c6ef5?style=flat-square&labelColor=454a54" alt="DSH"></a>
+  <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/DSH-0.1.7--rc.2-4c6ef5?style=flat-square&labelColor=454a54" alt="DSH"></a>
   &nbsp;
   <img src="https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square" alt="License">
   &nbsp;
@@ -74,7 +74,7 @@
 
 ### Prerequisites
 
-Host installs need Node.js 22.19+ or 24+, a working dsh installation, and git. The compatibility gate accepts stable DSH `0.1.7` and its alpha/rc prereleases; development and bundled Docker are pinned to `0.1.7-alpha.2`. Compatibility targets also retain the full `0.1.6` / `0.1.5` lines and the `0.1.2` / `0.1.3` API boundaries. The alpha.2 profile has been deployed and validated on the test server. Docker installs only need Docker Engine or Docker Desktop and a DeepSeek API key.
+Host installs need Node.js 22.19+ or 24+, a working dsh installation, and git. The compatibility gate accepts stable DSH `0.1.7` and its alpha/rc prereleases; the current working tree pins development and bundled Docker to `0.1.7-rc.2`. Compatibility targets also retain the full `0.1.6` / `0.1.5` lines and the `0.1.2` / `0.1.3` API boundaries. The alpha.2 profile (v2.7.4) has been deployed and validated on the test server. Docker installs only need Docker Engine or Docker Desktop and a DeepSeek API key.
 
 ### Install
 
@@ -104,10 +104,10 @@ docker run -d \
   -p 127.0.0.1:3088:3088 \
   -v dsh-home:/data/dsh \
   -v dsh-passwords-state:/data/dsh-passwords \
-  skywalker237234/dsh-passwords:2.7.4
+  skywalker237234/dsh-passwords:2.7.5
 ```
 
-`.env` needs at least `DEEPSEEK_API_KEY`. Set `MCP_GATEWAY_PUBLIC_HOST` to the domain you actually use. The host publishes port `127.0.0.1:3088` only while the container listens on `0.0.0.0:3088`; terminate TLS on nginx or Caddy for public access. The image bundles DSH `0.1.7-alpha.2` (the pinned release of the DSH 0.1.7 line; image runtime acceptance has not been performed for this pin); initialization is complete when healthz and readyz both return `ok:true`.
+`.env` needs at least `DEEPSEEK_API_KEY`. Set `MCP_GATEWAY_PUBLIC_HOST` to the domain you actually use. The host publishes port `127.0.0.1:3088` only while the container listens on `0.0.0.0:3088`; terminate TLS on nginx or Caddy for public access. The image bundles DSH `0.1.7-rc.2` (the pinned release of the DSH 0.1.7 line; image runtime acceptance has not been performed for this pin); initialization is complete when healthz and readyz both return `ok:true`.
 
 Notes:
 
@@ -318,7 +318,7 @@ The bottleneck is usually the network path to the server.
 
 ## Manual install
 
-> v2.7.4 accepts stable DSH `0.1.7` and its SemVer prereleases, with development and bundled Docker pinned to alpha.2; it also retains compatibility targets for the full `0.1.6` / `0.1.5` lines and the `0.1.2` / `0.1.3` API boundaries. The alpha.2 profile and primary E2E flows have been checked on the test server; one media case reached the existing quota. The installer requires Node.js `22.19+` or `24+`, registers the plugin, detects dsh, and applies the compatibility patch.
+> v2.7.5 accepts stable DSH `0.1.7` and its alpha/beta/rc prereleases, with the working tree and bundled Docker pinned to `0.1.7-rc.2`; it also retains compatibility targets for the full `0.1.6` / `0.1.5` lines and the `0.1.2` / `0.1.3` API boundaries. The 2.7.5 test-server deployment, health/readiness, patch status, and multiuser flows were checked. The installer requires Node.js `22.19+` or `24+`, registers the plugin, detects dsh, and applies the compatibility patch.
 
 1. `git clone https://github.com/slywalker2006/dsh-passwords && cd dsh-passwords`
 2. `npm install && npm run build`
@@ -345,7 +345,7 @@ The UI is bilingual zh/en and follows the dsh language setting. The login page h
 
 ## Version compatibility
 
-Current version: 2.7.4. The DSH compatibility gate accepts the stable 0.1.7 line and SemVer prereleases; development and bundled Docker are pinned to alpha.2. Test-server runtime and primary E2E flows have been checked; one media case reached the existing quota. Compatibility targets also retain the whole DSH `0.1.6` / `0.1.5` lines and the `0.1.2` / `0.1.3` API boundaries. The npm package ships prebuilt dist, TypeScript sources, and all scripts; Docker and npm are built from the same source revision.
+Latest published release: 2.7.5, pinned to DSH `0.1.7-rc.2`. The DSH compatibility gate accepts the stable 0.1.7 line and SemVer alpha/beta/rc prereleases. Compatibility targets also retain the whole DSH `0.1.6` / `0.1.5` lines and the `0.1.2` / `0.1.3` API boundaries. The npm package ships prebuilt dist, TypeScript sources, and all scripts; Docker and npm are built from the same source revision.
 
 ## Contributing
 
