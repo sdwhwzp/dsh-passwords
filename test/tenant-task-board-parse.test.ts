@@ -9,6 +9,7 @@ import jwt from 'jsonwebtoken';
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm';
 import { registerTenantTaskBoard } from '../dist/tenant-task-board.js';
 import { signedPrincipalHeaders } from '../src/principal.js';
+import type { HostTimerFace } from '../src/task-board-engine.js';
 
 async function listen(t: TestContext, handler: RequestListener): Promise<string> {
   const server = http.createServer(handler);
@@ -20,7 +21,7 @@ async function listen(t: TestContext, handler: RequestListener): Promise<string>
   return `http://127.0.0.1:${(server.address() as { port: number }).port}`;
 }
 
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, timer?: HostTimerFace) {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'tenant-board-parse-'));
   const disposers: Array<() => void> = [];
   t.after(async () => {
@@ -46,6 +47,7 @@ async function fixture(t: TestContext) {
   };
   const calls: GenerateOptions[] = [];
   const catalogCalls: Array<{ id: number; args: unknown }> = [];
+  const taskCalls: Array<{ id: number; method: string; args: Record<string, unknown> }> = [];
   const billed: Array<{ id: number; tokens: number }> = [];
   const spend: Array<{ principal: { id: string }; call: Record<string, unknown> }> = [];
   const gatewayOrigin = await listen(t, async (req, res) => {
@@ -56,6 +58,12 @@ async function fixture(t: TestContext) {
     const id = Number((jwt.verify(token, 'jwt-test') as { sub: string }).sub);
     if (body.method === 'session/list') {
       res.end(JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: { ok: true, value: { items: [] } } }));
+      return;
+    }
+    if (timer && ['session/create', 'session/rename', 'session/prompt'].includes(body.method)) {
+      taskCalls.push({ id, method: body.method, args: body.payload.args });
+      const value = body.method === 'session/create' ? { sessionId: `scheduled-${id}-${taskCalls.length}` } : {};
+      res.end(JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: { ok: true, value } }));
       return;
     }
     assert.equal(body.method, 'session/modelCatalog');
@@ -69,6 +77,7 @@ async function fixture(t: TestContext) {
     webServer: { register(route: { path: string; handler: RequestListener }) { routes.set(route.path, route.handler); return () => routes.delete(route.path); } },
     effect(register: () => () => void) { disposers.push(register()); },
     get(name: string) {
+      if (name === 'timer') return timer;
       if (name === 'llm') return { stream(options: GenerateOptions) { calls.push(options); return state.stream(options); } };
       if (name === 'spendAccounting') return {
         reconcile: () => state.reconcile(),
@@ -101,7 +110,29 @@ async function fixture(t: TestContext) {
     for (const dispose of disposers.splice(0).reverse()) dispose();
     register();
   };
-  return { state, users, calls, catalogCalls, billed, spend, parse, origin, headers, reload };
+  return { state, users, calls, catalogCalls, taskCalls, billed, spend, parse, origin, headers, reload };
+}
+
+/** Advance only board deadlines; HTTP sockets and gateway deadlines keep real timers. */
+function boardTimers() {
+  const deadlines = new Set<{ callback: () => void; at: number }>();
+  const intervals = new Set<() => void>();
+  const timer: HostTimerFace = {
+    timeout(callback, delay) {
+      const item = { callback, at: Date.now() + delay };
+      deadlines.add(item);
+      return () => { deadlines.delete(item); };
+    },
+    interval(callback) { intervals.add(callback); return () => { intervals.delete(callback); }; },
+  };
+  return {
+    timer, deadlines, intervals,
+    fireDue() {
+      for (const item of [...deadlines]) {
+        if (item.at <= Date.now()) { deadlines.delete(item); item.callback(); }
+      }
+    },
+  };
 }
 
 test('task parsing uses the account catalog and only the submitted text without creating a task', async t => {
@@ -285,4 +316,116 @@ test('tenant task-board parent creation and relinking reject references to anoth
     assert.equal(board.tasks[0].parentId, undefined);
   }
   assert.equal(f.calls.length, 0);
+});
+
+for (const creation of ['create', 'import'] as const) {
+  test(`tenant cron ${creation} arms immediately and dispatches only through its owner gateway`, { timeout: 10_000 }, async t => {
+    const start = new Date(2026, 8, 27, 10, 0, 30).getTime();
+    t.mock.timers.enable({ apis: ['Date'], now: start });
+    const probe = boardTimers();
+    const f = await fixture(t, probe.timer);
+    for (const id of [2, 3]) {
+      const input = { title: `Account ${id}`, description: '', prompt: `Only account ${id}`, schedule: { enabled: true, cron: '* * * * *' } };
+      const taskId = `task-${id}`;
+      const action = creation === 'create' ? { kind: creation, id: taskId, input } : {
+        kind: creation, sourceId: `import-${id}`, tasks: [{ ...input, id: taskId, status: 'todo', executions: [], createdAt: start, updatedAt: start }],
+      };
+      const response = await fetch(f.origin + '/api/task-board/action', {
+        method: 'POST', headers: f.headers(id), body: JSON.stringify({ requestId: randomUUID(), action }),
+      });
+      assert.equal(response.status, 200, await response.clone().text());
+      await response.body?.cancel();
+    }
+    assert.deepEqual([...probe.deadlines].map(item => item.at), [start + 30_000, start + 30_000]);
+    t.mock.timers.setTime(start + 29_999);
+    probe.fireDue();
+    assert.equal(f.taskCalls.length, 0);
+    t.mock.timers.setTime(start + 30_000);
+    probe.fireDue();
+    for (const id of [2, 3]) {
+      const deadline = performance.now() + 3_000;
+      for (;;) {
+        const response = await fetch(f.origin + '/api/task-board/state', { headers: f.headers(id) });
+        const board = await response.json();
+        assert.deepEqual(board.tasks.map((task: { id: string }) => task.id), [`task-${id}`]);
+        if (board.tasks[0].executions[0]?.sessionId) {
+          assert.match(board.tasks[0].executions[0].sessionId, new RegExp(`^scheduled-${id}-`));
+          break;
+        }
+        assert.ok(performance.now() < deadline, 'scheduled execution did not finish gateway admission');
+      }
+      const calls = f.taskCalls.filter(call => call.id === id);
+      assert.deepEqual(calls.map(call => call.method), ['session/create', 'session/rename', 'session/prompt']);
+      const prompt = calls[2].args.request as { sessionId: string; content: unknown };
+      assert.match(prompt.sessionId, new RegExp(`^scheduled-${id}-`));
+      assert.match(JSON.stringify(prompt.content), new RegExp(`Only account ${id}`));
+    }
+    assert.equal(f.calls.length, 0, 'fake gateway never makes a real model call');
+  });
+}
+
+test('tenant schedule changes cancel old deadlines and restart skips missed occurrences', { timeout: 10_000 }, async t => {
+  const start = new Date(2026, 8, 27, 10, 0, 30).getTime();
+  t.mock.timers.enable({ apis: ['Date'], now: start });
+  const probe = boardTimers();
+  const f = await fixture(t, probe.timer);
+  const action = async (id: number, value: object, expected = 200) => {
+    const response = await fetch(f.origin + '/api/task-board/action', {
+      method: 'POST', headers: f.headers(id), body: JSON.stringify({ requestId: randomUUID(), action: value }),
+    });
+    assert.equal(response.status, expected, await response.clone().text());
+    return response.json();
+  };
+  const input = { title: 'Mine', description: '', prompt: 'Mine', schedule: { enabled: true, cron: '* * * * *' } };
+  await action(2, { kind: 'create', id: 'mine', input });
+  await action(3, { kind: 'set-schedule', taskId: 'mine', patch: { cron: '*/5 * * * *' } }, 400);
+  assert.deepEqual([...probe.deadlines].map(item => item.at), [start + 30_000]);
+  await action(2, { kind: 'set-schedule', taskId: 'mine', patch: { cron: '*/5 * * * *' } });
+  assert.deepEqual([...probe.deadlines].map(item => item.at), [start + 270_000]);
+  await action(2, { kind: 'set-schedule', taskId: 'mine', patch: { enabled: false } });
+  assert.equal(probe.deadlines.size, 0);
+  await action(2, { kind: 'set-schedule', taskId: 'mine', patch: { enabled: true, cron: '* * * * *' } });
+  const cancelled = [...probe.deadlines];
+  t.mock.timers.setTime(start + 180_000);
+  f.reload();
+  assert.ok(cancelled.every(item => !probe.deadlines.has(item)), 'restart cancels previous account timers');
+  assert.equal(probe.intervals.size, 2, 'one roster timer per restored account');
+  assert.deepEqual([...probe.deadlines].map(item => item.at), [start + 210_000]);
+  const boardResponse = await fetch(f.origin + '/api/task-board/state', { headers: f.headers(2) });
+  const board = await boardResponse.json();
+  assert.equal(board.tasks[0].executions.length, 0, 'missed cron occurrences are not replayed');
+  assert.equal(f.taskCalls.length, 0);
+  await action(2, { kind: 'archive', taskId: 'mine' });
+  assert.equal(probe.deadlines.size, 0);
+  await action(2, { kind: 'create', id: 'delete-me', input });
+  assert.equal(probe.deadlines.size, 1);
+  await action(2, { kind: 'delete', taskId: 'delete-me' });
+  assert.equal(probe.deadlines.size, 0);
+});
+
+test('a revoked tenant cannot execute an already armed cron occurrence', { timeout: 10_000 }, async t => {
+  const start = new Date(2026, 8, 27, 10, 0, 30).getTime();
+  t.mock.timers.enable({ apis: ['Date'], now: start });
+  const probe = boardTimers();
+  const f = await fixture(t, probe.timer);
+  const created = await fetch(f.origin + '/api/task-board/action', {
+    method: 'POST', headers: f.headers(2), body: JSON.stringify({ requestId: randomUUID(), action: {
+      kind: 'create', id: 'revoked', input: { title: 'Revoked', description: '', prompt: 'Do not run', schedule: { enabled: true, cron: '* * * * *' } },
+    } }),
+  });
+  assert.equal(created.status, 200, await created.clone().text());
+  await created.body?.cancel();
+  const owner = f.users.get(2)!;
+  f.users.delete(2);
+  t.mock.timers.setTime(start + 30_000);
+  probe.fireDue();
+  const denied = await fetch(f.origin + '/api/task-board/state', { headers: f.headers(2) });
+  assert.equal(denied.status, 403);
+  await denied.body?.cancel();
+  assert.deepEqual(f.taskCalls, [], 'fresh account validation rejects before any session mutation reaches the gateway');
+  f.users.set(2, owner);
+  const response = await fetch(f.origin + '/api/task-board/state', { headers: f.headers(2) });
+  const board = await response.json();
+  assert.equal(board.tasks[0].executions[0].result, 'failed');
+  assert.match(board.tasks[0].executions[0].error, /task owner unavailable/);
 });

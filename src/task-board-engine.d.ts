@@ -7,9 +7,15 @@ export interface BoardGateway {
   stream(request: BoardGatewayRequest): Promise<AsyncIterable<unknown>>;
 }
 export class HostTaskLedger { constructor(directory: string) }
+/** Host-owned timer handles are cancelled when an account board is disposed. */
+export interface HostTimerFace {
+  timeout(callback: () => void, delay: number): () => void;
+  interval(callback: () => void, delay: number): () => void;
+}
 export class TaskBoardHostService {
   constructor(gateway: BoardGateway, options: {
     ledger: HostTaskLedger;
+    timers?: HostTimerFace;
     commandDispatcher: { execute(sessionId: string, line: string, signal: AbortSignal): Promise<unknown> };
   });
   start(): void;

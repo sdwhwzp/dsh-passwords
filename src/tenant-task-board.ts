@@ -10,7 +10,7 @@ import type { LlmRuntime, TokenUsage } from '@deepseek-ai/dsh-llm';
 import type { Database } from './db.js';
 import type { PlatformConfig } from './config.js';
 import { verifyPrincipalHeaders, type AuthenticatedPrincipal } from './principal.js';
-import { TaskBoardHostService, HostTaskLedger, makeTaskBoardRoutes, parseTaskDraft, splitModelRoute, TaskParseError, type BoardGatewayRequest, type BoardParseRequest } from './task-board-engine.js';
+import { TaskBoardHostService, HostTaskLedger, makeTaskBoardRoutes, parseTaskDraft, splitModelRoute, TaskParseError, type BoardGatewayRequest, type BoardParseRequest, type HostTimerFace } from './task-board-engine.js';
 import { customerModelAllowed } from './model-policy.js';
 import { todayLocal } from './permissions.js';
 import { dailyTimeQuotaError, hourlyTokenQuotaError, monthlySpendQuotaError, spendCheckUnavailableError } from './quota-notice.js';
@@ -87,6 +87,7 @@ export function registerTenantTaskBoard(ctx: Context, db: Database, config: Plat
   const settings = config.tenantTaskBoard;
   if (!settings?.enabled) return;
   const directory = settings.directory;
+  const timer = ctx.get('timer') as HostTimerFace | undefined;
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const boards = new Map<string, { principal: AuthenticatedPrincipal; service: TaskBoardHostService; routes: ReturnType<typeof makeTaskBoardRoutes> }>();
   const validate = (principal: AuthenticatedPrincipal) => {
@@ -135,6 +136,10 @@ export function registerTenantTaskBoard(ctx: Context, db: Database, config: Plat
     });
     const service = new TaskBoardHostService(gateway, {
       ledger: new HostTaskLedger(ledgerPath),
+      timers: timer === undefined ? undefined : {
+        timeout: (callback, delay) => timer.timeout(callback, delay),
+        interval: (callback, delay) => timer.interval(callback, delay),
+      },
       commandDispatcher: { execute: (sessionId, line, signal) => gateway.invoke({ namespace: 'commands', method: 'execute', args: { agentId: sessionId, line, submittedAttachments: [] }, signal }) },
     });
     const parseTask = async (request: BoardParseRequest, signal: AbortSignal) => {

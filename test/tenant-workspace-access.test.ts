@@ -50,6 +50,7 @@ test('task-board HTTP state and mutations are isolated by signed principal and p
   const disposers: Function[] = [];
   const db = { getUserById: (id: number) => users.get(String(id)), getPermissions: () => ({ banned: false }) };
   const ctx = {
+    get() { return undefined; },
     webServer: { register(route: { path: string; handler: Function }) { routes.set(route.path, route.handler); return () => routes.delete(route.path); } },
     effect(register: Function) { disposers.push(register()); },
   };

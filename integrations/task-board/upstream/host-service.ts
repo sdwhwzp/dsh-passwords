@@ -39,20 +39,62 @@ export interface TaskBoardTeamDispatcher {
   spawn(input: TeamSpawnInput): Promise<TeamSpawnResult>
 }
 
+/** Session-roster poll cadence — the one recurring Host timer this service still holds. */
 const SESSION_POLL_MS = 5_000
-const SCHEDULE_TICK_MS = 30_000
-const RESUME_GAP_MS = SCHEDULE_TICK_MS + 15_000
+/**
+ * How late an armed schedule fire may be before it counts as a resume rather
+ * than a normal occurrence. The schedule timer is armed AT the next due
+ * instant, so landing this far past its target means the Host was suspended,
+ * the process throttled, or the wall clock jumped forward — the same condition
+ * the old fixed 30 s heartbeat detected through its own gap threshold.
+ */
+const RECOVERY_TOLERANCE_MS = 60_000
+/** Largest delay a Node timer represents without clamping; longer targets re-arm in segments. */
+const MAX_TIMER_DELAY_MS = 2_147_483_647
+
+/**
+ * Actions that can move an armed trigger. Only these re-arm the native timer;
+ * an unrelated card edit leaves the pending fire untouched.
+ */
+const SCHEDULE_WRITE_ACTIONS: ReadonlySet<TaskBoardAction['kind']> = new Set(['create', 'import', 'set-schedule', 'delete', 'archive'])
+
+/**
+ * The native timer face the Host arms through. The cordis `timer` service
+ * (dsh-base's own `cordis-plugin-timer` row) provides it: its handles are
+ * registered on the owning fiber, so unloading the board clears every armed
+ * timer without this service tracking handles by hand. A composition that
+ * serves no timer service falls back to the process globals.
+ */
+export interface HostTimerFace {
+  timeout(callback: () => void, delay: number): () => void
+  interval(callback: () => void, delay: number): () => void
+}
+
+/** Process-global fallback used when the deployment serves no cordis timer service. */
+const PROCESS_TIMERS: HostTimerFace = {
+  timeout(callback: () => void, delay: number): () => void {
+    const handle = setTimeout(callback, delay)
+    return () => { clearTimeout(handle) }
+  },
+  interval(callback: () => void, delay: number): () => void {
+    const handle = setInterval(callback, delay)
+    return () => { clearInterval(handle) }
+  },
+}
 
 export class TaskBoardHostService {
   readonly ledger: HostTaskLedger
   readonly runner: HostExecutionRunner
   readonly power: PowerInhibitor
   private readonly listeners = new Set<() => void>()
-  private timers: Array<ReturnType<typeof setInterval>> = []
-  private lastScheduleTick: number | undefined
+  /** The one recurring timer: the session-roster poll. */
+  private pollTimer: (() => void) | undefined
+  /** The armed schedule timer, if a trigger is pending. */
+  private scheduleTimer: (() => void) | undefined
+  /** The instant the armed schedule timer targets (ms epoch), for resume detection. */
+  private scheduleTarget: number | undefined
   private disposed = false
   private pollInFlight = false
-  private tickInFlight = false
   private active = true
   /**
    * Ids the last roster poll saw as present and idle; undefined while the
@@ -65,6 +107,7 @@ export class TaskBoardHostService {
   private readonly accounts: TaskBoardAccounts | undefined
   private preventIdleSleep = false
   private readonly team: TaskBoardTeamDispatcher | undefined
+  private readonly timers: HostTimerFace
   private lastPowerJson = ''
   private readonly now: () => number
 
@@ -78,6 +121,7 @@ export class TaskBoardHostService {
     accounts?: TaskBoardAccounts
     maxSubtaskDepth?: number
     team?: TaskBoardTeamDispatcher
+    timers?: HostTimerFace
   } = {}) {
     this.ledger = options.ledger ?? new HostTaskLedger(undefined, undefined, {
       sessionDefaultPermission: options.sessionDefaultPermission,
@@ -86,6 +130,7 @@ export class TaskBoardHostService {
     this.accounts = options.accounts
     this.runner = new HostExecutionRunner(gateway, options.commandDispatcher, options.workspaceRegistry, undefined, principal => this.accounts?.assert(principal))
     this.team = options.team
+    this.timers = options.timers ?? PROCESS_TIMERS
     this.power = options.power ?? new PowerInhibitor()
     this.now = options.now ?? Date.now
     installStreamErrorGuards()
@@ -105,12 +150,15 @@ export class TaskBoardHostService {
   }
 
   start(): void {
-    if (this.disposed || this.timers.length > 0) return
+    if (this.disposed || this.pollTimer !== undefined) return
     this.syncPowerReasons()
-    this.timers.push(setInterval(() => { this.schedulePoll() }, SESSION_POLL_MS))
-    this.timers.push(setInterval(() => { this.scheduleTick(false) }, SCHEDULE_TICK_MS))
+    this.pollTimer = this.timers.interval(() => { this.schedulePoll() }, SESSION_POLL_MS)
     this.schedulePoll()
-    this.scheduleTick(true)
+    // Boot is a recovery point: an occurrence armed while the Host was down is
+    // not replayed, and each schedule rolls to its next future target. A
+    // schedule the Board should have served while running is then armed
+    // normally by the timer below.
+    this.recoverSchedule()
   }
 
   setConfiguration(active: boolean, preventIdleSleep: boolean): void {
@@ -128,7 +176,11 @@ export class TaskBoardHostService {
     this.power.setEnabled(active && preventIdleSleep)
     if (resumed) {
       this.schedulePoll()
-      this.scheduleTick(true)
+      this.recoverSchedule()
+    } else if (!active) {
+      // A disabled board holds no timer: its schedules must not fire while the
+      // master switch is off.
+      this.clearScheduleTimer()
     }
     this.emit()
   }
@@ -176,6 +228,10 @@ export class TaskBoardHostService {
     }
     const result = this.ledger.applyRequest(requestId, action, initiator, principal)
     if (result.runs !== undefined) this.dispatchRuns(result.runs)
+    // A committed schedule write (create / update / toggle / delete) moves the
+    // nearest trigger; re-arm on schedule writes so a newly enabled schedule fires
+    // at its own instant without waiting for the previous target to elapse.
+    if (SCHEDULE_WRITE_ACTIONS.has(action.kind)) this.refreshSchedule()
     return {
       schemaVersion: TASK_BOARD_SCHEMA_VERSION,
       revision: result.state.revision,
@@ -187,7 +243,9 @@ export class TaskBoardHostService {
 
   dispose(): void {
     this.disposed = true
-    for (const timer of this.timers.splice(0)) clearInterval(timer)
+    this.clearScheduleTimer()
+    this.pollTimer?.()
+    this.pollTimer = undefined
     this.power.dispose()
     this.ledger.dispose()
     this.listeners.clear()
@@ -312,20 +370,72 @@ export class TaskBoardHostService {
     }
   }
 
-  private async tickSchedule(first: boolean): Promise<void> {
+  /** Drop the armed schedule timer and forget its target. */
+  private clearScheduleTimer(): void {
+    this.scheduleTimer?.()
+    this.scheduleTimer = undefined
+    this.scheduleTarget = undefined
+  }
+
+  /**
+   * Boot / resume recovery: skip every occurrence that came due while the
+   * board was not running and roll each schedule to its next future target,
+   * then arm the timer for the nearest one. Rendering the occurrence is
+   * deliberately not attempted: the ACL of a card that fired hours ago is
+   * stale, and the board's own recovery contract is "missed triggers are
+   * skipped, never replayed".
+   */
+  private recoverSchedule(): void {
+    if (this.disposed) return
+    this.clearScheduleTimer()
+    const now = this.now()
+    this.ledger.setScheduler({ lastTickAt: now })
+    this.ledger.skipMissed(now)
+    this.armSchedule()
+  }
+
+  /**
+   * Arm the native timer at the nearest armed future trigger. One timer serves
+   * every schedule: the ledger's next target is the only instant the Host has
+   * to wake for. A target beyond the platform's timer ceiling re-arms in
+   * segments, and a target already past (the wall clock jumped, or the process
+   * was suspended) is handled immediately as a recovery.
+   */
+  private armSchedule(): void {
+    if (this.disposed || !this.active) return
+    this.clearScheduleTimer()
+    const target = this.ledger.nextArmedRunAt(this.now())
+    if (target === undefined) return
+    this.scheduleTarget = target
+    const delay = Math.max(0, Math.min(target - this.now(), MAX_TIMER_DELAY_MS))
+    this.scheduleTimer = this.timers.timeout(() => {
+      this.scheduleTimer = undefined
+      this.onScheduleFire(target)
+    }, delay)
+  }
+
+  /**
+   * One armed target became due. A fire landing well past its target is a
+   * resume (suspend, throttle, forward clock jump) rather than a normal
+   * occurrence, so it takes the recovery path instead of launching a run for a
+   * long-stale instant.
+   */
+  private onScheduleFire(target: number): void {
     if (this.disposed || !this.active) return
     const now = this.now()
-    const recovered = first || (this.lastScheduleTick !== undefined && now - this.lastScheduleTick > RESUME_GAP_MS)
-    this.lastScheduleTick = now
+    this.scheduleTarget = undefined
     this.ledger.setScheduler({ lastTickAt: now })
-    if (recovered) {
-      this.ledger.skipMissed(now)
+    if (now - target > RECOVERY_TOLERANCE_MS) {
+      this.recoverSchedule()
       return
     }
     for (const schedule of this.ledger.dueSchedules(now)) {
       const next = nextRunAtMs(schedule.cron, schedule.nextRunAt)
       this.dispatchRuns(this.ledger.openScheduled(schedule.taskId, next, now))
     }
+    // The launched run (or the rolled-forward target) moved every due schedule,
+    // so the next nearest target has to be recomputed from the ledger.
+    this.armSchedule()
   }
 
   private armedSchedules(): number {
@@ -363,12 +473,18 @@ export class TaskBoardHostService {
     }).finally(() => { this.pollInFlight = false })
   }
 
-  private scheduleTick(first: boolean): void {
-    if (this.tickInFlight || this.disposed) return
-    this.tickInFlight = true
-    void this.tickSchedule(first).catch(error => {
-      safeConsoleError('[dsh-task-board] scheduler tick failed', error)
-    }).finally(() => { this.tickInFlight = false })
+  /**
+   * Re-arm from the ledger's current targets. Callers that just changed a
+   * schedule (the host routes, the agent tools) invoke this after the write
+   * commits, so a new or edited trigger arms without waiting for the next fire.
+   */
+  refreshSchedule(): void {
+    if (this.disposed) return
+    if (!this.active) {
+      this.clearScheduleTimer()
+      return
+    }
+    this.armSchedule()
   }
 
   private syncPowerReasons(): void {

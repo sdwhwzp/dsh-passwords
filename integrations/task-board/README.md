@@ -1,6 +1,6 @@
 # Task board Host engine
 
-Pinned from [sdwhwzp/dsh-web](https://github.com/sdwhwzp/dsh-web) commit `cd033eff9f2d7a08ea361314ca83afb8bfca5651`, package `@linxin666/dsh-client-ui-task-board` version `0.4.2-dsh.20260926.1` (Apache-2.0). [source.json](source.json) records the 24 files in the Host service, ledger, routes and parser dependency closure with their Git blob hashes. Files under `upstream/` are unchanged copies of that commit.
+Pinned from [sdwhwzp/dsh-web](https://github.com/sdwhwzp/dsh-web) commit `282c164b27af96b4faa97ea2e6fdc5320a465007`, package `@linxin666/dsh-client-ui-task-board` version `0.4.3-dsh.20260927.1` (Apache-2.0). [source.json](source.json) records the 24 files in the Host service, ledger, routes and parser dependency closure with their Git blob hashes. Files under `upstream/` are unchanged copies of that commit.
 
 The tenant adapter authenticates requests, isolates ledgers by account and sends every execution RPC through the passwords gateway. Parent-child links, workspace IDs, tags and session-reuse preferences survive ledger reloads; the matching dsh-web client uses those workspace IDs for project partitions. Parent links can reference only tasks in the same account ledger; absent parents and cycles are rejected. Workspace creation and session reuse retain the gateway's account permissions and session ownership checks.
 
@@ -11,3 +11,5 @@ The parser requires `spendAccounting.recordUsage`, records the last usage counte
 Synchronizing dsh-web task-board changes also requires refreshing this Host dependency closure and its source manifest before packaging dsh-passwords; both provide the same browser action protocol.
 
 Rebuild with `node scripts/build-task-board.mjs` after compiling `src/tenant-task-board.ts`. Run `node --import tsx --test test/tenant-task-board-parse.test.ts test/tenant-workspace-access.test.ts` for account isolation, project persistence, model admission, quotas, usage recording, provider failures and cancellation.
+
+Each account arms one deadline timer for its earliest cron occurrence through the Host timer service when available. Creating or importing an enabled schedule arms it immediately; rescheduling, archiving, deletion and disposal cancel obsolete timers. Startup and resume skip missed occurrences. Ledger schema 3 and per-account storage locations are unchanged.
