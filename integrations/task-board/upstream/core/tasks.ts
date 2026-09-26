@@ -10,6 +10,9 @@ import type { TaskHandover, TaskHandoverInput } from './handover.ts'
 /** Task lifecycle status, one per kanban column. */
 export type TaskStatus = 'backlog' | 'todo' | 'running' | 'done' | 'failed'
 
+/** Settled outcome of one execution attempt. */
+export type ExecutionOutcome = 'succeeded' | 'failed' | 'cancelled'
+
 /**
  * One real execution attempt: the run's own id, the dsh session that ran it
  * (filled once the session is created), and the settled outcome once the
@@ -25,7 +28,7 @@ export interface ExecutionRecord {
   /** When the run settled; absent while still running. */
   endedAt: number | undefined
   /** Outcome once settled. */
-  result: 'succeeded' | 'failed' | 'cancelled' | undefined
+  result: ExecutionOutcome | undefined
   /** Human failure text when the run failed (prompt rejection or agent error). */
   error: string | undefined
   /**
@@ -38,6 +41,20 @@ export interface ExecutionRecord {
   frozenAt?: number
   /** Freeze source session captured from the card snapshot when the run opened. */
   frozenBy?: string
+  /**
+   * Cascade run group shared by the parent execution and every descendant
+   * execution one run request opened. Absent on a plain single-task run.
+   */
+  runGroupId?: string
+  /**
+   * A cascade parent's own session outcome, recorded as soon as its own turn
+   * settles and held while its subtask executions finish. The execution stays
+   * open (no `endedAt`) until the last child settles; the Host monitor skips
+   * an execution whose own outcome is already recorded.
+   */
+  ownResult?: ExecutionOutcome
+  /** Human failure text that arrived with {@link ownResult}. */
+  ownError?: string
 }
 
 /**
@@ -203,6 +220,14 @@ export interface TaskRecord {
   description: string
   /** The prompt sent to dsh when this task is executed. */
   prompt: string
+  /**
+   * Parent task id: present only on a subtask. The Host owns the lineage gate
+   * (see `core/subtask.ts`), which refuses a cycle, an archived parent, and
+   * any link that would exceed `maxSubtaskDepth` — so every chain the Host
+   * wrote under the current setting is at most that many links long. Lowering
+   * the limit later neither rewrites nor deletes an already stored link.
+   */
+  parentId?: string
   /** Current column. */
   status: TaskStatus
   /** Creation instant (ms epoch). */
@@ -244,6 +269,15 @@ export interface TaskRecord {
    * {@link reusableSessionId}).
    */
   reuseSession?: boolean
+  /**
+   * Run this task's subtree as an Agent Team instead of one Host-launched
+   * session per participant: the root becomes the Team Lead session and the
+   * Host spawns one teammate for each direct subtask inside it. Absent or false
+   * keeps the plain concurrent cascade. A deployment that does not serve the
+   * Agent Teams service refuses a team run instead of silently falling back,
+   * and a subtask's own permission pin cannot be honored in this mode.
+   */
+  teamRun?: boolean
   /**
    * Frozen context snapshot for a continuation card; absent on plain tasks.
    * Sanitized before it enters the ledger (redaction, slash-command taint,
@@ -302,6 +336,12 @@ export interface NewTaskInput {
   title: string
   description: string
   prompt: string
+  /**
+   * Parent task id, turning this creation into a subtask. Absent keeps a root
+   * task; the create use case validates the link (existence, depth) and
+   * inherits the parent's unset execution targets.
+   */
+  parentId?: string
   /** Workspace the execution must run in; empty/absent = the recent workspace. */
   workspaceId?: string
   /** Agent preset the execution session must be composed from; empty/absent = deployment default. */
@@ -312,6 +352,8 @@ export interface NewTaskInput {
   model?: string
   /** Reuse the previous execution's session for later runs (issue #1419). */
   reuseSession?: boolean
+  /** Run the subtree as an Agent Team (Team Lead session plus one teammate per direct subtask). */
+  teamRun?: boolean
   /**
    * Optional scheduled-run rule requested at creation time (the new-task
    * dialog): an enable flag plus a 5-field cron expression. The create use
@@ -397,6 +439,7 @@ export function createTask(input: NewTaskInput, now: number, id: string): TaskRe
     title: input.title.trim(),
     description: input.description.trim(),
     prompt: input.prompt.trim(),
+    parentId: normalizeTargetId(input.parentId),
     status: 'todo',
     createdAt: now,
     updatedAt: now,
@@ -406,6 +449,7 @@ export function createTask(input: NewTaskInput, now: number, id: string): TaskRe
     permission: isTaskPermission(input.permission) ? input.permission : undefined,
     model: normalizeTargetId(input.model),
     reuseSession: input.reuseSession === true ? true : undefined,
+  teamRun: input.teamRun === true ? true : undefined,
     ...(input.freeze === undefined ? {} : { freeze: freezeOf(input.freeze, now) }),
     ...(input.handover === undefined ? {} : { handover: { ...input.handover, bundledAt: now } }),
     ...(tags === undefined ? {} : { tags }),
@@ -445,12 +489,15 @@ export function withSchedule(
 /**
  * Open a fresh execution on a task: move it to 'running' and append a
  * running execution record. Returns the new task and the new execution.
+ * @param runGroupId - cascade run group, when this run also opened executions
+ *   for the task's subtasks (see `core/subtask.ts`).
  */
 export function startExecution(
   task: TaskRecord,
   now: number,
   executionId: string,
   initiatedBy?: string,
+  runGroupId?: string,
 ): { task: TaskRecord; execution: ExecutionRecord } {
   const execution: ExecutionRecord = {
     id: executionId,
@@ -459,6 +506,7 @@ export function startExecution(
     endedAt: undefined,
     result: undefined,
     error: undefined,
+    ...(runGroupId === undefined || runGroupId === '' ? {} : { runGroupId }),
     ...(initiatedBy === undefined || initiatedBy === '' ? {} : { initiatedBy }),
     // Capture the card's freeze provenance on the execution record so the
     // audit trail stays queryable even if the snapshot is replaced later.
@@ -486,7 +534,7 @@ export function startExecution(
 export function settleExecution(
   task: TaskRecord,
   executionId: string,
-  outcome: 'succeeded' | 'failed' | 'cancelled',
+  outcome: ExecutionOutcome,
   now: number,
   error: string | undefined,
 ): TaskRecord {

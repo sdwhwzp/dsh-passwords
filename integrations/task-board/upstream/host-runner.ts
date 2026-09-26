@@ -3,6 +3,7 @@ import type { SessionAddress, SessionHistoryRecord, SessionListValue, SessionPag
 import type { CommandResult } from '@deepseek-ai/dsh-commands/types'
 import type { Workspace } from '@deepseek-ai/dsh-workspace/types'
 import type { TaskBoardPrincipal } from './host-accounts.ts'
+import { teammateName } from './core/subtask.ts'
 import type { TaskPermission, TaskRecord } from './core/tasks.ts'
 
 /** Host services needed to validate a task's workspace before creating a session. */
@@ -55,6 +56,18 @@ function isInvocationUnavailable(error: unknown): boolean {
  */
 function isPrincipalRequired(error: unknown): boolean {
   return (error as { code?: unknown }).code === 'PRINCIPAL_ACCESS_DENIED'
+}
+
+/**
+ * Whether the endpoint exists but its strict definition was withdrawn by the
+ * running gateway (the cohort changed under this plugin). The plugin can send
+ * the call correctly and still be refused, and nothing in this repository can
+ * restore the definition, so the roster is treated as unknown quietly instead
+ * of printing an error the user has no action for (#1672).
+ */
+function isDefinitionWithdrawn(error: unknown): boolean {
+  const code = (error as { code?: unknown }).code
+  return code === 'definition-unavailable' || code === 'gateway/definition-unavailable'
 }
 
 const SERVICE_UNAVAILABLE_ATTEMPTS = 5
@@ -119,7 +132,47 @@ function escapeProvenanceDelimiter(value: string): string {
  * first, the provenance wrap then encloses the instruction. Plain tasks (no
  * freeze) keep the bare handover preamble + prompt.
  */
-export function promptText(task: TaskRecord): string {
+/** One other execution member of a run, as named in the launched task's prompt. */
+export interface PromptPeer {
+  /** Task id of the member. */
+  id: string
+  /** Member title. */
+  title: string
+  /** Teammate name when this member runs as a teammate. */
+  name?: string
+}
+
+/** Execution-shape context appended to the launched task's prompt. */
+export interface PromptContext {
+  /** The other members this run opens, excluding the launched task itself. */
+  peers?: readonly PromptPeer[]
+  /** True when those members run as teammates inside this session (Team Lead). */
+  team?: boolean
+}
+
+/**
+ * The execution-shape section: what else this run opens. A plain cascade opens
+ * one independent session per member; a team run starts every other member as a
+ * teammate inside THIS session, so the prompt names the Team tools instead.
+ */
+function peerPromptPreamble(context: PromptContext): string | undefined {
+  const peers = context.peers ?? []
+  if (peers.length === 0) return undefined
+  if (context.team === true) {
+    const lines = peers.map(peer => `- ${escapeProvenanceDelimiter(peer.title)}（teammate: ${peer.name ?? teammateName(peer.title, peer.id)}）`)
+    return `本任务是 Agent Team 的 Lead：本次运行不额外开启独立会话，以下 ${peers.length} 个子任务成员已在本会话中作为 teammate 启动。用 list_agents / send_message / wait_agent 协调它们，用任务看板工具读写它们在看板上的卡片：\n${lines.join('\n')}`
+  }
+  const lines = peers.map(peer => `- ${escapeProvenanceDelimiter(peer.title)}（任务 ${peer.id}）`)
+  return `本次运行同时并发开启 ${peers.length} 个独立 DSH 会话执行下列子任务成员（可用 task_board_* 工具查看它们的进度）：\n${lines.join('\n')}`
+}
+
+/**
+ * Build the execution prompt for one task.
+ * @param task - the task being launched.
+ * @param context - the run's other members, for the execution-shape section.
+ * @returns the prompt text.
+ */
+export function promptText(task: TaskRecord, context: PromptContext = {}): string {
   const body = task.prompt !== '' ? task.prompt : task.title
   const handover = task.handover
   const handoverPreamble = handover === undefined || handover.references.length === 0
@@ -129,7 +182,8 @@ export function promptText(task: TaskRecord): string {
   // output location), the handover preamble is a per-card note, and the task
   // body is the instruction itself.
   const tagPreamble = tagPromptPreamble(task)
-  const preambles = [tagPreamble, handoverPreamble].filter((part): part is string => part !== undefined)
+  const runPreamble = peerPromptPreamble(context)
+  const preambles = [tagPreamble, handoverPreamble, runPreamble].filter((part): part is string => part !== undefined)
   const preamble = preambles.length === 0 ? undefined : preambles.join('\n\n')
   const freeze = task.freeze
   if (freeze === undefined) {
@@ -157,10 +211,27 @@ function tagPromptPreamble(task: TaskRecord): string | undefined {
   return `标签提示（任务看板标签，每次执行前注入）：\n${lines.join('\n')}`
 }
 
-function isErrorTurnEnd(data: unknown): boolean {
-  if (typeof data !== 'object' || data === null) return false
+/**
+ * Why a `turn/end` did not complete successfully, or undefined when it did.
+ *
+ * The harness treats exactly `completed` as success (`headless` maps the turn
+ * reason to its exit code, `subagent/projection` records `lastTurnCompleted`,
+ * and `max-tokens` is a ceiling, not a result). A task-board execution is a
+ * SUCCESS only on positive evidence of a completed turn; every other reason —
+ * and an unreadable one — must be reported, or the board stamps a failed run
+ * as `succeeded` and a schedule dies silently (issue #1708). `interrupted` is
+ * the reason a restart produces: `interruptedTurnClosers` synthesizes it for a
+ * log whose tail turn never ended, which is exactly an aborted resume.
+ * @param data - the `turn/end` event payload.
+ * @returns the reason kind when it is not `completed`, else undefined.
+ */
+function nonCompletedTurnEnd(data: unknown): string | undefined {
+  if (typeof data !== 'object' || data === null) return 'unknown'
   const reason = (data as { reason?: unknown }).reason
-  return typeof reason === 'object' && reason !== null && (reason as { kind?: unknown }).kind === 'error'
+  if (typeof reason !== 'object' || reason === null) return 'unknown'
+  const kind = (reason as { kind?: unknown }).kind
+  if (typeof kind !== 'string') return 'unknown'
+  return kind === 'completed' ? undefined : kind
 }
 
 /**
@@ -220,7 +291,7 @@ export class HostExecutionRunner {
    * @param options - optional session to continue in and its Host-verified account.
    * @returns the session id the execution runs in.
    */
-  async launch(task: TaskRecord, options: { reuseSessionId?: string; principal?: TaskBoardPrincipal } = {}): Promise<string> {
+  async launch(task: TaskRecord, options: { reuseSessionId?: string; principal?: TaskBoardPrincipal; promptContext?: PromptContext } = {}): Promise<string> {
     const principal = options.principal
     this.assertPrincipal?.(principal)
     // A handover bundle overrides the legacy pin fields: the bundle is the
@@ -245,7 +316,16 @@ export class HostExecutionRunner {
     const reused = options.reuseSessionId as ExecutionSessionId | undefined
     if (reused !== undefined) {
       try {
-        await this.pinAndPrompt(reused, task, permission, principal)
+        // Assert the pinned preset against the one the session records before
+        // prompting. The reuse path must not call `session/create` (that would
+        // create or re-adopt a session the board only meant to continue), so
+        // the recorded preset is read through `session/projections` — the
+        // documented read that resolves NO Agent — and compared here. A card
+        // whose session was composed from a different preset now fails closed
+        // instead of silently running under the wrong composition, matching
+        // the fresh branch's `agentPreset` assertion (issue #1708).
+        await this.assertReusedPreset(reused, mode, principal)
+        await this.pinAndPrompt(reused, task, permission, principal, options.promptContext)
       } catch (error) {
         throw new SessionLaunchError(reused, error)
       }
@@ -258,7 +338,7 @@ export class HostExecutionRunner {
     const sessionId = created.sessionId
     try {
       await this.invoke('session', 'rename', { sessionId, title: task.title }, principal)
-      await this.pinAndPrompt(sessionId, task, permission, principal)
+      await this.pinAndPrompt(sessionId, task, permission, principal, options.promptContext)
     } catch (error) {
       throw new SessionLaunchError(sessionId, error)
     }
@@ -266,11 +346,45 @@ export class HostExecutionRunner {
   }
 
   /**
+   * Fail closed when a reused session records a different Agent preset than
+   * the one this task pins.
+   *
+   * The fresh branch asserts the pin by passing `agentPreset` to
+   * `session/create`; the reuse branch must not call that method (it would
+   * create or re-adopt the very session the board only meant to continue), so
+   * the recorded value is read through `session/projections` — the documented
+   * read that resolves no Agent — and compared here (issue #1708). A session
+   * whose preset cannot be read is not treated as a match: silently continuing
+   * under an unknown composition is the failure this guards.
+   * @param sessionId - the session this execution continues in.
+   * @param pinned - the preset id the task pins, when it pins one.
+   */
+  private async assertReusedPreset(sessionId: ExecutionSessionId, pinned: string | undefined, principal?: TaskBoardPrincipal): Promise<void> {
+    if (pinned === undefined) return
+    const projections = await this.invoke('session', 'projections', { sessionId }, principal) as
+      | { values?: { agentPreset?: unknown } }
+      | null
+    const recorded = projections?.values?.agentPreset
+    if (recorded === pinned) return
+    throw new Error(
+      'reused session ' + sessionId + ' was composed from agent preset '
+      + (typeof recorded === 'string' ? '"' + recorded + '"' : 'an unreadable value')
+      + ', but the task pins "' + pinned + '"',
+    )
+  }
+
+  /**
    * Re-assert the pinned execution contract on a session and queue the task
    * prompt. Shared by the fresh-session and reuse paths so both apply exactly
    * the same permission/model pins before the prompt.
    */
-  private async pinAndPrompt(sessionId: ExecutionSessionId, task: TaskRecord, permission: TaskPermission | undefined, principal?: TaskBoardPrincipal): Promise<void> {
+  private async pinAndPrompt(
+    sessionId: ExecutionSessionId,
+    task: TaskRecord,
+    permission: TaskPermission | undefined,
+    principal?: TaskBoardPrincipal,
+    context: PromptContext = {},
+  ): Promise<void> {
     if (permission !== undefined) {
       if (this.commands === undefined) throw new Error('permission command dispatcher is unavailable')
       this.assertPrincipal?.(principal)
@@ -297,7 +411,7 @@ export class HostExecutionRunner {
       sessionId,
       requestId: 'task-board-' + crypto.randomUUID(),
       mode: 'queue' as const,
-      content: [{ type: 'text' as const, text: promptText(task) }],
+      content: [{ type: 'text' as const, text: promptText(task, context) }],
     }, principal)
   }
 
@@ -318,6 +432,13 @@ export class HostExecutionRunner {
           if (!this.principalRequiredWarned) {
             this.principalRequiredWarned = true
             console.warn('[dsh-task-board] deployment authorization requires an authenticated principal; roster auto-discovery is disabled for this background poller')
+          }
+          return { known: false }
+        }
+        if (isDefinitionWithdrawn(error)) {
+          if (!this.unsupportedSessionListWarned) {
+            this.unsupportedSessionListWarned = true
+            console.warn('[dsh-task-board] the host gateway withdrew the session/list definition for this DSH cohort; task board roster auto-discovery is disabled', error)
           }
           return { known: false }
         }
@@ -353,6 +474,10 @@ export class HostExecutionRunner {
             this.principalRequiredWarned = true
             console.warn('[dsh-task-board] deployment authorization requires an authenticated principal; execution inspection stays pending')
           }
+          return { outcome: 'pending' }
+        }
+        if (isDefinitionWithdrawn(error)) {
+          console.warn('[dsh-task-board] the host gateway withdrew the session/list definition for this DSH cohort; keeping the outcome pending', error)
           return { outcome: 'pending' }
         }
         console.warn('[dsh-task-board] session/list failed during execution inspection; keeping the outcome pending', error)
@@ -421,8 +546,13 @@ export class HostExecutionRunner {
       return { outcome: 'pending' }
     }
     this.scanMemos.delete(sessionId)
-    return isErrorTurnEnd(turnEnd.event.data)
+    const reason = nonCompletedTurnEnd(turnEnd.event.data)
+    if (reason === undefined) return { outcome: 'succeeded' }
+    // `error` keeps its historical wording; every other non-completed reason
+    // (aborted / blocked / max-tokens / interrupted) now reports instead of
+    // silently counting as success.
+    return reason === 'error'
       ? { outcome: 'failed', error: 'agent turn ended with an error' }
-      : { outcome: 'succeeded' }
+      : { outcome: 'failed', error: 'agent turn ended without completing: ' + reason }
   }
 }

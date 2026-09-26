@@ -1,7 +1,11 @@
 /**
  * Delete-task use case: drop a task from the ledger and clear the selection
  * when it pointed at the removed task. Pure ledger transition (no persistence
- * or notify — the controller orchestrates those).
+ * or notify - the controller orchestrates those).
+ *
+ * A task that still has subtasks is refused: deleting the parent would leave
+ * dangling child links, and silently detaching (or cascading) the children is
+ * a data-loss decision the user must make explicitly.
  */
 import type { TaskRecord } from '../tasks.ts'
 
@@ -11,6 +15,8 @@ export interface DeleteTaskResult {
   tasks: readonly TaskRecord[]
   /** Whether the previous selection referenced the removed task. */
   selectionCleared: boolean
+  /** True when the task still carries subtasks, so nothing was removed. */
+  blocked: boolean
 }
 
 /**
@@ -25,9 +31,13 @@ export function applyDeleteTask(
   selectedTaskId: string | undefined,
   id: string,
 ): DeleteTaskResult {
+  if (tasks.some(task => task.parentId === id)) {
+    return { tasks, selectionCleared: false, blocked: true }
+  }
   const next = tasks.filter(task => task.id !== id)
   return {
     tasks: next,
     selectionCleared: selectedTaskId === id,
+    blocked: false,
   }
 }

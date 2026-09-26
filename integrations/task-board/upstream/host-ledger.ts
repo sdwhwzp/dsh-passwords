@@ -6,11 +6,21 @@ import { dshHome } from './dsh-home.ts'
 import { parseTaskPrincipals, principalKey, type TaskBoardPrincipal } from './host-accounts.ts'
 import { isValidCron, nextRunAtMs } from './core/schedule.ts'
 import { isTaskRecord, parseLedger } from './core/store.ts'
-import { canMoveManually, retainRecentExecutions, settleExecution, startExecution, withStatus, type ExecutionRecord, type TaskRecord } from './core/tasks.ts'
+import { canMoveManually, retainRecentExecutions, settleExecution, startExecution, withStatus, type ExecutionOutcome, type ExecutionRecord, type TaskRecord } from './core/tasks.ts'
+import {
+  DEFAULT_SUBTASK_DEPTH,
+  cascadeTargets,
+  combineCascadeOutcome,
+  normalizeSubtaskDepth,
+  openGroupExecution,
+  pendingCascadeChildren,
+  resolveExecutionTargets,
+} from './core/subtask.ts'
 import { applyArchiveTask, applyRestoreTask } from './core/use-cases/task-archive.ts'
 import { applyCreateTask } from './core/use-cases/task-create.ts'
 import { applyDeleteTask } from './core/use-cases/task-delete.ts'
 import { applySetSchedule, applyScheduleNextRun } from './core/use-cases/task-schedule.ts'
+import { applySetParent } from './core/use-cases/task-parent.ts'
 import { applyUpdateTask, canEditTaskContent, hasContentPatch } from './core/use-cases/task-update.ts'
 import { TASK_BOARD_LEGACY_SCHEMA_VERSION, TASK_BOARD_SCHEMA_VERSION, type TaskBoardAction, type TaskBoardSchedulerSnapshot } from './protocol.ts'
 import { DEFAULT_SESSION_PERMISSION, requiresPermissionConfirmation, type TaskPermission } from './core/handover.ts'
@@ -43,10 +53,33 @@ export interface LedgerState {
   scheduler: TaskBoardSchedulerSnapshot
 }
 
+/** Human-facing text for a refused binding, per surface. */
+function bindingRefusalMessage(
+  refusal: { kind: 'root' | 'inherited' | 'subtask-pin'; title: string },
+  sessionDefault: TaskPermission,
+  surface: 'run' | 'schedule',
+): string {
+  if (refusal.kind === 'subtask-pin') {
+    return `team run cannot honor the permission binding of subtask "${refusal.title}": a teammate runs inside the Lead session; clear that card's permission or run the tree without Agent Team`
+  }
+  if (surface === 'schedule') return `task "${refusal.title}" has an unconfirmed above-default permission`
+  if (refusal.kind === 'root') {
+    return `confirmation-required: the effective permission is above the session default (${sessionDefault}); confirm the card's permission binding first`
+  }
+  return `confirmation-required: subtask "${refusal.title}" inherits an above-default permission; confirm that card's permission binding first`
+}
+
 export interface OpenedRun {
   task: TaskRecord
   execution: ExecutionRecord
   principal?: TaskBoardPrincipal
+  /**
+   * How the Host obtains this run's session. Absent or `session` launches a
+   * fresh (or reused) execution session; `teammate` means the run belongs to a
+   * team-mode cascade, where the Host asks the root's Lead session to spawn a
+   * teammate instead of launching a session of its own.
+   */
+  dispatch?: 'session' | 'teammate'
 }
 
 /** Minimal value copy used by the Host session monitor. */
@@ -139,6 +172,11 @@ export function processIsAlive(pid: number): boolean {
 }
 
 const PROCESS_PROBE_TIMEOUT_MS = 3000
+/**
+ * The CIM fallback pays a WMI cold start, so it gets a wider budget than the
+ * direct `Get-Process` read it backs up.
+ */
+const CIM_PROBE_TIMEOUT_MS = 8000
 
 let ownStartTime: number | undefined
 let ownStartTimeResolved = false
@@ -166,6 +204,59 @@ function linuxStartTimeMs(pid: number): number | undefined {
   }
 }
 
+/** Runs one PowerShell script and returns its trimmed stdout. */
+export type PowerShellProbe = (script: string, timeoutMs: number) => string | undefined
+
+/** Default probe: one hidden, profile-free PowerShell process per script. */
+const runPowerShellProbe: PowerShellProbe = (script, timeoutMs) => {
+  const probe = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    timeout: timeoutMs,
+    windowsHide: true,
+  })
+  if (probe.status !== 0 || probe.stdout.length === 0) return undefined
+  return probe.stdout.toString('utf8').trim()
+}
+
+/** The epoch-millisecond reading a probe printed, or undefined when unusable. */
+function parseProbeEpochMs(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw.trim() === '') return undefined
+  const started = Number(raw.trim())
+  return Number.isFinite(started) ? started : undefined
+}
+
+/** Start time through Get-Process: precise, but empty for protected processes. */
+function getProcessStartScript(pid: number): string {
+  return '[DateTimeOffset]::FromFileTime((Get-Process -Id ' + String(pid)
+    + ' -ErrorAction SilentlyContinue).StartTime.ToUniversalTime().ToFileTime()).ToUnixTimeMilliseconds()'
+}
+
+/** Start time through Win32_Process: readable for System/svchost too. */
+function cimStartScript(pid: number): string {
+  return '$p=Get-CimInstance Win32_Process -Filter "ProcessId=' + String(pid)
+    + '" -ErrorAction SilentlyContinue;if($p -ne $null){[DateTimeOffset]::FromFileTime($p.CreationDate.ToUniversalTime().ToFileTime()).ToUnixTimeMilliseconds()}'
+}
+
+/**
+ * Windows start time (Unix epoch ms) of a live process.
+ *
+ * `Get-Process` is the precise first choice, but an unprivileged caller cannot
+ * read `.StartTime` for a protected process (System, svchost): the property is
+ * empty, so the probe returns nothing. Without a fallback, a crash leftover
+ * lock whose PID was reused by such a process could never be proven stale and
+ * blocked every startup until the lock was deleted by hand (issue #1629).
+ * Win32_Process through CIM reports the same CreationDate for those processes
+ * at the same millisecond precision, so it is the second identity source. The
+ * probe is injectable so the fallback chain is testable off Windows.
+ */
+export function win32StartTimeMs(pid: number, probe: PowerShellProbe = runPowerShellProbe): number | undefined {
+  // The pid is interpolated into a PowerShell script, so it must be a plain
+  // positive integer before any probe runs.
+  if (!Number.isSafeInteger(pid) || pid <= 0) return undefined
+  const direct = parseProbeEpochMs(probe(getProcessStartScript(pid), PROCESS_PROBE_TIMEOUT_MS))
+  if (direct !== undefined) return direct
+  return parseProbeEpochMs(probe(cimStartScript(pid), CIM_PROBE_TIMEOUT_MS))
+}
+
 /**
  * Best-effort start time (Unix epoch ms) of a live process. Used to prove
  * whether the ledger lock really belongs to the PID recorded in it, so a
@@ -175,17 +266,7 @@ function linuxStartTimeMs(pid: number): number | undefined {
  */
 function processStartTimeMs(pid: number): number | undefined {
   if (process.platform === 'linux') return linuxStartTimeMs(pid)
-  if (process.platform === 'win32') {
-    const probe = spawnSync(
-      'powershell',
-      ['-NoProfile', '-NonInteractive', '-Command',
-        '[DateTimeOffset]::FromFileTime((Get-Process -Id ' + String(pid) + ' -ErrorAction SilentlyContinue).StartTime.ToUniversalTime().ToFileTime()).ToUnixTimeMilliseconds()'],
-      { timeout: PROCESS_PROBE_TIMEOUT_MS, windowsHide: true },
-    )
-    if (probe.status !== 0 || probe.stdout.length === 0) return undefined
-    const started = Number(probe.stdout.toString('utf8').trim())
-    return Number.isFinite(started) ? started : undefined
-  }
+  if (process.platform === 'win32') return win32StartTimeMs(pid)
   // Other POSIX (macOS...): ps lstart with a forced English locale, falling
   // back to the elapsed-seconds column when lstart cannot be parsed.
   const env = { ...process.env, LC_ALL: 'C' }
@@ -255,6 +336,39 @@ function mergeTask(a: TaskRecord, b: TaskRecord): TaskRecord {
   return { ...newer, executions: retainRecentExecutions(executions) }
 }
 
+/**
+ * Repair parent links after a load or an import: a link whose parent row is
+ * missing, cyclic, or names an archived parent while the child is on board is
+ * dropped (the task becomes a root) instead of dropping the task. A chain
+ * deeper than the current `maxSubtaskDepth` is deliberately KEPT: the limit
+ * gates new links, it never deletes a stored one, and every cascade walk is
+ * bounded by the limit anyway. The Host is the only writer of these links, so
+ * this is a last-resort guard against a hand-edited or imported document.
+ */
+export function repairParentLinks(tasks: readonly TaskRecord[]): TaskRecord[] {
+  const byId = new Map(tasks.map(task => [task.id, task]))
+  return tasks.map(task => {
+    if (task.parentId === undefined) return task
+    const seen = new Set<string>([task.id])
+    let current: TaskRecord | undefined = byId.get(task.parentId)
+    let depth = 0
+    while (current !== undefined) {
+      // The first hop is the parent itself: an archived parent holding an
+      // on-board child is outside the archive cascade invariant, and only an
+      // import can produce it.
+      if (seen.has(current.id) || (depth === 0 && current.archivedAt !== undefined && task.archivedAt === undefined)) {
+        return { ...task, parentId: undefined }
+      }
+      seen.add(current.id)
+      depth += 1
+      current = current.parentId === undefined ? undefined : byId.get(current.parentId)
+    }
+    // A walk that never started (depth 0) means the parent row did not survive
+    // the parse: the link is dangling and the task goes back to the root.
+    return depth === 0 ? { ...task, parentId: undefined } : task
+  })
+}
+
 function parseHostTasks(values: readonly unknown[]): TaskRecord[] {
   const rawById = new Map<string, Record<string, unknown>>()
   for (const value of values) {
@@ -262,7 +376,7 @@ function parseHostTasks(values: readonly unknown[]): TaskRecord[] {
     const raw = value as Record<string, unknown>
     if (typeof raw.id === 'string') rawById.set(raw.id, raw)
   }
-  return parseLedger(JSON.stringify(values)).map(task => {
+  return repairParentLinks(parseLedger(JSON.stringify(values))).map(task => {
     const rawSchedule = rawById.get(task.id)?.schedule
     if (typeof rawSchedule !== 'object' || rawSchedule === null) return task
     const schedule = rawSchedule as Record<string, unknown>
@@ -294,9 +408,16 @@ export class HostTaskLedger {
 
   /** Session-default permission the confirmation gate compares against. */
   readonly sessionDefaultPermission: TaskPermission
+  /**
+   * Deployment subtask depth limit (1..3): the lineage gate every write obeys.
+   * The settings card edits it live, so {@link setMaxSubtaskDepth} mutates it
+   * instead of remounting the row.
+   */
+  private depthLimit: number
 
-  constructor(dir: string = join(dshHome(), 'task-board'), private readonly now: () => number = Date.now, options: { sessionDefaultPermission?: TaskPermission } = {}) {
+  constructor(dir: string = join(dshHome(), 'task-board'), private readonly now: () => number = Date.now, options: { sessionDefaultPermission?: TaskPermission; maxSubtaskDepth?: number } = {}) {
     this.sessionDefaultPermission = options.sessionDefaultPermission ?? DEFAULT_SESSION_PERMISSION
+    this.depthLimit = normalizeSubtaskDepth(options.maxSubtaskDepth ?? DEFAULT_SUBTASK_DEPTH)
     mkdirSync(dir, { recursive: true })
     this.file = join(dir, 'ledger-v2.json')
     this.lockFile = join(dir, 'ledger-v2.lock')
@@ -317,6 +438,23 @@ export class HostTaskLedger {
       this.dispose()
       throw error
     }
+  }
+
+  /** Current subtask depth limit (1..3). */
+  get maxSubtaskDepth(): number {
+    return this.depthLimit
+  }
+
+  /**
+   * Apply a live settings edit of the subtask depth limit. A no-op when the
+   * normalized limit is unchanged, so a coarse volatile invalidation that
+   * changed nothing emits nothing.
+   */
+  setMaxSubtaskDepth(depth: number): void {
+    const next = normalizeSubtaskDepth(depth)
+    if (next === this.depthLimit) return
+    this.depthLimit = next
+    this.notify()
   }
 
   /** Remove leftover *.tmp-* files from previous crashes or interrupted writes. */
@@ -361,6 +499,9 @@ export class HostTaskLedger {
       for (const execution of task.executions) {
         if (execution.endedAt !== undefined) continue
         const principal = this.taskPrincipal(task.id)
+        // A deferred cascade parent already knows its own outcome; the monitor
+        // has nothing left to inspect, and its children's settles finalize it.
+        if (execution.ownResult !== undefined) continue
         openExecutions.push({
           taskId: task.id,
           executionId: execution.id,
@@ -429,7 +570,7 @@ export class HostTaskLedger {
     action: TaskBoardAction,
     initiator?: string,
     principal?: TaskBoardPrincipal,
-  ): { state: LedgerState; run?: OpenedRun } {
+  ): { state: LedgerState; runs?: OpenedRun[] } {
     const fingerprint = createHash('sha256').update(JSON.stringify(principal === undefined ? action : [action, principal])).digest('hex')
     const cached = this.requestCache.get(requestId)
     if (cached !== undefined) {
@@ -451,28 +592,32 @@ export class HostTaskLedger {
     }
   }
 
-  openScheduled(taskId: string, nextRunAt: number | undefined, triggeredAt: number): OpenedRun | undefined {
+  /**
+   * Open the cascade one due schedule triggers: an empty array means nothing
+   * ran (already running, or a participant whose elevated permission is still
+   * unconfirmed), and the rule rolls to its next occurrence either way.
+   */
+  openScheduled(taskId: string, nextRunAt: number | undefined, triggeredAt: number): OpenedRun[] {
     const task = this.document.tasks.find(item => item.id === taskId)
-    if (task === undefined || task.archivedAt !== undefined) return undefined
-    if (requiresPermissionConfirmation(task, this.sessionDefaultPermission)) {
-      // An unconfirmed above-default permission must never run unattended:
-      // cron refuses the card and rolls to the next occurrence, exactly
-      // like the already-running refusal.
+    if (task === undefined || task.archivedAt !== undefined) return []
+    const rollForward = (): void => {
       this.document.tasks = [...applyScheduleNextRun(this.document.tasks, taskId, nextRunAt, task.schedule?.lastTriggeredAt, triggeredAt)]
       this.commit()
-      return undefined
+    }
+    const refusal = this.bindingRefusal(task)
+    if (refusal !== undefined) {
+      // An unconfirmed above-default permission must never run unattended: the
+      // whole tree is refused and the schedule rolls to the next occurrence,
+      // exactly like the already-running refusal.
+      this.document.scheduler.error = `scheduled run refused for task ${taskId}: ${bindingRefusalMessage(refusal, this.sessionDefaultPermission, 'schedule')}`
+      rollForward()
+      return []
     }
     if (task.status === 'running' || hasOpenExecution(task)) {
-      this.document.tasks = [...applyScheduleNextRun(this.document.tasks, taskId, nextRunAt, task.schedule?.lastTriggeredAt, triggeredAt)]
-      this.commit()
-      return undefined
+      rollForward()
+      return []
     }
-    const opened = startExecution(task, triggeredAt, crypto.randomUUID())
-    this.document.tasks = this.document.tasks.map(item => item.id === taskId ? opened.task : item)
-    this.document.tasks = [...applyScheduleNextRun(this.document.tasks, taskId, nextRunAt, triggeredAt, triggeredAt)]
-    this.commit()
-    const principal = this.taskPrincipal(taskId)
-    return { ...opened, ...(principal === undefined ? {} : { principal }) }
+    return this.startCascade(task, triggeredAt, undefined, false, nextRunAt, this.taskPrincipal(taskId))
   }
 
   skipMissed(now: number): void {
@@ -508,6 +653,38 @@ export class HostTaskLedger {
     this.commit(false)
   }
 
+  /**
+   * Settle one execution. A cascade participant first records its OWN outcome
+   * and only finalizes once every child execution in its run group has
+   * settled, so a parent card leaves 'running' with the whole tree's verdict
+   * rather than its own turn alone.
+   */
+  settle(taskId: string, executionId: string, outcome: ExecutionOutcome, error?: string): void {
+    const now = this.now()
+    const task = this.document.tasks.find(item => item.id === taskId)
+    const execution = task?.executions.find(entry => entry.id === executionId)
+    if (task === undefined || execution === undefined || execution.endedAt !== undefined) return
+    const groupId = execution.runGroupId
+    if (groupId === undefined) {
+      this.document.tasks = this.document.tasks.map(item => item.id === taskId
+        ? settleExecution(item, executionId, outcome, now, error)
+        : item)
+      this.commit()
+      return
+    }
+    let changed = false
+    if (execution.ownResult === undefined) {
+      this.document.tasks = this.document.tasks.map(item => item.id !== taskId ? item : {
+        ...item,
+        updatedAt: now,
+        executions: item.executions.map(entry => entry.id === executionId ? { ...entry, ownResult: outcome, ownError: error } : entry),
+      })
+      changed = true
+    }
+    if (this.settleCascade(taskId, groupId, now)) changed = true
+    if (changed) this.commit()
+  }
+
   attachSession(taskId: string, executionId: string, sessionId: string): void {
     const now = this.now()
     this.document.tasks = this.document.tasks.map(task => task.id !== taskId ? task : {
@@ -518,20 +695,18 @@ export class HostTaskLedger {
     this.commit()
   }
 
-  settle(taskId: string, executionId: string, outcome: 'succeeded' | 'failed' | 'cancelled', error?: string): void {
-    this.document.tasks = this.document.tasks.map(task => task.id === taskId
-      ? settleExecution(task, executionId, outcome, this.now(), error)
-      : task)
-    this.commit()
-  }
-
-  private apply(action: TaskBoardAction, initiator?: string, principal?: TaskBoardPrincipal): { state: LedgerState; run?: OpenedRun } {
+  private apply(action: TaskBoardAction, initiator?: string, principal?: TaskBoardPrincipal): { state: LedgerState; runs?: OpenedRun[] } {
     const now = this.now()
     const taskId = action.kind === 'import' ? undefined : action.kind === 'create' ? action.id : action.taskId
     const owner = taskId === undefined ? undefined : this.taskPrincipal(taskId)
     if (owner !== undefined && principalKey(owner) !== principalKey(principal)) throw new Error('task belongs to another account')
     if (action.kind === 'import' && action.tasks.some(task => this.taskPrincipal(task.id) !== undefined)) throw new Error('import cannot replace account-owned tasks')
-    let run: OpenedRun | undefined
+    const parentId = action.kind === 'create' ? action.input.parentId : action.kind === 'set-parent' ? action.parentId : undefined
+    if (parentId !== undefined && parentId !== null) {
+      const parentOwner = this.taskPrincipal(parentId)
+      if (parentOwner !== undefined && principalKey(parentOwner) !== principalKey(principal)) throw new Error('parent task belongs to another account')
+    }
+    let runs: OpenedRun[] | undefined
     switch (action.kind) {
       case 'import': {
         const sources = new Set(this.document.scheduler.importedSources ?? [])
@@ -542,7 +717,9 @@ export class HostTaskLedger {
         const incoming = parseHostTasks(action.tasks)
         const merged = new Map(this.document.tasks.map(task => [task.id, task]))
         for (const task of incoming) merged.set(task.id, merged.has(task.id) ? mergeTask(merged.get(task.id)!, task) : task)
-        this.document.tasks = [...merged.values()]
+        // An imported child can name a parent this ledger has never seen (a
+        // partial export): the dangling link is dropped, the task survives.
+        this.document.tasks = repairParentLinks([...merged.values()])
         this.document.scheduler.importedSources = [...sources, action.sourceId]
         this.document.scheduler.error = invalidScheduleIds.length === 0
           ? undefined
@@ -559,8 +736,8 @@ export class HostTaskLedger {
         const input = action.input.freeze === undefined || initiator === undefined || initiator === ''
           ? action.input
           : { ...action.input, freeze: { ...action.input.freeze, frozenBy: initiator } }
-        const result = applyCreateTask(this.document.tasks, input, now, action.id)
-        if (result.task === undefined) throw new Error('invalid task')
+        const result = applyCreateTask(this.document.tasks, input, now, action.id, this.maxSubtaskDepth)
+        if (result.task === undefined) throw new Error(result.error ?? 'invalid task')
         this.document.tasks = [...result.tasks]
         break
       }
@@ -584,14 +761,24 @@ export class HostTaskLedger {
         this.document.tasks = [...applyUpdateTask(this.document.tasks, action.taskId, patch, now)]
         break
       }
-      case 'delete':
-        {
-          const task = this.document.tasks.find(task => task.id === action.taskId)
-          if (task === undefined) throw new Error('task not found')
-          if (task.status === 'running' || hasOpenExecution(task)) throw new Error('running task cannot be deleted')
+      case 'delete': {
+        const task = this.document.tasks.find(task => task.id === action.taskId)
+        if (task === undefined) throw new Error('task not found')
+        if (task.status === 'running' || hasOpenExecution(task)) throw new Error('running task cannot be deleted')
+        // Subtasks keep their link: deleting the parent would leave dangling
+        // children, so the user detaches or deletes them explicitly first.
+        if (this.document.tasks.some(item => item.parentId === action.taskId)) {
+          throw new Error('task has subtasks; detach or delete them first')
         }
         this.document.tasks = [...applyDeleteTask(this.document.tasks, undefined, action.taskId).tasks]
         break
+      }
+      case 'set-parent': {
+        const result = applySetParent(this.document.tasks, action.taskId, action.parentId, now, this.maxSubtaskDepth)
+        if (!result.applied) throw new Error(result.error ?? 'parent link refused')
+        this.document.tasks = [...result.tasks]
+        break
+      }
       case 'move': {
         const task = this.document.tasks.find(item => item.id === action.taskId)
         if (task === undefined) throw new Error('task not found')
@@ -602,13 +789,15 @@ export class HostTaskLedger {
         break
       }
       case 'archive': {
-        const result = applyArchiveTask(this.document.tasks, action.taskId, now)
+        if (this.subtreeHasOpenExecution(action.taskId)) throw new Error('running task cannot be archived')
+        const result = applyArchiveTask(this.document.tasks, action.taskId, now, this.maxSubtaskDepth)
         if (!result.archived) throw new Error('task cannot be archived')
         this.document.tasks = [...result.tasks]
         break
       }
       case 'restore': {
-        const result = applyRestoreTask(this.document.tasks, action.taskId, now)
+        if (this.subtreeHasOpenExecution(action.taskId)) throw new Error('running task cannot be restored')
+        const result = applyRestoreTask(this.document.tasks, action.taskId, now, this.maxSubtaskDepth)
         if (!result.archived) throw new Error('task is not archived')
         this.document.tasks = [...result.tasks]
         break
@@ -635,12 +824,12 @@ export class HostTaskLedger {
         const task = this.document.tasks.find(item => item.id === action.taskId)
         if (task?.archivedAt !== undefined) throw new Error('archived task is read-only')
         if (task === undefined || task.status === 'running' || hasOpenExecution(task)) throw new Error('task is already running or missing')
-        if (requiresPermissionConfirmation(task, this.sessionDefaultPermission)) {
-          throw new Error(`confirmation-required: the effective permission is above the session default (${this.sessionDefaultPermission}); confirm the card's permission binding first`)
-        }
-        const base = action.kind === 'rerun' ? withStatus(task, 'todo', now) : task
-        run = startExecution(base, now, crypto.randomUUID(), initiator)
-        this.document.tasks = this.document.tasks.map(item => item.id === task.id ? run!.task : item)
+        // The confirmation gate judges the RESOLVED binding: a subtask that
+        // inherits an elevated permission from its parent is exactly as
+        // unconfirmed as the parent would be without its own stamp.
+        const refusal = this.bindingRefusal(task)
+        if (refusal !== undefined) throw new Error(bindingRefusalMessage(refusal, this.sessionDefaultPermission, 'run'))
+        runs = this.startCascade(task, now, initiator, action.kind === 'rerun', undefined, principal)
         break
       }
     }
@@ -651,9 +840,148 @@ export class HostTaskLedger {
         this.document.taskPrincipals = { ...this.document.taskPrincipals, [taskId]: { ...principal } }
       }
     }
-    if (run !== undefined && principal !== undefined) run = { ...run, principal: { ...principal } }
+    // startCascade committed the opened participants itself; committing again
+    // here would bump the revision twice for one action.
+    if (runs === undefined || runs.length === 0) this.commit()
+    return { state: this.state(), ...(runs === undefined ? {} : { runs }) }
+  }
+
+  /**
+   * The binding that makes a run illegal, if any.
+   *
+   * A plain cascade launches one session per participant, so every participant
+   * carries its own resolved binding and each one gates the run. A team run
+   * launches only the Lead session: the Lead's binding gates it, while a
+   * subtask's OWN above-default pin cannot be applied to a teammate and is
+   * refused instead of being silently dropped (an inherited binding is the
+   * Lead's own and stays allowed once the Lead is confirmed).
+   * @param root - the task being run.
+   * @returns the first refusal, or undefined when the run may start.
+   */
+  private bindingRefusal(root: TaskRecord): { kind: 'root' | 'inherited' | 'subtask-pin'; title: string } | undefined {
+    const participants = this.cascadeParticipants(root.id)
+    if (root.teamRun === true) {
+      const lead = participants.find(participant => participant.id === root.id)
+      if (lead !== undefined && requiresPermissionConfirmation(lead, this.sessionDefaultPermission)) {
+        return { kind: 'root', title: lead.title }
+      }
+      // The raw record carries the subtask's OWN binding: the resolved
+      // participant above already folded the inherited one into its permission.
+      const pinned = participants.find(participant => {
+        if (participant.id === root.id) return false
+        const raw = this.document.tasks.find(task => task.id === participant.id)
+        return raw !== undefined && requiresPermissionConfirmation(raw, this.sessionDefaultPermission)
+      })
+      return pinned === undefined ? undefined : { kind: 'subtask-pin', title: pinned.title }
+    }
+    const unconfirmed = participants.find(participant => requiresPermissionConfirmation(participant, this.sessionDefaultPermission))
+    if (unconfirmed === undefined) return undefined
+    return { kind: unconfirmed.id === root.id ? 'root' : 'inherited', title: unconfirmed.title }
+  }
+
+  /**
+   * The tasks a cascade from `rootId` would actually open executions for, with
+   * their effective execution targets resolved. Archived members never run, and
+   * a member that already has an open execution is skipped (a task cannot run
+   * twice), so the result is the participant set the launch will use.
+   */
+  private cascadeParticipants(rootId: string): TaskRecord[] {
+    return cascadeTargets(this.document.tasks, rootId, this.maxSubtaskDepth)
+      .map(participant => resolveExecutionTargets(participant, this.document.tasks, this.maxSubtaskDepth))
+      .filter(participant => participant.archivedAt === undefined
+        && participant.status !== 'running'
+        && !hasOpenExecution(participant))
+  }
+
+  /** Whether a task or any of its subtasks still has an open execution. */
+  private subtreeHasOpenExecution(id: string): boolean {
+    return cascadeTargets(this.document.tasks, id, this.maxSubtaskDepth)
+      .some(task => task.status === 'running' || hasOpenExecution(task))
+  }
+
+  /**
+   * Open one execution per cascade participant (the requested task and its
+   * on-board descendants, within the depth limit) under a single run group, and
+   * commit the ledger once. The returned runs are ordered root-first, so the
+   * Host launches the parent before its subtasks.
+   * @param root - the task the user ran.
+   * @param now - clock instant (ms epoch).
+   * @param initiator - the DSH session that asked for the run (audit only).
+   * @param rerun - true to reset the root to 'todo' before starting it.
+   * @param nextRunAt - when set, the root's schedule also rolls forward.
+   */
+  private startCascade(root: TaskRecord, now: number, initiator?: string, rerun = false, nextRunAt?: number, principal?: TaskBoardPrincipal): OpenedRun[] {
+    const before = this.document.tasks
+    const participants = cascadeTargets(before, root.id, this.maxSubtaskDepth)
+    for (const task of participants) {
+      const owner = this.taskPrincipal(task.id)
+      if (owner !== undefined && principalKey(owner) !== principalKey(principal)) throw new Error('subtask belongs to another account')
+    }
+    const groupId = crypto.randomUUID()
+    // A team-mode root runs as the Team Lead: every other member of the same
+    // cascade is handed to that Lead as a teammate (the tree is flattened into
+    // one Team, because only the Lead may spawn).
+    const team = root.teamRun === true
+    const started = new Map<string, TaskRecord>()
+    const runs: OpenedRun[] = []
+    for (const task of participants) {
+      if (task.archivedAt !== undefined) continue
+      if (task.status === 'running' || hasOpenExecution(task)) continue
+      const base = rerun && task.id === root.id ? withStatus(task, 'todo', now) : task
+      const opened = startExecution(base, now, crypto.randomUUID(), initiator, groupId)
+      started.set(task.id, opened.task)
+      runs.push({
+        task: resolveExecutionTargets(opened.task, before, this.maxSubtaskDepth),
+        execution: opened.execution,
+        ...(principal === undefined ? {} : { principal: { ...principal } }),
+        ...(team && task.id !== root.id ? { dispatch: 'teammate' as const } : {}),
+      })
+    }
+    if (runs.length === 0) return []
+    let tasks: readonly TaskRecord[] = before.map(task => started.get(task.id) ?? task)
+    if (nextRunAt !== undefined) tasks = applyScheduleNextRun(tasks, root.id, nextRunAt, now, now)
+    this.document.tasks = [...tasks]
+    if (principal !== undefined) {
+      for (const run of runs) this.document.taskPrincipals = { ...this.document.taskPrincipals, [run.task.id]: { ...principal } }
+    }
     this.commit()
-    return { state: this.state(), ...(run === undefined ? {} : { run }) }
+    return runs
+  }
+
+  /**
+   * Finalize every cascade parent that is ready, walking from `taskId` up the
+   * lineage: a member settles once its own outcome is recorded and none of its
+   * group children is still open, and its verdict folds those children in
+   * (failure dominates, then cancellation).
+   */
+  private settleCascade(taskId: string, groupId: string, now: number): boolean {
+    let changed = false
+    const visited = new Set<string>()
+    let current: string | undefined = taskId
+    while (current !== undefined && !visited.has(current)) {
+      visited.add(current)
+      const task: TaskRecord | undefined = this.document.tasks.find(item => item.id === current)
+      if (task === undefined) break
+      const execution = openGroupExecution(task, groupId)
+      if (execution === undefined || execution.ownResult === undefined) break
+      if (pendingCascadeChildren(this.document.tasks, current, groupId).length > 0) break
+      const entries: Array<{ result: ExecutionOutcome; error?: string }> = [
+        { result: execution.ownResult, ...(execution.ownError === undefined ? {} : { error: execution.ownError }) },
+      ]
+      for (const child of this.document.tasks) {
+        if (child.parentId !== current) continue
+        const childExecution = child.executions.find(entry => entry.runGroupId === groupId && entry.result !== undefined)
+        if (childExecution?.result === undefined) continue
+        entries.push({ result: childExecution.result, ...(childExecution.error === undefined ? {} : { error: childExecution.error }) })
+      }
+      const combined = combineCascadeOutcome(entries)
+      this.document.tasks = this.document.tasks.map(item => item.id === current
+        ? settleExecution(item, execution.id, combined.result, now, combined.error)
+        : item)
+      changed = true
+      current = task.parentId
+    }
+    return changed
   }
 
   private repairSchedules(skipPast: boolean, persist = true): void {
@@ -679,13 +1007,23 @@ export class HostTaskLedger {
   private reconcileInterruptedStarts(persist = true): void {
     const now = this.now()
     let changed = false
+    const interrupted: Array<{ taskId: string; runGroupId: string | undefined }> = []
     this.document.tasks = this.document.tasks.map(task => {
       if (task.status !== 'running') return task
       const execution = task.executions.at(-1)
       if (execution === undefined || execution.endedAt !== undefined || execution.sessionId !== undefined) return task
       changed = true
+      interrupted.push({ taskId: task.id, runGroupId: execution.runGroupId })
       return settleExecution(task, execution.id, 'cancelled', now, 'host restarted before the execution session was recorded')
     })
+    // A cancelled participant may have been the last pending child of a
+    // deferred cascade parent; walking up from its parent is what lets that
+    // parent finalize instead of staying in the running column forever.
+    for (const entry of interrupted) {
+      if (entry.runGroupId === undefined) continue
+      const parentId = this.document.tasks.find(task => task.id === entry.taskId)?.parentId
+      if (parentId !== undefined && this.settleCascade(parentId, entry.runGroupId, now)) changed = true
+    }
     if (changed && persist) this.commit()
   }
 

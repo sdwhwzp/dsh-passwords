@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
+import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -83,10 +84,11 @@ async function fixture(t: TestContext) {
     getUsage: () => state.usage,
     addTokens: (id: number, _day: string, tokens: number) => { billed.push({ id, tokens }); },
   };
-  registerTenantTaskBoard(ctx as never, db as never, {
+  const register = () => registerTenantTaskBoard(ctx as never, db as never, {
     internalSecret: 'principal-test', jwtSecret: 'jwt-test',
     tenantTaskBoard: { enabled: true, directory, gatewayOrigin },
   } as never);
+  register();
   const origin = await listen(t, (req, res) => {
     const handler = routes.get(req.url!);
     if (handler) void handler(req, res); else { res.writeHead(404); res.end(); }
@@ -95,7 +97,11 @@ async function fixture(t: TestContext) {
   const parse = (id: number, body: object, signal?: AbortSignal) => fetch(origin + '/api/task-board/parse', {
     method: 'POST', headers: headers(id), body: JSON.stringify(body), signal,
   });
-  return { state, users, calls, catalogCalls, billed, spend, parse, origin, headers };
+  const reload = () => {
+    for (const dispose of disposers.splice(0).reverse()) dispose();
+    register();
+  };
+  return { state, users, calls, catalogCalls, billed, spend, parse, origin, headers, reload };
 }
 
 test('task parsing uses the account catalog and only the submitted text without creating a task', async t => {
@@ -219,4 +225,64 @@ test('closing the parse request cancels the active model stream', { timeout: 15_
   controller.abort();
   await Promise.all([rejected, stopped.promise]);
   assert.equal(f.calls.length, 1);
+});
+
+
+test('current task-board child creation, attach and detach survive tenant ledger reload', async t => {
+  const f = await fixture(t);
+  const action = async (value: object, expected = 200) => {
+    const response = await fetch(f.origin + '/api/task-board/action', {
+      method: 'POST', headers: f.headers(2), body: JSON.stringify({ requestId: randomUUID(), action: value }),
+    });
+    const body = await response.json();
+    assert.equal(response.status, expected, JSON.stringify(body));
+    return body;
+  };
+  await action({ kind: 'create', id: 'parent', input: { title: 'Parent', description: '', prompt: '', workspaceId: 'owned-workspace', tags: [{ name: 'project' }] } });
+  const created = await action({ kind: 'create', id: 'child', input: { title: 'Child', description: '', prompt: '', parentId: 'parent' } });
+  assert.equal(created.tasks.find((task: { id: string }) => task.id === 'child').parentId, 'parent');
+  assert.equal(created.tasks.find((task: { id: string }) => task.id === 'child').workspaceId, 'owned-workspace');
+  const cycle = await action({ kind: 'set-parent', taskId: 'parent', parentId: 'child' }, 400);
+  assert.match(cycle.error, /subtask/);
+  await action({ kind: 'delete', taskId: 'parent' }, 400);
+  const detached = await action({ kind: 'set-parent', taskId: 'child', parentId: null });
+  assert.equal(detached.tasks.find((task: { id: string }) => task.id === 'child').parentId, undefined);
+  await action({ kind: 'set-parent', taskId: 'child', parentId: 'parent' });
+  f.reload();
+  const response = await fetch(f.origin + '/api/task-board/state', { headers: f.headers(2) });
+  const restored = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(restored.tasks.find((task: { id: string }) => task.id === 'child').parentId, 'parent');
+  assert.deepEqual(restored.tasks.find((task: { id: string }) => task.id === 'parent').tags, [{ name: 'project' }]);
+  assert.equal(f.calls.length, 0, 'creating and linking tasks does not invoke a model');
+});
+
+test('tenant task-board parent creation and relinking reject references to another account', async t => {
+  const f = await fixture(t);
+  const action = async (id: number, value: object, expected = 200) => {
+    const response = await fetch(f.origin + '/api/task-board/action', {
+      method: 'POST', headers: f.headers(id), body: JSON.stringify({ requestId: randomUUID(), action: value }),
+    });
+    const body = await response.json();
+    assert.equal(response.status, expected, JSON.stringify(body));
+    return body;
+  };
+  await action(2, { kind: 'create', id: 'private-parent', input: { title: 'Private parent', description: '', prompt: '' } });
+  await action(3, { kind: 'create', id: 'owned-task', input: { title: 'Own task', description: '', prompt: '' } });
+  for (const value of [
+    { kind: 'create', id: 'foreign-child', input: { title: 'Forbidden child', description: '', prompt: '', parentId: 'private-parent' } },
+    { kind: 'set-parent', taskId: 'owned-task', parentId: 'private-parent' },
+    { kind: 'set-parent', taskId: 'private-parent', parentId: 'owned-task' },
+  ]) {
+    const denied = await action(3, value, 400);
+    assert.match(denied.error, /task not found/);
+  }
+  f.reload();
+  for (const [id, own] of [[2, 'private-parent'], [3, 'owned-task']] as const) {
+    const response = await fetch(f.origin + '/api/task-board/state', { headers: f.headers(id) });
+    const board = await response.json();
+    assert.deepEqual(board.tasks.map((task: { id: string }) => task.id), [own]);
+    assert.equal(board.tasks[0].parentId, undefined);
+  }
+  assert.equal(f.calls.length, 0);
 });

@@ -2,11 +2,42 @@ import type { TypertGateway } from '@deepseek-ai/dsh-api-gateway'
 import { nextRunAtMs } from './core/schedule.ts'
 import { reusableSessionId } from './core/session-reuse.ts'
 import { HostTaskLedger, type OpenedRun, type OpenExecutionReference } from './host-ledger.ts'
-import { HostExecutionRunner, SessionLaunchError, type SessionCommandDispatcher, type SessionSummary, type TaskBoardWorkspaceRegistry } from './host-runner.ts'
+import { HostExecutionRunner, SessionLaunchError, promptText, type SessionCommandDispatcher, type SessionSummary, type TaskBoardWorkspaceRegistry } from './host-runner.ts'
+import { teammateName } from './core/subtask.ts'
 import { PowerInhibitor } from './power-inhibitor.ts'
 import { TASK_BOARD_SCHEMA_VERSION, type TaskBoardAction, type TaskBoardEventPayload, type TaskBoardSnapshot } from './protocol.ts'
 import type { TaskPermission } from './core/handover.ts'
 import { principalKey, type TaskBoardAccounts, type TaskBoardPrincipal } from './host-accounts.ts'
+
+/** One teammate the Host asks the Agent Teams service to spawn for a team run. */
+export interface TeamSpawnInput {
+  /** Session id of the run's Team Lead (the root task's execution session). */
+  leadSessionId: string
+  /** Immutable lower-kebab-case teammate name, unique inside the Team. */
+  name: string
+  /** Short description of the delegated responsibility. */
+  description: string
+  /** The subtask's execution prompt. */
+  prompt: string
+}
+
+/** Result of one teammate spawn attempt. */
+export interface TeamSpawnResult {
+  /** The teammate's session id when it reached the active edge. */
+  sessionId?: string
+  /** Why the spawn failed: a thrown call, or a member that settled as failed. */
+  error?: string
+}
+
+/**
+ * The Agent Teams capability the Host needs for team-mode runs. The plugin
+ * builds it from the optional `agentTeams` service; it is absent when this
+ * deployment does not serve that service, in which case a team run is refused
+ * instead of silently degrading into a plain cascade.
+ */
+export interface TaskBoardTeamDispatcher {
+  spawn(input: TeamSpawnInput): Promise<TeamSpawnResult>
+}
 
 const SESSION_POLL_MS = 5_000
 const SCHEDULE_TICK_MS = 30_000
@@ -33,6 +64,7 @@ export class TaskBoardHostService {
   private observerPrincipal: TaskBoardPrincipal | undefined
   private readonly accounts: TaskBoardAccounts | undefined
   private preventIdleSleep = false
+  private readonly team: TaskBoardTeamDispatcher | undefined
   private lastPowerJson = ''
   private readonly now: () => number
 
@@ -44,10 +76,16 @@ export class TaskBoardHostService {
     workspaceRegistry?: TaskBoardWorkspaceRegistry
     sessionDefaultPermission?: TaskPermission
     accounts?: TaskBoardAccounts
+    maxSubtaskDepth?: number
+    team?: TaskBoardTeamDispatcher
   } = {}) {
-    this.ledger = options.ledger ?? new HostTaskLedger(undefined, undefined, { sessionDefaultPermission: options.sessionDefaultPermission })
+    this.ledger = options.ledger ?? new HostTaskLedger(undefined, undefined, {
+      sessionDefaultPermission: options.sessionDefaultPermission,
+      maxSubtaskDepth: options.maxSubtaskDepth,
+    })
     this.accounts = options.accounts
     this.runner = new HostExecutionRunner(gateway, options.commandDispatcher, options.workspaceRegistry, undefined, principal => this.accounts?.assert(principal))
+    this.team = options.team
     this.power = options.power ?? new PowerInhibitor()
     this.now = options.now ?? Date.now
     installStreamErrorGuards()
@@ -104,6 +142,8 @@ export class TaskBoardHostService {
       scheduler: state.scheduler,
       power: this.power.snapshot(),
       sessionDefaultPermission: this.ledger.sessionDefaultPermission,
+      maxSubtaskDepth: this.ledger.maxSubtaskDepth,
+      teamRunAvailable: this.team !== undefined,
     }
   }
 
@@ -127,8 +167,15 @@ export class TaskBoardHostService {
   apply(requestId: string, action: TaskBoardAction, initiator?: string, principal?: TaskBoardPrincipal): TaskBoardSnapshot {
     if (!this.active) throw new Error('task board is disabled')
     this.accounts?.assert(principal)
+    // Fail closed before the ledger opens anything: a card opted into team
+    // execution cannot run in a deployment that serves no Agent Teams service,
+    // and silently degrading it to a plain cascade would misreport the work.
+    if (this.team === undefined && (action.kind === 'run' || action.kind === 'rerun')) {
+      const task = this.ledger.state().tasks.find(item => item.id === action.taskId)
+      if (task?.teamRun === true) throw new Error('Agent Teams is unavailable in this deployment')
+    }
     const result = this.ledger.applyRequest(requestId, action, initiator, principal)
-    if (result.run !== undefined) this.scheduleLaunch(result.run)
+    if (result.runs !== undefined) this.dispatchRuns(result.runs)
     return {
       schemaVersion: TASK_BOARD_SCHEMA_VERSION,
       revision: result.state.revision,
@@ -146,16 +193,72 @@ export class TaskBoardHostService {
     this.listeners.clear()
   }
 
-  private async launch(opened: OpenedRun): Promise<void> {
+  private async launch(opened: OpenedRun, others: readonly OpenedRun[] = []): Promise<void> {
     try {
+      // A team run always mints a fresh Lead session: teammates are immutable
+      // children of that session, so reusing an older one would collide on
+      // their names and orphan the previous team.
       const idleIds = this.accountIdleSessionIds.get(principalKey(opened.principal))
-      const reuseSessionId = reusableSessionId(opened.task, idleIds)
-      const sessionId = await this.runner.launch(opened.task, { ...(reuseSessionId === undefined ? {} : { reuseSessionId }), ...(opened.principal === undefined ? {} : { principal: opened.principal }) })
+      const team = opened.task.teamRun === true
+      const reuseSessionId = team ? undefined : reusableSessionId(opened.task, idleIds)
+      // Both modes tell the launched agent what else this run opens; only a team
+      // run names teammates, because only then does this session own them.
+      const promptContext = others.length === 0 ? undefined : {
+        peers: others.map(other => ({
+          id: other.task.id,
+          title: other.task.title,
+          ...(team ? { name: teammateName(other.task.title, other.execution.runGroupId ?? other.task.id) } : {}),
+        })),
+        ...(team ? { team: true } : {}),
+      }
+      const sessionId = await this.runner.launch(opened.task, {
+        ...(opened.principal === undefined ? {} : { principal: opened.principal }),
+        ...(reuseSessionId === undefined ? {} : { reuseSessionId }),
+        ...(promptContext === undefined ? {} : { promptContext }),
+      })
       this.ledger.attachSession(opened.task.id, opened.execution.id, sessionId)
+      if (team) for (const teammate of others) this.scheduleTeammate(teammate, sessionId)
     } catch (error) {
       if (error instanceof SessionLaunchError) {
         this.ledger.attachSession(opened.task.id, opened.execution.id, error.sessionId)
       }
+      this.ledger.settle(opened.task.id, opened.execution.id, 'failed', error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  private scheduleTeammate(opened: OpenedRun, leadSessionId: string): void {
+    void this.spawnTeammate(opened, leadSessionId).catch(error => {
+      safeConsoleError('[dsh-task-board] teammate spawn settlement failed', error)
+    })
+  }
+
+  /**
+   * Spawn one teammate inside the Lead session and attach the teammate's
+   * session to the subtask execution, so the existing session monitor settles
+   * it from the teammate's own turn like any other execution. A spawn that
+   * fails settles the subtask as failed immediately, which then folds into the
+   * Lead's cascade verdict.
+   */
+  private async spawnTeammate(opened: OpenedRun, leadSessionId: string): Promise<void> {
+    const team = this.team
+    if (team === undefined) {
+      this.ledger.settle(opened.task.id, opened.execution.id, 'failed', 'Agent Teams is unavailable in this deployment')
+      return
+    }
+    try {
+      this.accounts?.assert(opened.principal)
+      const member = await team.spawn({
+        leadSessionId,
+        name: teammateName(opened.task.title, opened.execution.runGroupId ?? opened.task.id),
+        description: opened.task.title,
+        prompt: promptText(opened.task),
+      })
+      if (member.sessionId === undefined || member.sessionId === '') {
+        this.ledger.settle(opened.task.id, opened.execution.id, 'failed', member.error ?? 'teammate provisioning failed')
+        return
+      }
+      this.ledger.attachSession(opened.task.id, opened.execution.id, member.sessionId)
+    } catch (error) {
       this.ledger.settle(opened.task.id, opened.execution.id, 'failed', error instanceof Error ? error.message : String(error))
     }
   }
@@ -221,8 +324,7 @@ export class TaskBoardHostService {
     }
     for (const schedule of this.ledger.dueSchedules(now)) {
       const next = nextRunAtMs(schedule.cron, schedule.nextRunAt)
-      const opened = this.ledger.openScheduled(schedule.taskId, next, now)
-      if (opened !== undefined) this.scheduleLaunch(opened)
+      this.dispatchRuns(this.ledger.openScheduled(schedule.taskId, next, now))
     }
   }
 
@@ -230,8 +332,25 @@ export class TaskBoardHostService {
     return this.ledger.armedScheduleCount()
   }
 
-  private scheduleLaunch(opened: OpenedRun): void {
-    void this.launch(opened).catch(error => {
+  /**
+   * Launch one run set. The root goes first and receives the run shape in its
+   * prompt (which members this run opens, and how they run); every plain-cascade
+   * member then launches on its own so one refused participant cannot hold the
+   * others back. A team run's members are spawned inside the root's Lead
+   * session instead, once that session exists.
+   */
+  private dispatchRuns(runs: readonly OpenedRun[]): void {
+    if (runs.length === 0) return
+    const root = runs.find(run => run.dispatch !== 'teammate') ?? runs[0]
+    const others = runs.filter(run => run !== root)
+    this.scheduleLaunch(root, others)
+    for (const run of others) {
+      if (run.dispatch !== 'teammate') this.scheduleLaunch(run)
+    }
+  }
+
+  private scheduleLaunch(opened: OpenedRun, others: readonly OpenedRun[] = []): void {
+    void this.launch(opened, others).catch(error => {
       safeConsoleError('[dsh-task-board] execution launch settlement failed', error)
     })
   }

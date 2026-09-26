@@ -1,6 +1,6 @@
 # Fork compatibility and deployment
 
-This fork integrates `slywalker2006/dsh-passwords` commit `ff09f16a86fd4d6a85c9566e573c297744f0e4ac` (v2.7.5) on `dev`. Its candidate version is `2.7.5-dsh.20260926.1`; the owned push repository is `git@github.com:sdwhwzp/dsh-passwords.git`.
+This fork integrates `slywalker2006/dsh-passwords` commit `ff09f16a86fd4d6a85c9566e573c297744f0e4ac` (v2.7.5) on `dev`. Its candidate version is `2.7.5-dsh.20260926.2`; the owned push repository is `git@github.com:sdwhwzp/dsh-passwords.git`.
 
 ## Runtime requirements
 
@@ -27,6 +27,8 @@ The host plugin waits for an occupied gateway port to be released without termin
 The source media and message route factories own their state and cleanup. The source sandbox applier receives the current private Host authentication headers. Account management, managed directories and native HTTP/WebSocket proxy routing remain in the private gateway because they jointly enforce immutable ownership, desktop satellites and persistent services. The source admin/proxy factories remain available for the source gateway configuration; they are not registered alongside private routes.
 
 The v2.7.5 proxy fixes apply to the private gateway: schedule catalogs contain only authorized Session entries, stale workspace responses cannot replace archive markers, shared preset mutations require an administrator, and an upstream response-header deadline starts after request-body completion without limiting streamed response bodies. Ordinary accounts use the authenticated WebSocket/Remote event streams; retired HTTP event routes are rejected before forwarding. Existing administrator HTTP event subscriptions close on logout and credential changes. Media quotas count unfinished and unbound assets, and aborted media reads close their file descriptors.
+
+The private task-board Host engine is pinned to the matching dsh-web dependency closure recorded in `integrations/task-board/source.json`. Parent-child creation, linking and ledger reloads use the same protocol as the current client; every account retains a separate ledger and execution gateway. Both engine generations use ledger schema 3 with `ledger-v2.json` and `scheduler-v2.json`; the task-board storage directory is `MCP_TENANT_TASK_BOARD_DIR` (default `~/.dsh/tenant-task-boards`), with an `owner.json` and ledger files under each `u<accountId>` directory. Deployment backups include that entire directory.
 
 ## Release policy
 

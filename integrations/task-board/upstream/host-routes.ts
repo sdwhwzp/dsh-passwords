@@ -77,14 +77,50 @@ function resolveAccess(access: TaskBoardRouteAccess): ResolvedRouteAccess {
 }
 
 /**
+ * Harness browser-auth cookie prefix (dsh-client-connection): the
+ * authority-bound signed cookie the Host mints in exchange for its launch
+ * token. dsh-web's remote channel redeems that token before re-issuing paired
+ * traffic to 127.0.0.1 (packages/dsh-remote-web-ui/src/inner-auth.ts), and the
+ * official DSH Desktop shell keeps its own copy from the same exchange and
+ * attaches it to every request it forwards for the dsh-app://app/ page. The
+ * two constants describe one fact and move together.
+ */
+const BROWSER_AUTH_COOKIE_PREFIX = 'dsh-auth-'
+
+/**
+ * Whether a Cookie header carries the Host's browser-auth credential. Only an
+ * application on this machine can hold it: the desktop shell never lets it
+ * reach the page's cookie jar, and SameSite=Strict keeps a cross-site page
+ * from attaching it.
+ * @param header - the raw Cookie header value.
+ */
+function carriesBrowserAuthCookie(header: string | undefined): boolean {
+  if (header === undefined) return false
+  return header.split(';').some(segment => segment.trim().startsWith(BROWSER_AUTH_COOKIE_PREFIX))
+}
+
+/**
  * Browser-signal tripwire, NOT an authority check: a bare curl sends neither
  * header and is refused, but a curl with a forged Origin passes this too.
  * The real boundary is the loopback socket + Host + origin-equality checks
  * in isTrustedTaskBoardRequest below; do not rely on this marker alone.
+ *
+ * A first-party client that presents NEITHER header must still pass. The DSH
+ * Desktop shell serves the Web GUI from dsh-app://app/ and forwards that
+ * page's Host requests itself, deleting origin and sec-fetch-site on the
+ * way (dsh-desktop-host's forwardWebRequest), so the panel's own fetch
+ * arrives marker-less and every route behind this guard answered 403 - which
+ * the panel renders as its board.hostError.unauthorized message. The shell
+ * does attach the Host's browser-auth cookie, redeemed from the Host's launch
+ * URL at startup and deliberately withheld from the page. That credential,
+ * not a header the shell strips, is the browser signal of an application on
+ * this machine; a marker-less, credential-less request stays refused.
  */
 function browserSameOriginMarker(req: IncomingMessage): boolean {
   const site = req.headers['sec-fetch-site']
-  return site === 'same-origin' || typeof req.headers.origin === 'string'
+  if (site === 'same-origin') return true
+  if (typeof req.headers.origin === 'string') return true
+  return carriesBrowserAuthCookie(req.headers.cookie)
 }
 
 function sameAuthority(req: IncomingMessage, host: URL): boolean {
