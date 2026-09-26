@@ -10,6 +10,7 @@ import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import type { MysqlConnectionOptions } from './mysql-sync.js';
+import { parseUpstreamIdleTimeoutMs } from './upstream-agent.js';
 import { parseEndpointAllowlist } from './permissions.js';
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -67,6 +68,8 @@ export interface PlatformConfig {
     host: string;
     port: number;
     upstream: string;
+    /** Idle pooled HTTP connections expire before the Host closes them; active requests are unaffected. */
+    upstreamIdleTimeoutMs?: number;
     /** HTTPS 证书/密钥文件路径（都配置时网关启用 TLS） */
     tls: { cert: string; key: string } | null;
     /** HTTP→HTTPS 301 跳转端口（TLS 开启时可选；空/0 = 关闭） */
@@ -301,6 +304,7 @@ export function loadConfig(options: { requireSetupKey?: boolean } = {}): Platfor
       host: readEnv('MCP_GATEWAY_HOST', '0.0.0.0'),
       port: gatewayPort,
       upstream: readEnv('MCP_GATEWAY_UPSTREAM', 'http://127.0.0.1:3080'),
+      upstreamIdleTimeoutMs: parseUpstreamIdleTimeoutMs(process.env.MCP_GATEWAY_UPSTREAM_IDLE_TIMEOUT_MS),
       tls: userCerts
         ? { cert: userTlsCert, key: userTlsKey }
         : autoTls

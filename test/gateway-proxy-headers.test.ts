@@ -3963,7 +3963,7 @@ for (const endpoint of ['/api/session/initializeDefaultModel', '/api/session.ini
 }
 
 test('Remote mux rejects ordinary-account Host default-model initialization without forwarding', async () => {
-  const fixture = await authorizedSubuserFixture('default-model-mux-user');
+  const fixture = await authorizedSubuserFixture('default-model-mux-user', { allowSsh: true });
   try {
     fixture.connection.client.send(JSON.stringify({ type: 'open', streamId: 'initialize-model',
       endpoint: 'session/initializeDefaultModel', payload: { args: { request: { model: 'deepseek-official/deepseek-v4' } } } }));
@@ -3988,5 +3988,27 @@ test('Administrator Remote mux preserves Host validation for the default-model u
     assert.deepEqual(remoteMuxOpenEndpoints, ['session/initializeDefaultModel']);
   } finally {
     connection.client.close();
+  }
+});
+
+
+test('SSH permission does not authorize unknown terminal endpoints or another account Session', async () => {
+  const fixture = await authorizedSubuserFixture('terminal-scope-mux-user', { allowSsh: true });
+  try {
+    for (const endpoint of ['terminal/futureStream', 'terminal/follow/nested']) {
+      fixture.connection.client.send(JSON.stringify({ type: 'open', streamId: endpoint,
+        endpoint, payload: { args: { agentId: 'session-visible', id: 'term-owner-1' } } }));
+      const result = await nextFrameOrFail(fixture.connection, 'unknown terminal endpoint denied');
+      assert.equal(result.type, 'error');
+      assert.equal((result.error as { code: string }).code, 'gateway/forbidden');
+      assert.equal(remoteMuxOpenEndpoints.includes(endpoint), false);
+    }
+    const closed = waitForWebSocketClose(fixture.connection.client, 'foreign terminal Session denied');
+    fixture.connection.client.send(JSON.stringify({ type: 'open', streamId: 'foreign-terminal',
+      endpoint: 'terminal/follow', payload: { args: { agentId: 's-other-user', id: 'foreign-terminal', attachmentId: 'foreign-attachment' } } }));
+    assert.deepEqual(await closed, { code: 1008, reason: 'invalid Remote stream request' });
+    assert.equal(remoteMuxOpenEndpoints.includes('terminal/follow'), false);
+  } finally {
+    fixture.connection.client.close();
   }
 });

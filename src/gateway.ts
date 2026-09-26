@@ -23,6 +23,7 @@ import { URL, fileURLToPath } from 'node:url';
 import dns from 'node:dns';
 import express, { type Request, type Response } from 'express';
 import { registerMessageRoutes } from './messages.js';
+import { UpstreamHttpAgent } from './upstream-agent.js';
 import { createSandboxApplier } from './proxy.js';
 import { registerMediaRoutes } from './media.js';
 import { MobileAuth, isMobileRequest, mobileRequestToken } from './mobile-auth.js';
@@ -1771,9 +1772,7 @@ export function createGatewayServer(
   const upstreamPort = Number(upstream.port || 80);
   const upstreamAuthority = upstream.host;
 
-  // 上游连接池：复用与 dsh 的 TCP 连接（keep-alive），
-  // 避免每个代理请求都新建一次 TCP 握手
-  const upstreamAgent = new http.Agent({ keepAlive: true, maxSockets: 64, keepAliveMsecs: 30_000 });
+  const upstreamAgent = new UpstreamHttpAgent(config.gateway.upstreamIdleTimeoutMs);
   const configuredUpstreamBrowserCookie = options.upstreamBrowserCookie;
   const upstreamRemoteTransport = options.upstreamRemoteTransport === true;
   const rawUpstreamBrowserCookie: () => string | null = typeof configuredUpstreamBrowserCookie === 'function'
@@ -10622,10 +10621,14 @@ export function createGatewayServer(
               sendDownstream(JSON.stringify({ type: 'error', streamId: frame.streamId,
                 error: { code, message, details: {} } }));
             };
-            if (isSubuserBlockedApiPath(`/api/${frame.endpoint}`) || !TENANT_REMOTE_STREAM_ENDPOINTS.has(frame.endpoint)) {
+            const officialTerminalStream = OFFICIAL_TERMINAL_REMOTE_ENDPOINTS.has(frame.endpoint);
+            // Official terminal streams use the SSH grant and Session checks below,
+            // matching their HTTP routes. All other blocked APIs remain denied.
+            if ((!officialTerminalStream && isSubuserBlockedApiPath(`/api/${frame.endpoint}`)) ||
+                !TENANT_REMOTE_STREAM_ENDPOINTS.has(frame.endpoint)) {
               rejectStream('gateway/forbidden', 'Remote endpoint is not available for this user'); return;
             }
-            if (OFFICIAL_TERMINAL_REMOTE_ENDPOINTS.has(frame.endpoint) && !perms.allow_ssh) {
+            if (officialTerminalStream && !perms.allow_ssh) {
               rejectStream('terminal/unavailable'); return;
             }
             const args = clientConnectionArgs({ type: 'client-request', method: frame.endpoint, payload: frame.payload });

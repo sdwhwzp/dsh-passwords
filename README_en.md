@@ -14,6 +14,10 @@ Listed in [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek
 
 The Harness 0.1.7 gateway accepts workspace pin lists and validates each pinned session ID. Session and workspace access remains scoped to the signed-in account.
 
+The upstream HTTP pool uses `MCP_GATEWAY_UPSTREAM_IDLE_TIMEOUT_MS` for idle connections (default: 5000 ms), capped by shorter Host Keep-Alive hints. New and reused active requests, including SSE, do not inherit the idle deadline; caller request deadlines remain effective. Connection failures never replay requests automatically.
+
+Official `terminal/follow` and `terminal/retain` Remote streams require the account SSH grant and Session ownership. This does not authorize shared default-model initialization or unknown terminal endpoints.
+
 ## Development and chat modes
 
 Choose **Development** in the sidebar to use workspaces, terminals and the editor. Choose **Chat** to ask questions without selecting a workspace. **New chat** reuses an unasked chat on the server per account, including concurrent requests from multiple windows. History shows only the selected blank chat. Messages, running work, queued input, archived chats and named chats are preserved. Subagent records remain accessible through their parent conversation and are not listed as new chats. History belongs to the signed-in account and can be resumed later.
