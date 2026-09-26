@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.7.5 - 2026-09-25
+
+### 中文
+
+更新公告：
+
+1. 适配 DSH `0.1.7-rc.2`；兼容门禁维持 `0.1.7` 线，继续接受稳定版及 alpha/beta/rc 预发布版本。
+2. 修复 rc.2 子用户会话中的 dsh-schedule 403、目录选择器删除按钮和删除目录后的 workspace/子用户授权联动清理。
+3. 修复媒体配额、归档并发、SSE 生命周期、上游超时与插件通知超时；网关按功能拆分为 `proxy`、`admin`、`media`、`messages` 和 `sse-frames` 模块。
+
+### English
+
+Release notes:
+
+1. Adapted to DSH `0.1.7-rc.2`; the compatibility gate remains on the `0.1.7` line and accepts stable and alpha/beta/rc prereleases.
+2. Fixed rc.2 subuser dsh-schedule 403 responses, the directory-picker delete button, and linked workspace/subuser authorization cleanup after directory deletion.
+3. Fixed media quota accounting, archive concurrency, SSE lifecycle, upstream and plugin notification timeouts; the gateway is split by function into `proxy`, `admin`, `media`, `messages`, and `sse-frames` modules.
+
+验证：本地 `npm test` 577/577、构建、类型检查、打包与 diff 检查通过；测试服务器 2.7.5 / DSH 0.1.7-rc.2 healthz/readyz 与 patch status 正常；多用户 E2E 128 PASS / 0 FAIL / 9 INCONCLUSIVE，未执行 destructive purge。
+
+Validation: `npm test` 577/577, build, type check, package and diff checks passed; test-server 2.7.5 / DSH 0.1.7-rc.2 health/readiness and patch status are healthy; multiuser E2E completed with 128 PASS / 0 FAIL / 9 INCONCLUSIVE. Destructive purge was not run.
+
 ## 2.7.4 - 2026-09-23
 
 ### 中文

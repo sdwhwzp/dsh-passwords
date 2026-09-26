@@ -2555,7 +2555,7 @@ export class Database {
 
   /**
    * 该用户当前可用（ready 且未过期）的媒体对象列表；
-   * 传入 kind 时按类型过滤（用于上传配额统计）。
+   * 传入 kind 时按类型过滤。上传配额（未绑定资产）用 countUnboundMediaForUser。
    */
   listMediaForUser(userId: number, kind?: 'sticker' | 'image' | 'video'): OwnedMediaRow[] {
     const params: (string | number)[] = [userId];
@@ -2577,6 +2577,29 @@ export class Database {
       height: row.height === null ? null : Number(row.height),
       duration_ms: row.duration_ms === null ? null : Number(row.duration_ms),
     }));
+  }
+
+  /**
+   * 该用户当前「未绑定」的媒体资产数量（上传配额统计）：
+   *   - pending 且未过期（已签发上传但尚未完成 PUT）；以及
+   *   - ready 且未过期、且未出现在 message_media 绑定表中。
+   * 已挂到消息上的资产不再计入，否则正常聊天累计发送到上限后会再也无法上传；
+   * pending 同期计入，堵住「只 init 不 PUT」绕过配额的路径。
+   */
+  countUnboundMediaForUser(userId: number): number {
+    const row = this.stmt(
+      `SELECT COUNT(*) AS n
+         FROM media_assets a
+        WHERE a.owner_id = ?
+          AND (a.expires_at IS NULL OR a.expires_at > datetime('now'))
+          AND (
+            a.state = 'pending'
+            OR (a.state = 'ready' AND NOT EXISTS (
+              SELECT 1 FROM message_media mm WHERE mm.media_id = a.id
+            ))
+          )`,
+    ).get(userId) as { n: number | bigint } | undefined;
+    return row === undefined ? 0 : Number(row.n);
   }
 
   /** 该用户是否拥有一个可用（ready 且未过期）的媒体对象 */

@@ -6,11 +6,11 @@ import path from 'node:path';
 const projectRoot = path.resolve(import.meta.dirname, '..');
 const read = (...parts: string[]) => readFileSync(path.join(projectRoot, ...parts), 'utf8');
 
-// The DSH 0.1.7 line is the current compatibility target; alpha.2 is the pinned release.
+// Private development links and public installer defaults target the reviewed RC2 release.
 // Bump this constant together with package.json, the lockfile, the installers, Docker
 // defaults, and the public baseline docs.
-const PRIVATE_HARNESS = '0.1.7-rc.1';
-const DSH_ALPHA = '0.1.7-alpha.2';
+const PRIVATE_HARNESS = '0.1.7-rc.2';
+const DSH_PIN = '0.1.7-rc.2';
 const PREVIOUS_ALPHA = '0.1.7-alpha.1';
 // Exact-match detector: the `(?!\d)` guard keeps a future alpha.10 / alpha.11
 // from being misread as the previous alpha.1.
@@ -46,7 +46,7 @@ test('the previous-alpha detector matches the previous alpha exactly and never a
   assert.doesNotMatch('0.1.7-alpha.10', PREVIOUS_ALPHA_RE);
   assert.doesNotMatch('0.1.7-alpha.11', PREVIOUS_ALPHA_RE);
   assert.doesNotMatch('0.1.7-alpha.100', PREVIOUS_ALPHA_RE);
-  assert.doesNotMatch('0.1.7-alpha.2', PREVIOUS_ALPHA_RE);
+  assert.doesNotMatch('0.1.7-rc.2', PREVIOUS_ALPHA_RE);
   assert.match('DSH-0.1.7--alpha.1', PREVIOUS_ALPHA_RE, 'the shields.io double-hyphen spelling must also be detected');
 });
 
@@ -102,20 +102,20 @@ test('shrinkwrap records every private Harness development link', () => {
   }
 });
 
-test('installers and bundled Docker default to the pinned alpha', () => {
+test('installers and bundled Docker default to the pinned release', () => {
   for (const file of ['install.sh', 'install.bat', 'scripts/install.mjs']) {
     const source = read(file);
-    assert.match(source, /@deepseek-ai\/dsh@0\.1\.7-alpha\.2/, `${file} must install @deepseek-ai/dsh@${DSH_ALPHA}`);
+    assert.match(source, /@deepseek-ai\/dsh@0\.1\.7-rc\.2/, `${file} must install @deepseek-ai/dsh@${DSH_PIN}`);
     assert.doesNotMatch(source, /@deepseek-ai\/dsh@0\.1\.6-alpha\.2(?!\d)/, `${file} must not prescribe the previous alpha install command`);
   }
-  assert.match(read('docker', 'Dockerfile.bundled'), /ARG DSH_VERSION=0\.1\.7-alpha\.2/);
-  assert.match(read('docker', 'docker-compose.yml'), /DSH_VERSION:-0\.1\.7-alpha\.2/);
-  assert.match(read('docker', '.env.example'), /#DSH_VERSION=0\.1\.7-alpha\.2/);
+  assert.match(read('docker', 'Dockerfile.bundled'), /ARG DSH_VERSION=0\.1\.7-rc\.2/);
+  assert.match(read('docker', 'docker-compose.yml'), /DSH_VERSION:-0\.1\.7-rc\.2/);
+  assert.match(read('docker', '.env.example'), /#DSH_VERSION=0\.1\.7-rc\.2/);
 });
 
 test('compatibility documentation identifies the private Harness requirement', () => {
   const matrix = read('docs', 'compatibility-matrix.md');
-  assert.match(matrix, /0\.1\.7-rc\.1/);
+  assert.match(matrix, /0\.1\.7-rc\.2/);
   assert.match(matrix, /native principal/);
   assert.match(matrix, /candidate/i);
 });

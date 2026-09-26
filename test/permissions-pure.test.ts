@@ -373,7 +373,7 @@ test('terminal：alpha.2 客户端会调用 list/environment/shells/close，网�
 
 // ── alpha.2 官方命名空间清理：清单固定 / 精确路由 / 遗留兼容 / 硬拒单端点 ──
 
-test('OFFICIAL_API_NAMESPACES：alpha.2 实测清单精确固定（新增必须显式改测试与兼容性矩阵）', () => {
+test('OFFICIAL_API_NAMESPACES：alpha.2/rc.2 实测清单精确固定（新增必须显式改测试与兼容性矩阵）', () => {
   assert.deepEqual([...OFFICIAL_API_NAMESPACES].sort(), [
     '$events',
     'account',
@@ -391,6 +391,7 @@ test('OFFICIAL_API_NAMESPACES：alpha.2 实测清单精确固定（新增必须�
     'permissionPresets',
     'pluginInventory',
     'remote.mux',
+    'schedule',
     'session',
     'sessionFeedback',
     'sessionReferenceResolver',
@@ -519,8 +520,8 @@ test('0.1.7：硬拒绝端点集合精确固定（宿主级能力 + 无法校验
     'credentials/set',
     'credentials/unset',
     'directoryPicker/pick',
-
     'session/canOpenWorkspacePath',
+    'session/initializeDefaultModel',
     'session/openWorkspacePath',
     'session/workspacePathApplications',
     'settings/openSettingsDocument',
@@ -534,6 +535,7 @@ test('0.1.7 硬拒新端点：精确方法先于登记表，且不按前缀/命�
   const blocked = [
     'credentials/set', 'credentials/unset', 'settings/openSettingsDocument',
     'session/openWorkspacePath', 'session/canOpenWorkspacePath', 'session/workspacePathApplications',
+    'session/initializeDefaultModel',
 
   ];
   for (const endpoint of blocked) {
@@ -668,6 +670,48 @@ test('0.1.7：sessionFeedback/record 与 goals/get 纳入会话作用域（点�
   // 它们是归属校验而不是硬拒：两条收紧路径互不替代
   assert.equal(isSubuserBlockedApiPath('/api/sessionFeedback/record'), false);
   assert.equal(isSubuserBlockedApiPath('/api/goals/get'), false);
+});
+
+test('0.1.7-rc.2：schedule 官方化，list/history/update/delete 走会话归属，catalog 官方放行并由网关过滤', () => {
+  const none = parseEndpointAllowlist('', 'TEST');
+  const generic = parseEndpointAllowlist('/api/*,ws:/api/*,http:/api/*', 'TEST');
+
+  // 命名空间整体进入官方清单：登记表为空时也不再是 third-party
+  assert.equal(OFFICIAL_API_NAMESPACES.has('schedule'), true);
+  assert.equal(isSubuserBlockedApiPath('/api/schedule/list'), false);
+  assert.equal(classifySubuserPath('/api/schedule/list', { endpointRules: none, transport: 'http' }), 'official');
+
+  // 四个带 request.sessionId 的方法逐会话归属校验（点号/斜杠同口径）
+  for (const method of ['list', 'history', 'update', 'delete']) {
+    assert.equal(SESSION_SCOPED_RE.test(`/api/schedule/${method}`), true, method);
+    assert.equal(SESSION_SCOPED_RE.test(`/api/schedule.${method}`), true, `${method} 点号形状`);
+  }
+  // 前缀相近的方法/命名空间不被顺带纳入
+  for (const path of ['/api/schedule/listExtra', '/api/schedule/listAll', '/api/schedule', '/api/scheduleList/list', '/api/schedules/list']) {
+    assert.equal(SESSION_SCOPED_RE.test(path), false, path);
+  }
+
+  // catalog 无会话身份：不进归属校验面，但对子用户不再硬拒——官方分类放行，
+  // 授权边界改由 gateway 解析响应后按条目 sessionId 过滤（见 gateway-proxy 的
+  // SCHEDULE_CATALOG_RE）。此处只断言分类面：空登记表下两种形状与两条通道均为
+  // official；宽泛的 /api/* 规则会以 ssh 命中点号形状（登记表既有语义，与本次改动
+  // 无关），但不再落入 third-party 硬拒；响应过滤与分类无关、始终执行。
+  assert.equal(SESSION_SCOPED_RE.test('/api/schedule/catalog'), false);
+  assert.equal(SESSION_SCOPED_RE.test('/api/schedule.catalog'), false);
+  assert.equal(isSubuserBlockedApiPath('/api/schedule/catalog'), false);
+  assert.equal(isSubuserBlockedApiPath('/api/schedule.catalog'), false);
+  assert.equal(classifySubuserPath('/api/schedule/catalog', { endpointRules: none, transport: 'http' }), 'official');
+  assert.equal(classifySubuserPath('/api/schedule.catalog', { endpointRules: none, transport: 'ws' }), 'official');
+  assert.equal(classifySubuserPath('/api/schedule/catalog', { endpointRules: generic, transport: 'http' }), 'official');
+  assert.equal(
+    classifySubuserPath('/api/schedule.catalog', { endpointRules: generic, transport: 'http' }),
+    'ssh',
+    '宽泛 /api/* 登记把点号形状归为已登记 ssh（非 official），但已不再是 third-party 硬拒',
+  );
+  // 逐方法精确相等：依赖归属校验的其它方法不受影响，前缀相近不误伤
+  // （catalogExtra 仍是 schedule 官方命名空间下的未知方法，不为 catalog 过滤器命中）
+  assert.equal(isSubuserBlockedApiPath('/api/schedule/list'), false);
+  assert.equal(isSubuserBlockedApiPath('/api/schedule/catalogExtra'), false);
 });
 
 test('present.open / changes.open 按 POST 会话作用域纳入（query 会话身份由网关回落采集）', () => {

@@ -1,12 +1,12 @@
 {
   "name": "dsh-passwords",
-  "version": "2.7.4-dsh.20260924.1",
+  "version": "2.7.5-dsh.20260926.1",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
     "": {
       "name": "dsh-passwords",
-      "version": "2.7.4-dsh.20260924.1",
+      "version": "2.7.5-dsh.20260926.1",
       "license": "BSD-3-Clause",
       "dependencies": {
         "bcryptjs": "^3.0.2",
@@ -67,29 +67,29 @@
       },
       "peerDependencies": {
         "@deepseek-ai/cordis": "^4.0.2",
-        "@deepseek-ai/dsh-agent": "^0.1.7-rc.1",
-        "@deepseek-ai/dsh-api-gateway": "^0.1.7-rc.1",
-        "@deepseek-ai/dsh-api-session-controller": "^0.1.7-rc.1",
-        "@deepseek-ai/dsh-api-workspace-controller": "^0.1.7-rc.1",
-        "@deepseek-ai/dsh-attachment": "^0.1.7-rc.1",
-        "@deepseek-ai/dsh-client-connection": "^0.1.7-rc.1",
-        "@deepseek-ai/dsh-client-locale": "^0.1.7-rc.1",
-        "@deepseek-ai/dsh-client-ui-conversation": "^0.1.7-rc.1",
-        "@deepseek-ai/dsh-client-ui-layout": "^0.1.7-rc.1",
-        "@deepseek-ai/dsh-client-ui-primitives": "^0.1.7-rc.1",
-        "@deepseek-ai/dsh-client-ui-renderer": "^0.1.7-rc.1",
-        "@deepseek-ai/dsh-client-ui-settings": "^0.1.7-rc.1",
-        "@deepseek-ai/dsh-client-ui-slots": "^0.1.7-rc.1",
-        "@deepseek-ai/dsh-client-ui-workspace": "^0.1.7-rc.1",
-        "@deepseek-ai/dsh-host-webserver": "^0.1.7-rc.1",
-        "@deepseek-ai/dsh-llm": "^0.1.7-rc.1",
-        "@deepseek-ai/dsh-principal-access": "^0.1.7-rc.1",
-        "@deepseek-ai/dsh-session": "^0.1.7-rc.1",
-        "@deepseek-ai/dsh-session-query": "^0.1.7-rc.1",
-        "@deepseek-ai/dsh-system-prompt": "^0.1.7-rc.1",
-        "@deepseek-ai/dsh-tools": "^0.1.7-rc.1",
-        "@deepseek-ai/dsh-typert-protocol": "^0.1.7-rc.1",
-        "@deepseek-ai/dsh-workspace": "^0.1.7-rc.1"
+        "@deepseek-ai/dsh-agent": "^0.1.7-rc.2",
+        "@deepseek-ai/dsh-api-gateway": "^0.1.7-rc.2",
+        "@deepseek-ai/dsh-api-session-controller": "^0.1.7-rc.2",
+        "@deepseek-ai/dsh-api-workspace-controller": "^0.1.7-rc.2",
+        "@deepseek-ai/dsh-attachment": "^0.1.7-rc.2",
+        "@deepseek-ai/dsh-client-connection": "^0.1.7-rc.2",
+        "@deepseek-ai/dsh-client-locale": "^0.1.7-rc.2",
+        "@deepseek-ai/dsh-client-ui-conversation": "^0.1.7-rc.2",
+        "@deepseek-ai/dsh-client-ui-layout": "^0.1.7-rc.2",
+        "@deepseek-ai/dsh-client-ui-primitives": "^0.1.7-rc.2",
+        "@deepseek-ai/dsh-client-ui-renderer": "^0.1.7-rc.2",
+        "@deepseek-ai/dsh-client-ui-settings": "^0.1.7-rc.2",
+        "@deepseek-ai/dsh-client-ui-slots": "^0.1.7-rc.2",
+        "@deepseek-ai/dsh-client-ui-workspace": "^0.1.7-rc.2",
+        "@deepseek-ai/dsh-host-webserver": "^0.1.7-rc.2",
+        "@deepseek-ai/dsh-llm": "^0.1.7-rc.2",
+        "@deepseek-ai/dsh-principal-access": "^0.1.7-rc.2",
+        "@deepseek-ai/dsh-session": "^0.1.7-rc.2",
+        "@deepseek-ai/dsh-session-query": "^0.1.7-rc.2",
+        "@deepseek-ai/dsh-system-prompt": "^0.1.7-rc.2",
+        "@deepseek-ai/dsh-tools": "^0.1.7-rc.2",
+        "@deepseek-ai/dsh-typert-protocol": "^0.1.7-rc.2",
+        "@deepseek-ai/dsh-workspace": "^0.1.7-rc.2"
       },
       "peerDependenciesMeta": {
         "@deepseek-ai/dsh-principal-access": {
@@ -99,7 +99,7 @@
     },
     "../../deepseek-harness/packages/api/gateway": {
       "name": "@deepseek-ai/dsh-api-gateway",
-      "version": "0.1.7-rc.1",
+      "version": "0.1.7-rc.2",
       "dev": true,
       "license": "MIT",
       "dependencies": {
@@ -131,7 +131,7 @@
     },
     "../../deepseek-harness/packages/api/session-controller": {
       "name": "@deepseek-ai/dsh-api-session-controller",
-      "version": "0.1.7-rc.1",
+      "version": "0.1.7-rc.2",
       "dev": true,
       "license": "MIT",
       "dependencies": {
@@ -155,6 +155,7 @@
         "@deepseek-ai/dsh-client-store": "workspace:*",
         "@deepseek-ai/dsh-client-test-runtime": "workspace:*",
         "@deepseek-ai/dsh-commands": "workspace:*",
+        "@deepseek-ai/dsh-credentials": "workspace:*",
         "@deepseek-ai/dsh-file-reference": "workspace:*",
         "@deepseek-ai/dsh-fs": "workspace:*",
         "@deepseek-ai/dsh-fs-local": "workspace:*",
@@ -170,6 +171,7 @@
         "@deepseek-ai/dsh-session-projection-cache": "workspace:*",
         "@deepseek-ai/dsh-session-query": "workspace:*",
         "@deepseek-ai/dsh-session-title": "workspace:*",
+        "@deepseek-ai/dsh-settings": "workspace:*",
         "@deepseek-ai/dsh-skill": "workspace:*",
         "@deepseek-ai/dsh-storage": "workspace:*",
         "@deepseek-ai/dsh-storage-domain": "workspace:*",
@@ -194,6 +196,7 @@
         "@deepseek-ai/dsh-client-connection": "workspace:*",
         "@deepseek-ai/dsh-client-file-upload": "workspace:*",
         "@deepseek-ai/dsh-commands": "workspace:*",
+        "@deepseek-ai/dsh-credentials": "workspace:*",
         "@deepseek-ai/dsh-file-reference": "workspace:*",
         "@deepseek-ai/dsh-fs": "workspace:*",
         "@deepseek-ai/dsh-llm": "workspace:*",
@@ -206,6 +209,7 @@
         "@deepseek-ai/dsh-session-projection-cache": "workspace:*",
         "@deepseek-ai/dsh-session-query": "workspace:*",
         "@deepseek-ai/dsh-session-title": "workspace:*",
+        "@deepseek-ai/dsh-settings": "workspace:*",
         "@deepseek-ai/dsh-skill": "workspace:*",
         "@deepseek-ai/dsh-subagent": "workspace:*",
         "@deepseek-ai/dsh-typert-protocol": "workspace:*",
@@ -221,12 +225,15 @@
         },
         "@deepseek-ai/dsh-session-projection-cache": {
           "optional": true
+        },
+        "@deepseek-ai/dsh-settings": {
+          "optional": true
         }
       }
     },
     "../../deepseek-harness/packages/api/workspace-controller": {
       "name": "@deepseek-ai/dsh-api-workspace-controller",
-      "version": "0.1.7-rc.1",
+      "version": "0.1.7-rc.2",
       "dev": true,
       "license": "MIT",
       "dependencies": {
@@ -265,7 +272,7 @@
     },
     "../../deepseek-harness/packages/attachment/attachment": {
       "name": "@deepseek-ai/dsh-attachment",
-      "version": "0.1.7-rc.1",
+      "version": "0.1.7-rc.2",
       "dev": true,
       "license": "MIT",
       "devDependencies": {
@@ -279,7 +286,7 @@
     },
     "../../deepseek-harness/packages/client/connection": {
       "name": "@deepseek-ai/dsh-client-connection",
-      "version": "0.1.7-rc.1",
+      "version": "0.1.7-rc.2",
       "dev": true,
       "license": "MIT",
       "dependencies": {
@@ -304,7 +311,7 @@
     },
     "../../deepseek-harness/packages/client/locale": {
       "name": "@deepseek-ai/dsh-client-locale",
-      "version": "0.1.7-rc.1",
+      "version": "0.1.7-rc.2",
       "dev": true,
       "license": "MIT",
       "dependencies": {
@@ -331,7 +338,7 @@
     },
     "../../deepseek-harness/packages/client/ui-conversation": {
       "name": "@deepseek-ai/dsh-client-ui-conversation",
-      "version": "0.1.7-rc.1",
+      "version": "0.1.7-rc.2",
       "dev": true,
       "license": "MIT",
       "dependencies": {
@@ -347,6 +354,7 @@
         "@deepseek-ai/dsh-brand": "workspace:*",
         "@deepseek-ai/dsh-client-file-upload": "workspace:*",
         "@deepseek-ai/dsh-client-locale": "workspace:*",
+        "@deepseek-ai/dsh-client-shortcuts": "workspace:*",
         "@deepseek-ai/dsh-client-store": "workspace:*",
         "@deepseek-ai/dsh-client-test-runtime": "workspace:*",
         "@deepseek-ai/dsh-client-ui-layout": "workspace:*",
@@ -389,13 +397,14 @@
     },
     "../../deepseek-harness/packages/client/ui-layout": {
       "name": "@deepseek-ai/dsh-client-ui-layout",
-      "version": "0.1.7-rc.1",
+      "version": "0.1.7-rc.2",
       "dev": true,
       "license": "MIT",
       "devDependencies": {
         "@deepseek-ai/cordis": "workspace:~",
         "@deepseek-ai/dsh-brand": "workspace:*",
         "@deepseek-ai/dsh-client-locale": "workspace:*",
+        "@deepseek-ai/dsh-client-shortcuts": "workspace:*",
         "@deepseek-ai/dsh-client-store": "workspace:*",
         "@deepseek-ai/dsh-client-ui-renderer": "workspace:*",
         "@deepseek-ai/dsh-client-ui-session": "workspace:*",
@@ -410,12 +419,13 @@
     },
     "../../deepseek-harness/packages/client/ui-primitives": {
       "name": "@deepseek-ai/dsh-client-ui-primitives",
-      "version": "0.1.7-rc.1",
+      "version": "0.1.7-rc.2",
       "dev": true,
       "license": "MIT",
       "devDependencies": {
         "@deepseek-ai/cordis": "workspace:~",
         "@deepseek-ai/dsh-client-store": "workspace:*",
+        "@deepseek-ai/dsh-util-code-language": "workspace:*",
         "@deepseek-ai/dsh-util-workspace-path": "workspace:*",
         "@shikijs/langs": "^4.3.1",
         "@types/mdast": "^4.0.4",
@@ -448,7 +458,7 @@
     },
     "../../deepseek-harness/packages/client/ui-renderer": {
       "name": "@deepseek-ai/dsh-client-ui-renderer",
-      "version": "0.1.7-rc.1",
+      "version": "0.1.7-rc.2",
       "dev": true,
       "license": "MIT",
       "devDependencies": {
@@ -469,7 +479,7 @@
     },
     "../../deepseek-harness/packages/client/ui-settings": {
       "name": "@deepseek-ai/dsh-client-ui-settings",
-      "version": "0.1.7-rc.1",
+      "version": "0.1.7-rc.2",
       "dev": true,
       "license": "MIT",
       "dependencies": {
@@ -492,7 +502,7 @@
     },
     "../../deepseek-harness/packages/client/ui-settings-general": {
       "name": "@deepseek-ai/dsh-client-ui-settings-general",
-      "version": "0.1.7-rc.1",
+      "version": "0.1.7-rc.2",
       "dev": true,
       "license": "MIT",
       "dependencies": {
@@ -503,6 +513,7 @@
         "@deepseek-ai/dsh-api-remotes": "workspace:*",
         "@deepseek-ai/dsh-client-connection": "workspace:*",
         "@deepseek-ai/dsh-client-locale": "workspace:*",
+        "@deepseek-ai/dsh-client-shortcuts": "workspace:*",
         "@deepseek-ai/dsh-client-store": "workspace:*",
         "@deepseek-ai/dsh-client-test-runtime": "workspace:*",
         "@deepseek-ai/dsh-client-ui-primitives": "workspace:*",
@@ -514,8 +525,10 @@
         "@deepseek-ai/dsh-remote-mock": "workspace:*",
         "@deepseek-ai/dsh-settings": "workspace:*",
         "@types/react": "~18.3.1",
+        "@types/react-dom": "~18.3.0",
         "clsx": "^2.0.0",
-        "react": "^18.2.0"
+        "react": "^18.2.0",
+        "react-dom": "^18.2.0"
       },
       "peerDependencies": {
         "@deepseek-ai/cordis": "workspace:~"
@@ -523,7 +536,7 @@
     },
     "../../deepseek-harness/packages/client/ui-slots": {
       "name": "@deepseek-ai/dsh-client-ui-slots",
-      "version": "0.1.7-rc.1",
+      "version": "0.1.7-rc.2",
       "dev": true,
       "license": "MIT",
       "devDependencies": {
@@ -537,7 +550,7 @@
     },
     "../../deepseek-harness/packages/client/ui-workspace": {
       "name": "@deepseek-ai/dsh-client-ui-workspace",
-      "version": "0.1.7-rc.1",
+      "version": "0.1.7-rc.2",
       "dev": true,
       "license": "MIT",
       "devDependencies": {
@@ -548,6 +561,7 @@
         "@deepseek-ai/dsh-api-workspace-controller": "workspace:*",
         "@deepseek-ai/dsh-client-connection": "workspace:*",
         "@deepseek-ai/dsh-client-locale": "workspace:*",
+        "@deepseek-ai/dsh-client-shortcuts": "workspace:*",
         "@deepseek-ai/dsh-client-store": "workspace:*",
         "@deepseek-ai/dsh-client-test-runtime": "workspace:*",
         "@deepseek-ai/dsh-client-ui-conversation": "workspace:*",
@@ -574,7 +588,7 @@
     },
     "../../deepseek-harness/packages/core/agent": {
       "name": "@deepseek-ai/dsh-agent",
-      "version": "0.1.7-rc.1",
+      "version": "0.1.7-rc.2",
       "dev": true,
       "license": "MIT",
       "devDependencies": {
@@ -610,7 +624,7 @@
     },
     "../../deepseek-harness/packages/core/scope": {
       "name": "@deepseek-ai/dsh-scope",
-      "version": "0.1.7-rc.1",
+      "version": "0.1.7-rc.2",
       "dev": true,
       "license": "MIT",
       "devDependencies": {
@@ -624,7 +638,7 @@
     },
     "../../deepseek-harness/packages/core/session": {
       "name": "@deepseek-ai/dsh-session",
-      "version": "0.1.7-rc.1",
+      "version": "0.1.7-rc.2",
       "dev": true,
       "license": "MIT",
       "dependencies": {
@@ -646,7 +660,7 @@
     },
     "../../deepseek-harness/packages/core/system-prompt": {
       "name": "@deepseek-ai/dsh-system-prompt",
-      "version": "0.1.7-rc.1",
+      "version": "0.1.7-rc.2",
       "dev": true,
       "license": "MIT",
       "dependencies": {
@@ -667,7 +681,7 @@
     },
     "../../deepseek-harness/packages/core/tools": {
       "name": "@deepseek-ai/dsh-tools",
-      "version": "0.1.7-rc.1",
+      "version": "0.1.7-rc.2",
       "dev": true,
       "license": "MIT",
       "dependencies": {
@@ -705,7 +719,7 @@
     },
     "../../deepseek-harness/packages/host/webserver": {
       "name": "@deepseek-ai/dsh-host-webserver",
-      "version": "0.1.7-rc.1",
+      "version": "0.1.7-rc.2",
       "dev": true,
       "license": "MIT",
       "dependencies": {
@@ -724,7 +738,7 @@
     },
     "../../deepseek-harness/packages/llm/llm": {
       "name": "@deepseek-ai/dsh-llm",
-      "version": "0.1.7-rc.1",
+      "version": "0.1.7-rc.2",
       "dev": true,
       "license": "MIT",
       "dependencies": {
@@ -747,7 +761,7 @@
     },
     "../../deepseek-harness/packages/session-query/session-query": {
       "name": "@deepseek-ai/dsh-session-query",
-      "version": "0.1.7-rc.1",
+      "version": "0.1.7-rc.2",
       "dev": true,
       "license": "MIT",
       "dependencies": {
@@ -789,7 +803,7 @@
     },
     "../../deepseek-harness/packages/typert/protocol": {
       "name": "@deepseek-ai/dsh-typert-protocol",
-      "version": "0.1.7-rc.1",
+      "version": "0.1.7-rc.2",
       "dev": true,
       "license": "MIT",
       "dependencies": {
@@ -804,7 +818,7 @@
     },
     "../../deepseek-harness/packages/workspace/workspace": {
       "name": "@deepseek-ai/dsh-workspace",
-      "version": "0.1.7-rc.1",
+      "version": "0.1.7-rc.2",
       "dev": true,
       "license": "MIT",
       "dependencies": {

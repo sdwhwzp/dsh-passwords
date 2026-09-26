@@ -28,7 +28,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, ReadStream, rmSync } from 'node:fs';
 import jwt from 'jsonwebtoken';
 import { createRequire } from 'node:module';
 
@@ -329,6 +329,13 @@ function setPerms(userId: number, extra: Record<string, unknown>): void {
     disabledSessions: [],
     ...extra,
   });
+}
+
+/** 新建一个开启聊天媒体的隔离子用户（配额用例专用，避免与其它用例的媒体互相干扰） */
+function freshMediaUser(name: string): { id: number; cookie: string } {
+  const user = db.createUser(`model-media-${name}`, HASH, 'user');
+  setPerms(user.id, { allowedModels: null, allowChatMedia: true });
+  return { id: user.id, cookie: subCookie(user) };
 }
 
 before(async () => {
@@ -1103,6 +1110,71 @@ test('媒体上传：上传其他用户的 upload ID 被拒绝（IDOR）', async
 });
 
 // ══════════════════════════════════════════════════════════════════════
+// 五之二、媒体上传配额（MEDIA_MAX_PENDING_ASSETS_PER_USER）
+// ══════════════════════════════════════════════════════════════════════
+
+const MEDIA_QUOTA_MAX = 20;
+
+/** 发起一次 init（不 PUT，用于 pending 配额） */
+function initMedia(cookie: string, fileName: string): Promise<Res> {
+  return req('POST', '/gateway/api/message-media/init', {
+    cookie,
+    body: { kind: 'image', mimeType: 'image/png', byteSize: PNG_BYTES.length, fileName },
+  });
+}
+
+test('媒体配额：已发送到消息的 20 个媒体不再占用 init 配额', async () => {
+  const user = freshMediaUser('quota-sent');
+  for (let i = 0; i < MEDIA_QUOTA_MAX; i += 1) {
+    const { init, put, mediaId } = await uploadMedia(user.cookie, 'image', 'image/png', PNG_BYTES, `sent-${i}.png`);
+    assert.equal(init.status, 200, `第 ${i + 1} 次 init 应放行：${init.body}`);
+    assert.equal(put.status, 200, `第 ${i + 1} 次上传应成功：${put.body}`);
+    // 直接经数据层绑定到消息（与 HTTP 发送写的是同一张 message_media 表）；
+    // 避免触发与本用例无关的留言频率限制，使 20 条发送的建立保持确定性。
+    db.addMessageWithMedia({
+      senderId: user.id,
+      recipientId: adminId,
+      content: '',
+      tags: [],
+      mediaIds: [mediaId],
+    });
+    assert.equal(db.mediaAttachedToAnyMessage(mediaId), true, `第 ${i + 1} 个媒体应已绑定到消息`);
+  }
+
+  // 20 个媒体均已绑定到消息：配额应已释放，init 必须继续可用（协议不得 429）
+  const after = await initMedia(user.cookie, 'after-20-sent.png');
+  assert.equal(after.status, 200, `已发送的媒体不得继续占用配额：${after.body}`);
+  assert.notEqual(uploadIdOf(after), '', 'init 必须返回 upload ID');
+});
+
+test('媒体配额：未绑定的 20 个 ready 资产触发 429 MEDIA_QUOTA', async () => {
+  const user = freshMediaUser('quota-unbound');
+  for (let i = 0; i < MEDIA_QUOTA_MAX; i += 1) {
+    const { init, put } = await uploadMedia(user.cookie, 'image', 'image/png', PNG_BYTES, `unbound-${i}.png`);
+    assert.equal(init.status, 200, `第 ${i + 1} 次 init 应放行：${init.body}`);
+    assert.equal(put.status, 200, `第 ${i + 1} 次上传应成功：${put.body}`);
+  }
+
+  // 上传成功但一次未发送：达到上限后新的 init 必须被配额拦下
+  const blocked = await initMedia(user.cookie, 'blocked.png');
+  assert.equal(blocked.status, 429, `未绑定 ready 资产达到上限必须 429：${blocked.body}`);
+  assert.equal(blocked.json.code, 'MEDIA_QUOTA', '必须返回稳定的 MEDIA_QUOTA 错误码');
+});
+
+test('媒体配额：只 init 不 PUT 的 pending 资产同样计入，不能绕过配额', async () => {
+  const user = freshMediaUser('quota-pending');
+  for (let i = 0; i < MEDIA_QUOTA_MAX; i += 1) {
+    const init = await initMedia(user.cookie, `pending-${i}.png`);
+    assert.equal(init.status, 200, `第 ${i + 1} 次 init 应放行：${init.body}`);
+    assert.equal(db.getMediaAsset(uploadIdOf(init))?.state, 'pending', '未 PUT 的资产应停留在 pending');
+  }
+
+  const blocked = await initMedia(user.cookie, 'blocked.png');
+  assert.equal(blocked.status, 429, `pending 资产同样占用配额，不得绕过：${blocked.body}`);
+  assert.equal(blocked.json.code, 'MEDIA_QUOTA');
+});
+
+// ══════════════════════════════════════════════════════════════════════
 // 六、纯媒体消息、IDOR 与私信可见性
 // ══════════════════════════════════════════════════════════════════════
 
@@ -1225,6 +1297,61 @@ test('视频 Range：图片不参与 Range（避免无意义的攻击面）', as
   });
   assert.equal(res.status, 200, '图片带 Range 头仍返回完整 200');
   assert.equal(Number(res.headers['content-length']), PNG_BYTES.length);
+});
+
+test('媒体读取：客户端中途断开必须销毁源流（不泄漏 fd）', async () => {
+  // 大文件 + 客户端只读首批数据就断开：pipe 只会 unpipe 源流，被背压 pause 的
+  // ReadStream 若不显式 destroy 会永久挂住 fd。用只统计 message-media 源流的
+  // destroy 探针断言清理真的发生（正常 autoClose 路径不会调用 destroy）。
+  const bigBytes = Buffer.concat([MP4_BYTES, Buffer.alloc(6 * 1024 * 1024, 0x5a)]);
+  const user = freshMediaUser('abort');
+  const { put, mediaId } = await uploadMedia(user.cookie, 'video', 'video/mp4', bigBytes, 'big.mp4');
+  assert.equal(put.status, 200, put.body);
+  const sent = await req('POST', '/gateway/api/messages', { cookie: user.cookie, body: { mediaIds: [mediaId] } });
+  assert.equal(sent.status, 200, sent.body);
+
+  const destroyedFds: number[] = [];
+  const originalDestroy = ReadStream.prototype.destroy;
+  // 传 fd 创建时 stream.path 为 undefined，改用运行时的 fd 识别服务端源流
+  ReadStream.prototype.destroy = function (this: ReadStream, error?: Error): ReadStream {
+    const fd = (this as { fd?: unknown }).fd;
+    if (typeof fd === 'number') destroyedFds.push(fd);
+    return originalDestroy.call(this, error) as ReadStream;
+  };
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const r = http.request(
+        {
+          host: '127.0.0.1',
+          port: gatewayPort,
+          path: `/gateway/api/message-media/${encodeURIComponent(mediaId)}`,
+          headers: { cookie: user.cookie },
+        },
+        (res) => {
+          if ((res.statusCode ?? 0) !== 200) {
+            r.destroy();
+            reject(new Error(`媒体读取必须 200：${String(res.statusCode)}`));
+            return;
+          }
+          res.once('data', () => {
+            res.pause(); // 不再继续读：让服务端写满 socket 缓冲后暂停源流
+            r.destroy(); // 客户端中途断开
+            resolve();
+          });
+        },
+      );
+      r.on('error', () => resolve());
+      r.end();
+    });
+
+    const deadline = Date.now() + 3000;
+    while (destroyedFds.length === 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.ok(destroyedFds.length > 0, '客户端断开后必须 destroy 源流，否则 fd 一直开着');
+  } finally {
+    ReadStream.prototype.destroy = originalDestroy;
+  }
 });
 
 // ══════════════════════════════════════════════════════════════════════

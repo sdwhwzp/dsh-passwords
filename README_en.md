@@ -105,7 +105,7 @@ External file services and their accounts, passwords and databases are managed b
 
 ### 0. Prerequisites (three things)
 
-Host installs need Node.js 22.19+ or 24+, git, and the private Harness `0.1.7-rc.1` with native tenant extensions. Within the 0.1.7 line, the gateway accepts only reviewed alpha.2 and rc.1 identities. Public alpha.2 is the inherited installer and Docker default, not an accepted substitute for the private deployment. See the [compatibility notes](docs/compatibility-matrix.md) and deployment records.
+Host installs need Node.js 22.19+ or 24+, git, and the private Harness `0.1.7-rc.2` with native tenant extensions. Within the 0.1.7 line, the gateway accepts only reviewed alpha.2, rc.1 and rc.2 identities. Public rc.2 is the inherited installer and Docker default, not an accepted substitute for the private deployment. See the [compatibility notes](docs/compatibility-matrix.md) and deployment records.
 
 ### 1. Install (by platform)
 
@@ -142,10 +142,10 @@ docker run -d \
   -p 127.0.0.1:3088:3088 \
   -v dsh-home:/data/dsh \
   -v dsh-passwords-state:/data/dsh-passwords \
-  skywalker237234/dsh-passwords:2.7.4
+  skywalker237234/dsh-passwords:2.7.5
 ```
 
-`.env` needs at least `DEEPSEEK_API_KEY`. Set `MCP_GATEWAY_PUBLIC_HOST` to the domain you actually use. The host publishes port `127.0.0.1:3088` only while the container listens on `0.0.0.0:3088`; terminate TLS on nginx or Caddy for public access. The image bundles DSH `0.1.7-alpha.2` (the pinned release of the DSH 0.1.7 line; image runtime acceptance has not been performed for this pin); initialization is complete when healthz and readyz both return `ok:true`.
+`.env` needs at least `DEEPSEEK_API_KEY`. Set `MCP_GATEWAY_PUBLIC_HOST` to the domain you actually use. The host publishes port `127.0.0.1:3088` only while the container listens on `0.0.0.0:3088`; terminate TLS on nginx or Caddy for public access. The image bundles DSH `0.1.7-rc.2` (the pinned release of the DSH 0.1.7 line; image runtime acceptance has not been performed for this pin); initialization is complete when healthz and readyz both return `ok:true`.
 
 `scripts/profile-plugins.json` is the versioned cross-machine deployment manifest. `dsh-passwords install` idempotently merges its NPM/Git sources, bundle order, Git build permissions, and required profile patches into `~/.dsh/profiles/web`, then runs one `pnpm install`. Existing local `link:` development sources and custom plugins outside the manifest are preserved; retired aggregate packages explicitly named by the manifest are migrated automatically.
 
@@ -426,7 +426,7 @@ The bottleneck is usually the network path to the server.
 
 ## Manual install
 
-> v2.7.4 is being adapted for the private Harness `0.1.7-rc.1` deployment. The [compatibility notes](docs/compatibility-matrix.md) define account isolation and managed-directory rules. Upstream test-server results do not establish acceptance of this fork.
+> v2.7.4 is being adapted for the private Harness `0.1.7-rc.2` deployment. The [compatibility notes](docs/compatibility-matrix.md) define account isolation and managed-directory rules. Upstream test-server results do not establish acceptance of this fork.
 
 1. `git clone https://github.com/sdwhwzp/dsh-passwords && cd dsh-passwords`
 2. `npm install && npm run build`
@@ -587,6 +587,6 @@ Desktop terminal restoration through `terminal/retain` checks session ownership,
 
 Host login exchange accepts root redirects `/` and `./` without following them; external destinations and query-bearing targets are rejected.
 
-The verified Harness 0.1.7-alpha.2 and 0.1.7-rc.1 runtimes start the gateway through native permission APIs without rewriting installed bundles. Unreviewed future versions remain rejected at startup.
+The verified Harness 0.1.7-alpha.2 and 0.1.7-rc.2 runtimes start the gateway through native permission APIs without rewriting installed bundles. Unreviewed future versions remain rejected at startup.
 
 Session ownership validation accepts legacy projections and current `cached`/`sequenced` projections with the `agentAvailable` flag, while retaining strict type and field validation.

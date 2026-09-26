@@ -22,6 +22,9 @@ import zlib from 'node:zlib';
 import { URL, fileURLToPath } from 'node:url';
 import dns from 'node:dns';
 import express, { type Request, type Response } from 'express';
+import { registerMessageRoutes } from './messages.js';
+import { createSandboxApplier } from './proxy.js';
+import { registerMediaRoutes } from './media.js';
 import { MobileAuth, isMobileRequest, mobileRequestToken } from './mobile-auth.js';
 import { registerDesktopDownloads } from './desktop-downloads.js';
 import { registerTenantServiceRoutes } from './tenant-service-routes.js';
@@ -42,7 +45,7 @@ import {
 import type { PlatformConfig } from './config.js';
 import { hardenSecretsAfterSetup, readEndpointRuntimeConfig } from './config.js';
 import { AuthService, AuthError, type RequestMeta } from './auth.js';
-import { Database, MediaError, MEDIA_IN_USE, PermissionStateConflictError, SessionGrantsConflictError, canonicalForMatch, pathWithinDeletedTree, samePathForMatch, type UserPermissionsRow, type MessageRow, type WorkspaceCleanupIntent } from './db.js';
+import { Database, PermissionStateConflictError, SessionGrantsConflictError, canonicalForMatch, pathWithinDeletedTree, samePathForMatch, type UserPermissionsRow, type WorkspaceCleanupIntent } from './db.js';
 import {
   clientConnectionArgs,
   parseSessionAddress,
@@ -1644,29 +1647,6 @@ export function createGatewayServer(
   };
 
 
-  /**
-   * Do not serialize up to 2,000 internal requests behind a permission-save HTTP
-   * request. A small fixed pool bounds upstream pressure while preserving the
-   * fail-closed contract: every failed confirmation is returned for grant revocation.
-   */
-  async function applySandboxToSessions(sessionIds: readonly string[], mode: string): Promise<string[]> {
-    const failed: string[] = [];
-    let cursor = 0;
-    const workerCount = Math.min(16, sessionIds.length);
-    const worker = async (): Promise<void> => {
-      while (true) {
-        const index = cursor;
-        cursor += 1;
-        if (index >= sessionIds.length) return;
-        const sessionId = sessionIds[index];
-        if (!(await applySandboxToSession(sessionId, mode))) failed.push(sessionId);
-      }
-    };
-    await Promise.all(Array.from({ length: workerCount }, () => worker()));
-    return failed;
-  }
-
-
   type AssignableResources = { folders: Set<string>; sessions: Set<string> };
 
   // 子用户刚通过目录选择器成功创建、可登记为工作区的目录（带过期）。
@@ -1932,13 +1912,16 @@ export function createGatewayServer(
    *   · order 只做同一用户 workspace.list 响应的先后排序（0 = 不参与排序，例如
    *     Remote baseline）：更旧的响应不得回滚更新的快照。
    * 本函数绝不推进 epoch —— 快照替换不是授权变更，不能改变授权版本。
+   *   · 返回是否真正接受本次回写：false = 被 epoch/order 栅栏拒绝。与授权快照
+   *     同源的派生集合（如归档标记）必须复用该结果，不能单独绕过栅栏写入。
    */
-  const replaceUserSessionAccess = (userId: number, access: Map<string, string>, epoch: number, order = 0): void => {
-    if (epoch < userAccessEpochFor(userId)) return;
-    if (order !== 0 && order < (userAccessListOrder.get(userId) ?? 0)) return;
+  const replaceUserSessionAccess = (userId: number, access: Map<string, string>, epoch: number, order = 0): boolean => {
+    if (epoch < userAccessEpochFor(userId)) return false;
+    if (order !== 0 && order < (userAccessListOrder.get(userId) ?? 0)) return false;
     userSessionAccess.set(userId, access);
     if (order !== 0) userAccessListOrder.set(userId, order);
     notifyUserSessionAccessWaiters(userId);
+    return true;
   };
   /** 授权变更后失效内存快照：先推进 epoch（旧请求/旧 baseline 随即失去回写资格），
    *  再清空快照，等待新 baseline 重建。 */
@@ -3174,24 +3157,6 @@ export function createGatewayServer(
     return db.getUsage(userId, day);
   }
 
-  // ── 留言 / 聊天（SSE 广播） ────────────────────────────────
-  // 订阅者带 userId，广播时按收件人过滤（与 GET /gateway/api/messages 的
-  // 列表语义一致）：定向消息只推给收件人与发件人，公开消息推给所有人。
-  const chatClients = new Set<{ res: Response; userId: number }>();
-  function broadcastMessage(msg: MessageRow): void {
-    const payload = `data: ${JSON.stringify(msg)}\n\n`;
-    for (const client of chatClients) {
-      const visible =
-        msg.recipient_id === null || msg.recipient_id === client.userId || msg.sender_id === client.userId;
-      if (!visible) continue;
-      try {
-        client.res.write(payload);
-      } catch {
-        chatClients.delete(client);
-      }
-    }
-  }
-
   // ── 登录页（GET）：平台未初始化时显示首次配置页 ─────────────
   app.get('/gateway/login', async (req, res) => {
     const next = safeNext(typeof req.query.next === 'string' ? req.query.next : undefined);
@@ -3665,16 +3630,16 @@ export function createGatewayServer(
     const parentPid = Number(parentPidRaw);
     const dshRoot = findDshRoot(config.patch.dshRoot);
     const helperSource = path.join(gatewayRoot, 'scripts', 'purge.mjs');
-    let upstreamPort: number | null = null;
+    let upstreamPortValue: number | null = null;
     try {
       const upstreamUrl = new URL(config.gateway.upstream);
       const candidate = Number(upstreamUrl.port || (upstreamUrl.protocol === 'https:' ? 443 : 80));
-      upstreamPort = Number.isInteger(candidate) && candidate > 0 && candidate <= 65535 ? candidate : null;
+      upstreamPortValue = Number.isInteger(candidate) && candidate > 0 && candidate <= 65535 ? candidate : null;
     } catch {
-      upstreamPort = null;
+      upstreamPortValue = null;
     }
     const canStopHost = process.platform === 'win32'
-      ? (Number.isInteger(parentPid) && parentPid > 0) || upstreamPort !== null
+      ? (Number.isInteger(parentPid) && parentPid > 0) || upstreamPortValue !== null
       : purgeServiceNameValid && purgeServiceName !== '';
     const isDockerRuntime = isContainerRuntime();
     if (isDockerRuntime || !canStopHost || dshRoot === null || !existsSync(helperSource)) {
@@ -3698,7 +3663,7 @@ export function createGatewayServer(
       transactionId,
       gatewayPid: process.pid,
       parentPid: Number.isInteger(parentPid) && parentPid > 0 ? parentPid : null,
-      upstreamPort,
+      upstreamPort: upstreamPortValue,
       serviceName: purgeServiceNameValid ? purgeServiceName : '',
       creatorUid: typeof process.getuid === 'function' ? process.getuid() : null,
       creatorGid: typeof process.getgid === 'function' ? process.getgid() : null,
@@ -6443,841 +6408,13 @@ export function createGatewayServer(
     res.json({ ok: true });
   });
 
-  // ── 聊天媒体（sticker / image / video）─────────────────────────
-  // 三步上传协议（见 docs/plans/2026-09-15-model-restrictions-chat-media-design.md）：
-  //   1. POST /gateway/api/message-media/init  签发不透明 uploadId（DB 行置 pending）
-  //   2. PUT  /gateway/api/message-media/:id   流式接收二进制 → 魔数校验 → 原子转正
-  //   3. POST /gateway/api/messages            带 mediaIds 绑定到消息（同事务）
-  // 文件本体写在 data/message-media/ 私有目录，文件名恒为随机 storage key，
-  // 绝不使用用户提供的路径/文件名（原始名只进 DB 作展示元数据）。
-  //
-  // 权限：主用户不受 allow_chat_media 限制；子用户默认关闭（effectivePermissions
-  // 的缺省行已给 false），且每个上传/下载都要重新判定，不缓存授权结果。
-  type ChatMediaKind = 'sticker' | 'image' | 'video';
-
-  /** 每种类型的允许 MIME → 允许的魔数族（按字节前缀判定，不看声明头） */
-  const MEDIA_POLICY: Record<ChatMediaKind, { maxBytes: number; mimes: readonly string[] }> = {
-    // sticker 通常是透明小图：PNG/JPEG/WebP/GIF 都允许（设计稿「必要时 GIF」）
-    sticker: { maxBytes: 2 * 1024 * 1024, mimes: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'] },
-    image: {
-      maxBytes: 10 * 1024 * 1024,
-      mimes: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'],
-    },
-    video: { maxBytes: 100 * 1024 * 1024, mimes: ['video/mp4', 'video/webm'] },
-  };
-
-  /** 上传会话有效期：未 PUT 完成的上传由清理器回收（转 failed + 删文件） */
-  const MEDIA_UPLOAD_TTL_MS = 30 * 60_000;
-  /** 服务端解包后的媒体过期时间：过期且未被消息占用的资产由 pruneMedia 回收 */
-  const MEDIA_ASSET_TTL_MS = 30 * 24 * 3600_000;
-  /** 并发上限：同一用户同时打开的 PUT 上传数（防单账号霸占磁盘/连接） */
-  const MEDIA_MAX_CONCURRENT_UPLOADS = 3;
-  /** 每用户未绑定（ready 但仍未挂到消息上）的资产上限：防“只上传不发送”刷盘 */
-  const MEDIA_MAX_PENDING_ASSETS_PER_USER = 20;
-  /** 每用户 1 小时内的 init 次数上限 */
-  const MEDIA_MAX_INITS_PER_HOUR = 60;
-  /** 单次 PUT 最长接收时间：慢速上传占着连接不放（服务端 requestTimeout 管整体） */
-  const MEDIA_UPLOAD_TIMEOUT_MS = 10 * 60_000;
-
-  /**
-   * 媒体私有目录：与 SQLite 同锚（dbPath 的 data/ 下），不是工作区、永远不可代理。
-   * 目录权限收紧到 0700（Windows 上忽略 mode，依赖父目录 ACL）。
-   */
-  const mediaRoot = path.join(path.dirname(config.dbPath), 'message-media');
-  const mediaObjectsDir = path.join(mediaRoot, 'objects');
-  const mediaTempDir = path.join(mediaRoot, 'tmp');
-  for (const dir of [mediaRoot, mediaObjectsDir, mediaTempDir]) {
-    try {
-      mkdirSync(dir, { recursive: true, mode: 0o700 });
-    } catch (error) {
-      console.warn('[dsh-passwords] 聊天媒体目录创建失败:', String(error));
-    }
-  }
-
-  /**
-   * storage key 的最终落盘路径。key 只由服务端随机生成（`o_<hex>` / `t_<hex>`），
-   * 这里仍做一次白名单校验：任何含分隔符/点段/非白名单字符的键都拒绝，
-   * 保证「随机 ID 决定路径」这条不变量在数据被污染时也不会被绕过。
-   */
-  const MEDIA_KEY_RE = /^[A-Za-z0-9_-]{8,128}$/;
-  function mediaFilePath(key: string, subdir: 'objects' | 'tmp'): string {
-    if (!MEDIA_KEY_RE.test(key)) throw new MediaError('存储键非法', 'INVALID_MEDIA');
-    const base = subdir === 'objects' ? mediaObjectsDir : mediaTempDir;
-    const full = path.join(base, key);
-    // 纵深防御：拼接结果必须仍在目标目录内（key 白名单下恒成立）
-    if (path.dirname(path.resolve(full)) !== path.resolve(base)) {
-      throw new MediaError('存储键越界', 'INVALID_MEDIA');
-    }
-    return full;
-  }
-
-  function newMediaKey(prefix: string): string {
-    return `${prefix}${randomBytes(16).toString('hex')}`;
-  }
-
-  function mediaKindOf(value: unknown): ChatMediaKind | null {
-    return value === 'sticker' || value === 'image' || value === 'video' ? value : null;
-  }
-
-  /**
-   * 魔数判定：只认文件真实内容，不认 Content-Type 声明（两者不符即拒绝）。
-   * 覆盖设计稿允许的全部格式，并显式拒绝 SVG/HTML/XML/压缩包/可执行文件——
-   * 它们要么魔数不匹配、要么（SVG/HTML/XML）被 isDangerousUploadName 拦下。
-   */
-  function sniffMediaType(head: Buffer): string | null {
-    if (head.length < 12) return null;
-    // JPEG: FF D8 FF
-    if (head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return 'image/jpeg';
-    // PNG: 89 50 4E 47 0D 0A 1A 0A
-    if (head.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
-      return 'image/png';
-    }
-    // GIF87a / GIF89a
-    const gif = head.subarray(0, 6).toString('latin1');
-    if (gif === 'GIF87a' || gif === 'GIF89a') return 'image/gif';
-    // WebP: 'RIFF' + 4 字节长度 + 'WEBP'
-    if (head.subarray(0, 4).toString('latin1') === 'RIFF' && head.subarray(8, 12).toString('latin1') === 'WEBP') {
-      return 'image/webp';
-    }
-    // WebM: EBML 头 1A 45 DF A3（不进一步解析 DocType，见下方 MP4 注释）
-    if (head[0] === 0x1a && head[1] === 0x45 && head[2] === 0xdf && head[3] === 0xa3) return 'video/webm';
-    // MP4/MOV 家族: box size(4) + 'ftyp'。只做容器识别，不解析 codec——
-    // 这里的目标是「不是图片/脚本/压缩包」，不是内容审核。
-    if (head.subarray(4, 8).toString('latin1') === 'ftyp') return 'video/mp4';
-    return null;
-  }
-
-  /**
-   * 上传超时/放弃后的清理：临时文件立即删除，DB 行转 failed（保留元数据供排障，
-   * 但绝不再是 ready，无法被 /messages 绑定）。storage key 占位符由之后
-   * pruneMedia 的 pending 分支回收。
-   */
-  function failMediaUpload(mediaId: string, tempKey: string | null): void {
-    if (tempKey !== null) {
-      try {
-        unlinkSync(mediaFilePath(tempKey, 'tmp'));
-      } catch {
-        /* 已删除或从未创建 */
-      }
-    }
-    try {
-      db.markMediaFailed(mediaId);
-    } catch (error) {
-      console.warn('[dsh-passwords] 媒体上传失败标记丢失:', String(error));
-    }
-  }
-
-  /** 删除一批 storage keys 对应的文件本体（清理钩子用；失败只告警不阻断） */
-  function unlinkMediaFiles(keys: readonly string[], subdir: 'objects' | 'tmp' = 'objects'): void {
-    for (const key of keys) {
-      if (key === '') continue;
-      try {
-        unlinkSync(mediaFilePath(key, subdir));
-      } catch {
-        /* 文件不存在（重复清理）或键非法：忽略 */
-      }
-    }
-  }
-
-  /**
-   * 回收未被 DB 引用的临时上传文件：进程崩溃/重启会留下 tmp 文件（来不及 unlink），
-   * DB 里已无对应行可参考，只能按 mtime 判断。保守取 4 倍上传 TTL，
-   * 避免误删重启后仍可能被恢复的上传。
-   */
-  function pruneStaleMediaTemps(now: number): void {
-    const cutoff = now - MEDIA_UPLOAD_TTL_MS * 4;
-    let names: string[];
-    try {
-      names = readdirSync(mediaTempDir);
-    } catch {
-      return;
-    }
-    for (const name of names) {
-      if (!MEDIA_KEY_RE.test(name)) continue;
-      const full = path.join(mediaTempDir, name);
-      try {
-        if (statSync(full).mtimeMs < cutoff) unlinkSync(full);
-      } catch {
-        /* 已被其他清理路径删除 */
-      }
-    }
-  }
-
-  /** init 限流：每用户滑动窗口（内存面与活跃用户数成正比，由 sweep 周期裁剪） */
-  const mediaInitRate = new Map<number, number[]>();
-  /** 每用户正在进行的 PUT 上传数 */
-  const mediaActiveUploads = new Map<number, number>();
-
-  /** 子用户是否有聊天媒体权限（默认拒绝；主用户不受限） */
-  function chatMediaAllowed(role: 'admin' | 'user', userId: number): boolean {
-    if (role === 'admin') return true;
-    return effectivePermissions(userId).allow_chat_media === true;
-  }
-
-  /** 标题式错误响应（所有媒体端点统一形状：{ ok:false, code, error }） */
-  function mediaError(res: Response, status: number, code: string, message: string): void {
-    res.status(status).json({ ok: false, code, error: message });
-  }
-
-  /**
-   * 上传端点的提前拒绝：在未读完整请求体时就回响应会让 Node 直接断开连接
-   * （客户端看到 ECONNRESET 而非我们的 4xx/JSON）。先把请求体排空再响应，
-   * 保证错误能完整送达；排空是丢弃性的，不再写入磁盘。
-   * 同时清理临时文件并把 DB 行转 failed，不留下 ready 的半成品。
-   */
-  function rejectUpload(
-    req: Request,
-    res: Response,
-    mediaId: string | null,
-    tempKey: string | null,
-    status: number,
-    code: string,
-    message: string,
-  ): void {
-    if (mediaId !== null) failMediaUpload(mediaId, tempKey);
-    req.resume();
-    // 'end' 在收到完整请求体（或被 aborted）后触发；'close' 兼容中断场景。
-    let done = false;
-    const respond = (): void => {
-      if (done) return;
-      done = true;
-      mediaError(res, status, code, message);
-    };
-    req.once('end', respond);
-    req.once('close', respond);
-    // 兜底：客户端声明了 Content-Length 却迟迟不发（或已发送完毕但事件已错过）时
-    // 不能永远挂着；短延迟后直接响应，此时连接已可安全关闭。
-    const timer = setTimeout(respond, 1000);
-    timer.unref();
-  }
-
-  /**
-   * 签发上传：校验权限/类型/文件名/配额，落一行 pending 资产并返回不透明 IDs。
-   * 只要客户端不提交 PUT，就不会占用磁盘（仅占一行元数据，由清理器回收）。
-   */
-  app.post('/gateway/api/message-media/init', jsonBody, (req, res) => {
-    const me = apiAuth(req, res);
-    if (!me) return;
-    if (!chatMediaAllowed(me.role, me.userId)) {
-      mediaError(res, 403, 'FORBIDDEN', '未开启聊天媒体权限');
-      return;
-    }
-    const body = (req.body ?? {}) as Record<string, unknown>;
-    const kind = mediaKindOf(body.kind);
-    if (kind === null) {
-      mediaError(res, 400, 'INVALID_KIND', 'kind 必须是 sticker/image/video');
-      return;
-    }
-    // 文件名只作展示元数据，从不参与落盘路径；仍拒绝危险名（.. 与可执行/脚本/
-    // SVG 后缀）以避免展示层/下载层对原始名的二次消费被利用。
-    const rawName = typeof body.fileName === 'string' ? body.fileName : '';
-    if (rawName !== '' && (rawName.length > 255 || isDangerousUploadName(rawName))) {
-      mediaError(res, 400, 'INVALID_NAME', '文件名非法');
-      return;
-    }
-    const policy = MEDIA_POLICY[kind];
-    const declaredMime = typeof body.mimeType === 'string' ? body.mimeType.trim().toLowerCase() : '';
-    if (declaredMime !== '' && !policy.mimes.includes(declaredMime)) {
-      mediaError(res, 400, 'INVALID_MIME', '该类型不允许此 MIME');
-      return;
-    }
-    const declaredSize = body.byteSize === undefined ? null : Number(body.byteSize);
-    if (declaredSize !== null && (!Number.isSafeInteger(declaredSize) || declaredSize <= 0 || declaredSize > policy.maxBytes)) {
-      mediaError(res, 400, 'TOO_LARGE', '文件过大');
-      return;
-    }
-    // 限流：防脚本化刷 init 制造大量 pending 行
-    const now = Date.now();
-    const recent = (mediaInitRate.get(me.userId) ?? []).filter((t) => now - t < 3600_000);
-    if (recent.length >= MEDIA_MAX_INITS_PER_HOUR) {
-      mediaInitRate.set(me.userId, recent);
-      mediaError(res, 429, 'RATE_LIMITED', '上传过于频繁，请稍后再试');
-      return;
-    }
-    recent.push(now);
-    mediaInitRate.set(me.userId, recent);
-    // 配额：未绑定到消息的 ready 资产数量（防止只 init/上传不发消息把磁盘刷满）
-    const unbound = db.listMediaForUser(me.userId);
-    if (unbound.length >= MEDIA_MAX_PENDING_ASSETS_PER_USER) {
-      mediaError(res, 429, 'MEDIA_QUOTA', '未发送的媒体过多，请先发送或等待过期');
-      return;
-    }
-    if ((mediaActiveUploads.get(me.userId) ?? 0) >= MEDIA_MAX_CONCURRENT_UPLOADS) {
-      mediaError(res, 429, 'MEDIA_BUSY', '并发上传过多，请稍后再试');
-      return;
-    }
-    const mediaId = newMediaKey('m_');
-    const expiresAt = new Date(now + MEDIA_UPLOAD_TTL_MS);
-    try {
-      const created = db.addMediaAsset({
-        id: mediaId,
-        ownerId: me.userId,
-        // pending 阶段不落盘：storage key 留空，由数据层写入占位键
-        storageKey: '',
-        originalName: rawName,
-        kind,
-        mimeType: declaredMime === '' ? policy.mimes[0] : declaredMime,
-        byteSize: declaredSize ?? policy.maxBytes,
-        sha256: '',
-        state: 'pending',
-        expiresAt,
-      });
-      if (!created.created) {
-        mediaError(res, 409, 'MEDIA_CONFLICT', '上传标识冲突，请重试');
-        return;
-      }
-    } catch (error) {
-      console.warn('[dsh-passwords] 媒体元数据创建失败:', String(error));
-      mediaError(res, 500, 'INTERNAL', '上传初始化失败');
-      return;
-    }
-    res.json({
-      ok: true,
-      // uploadId 与 mediaId 当前同值：前者用于 PUT，后者用于消息绑定；
-      // 分开给出是为将来把上传令牌与媒体身份解耦留口子，客户端不应假设二者不同。
-      uploadId: mediaId,
-      mediaId,
-      kind,
-      maxBytes: policy.maxBytes,
-      allowedMimeTypes: policy.mimes,
-      expiresAt: expiresAt.toISOString(),
-    });
+  const mediaRoutes = registerMediaRoutes(app, {
+    db, dbPath: config.dbPath, effectivePermissions, apiAuth, jsonBody,
   });
+  const { chatMediaAllowed } = mediaRoutes;
 
-  /**
-   * 接收媒体二进制（流式落地，不经过 express JSON 解析）。
-   * 安全要点（按顺序）：
-   *   1. 鉴权 + 媒体权限；只有自己的 pending 资产可写；
-   *   2. Content-Length 提前拒绝（不读一个字节）；实际字节数再按上限二次封口；
-   *   3. 写入 temp 目录的随机文件名（绝不使用客户端提供的键/名），边写边算 sha256；
-   *   4. 只有首块前 64 字节做魔数嗅探，与声明 MIME 必须一致；
-   *   5. 全部通过才 rename 进 objects/ 并 finalizeMediaAsset；任何失败清理临时文件
-   *      并把 DB 行转 failed（不留下 ready 的半成品）。
-   */
-  app.put('/gateway/api/message-media/:id', (req, res) => {
-    const me = apiAuth(req, res);
-    if (!me) return;
-    const mediaId = typeof req.params.id === 'string' ? req.params.id : '';
-    // 必须先做形状校验再入 DB：非法 ID 直接 404（不暴露“是否存在”的差异）
-    if (!/^[A-Za-z0-9_-]{8,128}$/.test(mediaId)) {
-      mediaError(res, 404, 'NOT_FOUND', '媒体不存在');
-      return;
-    }
-    // 该 ID 必须是本用户的 pending 资产；否则一律 404（IDOR 防护：他人 ID 与
-    // 不存在的 ID 返回同一个响应，不泄露媒体存在性）
-    const asset = db.getMediaAssetFile(mediaId);
-    if (!asset || asset.owner_id !== me.userId || asset.state !== 'pending') {
-      mediaError(res, 404, 'NOT_FOUND', '媒体不存在');
-      return;
-    }
-    // 权限在 PUT 时重判：init 后权限被收紧也要立即失效
-    if (!chatMediaAllowed(me.role, me.userId)) {
-      rejectUpload(req, res, mediaId, null, 403, 'FORBIDDEN', '未开启聊天媒体权限');
-      return;
-    }
-    const kind = mediaKindOf(asset.kind);
-    if (kind === null) {
-      rejectUpload(req, res, mediaId, null, 400, 'INVALID_KIND', '媒体类型非法');
-      return;
-    }
-    const policy = MEDIA_POLICY[kind];
-    const declaredLength = Number(req.headers['content-length']);
-    if (Number.isFinite(declaredLength) && declaredLength > policy.maxBytes) {
-      rejectUpload(req, res, mediaId, null, 413, 'TOO_LARGE', '文件过大');
-      return;
-    }
-    // Content-Type 若给出必须属于该类型白名单；空则由魔数决定
-    const contentType = String(req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase();
-    if (contentType !== '' && !policy.mimes.includes(contentType)) {
-      rejectUpload(req, res, mediaId, null, 415, 'INVALID_MIME', '该类型不允许此 MIME');
-      return;
-    }
-    const tempKey = newMediaKey('u_');
-    let tempPath: string;
-    try {
-      tempPath = mediaFilePath(tempKey, 'tmp');
-    } catch {
-      rejectUpload(req, res, mediaId, null, 500, 'INTERNAL', '上传初始化失败');
-      return;
-    }
-    const hash = createHash('sha256');
-    const out = createWriteStream(tempPath, { flags: 'wx', mode: 0o600 });
-    let received = 0;
-    let head: Buffer = Buffer.alloc(0);
-    let settled = false;
-    mediaActiveUploads.set(me.userId, (mediaActiveUploads.get(me.userId) ?? 0) + 1);
-    const releaseSlot = (): void => {
-      const current = (mediaActiveUploads.get(me.userId) ?? 1) - 1;
-      if (current > 0) mediaActiveUploads.set(me.userId, current);
-      else mediaActiveUploads.delete(me.userId);
-    };
-    const finishFailure = (status: number, code: string, message: string): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(uploadTimeout);
-      releaseSlot();
-      req.unpipe(out);
-      out.destroy();
-      failMediaUpload(mediaId, tempKey);
-      if (!res.headersSent) {
-        // 不 destroy 连接：排空剩余请求体后再回 4xx，让客户端能完整收到错误
-        // （直接断开会把错误响应变成 ECONNRESET，客户端看不到原因）。
-        // 数据事件已通过 settled 短路，字节不再落盘。
-        rejectUpload(req, res, null, null, status, code, message);
-        return;
-      }
-      req.resume();
-    };
-    const finishSuccess = (): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(uploadTimeout);
-      releaseSlot();
-      const objectKey = newMediaKey('o_');
-      let objectPath: string;
-      try {
-        objectPath = mediaFilePath(objectKey, 'objects');
-        // 原子转正：先把临时文件重命名进私有对象目录，再更新 DB。
-        // 顺序保证「DB 说 ready」时文件必然已就位（反过来会留下不可读的 ready 记录）。
-        renameSync(tempPath, objectPath);
-      } catch (error) {
-        console.warn('[dsh-passwords] 媒体转正失败:', String(error));
-        failMediaUpload(mediaId, tempKey);
-        mediaError(res, 500, 'INTERNAL', '媒体写入失败');
-        return;
-      }
-      let finalized = null;
-      try {
-        finalized = db.finalizeMediaAsset(mediaId, {
-          storageKey: objectKey,
-          sha256: hash.digest('hex'),
-          byteSize: received,
-          mimeType: sniffed ?? asset.mime_type,
-          expiresAt: new Date(Date.now() + MEDIA_ASSET_TTL_MS),
-        });
-      } catch (error) {
-        console.warn('[dsh-passwords] 媒体元数据提交失败:', String(error));
-      }
-      if (finalized === null) {
-        // 元数据没转正（并发/过期/已失败）：对象文件立即回收，不能留下无主文件
-        try {
-          unlinkSync(objectPath);
-        } catch {
-          /* 已删除 */
-        }
-        mediaError(res, 409, 'MEDIA_STATE', '上传状态已失效，请重新上传');
-        return;
-      }
-      res.json({
-        ok: true,
-        mediaId,
-        kind,
-        mimeType: sniffed ?? asset.mime_type,
-        byteSize: received,
-        expiresAt: finalized.expires_at,
-      });
-    };
-    let sniffed: string | null = null;
-    const uploadTimeout = setTimeout(() => finishFailure(408, 'UPLOAD_TIMEOUT', '上传超时'), MEDIA_UPLOAD_TIMEOUT_MS);
-    uploadTimeout.unref();
-    out.on('error', () => finishFailure(500, 'INTERNAL', '媒体写入失败'));
-    req.on('aborted', () => finishFailure(499, 'UPLOAD_ABORTED', '上传已中断'));
-    // ⚠ 不用 req.pipe(out)：本处理器已自行消费 data 事件（计数/嗅探/哈希）。
-    // 同时 pipe 会让每个块被写两次（文件变成两倍大，且大小校验形同虚设）。
-    req.on('data', (chunk: Buffer) => {
-      if (settled) return;
-      received += chunk.length;
-      if (received > policy.maxBytes) {
-        finishFailure(413, 'TOO_LARGE', '文件过大');
-        return;
-      }
-      if (head.length < 64) {
-        head = head.length === 0 ? Buffer.from(chunk) : Buffer.concat([head, chunk]);
-      }
-      hash.update(chunk);
-      // 首块到达即校验魔数：不匹配立刻中断，不为伪造内容写完整文件
-      if (sniffed === null && head.length >= 12) {
-        sniffed = sniffMediaType(head);
-        if (sniffed === null || !policy.mimes.includes(sniffed)) {
-          finishFailure(415, 'INVALID_CONTENT', '文件内容与类型不符');
-          return;
-        }
-      }
-      if (!out.write(chunk)) req.pause();
-    });
-    out.on('drain', () => {
-      if (!settled) req.resume();
-    });
-    req.on('end', () => {
-      if (settled) return;
-      // 空文件 / 未达嗅探门槛：一律拒绝（没有可识别的媒体内容）
-      if (received === 0) {
-        finishFailure(400, 'EMPTY_UPLOAD', '上传内容为空');
-        return;
-      }
-      if (sniffed === null) sniffed = sniffMediaType(head);
-      if (sniffed === null || !policy.mimes.includes(sniffed)) {
-        finishFailure(415, 'INVALID_CONTENT', '文件内容与类型不符');
-        return;
-      }
-      out.end(() => finishSuccess());
-    });
-    req.on('error', () => finishFailure(500, 'INTERNAL', '上传失败'));
-  });
-
-  /**
-   * 媒体读取：鉴权链 = 不透明媒体 ID → 占用它的消息 → 当前用户是否可见该消息
-   * （getMessageMediaForUser）。**不按媒体 owner 放行**——主用户/上传者如果看不到
-   * 那条消息（例如子用户给第三人发的私信），同样 404，避免用 owner 身份绕过。
-   * 文件侧：realpath + 敏感目录屏蔽 + O_NOFOLLOW + fstat 锁 fd（与 /api/download 同口径）。
-   */
-  function serveMessageMedia(req: Request, res: Response): void {
-    const me = apiAuth(req, res);
-    if (!me) return;
-    const mediaId = typeof req.params.id === 'string' ? req.params.id : '';
-    if (!/^[A-Za-z0-9_-]{8,128}$/.test(mediaId)) {
-      mediaError(res, 404, 'NOT_FOUND', '媒体不存在');
-      return;
-    }
-    // 消息可见性鉴权：拿不到就是不存在的媒体（不区分“无权限”与“不存在”）
-    const visible = db.getMessageMediaForUser(mediaId, me.userId);
-    if (!visible) {
-      mediaError(res, 404, 'NOT_FOUND', '媒体不存在');
-      return;
-    }
-    const internal = db.getMediaAssetFile(mediaId);
-    if (!internal || internal.state !== 'ready') {
-      mediaError(res, 404, 'NOT_FOUND', '媒体不存在');
-      return;
-    }
-    const kind = mediaKindOf(internal.kind);
-    if (kind === null) {
-      mediaError(res, 404, 'NOT_FOUND', '媒体不存在');
-      return;
-    }
-    let expectedPath: string;
-    try {
-      expectedPath = mediaFilePath(internal.storage_key, 'objects');
-    } catch {
-      mediaError(res, 404, 'NOT_FOUND', '媒体不存在');
-      return;
-    }
-    // realpath 后再比对：防 storage_key 被替换成指向媒体目录之外的符号链接
-    let real: string;
-    try {
-      real = realpathSync(expectedPath);
-    } catch {
-      mediaError(res, 404, 'NOT_FOUND', '媒体不存在');
-      return;
-    }
-    const mediaRootReal = (() => {
-      try {
-        return realpathSync(mediaObjectsDir);
-      } catch {
-        return path.resolve(mediaObjectsDir);
-      }
-    })();
-    if (real !== expectedPath && !real.startsWith(mediaRootReal + path.sep)) {
-      mediaError(res, 403, 'FORBIDDEN', '媒体路径非法');
-      return;
-    }
-    // 锁定 fd：后续 Range/HEAD/GET 都从同一 fd 读取，避免 stat 与打开之间被替换
-    let fd: number;
-    let st;
-    try {
-      const noFollow = process.platform === 'win32' ? 0 : (fsConstants.O_NOFOLLOW ?? 0);
-      fd = openSync(real, fsConstants.O_RDONLY | noFollow);
-      st = fstatSync(fd);
-    } catch {
-      mediaError(res, 404, 'NOT_FOUND', '媒体不存在');
-      return;
-    }
-    if (!st.isFile()) {
-      closeSync(fd);
-      mediaError(res, 404, 'NOT_FOUND', '媒体不存在');
-      return;
-    }
-    const size = st.size;
-    res.setHeader('Content-Type', internal.mime_type);
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Cache-Control', 'private, no-store');
-    res.setHeader('Accept-Ranges', 'bytes');
-    // inline：媒体要在消息气泡里直接渲染；文件名不参与（不输出原始名）
-    res.setHeader('Content-Disposition', 'inline');
-    const rangeHeader = typeof req.headers.range === 'string' ? req.headers.range : '';
-    // Range 只对视频开放（图片/表情包不需要断点续传，少一条攻击面）
-    if (kind === 'video' && rangeHeader !== '') {
-      const match = /^bytes=([0-9]*)-([0-9]*)$/.exec(rangeHeader.trim());
-      const invalid = (): void => {
-        res.setHeader('Content-Range', `bytes */${size}`);
-        closeSync(fd);
-        res.status(416).end();
-      };
-      if (match === null) {
-        invalid();
-        return;
-      }
-      const startRaw = match[1];
-      const endRaw = match[2];
-      let start: number;
-      let end: number;
-      if (startRaw === '') {
-        // 后缀范围 `bytes=-N`：取末尾 N 字节
-        const suffix = endRaw === '' ? NaN : Number(endRaw);
-        if (!Number.isSafeInteger(suffix) || suffix <= 0) {
-          invalid();
-          return;
-        }
-        start = Math.max(0, size - suffix);
-        end = size - 1;
-      } else {
-        start = Number(startRaw);
-        end = endRaw === '' ? size - 1 : Number(endRaw);
-      }
-      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end || start >= size) {
-        invalid();
-        return;
-      }
-      if (end >= size) end = size - 1;
-      res.status(206);
-      res.setHeader('Content-Range', `bytes ${start}-${end}/${size}`);
-      res.setHeader('Content-Length', String(end - start + 1));
-      if (req.method === 'HEAD') {
-        closeSync(fd);
-        res.end();
-        return;
-      }
-      const stream = createReadStream(real, { fd, autoClose: true, start, end });
-      stream.on('error', () => {
-        if (!res.headersSent) mediaError(res, 500, 'INTERNAL', '读取失败');
-        else res.destroy();
-      });
-      stream.pipe(res);
-      return;
-    }
-    res.setHeader('Content-Length', String(size));
-    if (req.method === 'HEAD') {
-      closeSync(fd);
-      res.end();
-      return;
-    }
-    const stream = createReadStream(real, { fd, autoClose: true });
-    stream.on('error', () => {
-      if (!res.headersSent) mediaError(res, 500, 'INTERNAL', '读取失败');
-      else res.destroy();
-    });
-    stream.pipe(res);
-  }
-
-  app.get('/gateway/api/message-media/:id', serveMessageMedia);
-  app.head('/gateway/api/message-media/:id', serveMessageMedia);
-
-  // ── 留言列表（所有登录用户；可见性在 SQL 层按用户过滤） ─────
-  // 支持 ?since=<id> 增量拉取（客户端轮询只取新增消息，避免每次全量下载）。
-  // reset：游标超前于【当前用户可见】的最新 id（数据库重建/消息清空后自增从头
-  // 开始）时，服务端回退全量并显式告知客户端重建基线——只靠客户端“空响应”判断
-  // 无法区分“正常无新消息”与“游标已失效”，会永久收不到新消息。
-  // 不能用全局最大 id：既泄露全平台消息活动量，也会被其他用户私信干扰判定。
-  app.get('/gateway/api/messages', (req, res) => {
-    const me = apiAuth(req, res);
-    if (!me) return;
-    const sinceRaw = typeof req.query.since === 'string' ? Number(req.query.since) : NaN;
-    const since = Number.isFinite(sinceRaw) && sinceRaw > 0 ? Math.floor(sinceRaw) : 0;
-    let mine = since > 0 ? db.listMessagesAfterForUser(me.userId, since, 300) : db.listMessagesForUser(me.userId, 300);
-    let reset = false;
-    if (since > 0 && mine.length === 0) {
-      const latest = db.latestMessageIdForUser(me.userId);
-      if (latest === null || since > latest) {
-        reset = true;
-        mine = db.listMessagesForUser(me.userId, 300);
-      }
-    }
-    res.json({ ok: true, me: { id: me.userId, username: me.username, role: me.role }, messages: mine, reset });
-  });
-
-  // ── 发送留言（所有登录用户） ─────────────────────────────────
-  // F-22：留言洪泛限流——每用户 60 秒内最多 12 条（滑动窗口），防止刷爆广播栏。
-  const msgRate = new Map<number, number[]>();
-  app.post('/gateway/api/messages', jsonBody, (req, res) => {
-    const me = apiAuth(req, res);
-    if (!me) return;
-    const now = Date.now();
-    const recent = (msgRate.get(me.userId) ?? []).filter((t) => now - t < 60_000);
-    if (recent.length >= 12) {
-      msgRate.set(me.userId, recent);
-      res.status(429).json({ ok: false, code: 'RATE_LIMITED', error: '留言过于频繁，请稍后再试' });
-      return;
-    }
-    recent.push(now);
-    msgRate.set(me.userId, recent);
-    const body = (req.body ?? {}) as Record<string, unknown>;
-    // 服务端净化（#3）：剥离 HTML/CSS 结构后入库——防存储型注入 + AI agent 间接提示注入
-    const content = sanitizeText(typeof body.content === 'string' ? body.content : '');
-    // 媒体附件：纯媒体消息允许 content 为空，但必须至少有一个合法媒体
-    // （见下方「必需条件」判定）。mediaIds 是客户端拿到的不透明 ID 数组。
-    const rawMediaIds = Array.isArray(body.mediaIds) ? body.mediaIds : [];
-    if (
-      rawMediaIds.length > 10 ||
-      rawMediaIds.some((id) => typeof id !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(id))
-    ) {
-      res.status(400).json({ ok: false, code: 'INVALID_MEDIA_ID', error: '媒体 ID 非法' });
-      return;
-    }
-    const mediaIds = [...new Set(rawMediaIds as string[])];
-    if (mediaIds.length > 0 && !chatMediaAllowed(me.role, me.userId)) {
-      res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '未开启聊天媒体权限' });
-      return;
-    }
-    const rawCaptions = Array.isArray(body.captions) ? body.captions : [];
-    if (rawCaptions.some((caption) => caption !== null && typeof caption !== 'string')) {
-      res.status(400).json({ ok: false, code: 'INVALID', error: 'captions 必须是字符串数组' });
-      return;
-    }
-    // 发布前的预检（与数据层的绑定校验同口径）：失败在写库前给出明确 4xx，
-    // 数据层仍在事务内重复校验（并发下它是唯一可信边界）。
-    for (const mediaId of mediaIds) {
-      if (!db.mediaOwnedByUser(mediaId, me.userId)) {
-        res.status(403).json({ ok: false, code: 'MEDIA_NOT_OWNED', error: '媒体不属于当前用户或未就绪' });
-        return;
-      }
-      if (db.mediaAttachedToAnyMessage(mediaId)) {
-        res.status(409).json({ ok: false, code: 'MEDIA_IN_USE', error: '媒体已被其他消息占用' });
-        return;
-      }
-    }
-    if (content === '' && mediaIds.length === 0) {
-      // 纯媒体消息：内容可以为空串，但必须有媒体；两者都缺仍按旧行为拒绝
-      res.status(400).json({ ok: false, code: 'INVALID', error: '内容不能为空' });
-      return;
-    }
-    if (content.length > 4000) {
-      res.status(400).json({ ok: false, code: 'INVALID', error: '内容过长' });
-      return;
-    }
-    // 投递口径（Discussion #6 实施项 5）：
-    //   1. recipientId 显式给出 → 私信该用户（主用户可私信任何人；子用户只能私信主用户）。
-    //      非法值绝不静默归一成广播（调用方本意私信却公开发出 = 隐私事故）；
-    //      不存在的用户也不能留下永远不可投递的孤儿消息（messages 无 FK）。
-    //   2. broadcast === true → 广播；仅主用户可用（子用户广播会被拦下）。
-    //   3. 两者都缺 → 子用户默认私信主用户（客服/反馈语义）；主用户必须显式
-    //      选择收件人或勾选广播，避免误发全员消息。
-    const rawRecipient = body.recipientId;
-    const wantBroadcast = body.broadcast === true;
-    // 一次取用：两个分支共用，避免两次查询间 admin 被删导致错误码口径漂移
-    const adminId = db.findAdminId();
-    let recipientId: number | null = null;
-    if (rawRecipient !== undefined && rawRecipient !== null) {
-      if (wantBroadcast) {
-        // 两个意图互斥：同时给出视为歧义请求（主用户本想广播却被静默降级成私信 = 坏契约）
-        res.status(400).json({ ok: false, code: 'INVALID', error: 'recipientId 与 broadcast 不能同时提供' });
-        return;
-      }
-      recipientId = nullableInt(rawRecipient);
-      if (recipientId === null || recipientId < 1) {
-        res.status(400).json({ ok: false, code: 'INVALID', error: 'recipientId 无效' });
-        return;
-      }
-      if (db.getUserById(recipientId) === null) {
-        res.status(404).json({ ok: false, code: 'NO_SUCH_USER', error: '收件人不存在' });
-        return;
-      }
-    } else if (wantBroadcast) {
-      if (me.role !== 'admin') {
-        res.status(403).json({ ok: false, code: 'FORBIDDEN_BROADCAST', error: '仅主用户可以发送广播消息' });
-        return;
-      }
-    } else if (me.role !== 'admin') {
-      if (adminId === null) {
-        res.status(500).json({ ok: false, code: 'INTERNAL', error: '平台主用户缺失' });
-        return;
-      }
-      recipientId = adminId;
-    } else {
-      res.status(400).json({ ok: false, code: 'SELECT_RECIPIENT', error: '请选择收件人或勾选广播' });
-      return;
-    }
-    // 子用户只能私信主用户（跨子用户私信在多租户场景下无业务价值，且扩大消息泄露面）
-    if (me.role !== 'admin' && recipientId !== null && (adminId === null || recipientId !== adminId)) {
-      res.status(403).json({ ok: false, code: 'FORBIDDEN_RECIPIENT', error: '子用户只能给主用户发私信' });
-      return;
-    }
-    // tag 是展示元数据：限制数量、逐项长度并去空白，防 256KB JSON 请求把极长 tag
-    // 持久化到每条消息（content 已有 4k 上限）。保留未知短 tag 兼容旧数据/扩展。
-    const tags = stringArray(body.tags)
-      .map((tag) => tag.trim())
-      .filter((tag) => tag.length > 0 && tag.length <= 64)
-      .slice(0, 8);
-    // captions 与 mediaIds 同序（数据层按索引写入 sort_order 对应的 caption）
-    const mediaCaptions = mediaIds.map((_, index) => {
-      const raw = rawCaptions[index];
-      if (typeof raw !== 'string') return null;
-      // caption 也是可渲染的展示文本：与 content 同口径净化
-      const caption = sanitizeText(raw).trim();
-      return caption === '' ? null : caption.slice(0, 500);
-    });
-    let msg: MessageRow;
-    try {
-      // 同一事务写入消息与媒体关系（媒体校验失败则消息不落库）
-      msg = db.addMessageWithMedia({
-        senderId: me.userId,
-        recipientId,
-        content,
-        tags,
-        mediaIds,
-        mediaCaptions,
-      });
-    } catch (error) {
-      if (error instanceof MediaError) {
-        const status =
-          error.code === 'MEDIA_NOT_OWNED' || error.code === 'MEDIA_NOT_READY' || error.code === 'MEDIA_EXPIRED'
-            ? 403
-            : error.code === MEDIA_IN_USE
-              ? 409
-              : error.code === 'MEDIA_NOT_FOUND' || error.code === 'INVALID_MEDIA_ID'
-                ? 404
-                : 400;
-        res.status(status).json({ ok: false, code: error.code, error: '媒体附件无效' });
-        return;
-      }
-      // 写库失败（磁盘/锁）：不能返回一个并不存在的消息
-      console.warn('[dsh-passwords] 留言写入失败:', String(error));
-      res.status(500).json({ ok: false, code: 'INTERNAL', error: '消息发送失败' });
-      return;
-    }
-    broadcastMessage(msg);
-    res.json({ ok: true, message: msg });
-  });
-
-  // ── SSE 实时推送（所有登录用户） ─────────────────────────────
-  app.get('/gateway/api/messages/stream', (req, res) => {
-    const me = apiAuth(req, res);
-    if (!me) return;
-    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no');
-    res.flushHeaders();
-    res.write(`data: ${JSON.stringify({ type: 'init', me: { id: me.userId, username: me.username, role: me.role } })}\n\n`);
-    const client = { res, userId: me.userId };
-    chatClients.add(client);
-    // 心跳：25 秒一条 SSE 注释帧。既防止代理/负载均衡器把空闲连接杀掉，
-    // 也用于探活——write 失败说明连接已死，立即移除，避免僵尸连接缓慢积累。
-    const heartbeat = setInterval(() => {
-      try {
-        res.write(': ping\n\n');
-      } catch {
-        clearInterval(heartbeat);
-        chatClients.delete(client);
-      }
-    }, 25_000);
-    heartbeat.unref();
-    // req/res 双监听 close（断网无 FIN 时 res.close 兜底），清理幂等
-    const cleanup = () => {
-      clearInterval(heartbeat);
-      chatClients.delete(client);
-    };
-    req.on('close', cleanup);
-    res.on('close', cleanup);
+  const messageRoutes = registerMessageRoutes(app, {
+    db, apiAuth, jsonBody, chatMediaAllowed, nullableInt, stringArray,
   });
 
   // ── 认证门卫：非 /gateway 请求必须带有效会话 ─────────────────
@@ -7654,6 +6791,12 @@ export function createGatewayServer(
             return;
           }
         }
+        // RC2 tenant event delivery uses authenticated WebSocket/Remote streams.
+        // Retired HTTP event routes have no native account scope.
+        if (requestPath === '/api/events.host' || requestPath === '/api/events.mux') {
+          denyRequest(req, res, lang, t(lang, 'gw.adminOnly'));
+          return;
+        }
         // F-09/F-12：第三方插件“运维面”端点（skin-center、modlens、
         // dsh-uploads 列表/删除等）不在网关权限模型内，对子用户一律 403（仅主用户可访问）
         if (isAdminOnlyPluginEndpoint(req.method, requestPath) ||
@@ -7892,6 +7035,8 @@ export function createGatewayServer(
     }
   });
 
+  const SCHEDULE_CATALOG_RE = /^\/api\/schedule[.\/]catalog$/;
+
   // ── 反向代理（HTTP）→ 上游 dsh ──────────────────────────────
   // 改写路径：body 已重算，分帧以新 content-length 为准，必须清掉上游的
   // transfer-encoding（RFC 9110 §8.6：CL 与 TE 同帧属于畸形消息，Nginx 直接 502）
@@ -7941,6 +7086,19 @@ export function createGatewayServer(
   const MAX_DECOMPRESSED_BYTES = 64 * 1024 * 1024;
   /** 安全过滤分支专属：解压超限时 fail-closed（502），不得透传未过滤内容 */
   class OversizeResponseError extends Error {}
+
+  /** 等待上游响应头的默认上限：请求体写尽后上游既不回响应头也不断开时，客户端不应永久挂起 */
+  const UPSTREAM_RESPONSE_HEADER_TIMEOUT_MS = 60_000;
+  /**
+   * 响应头等待上限（毫秒）。按请求读取环境变量，便于自动化测试把窗口压到毫秒级
+   * （与 MCP_GATEWAY_UPSTREAM_TLS_VERIFY 同口径）；非法值回落到默认上限，保证窗口有界。
+   */
+  function upstreamResponseHeaderTimeoutMs(): number {
+    const raw = Number(process.env.MCP_GATEWAY_UPSTREAM_HEADER_TIMEOUT_MS ?? '');
+    return Number.isFinite(raw) && raw > 0 ? raw : UPSTREAM_RESPONSE_HEADER_TIMEOUT_MS;
+  }
+
+
 
   type WorkspaceListFailure =
     | 'admin-principal'
@@ -8923,52 +8081,10 @@ export function createGatewayServer(
     stream.pipe(res);
   }
 
-  /**
-   * F-26：向 dsh 注入会话沙盒，并等待插件确认。
-   * 受限子用户的新会话在确认前仍是 DSH 默认 sandbox；若此处 fire-and-forget，
-   * 内部调用失败后会把比授权更宽松的会话成功交给用户。因此失败必须让创建请求
-   * 失败，不能把未确认的会话当作可用会话返回。
-   */
-  function applySandboxToSession(sessionId: string, mode: string): Promise<boolean> {
-    return new Promise((resolve) => {
-      const body = JSON.stringify({ sessionId, mode });
-      let settled = false;
-      const finish = (ok: boolean) => {
-        if (settled) return;
-        settled = true;
-        resolve(ok);
-      };
-      const r = upstreamTransport.request(
-        {
-          hostname: upstreamHost,
-          port: upstreamPort,
-          path: '/api/dsh-passwords/internal/sandbox',
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            'content-length': String(Buffer.byteLength(body)),
-            'x-internal-secret': config.internalSecret,
-            host: upstreamAuthority,
-            ...upstreamAuthenticationHeaders(),
-          },
-          timeout: 3000,
-        },
-        (response) => {
-          response.resume();
-          finish((response.statusCode ?? 500) >= 200 && (response.statusCode ?? 500) < 300);
-        },
-      );
-      r.on('error', (error) => {
-        console.error(`[dsh-passwords] 沙盒注入失败 session=${sessionId} mode=${mode}: ${error?.message ?? error}`);
-        finish(false);
-      });
-      r.on('timeout', () => {
-        r.destroy();
-        finish(false);
-      });
-      r.end(body);
-    });
-  }
+  const { applySandboxToSession, applySandboxToSessions } = createSandboxApplier({
+    upstreamTransport, upstreamHost, upstreamPort, internalSecret: config.internalSecret,
+    getAuthenticationHeaders: () => ({ host: upstreamAuthority, ...upstreamAuthenticationHeaders() }),
+  });
 
   app.use((req, res) => {
     // F-1 纵深防御：能到达这里（代理兑底）的 /gateway* 请求必然是未被具体网关路由
@@ -9121,6 +8237,15 @@ export function createGatewayServer(
       headers['content-type'] = 'application/json';
       headers['content-length'] = String(getListRpcBody.length);
     }
+    // 上游响应头等待：只覆盖「尚未收到响应头」的窗口，收到头或上游出错即清除。
+    let upstreamResponseHeaderTimer: NodeJS.Timeout | undefined;
+    let upstreamResponseHeaderTimedOut = false;
+    let upstreamResponseHeadersReceived = false;
+    const clearUpstreamResponseHeaderTimer = (): void => {
+      if (upstreamResponseHeaderTimer === undefined) return;
+      clearTimeout(upstreamResponseHeaderTimer);
+      upstreamResponseHeaderTimer = undefined;
+    };
     let proxyRequestRejected = false;
     let proxyRequestBodyComplete = false;
     let resolveProxyRequestBody: () => void = () => {};
@@ -9149,6 +8274,8 @@ export function createGatewayServer(
         agent: upstreamAgent,
       },
       async (upstreamRes) => {
+        upstreamResponseHeadersReceived = true;
+        clearUpstreamResponseHeaderTimer();
         // A Host/plugin may reply before a chunked request reaches its hard limit.
         // IncomingMessage stays paused while it has no data consumer, so defer every
         // response branch until the request either finishes or is rejected. This keeps
@@ -9539,7 +8666,7 @@ export function createGatewayServer(
                 );
                 // 授权回写栅栏用请求开始时的 epoch（授权在途中变更则不回写）；
                 // requestRevision 只做同一用户 workspace.list 响应之间的排序。
-                replaceUserSessionAccess(
+                const accessReplaced = replaceUserSessionAccess(
                   reqAs.dshpwUser!,
                   authorizedAccess,
                   sessionAccessRequestEpoch,
@@ -9551,9 +8678,11 @@ export function createGatewayServer(
                   sessionAccessRequestEpoch,
                   archiveRequestRevision,
                 );
-                userArchivedSessionIds.set(reqAs.dshpwUser!, new Set(
-                  [...archivedSessionSnapshot].filter((id) => authorizedAccess.has(id)),
-                ));
+                if (accessReplaced) {
+                  userArchivedSessionIds.set(reqAs.dshpwUser!, new Set(
+                    [...archivedSessionSnapshot].filter((id) => authorizedAccess.has(id)),
+                  ));
+                }
               }
               const out = Buffer.from(JSON.stringify(outBody), 'utf8');
               const respHeaders = headersForRewrittenBody(upstreamRes.headers);
@@ -10091,6 +9220,57 @@ export function createGatewayServer(
           return;
         }
 
+        // ── schedule/catalog 响应过滤（受限子用户）──────────────────────────
+        // `catalog` 无参，返回宿主全局提醒的裸数组，每个条目带原始 sessionId
+        // （ScheduleCatalogEntry）。官方分类对子用户放行，授权边界只能落在本分支：
+        // 逐条按 authorizedSubuserSessionRoot(userId, entry.sessionId, perms) 判定，
+        // sessionId 缺失/非法/非该用户授权会话一律丢弃。主用户（无 dshpwPerms）不解析、
+        // 不改写，整段原样透传。
+        // 信封/形状不合法或解压失败时 fail-closed（502），绝不回放未过滤的全局清单。
+        if (req.method === 'POST' && SCHEDULE_CATALOG_RE.test(proxyPath) &&
+          reqAs.dshpwPerms !== undefined && reqAs.dshpwIsAdmin !== true) {
+          bufferUpstream(upstreamRes, res, (raw) => {
+            try {
+              const body = decodeUpstreamBody(raw, String(upstreamRes.headers['content-encoding'] ?? ''));
+              const parsed = JSON.parse(body.toString('utf8')) as unknown;
+              if (!isPlainJsonRecord(parsed) || !isPlainJsonRecord(parsed.result)) {
+                throw new Error('invalid schedule catalog envelope');
+              }
+              const result = parsed.result;
+              // 业务失败不携带提醒数据：原样返回，不掩盖上游错误。
+              if (result.ok !== true) {
+                const respHeaders = headersForStreaming(upstreamRes.headers);
+                if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+                if (!res.writableEnded) res.end(raw);
+                return;
+              }
+              if (!Array.isArray(result.value)) throw new Error('invalid schedule catalog result');
+              const userId = reqAs.dshpwUser!;
+              const perms = reqAs.dshpwPerms!;
+              // fail-closed：只有命中该用户已授权会话快照的条目保留；缺失/非法
+              // sessionId 由 authorizedSubuserSessionRoot 统一判空丢弃。
+              const visible = result.value.filter((entry): entry is Record<string, unknown> =>
+                isPlainJsonRecord(entry) &&
+                authorizedSubuserSessionRoot(userId, entry.sessionId, perms) !== null,
+              ).map((entry) => ({ ...entry }));
+              const filtered = { ...parsed, result: { ...result, value: visible } };
+              const out = Buffer.from(JSON.stringify(filtered), 'utf8');
+              const respHeaders = headersForRewrittenBody(upstreamRes.headers);
+              respHeaders['content-length'] = String(out.length);
+              if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+              if (!res.writableEnded) res.end(out);
+            } catch (error) {
+              if (!res.headersSent) {
+                const msg = error instanceof OversizeResponseError
+                  ? '502 Upstream response too large'
+                  : '502 Upstream response unprocessable';
+                res.status(502).type('text/plain').send(msg);
+              }
+            }
+          });
+          return;
+        }
+
         // ── 非 HTML：原样流式转发 ───────────────────────────────────
         const respHeaders = headersForStreaming(upstreamRes.headers);
         // dsh 对插件/静态资源返回 no-cache（或不给缓存头），浏览器每次
@@ -10138,6 +9318,25 @@ export function createGatewayServer(
           upstreamRes.on('error', () => res.destroy());
           return;
         }
+        // 旧线 /api/events.host|events.mux 的 HTTP SSE 长连接与 WS 通道同口径登记
+        // （含主用户）：权限变更/登出/删号必须立即终止仍在升级时身份下推送的旧订阅，
+        // 否则撤销后连接会继续持有旧授权（主用户为原样透传，泄露面更大）。只在真正
+        // 建立的事件流（GET + 2xx）上登记，响应关闭即注销，避免登记表滞留。
+        if (
+          req.method === 'GET' &&
+          (upstreamRes.statusCode ?? 0) === 200 &&
+          reqAs.dshpwUser !== undefined &&
+          (proxyPath === '/api/events.host' || proxyPath === '/api/events.mux')
+        ) {
+          const unregisterEventSse = registerUserWebSocketClient(reqAs.dshpwUser, {
+            close: () => {
+              // HTTP SSE 没有 WS close 帧：直接销毁响应，立即中断下行并释放缓冲；
+              // 客户端 EventSource 会按协议重连，重新经过认证门卫与权限过滤。
+              if (!res.writableEnded) res.destroy();
+            },
+          });
+          res.on('close', unregisterEventSse);
+        }
         upstreamRes.pipe(res);
         // 上游响应流中途断开：客户端侧直接中断（头已发，不能再写错误页）
         upstreamRes.on('error', () => {
@@ -10145,13 +9344,26 @@ export function createGatewayServer(
         });
       },
     );
+    upstreamReq.on('finish', () => {
+      if (upstreamResponseHeaderTimer !== undefined || upstreamResponseHeadersReceived || res.headersSent) return;
+      upstreamResponseHeaderTimer = setTimeout(() => {
+        upstreamResponseHeaderTimer = undefined;
+        if (res.headersSent) return;
+        upstreamResponseHeaderTimedOut = true;
+        releaseSessionCreateReservation(reqAs);
+        upstreamReq.destroy();
+        res.status(504).type('text/plain').send('504 Upstream response timeout');
+      }, upstreamResponseHeaderTimeoutMs());
+      upstreamResponseHeaderTimer.unref();
+    });
     req.once('aborted', rejectProxyRequestBody);
     upstreamReq.once('close', () => {
       if (!proxyRequestBodyComplete) rejectProxyRequestBody();
     });
     upstreamReq.on('error', (error) => {
+      clearUpstreamResponseHeaderTimer();
       releaseSessionCreateReservation(reqAs);
-      if (proxyRequestRejected) return;
+      if (proxyRequestRejected || upstreamResponseHeaderTimedOut) return;
       if (!responseWritable()) {
         // 响应已开始转发：只能中断连接，避免 ERR_HTTP_HEADERS_SENT 崩溃
         if (!res.destroyed) res.destroy();
@@ -10167,6 +9379,7 @@ export function createGatewayServer(
     res.on('finish', () => releaseSessionCreateReservation(reqAs));
     // 客户端中途断开：中止上游请求，避免悬挂连接
     res.on('close', () => {
+      clearUpstreamResponseHeaderTimer();
       releaseSessionCreateReservation(reqAs);
       if (!res.writableEnded) {
         rejectProxyRequestBody();
@@ -10257,7 +9470,7 @@ export function createGatewayServer(
     const agentPresetMutation = /^\/api\/agentPresets?[.\/](copy|openDocument|remove|read|deletePreset)$/.test(proxyPath);
     if (
       reqAs.dshpwPerms !== undefined &&
-      reqAs.dshpwPerms.allowed_agent_presets !== null &&
+      reqAs.dshpwIsAdmin !== true &&
       agentPresetMutation
     ) {
       rejectProxyRequestBody();
@@ -11409,7 +10622,9 @@ export function createGatewayServer(
               sendDownstream(JSON.stringify({ type: 'error', streamId: frame.streamId,
                 error: { code, message, details: {} } }));
             };
-            if (!TENANT_REMOTE_STREAM_ENDPOINTS.has(frame.endpoint)) { rejectStream('gateway/forbidden', 'Remote endpoint is not available for this user'); return; }
+            if (isSubuserBlockedApiPath(`/api/${frame.endpoint}`) || !TENANT_REMOTE_STREAM_ENDPOINTS.has(frame.endpoint)) {
+              rejectStream('gateway/forbidden', 'Remote endpoint is not available for this user'); return;
+            }
             if (OFFICIAL_TERMINAL_REMOTE_ENDPOINTS.has(frame.endpoint) && !perms.allow_ssh) {
               rejectStream('terminal/unavailable'); return;
             }
@@ -11592,16 +10807,13 @@ export function createGatewayServer(
       if (keep.length > 0) setupAttempts.set(k, keep);
       else setupAttempts.delete(k);
     }
-    for (const [k, v] of msgRate) {
-      const keep = v.filter((t) => now - t < 60_000);
-      if (keep.length > 0) msgRate.set(k, keep);
-      else msgRate.delete(k);
-    }
+    messageRoutes.sweep();
     for (const [k, v] of loginSuccessRate) {
       const keep = v.filter((t) => now - t < 60_000);
       if (keep.length > 0) loginSuccessRate.set(k, keep);
       else loginSuccessRate.delete(k);
     }
+    mediaRoutes.sweepRate(now);
     // 极端 token/IP 洪泛下，TTL 尚未到期的键也可能无界增长；保留最新一半，
     // 牺牲极端情况下的短期缓存命中而不牺牲进程可用性。
     // ⚠ revokedTokens 不参与裁剪：它是登出吊销语义（未过期条目=拒绝该 JWT），
@@ -11618,7 +10830,6 @@ export function createGatewayServer(
     cap(usageThrottle);
     cap(usageReportThrottle);
     cap(setupAttempts);
-    cap(msgRate);
     // 会话路径缓存按容量裁剪（重启后由 session.list/workspace.list 重建；防长期运行无界增长）
     cap(sessionCwdById);
     cap(workspacePathById, 20_000);
@@ -11630,21 +10841,7 @@ export function createGatewayServer(
     }
     // 聊天媒体周期回收：过期资产 + 长期未提交的 pending 上传（客户端 init 后
     // 断网/取消会留下元数据行；DB 只删元数据，文件本体由网关按 storage key 删除）。
-    // pendingCutoff 取 2 倍上传 TTL，避免误删正在进行中的上传。
-    try {
-      const mediaPlan = db.pruneMedia({
-        now: new Date(now),
-        pendingCutoff: new Date(now - MEDIA_UPLOAD_TTL_MS * 2),
-      });
-      unlinkMediaFiles(mediaPlan.storage_keys);
-      // 消费消息历史修剪/clearMessages 在数据库事务内留下的待回收队列。
-      // 读取并删除队列是同一事务，多个清理调用方不会重复领取同一 key。
-      unlinkMediaFiles(db.drainPendingMediaRemovals());
-      // 意外中断的 PUT 留下的临时文件（进程崩溃时来不及清理）
-      pruneStaleMediaTemps(now);
-    } catch (error) {
-      console.warn('[dsh-passwords] 媒体清理失败:', String(error));
-    }
+    mediaRoutes.sweepMedia(now);
   }, 10 * 60_000);
   sweep.unref();
   server.on('close', () => clearInterval(sweep));

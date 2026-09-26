@@ -33,7 +33,7 @@ test('patch command uses a stable exit code when the configured DSH root is abse
   }
 });
 
-for (const version of ['0.1.2-alpha.4', '0.1.7-alpha.2', '0.1.7-rc.1', '0.1.7-rc.1+build.1']) for (const action of ['status', 'on']) test(`native ${version} ${action} reports compatibility ready without bundle rewriting`, () => {
+for (const version of ['0.1.2-alpha.4', '0.1.7-alpha.2', '0.1.7-rc.1', '0.1.7-rc.1+build.1', '0.1.7-rc.2', '0.1.7-rc.2+build.1']) for (const action of ['status', 'on']) test(`native ${version} ${action} reports compatibility ready without bundle rewriting`, () => {
   const root = mkdtempSync(path.join(tmpdir(), 'dshpw-cli-native-'));
   const dshRoot = path.join(root, 'dsh');
   mkdirSync(dshRoot, { recursive: true });
@@ -58,7 +58,7 @@ for (const version of ['0.1.2-alpha.4', '0.1.7-alpha.2', '0.1.7-rc.1', '0.1.7-rc
   }
 });
 
-for (const version of ['0.1.7-rc.2', '0.1.8-alpha.1', '0.1.7-alpha.1', '0.1.6-alpha.02', 'v0.1.6-alpha.2']) {
+for (const version of ['0.1.7-rc.3', '0.1.8-alpha.1', '0.1.7-alpha.1', '0.1.6-alpha.02', 'v0.1.6-alpha.2']) {
   test(`unreviewed or malformed ${version} is rejected before patching`, () => {
     const root = mkdtempSync(path.join(tmpdir(), 'dshpw-cli-version-'));
     const dshRoot = path.join(root, 'dsh');

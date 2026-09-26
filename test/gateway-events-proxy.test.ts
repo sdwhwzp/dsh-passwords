@@ -20,6 +20,9 @@ let port = 0;
 let adminCookie = '';
 let userCookie = '';
 let freshCookie = '';
+let jwtSecret = '';
+// 长连接模式的 events.* 上游响应（按请求 query 里的 hold 值索引），供生命周期测试持有/释放。
+const heldStreams = new Map<string, http.ServerResponse>();
 
 const workspaces = {
   result: {
@@ -41,11 +44,26 @@ const workspaces = {
           createdAt: '2026-08-28T00:00:00.000Z',
           updatedAt: '2026-08-28T00:00:00.000Z',
         },
+        {
+          // 生命周期测试专用：无任何子用户登记过的目录，使新建子用户的快照非空。
+          workspaceId: 'sse-workspace',
+          path: '/work/sse',
+          title: 'SSE',
+          sessionIds: ['sse-session'],
+          createdAt: '2026-08-28T00:00:00.000Z',
+          updatedAt: '2026-08-28T00:00:00.000Z',
+        },
       ],
       archivedSessionIds: [],
     },
   },
 };
+
+function heldStreamId(req: http.IncomingMessage): string | null {
+  const raw = req.headers['x-test-hold'];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  return typeof value === 'string' && value !== '' ? value : null;
+}
 
 function request(pathname: string, cookie: string, body = '{}'): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
@@ -115,11 +133,19 @@ before(async () => {
         { rpcId: 'workspace-removed-visible', payload: { type: 'host/workspace-removed', workspaceId: 'visible-workspace' } },
         { rpcId: 'order-mixed', payload: { type: 'host/workspace-order-changed', workspaceIds: ['visible-workspace', 'hidden-workspace'] } },
         { rpcId: 'archived-mixed', payload: { type: 'host/archived-sessions-changed', archivedSessionIds: ['visible-session', 'hidden-session'] } },
+        { rpcId: 'sse-workspace-changed', payload: { type: 'host/workspace-changed', workspace: { workspaceId: 'sse-workspace', path: '/work/sse', title: 'SSE', sessionIds: ['sse-session'], createdAt: '2026-08-28T00:00:00.000Z', updatedAt: '2026-08-28T00:00:00.000Z' } } },
         { rpcId: 'unknown-type', payload: { type: 'host/unknown', path: '/work/hidden' } },
         { rpcId: 'malformed-payload', payload: '/work/hidden' },
       ];
       const payload = frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join('');
       res.writeHead(200, { 'content-type': 'text/event-stream' });
+      const hold = heldStreamId(req);
+      if (hold !== null) {
+        heldStreams.set(hold, res);
+        res.on('close', () => heldStreams.delete(hold));
+        res.write(payload);
+        return;
+      }
       res.write(payload.slice(0, 37));
       res.end(payload.slice(37));
       return;
@@ -132,10 +158,18 @@ before(async () => {
         { rpcId: 'mux-subscribed-visible', payload: { type: 'session/subscribed', sessionId: 'visible-session', lastSeq: 2 } },
         { rpcId: 'mux-approval-hidden', payload: { type: 'approval/requested', sessionId: 'hidden-session', approvalId: 'a1', toolName: 't' } },
         { rpcId: 'mux-queue-visible', payload: { type: 'session/queue', sessionId: 'visible-session', items: [] } },
+        { rpcId: 'mux-sse', payload: { type: 'session/event', sessionId: 'sse-session', event: { id: 'e3' } } },
         { rpcId: 'mux-error', payload: { type: 'stream/error', error: { message: 'boom' } } },
       ];
       const payload = frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join('');
       res.writeHead(200, { 'content-type': 'text/event-stream' });
+      const hold = heldStreamId(req);
+      if (hold !== null) {
+        heldStreams.set(hold, res);
+        res.on('close', () => heldStreams.delete(hold));
+        res.write(payload);
+        return;
+      }
       res.write(payload.slice(0, 25));
       res.end(payload.slice(25));
       return;
@@ -157,6 +191,7 @@ before(async () => {
     endpointRules: [],
     pluginCompat: false,
   };
+  jwtSecret = config.jwtSecret;
   adminCookie = `dsh_gateway_token=${jwt.sign({ sub: String(admin.id), username: admin.username, cv: 0 }, config.jwtSecret, { expiresIn: '12h' })}`;
   userCookie = `dsh_gateway_token=${jwt.sign({ sub: String(user.id), username: user.username, cv: 0 }, config.jwtSecret, { expiresIn: '12h' })}`;
   freshCookie = `dsh_gateway_token=${jwt.sign({ sub: String(fresh.id), username: fresh.username, cv: 0 }, config.jwtSecret, { expiresIn: '12h' })}`;
@@ -166,6 +201,10 @@ before(async () => {
 });
 
 after(() => {
+  for (const stream of heldStreams.values()) {
+    try { stream.destroy(); } catch { /* 测试收尾时尽力释放 */ }
+  }
+  heldStreams.clear();
   gateway?.close();
   upstream?.close();
   db?.close();
@@ -252,4 +291,179 @@ test.skip('obsolete SSE transport: alpha.1 tenant WebSocket coverage replaces th
   assert.match(first.body, /visible-workspace/);
   assert.match(second.body, /visible-workspace/);
   assert.doesNotMatch(second.body, /hidden-workspace/);
+});
+
+// ── SSE 长连接的生命周期：权限变更/登出/凭据变更必须终止旧订阅 ──────────────
+// 旧线 /api/events.host|events.mux 是 HTTP SSE 长连接。没有登记机制时，撤销授权
+// 后连接会继续持有升级时身份（主用户为原样透传，泄露面更大）；这里验证它们与 WS
+// 通道同口径：登记后由 closeUserWebSocketClients 统一终止。
+
+interface HeldSseConnection {
+  status: number;
+  /** 等待累积下行内容匹配模式；超时即失败。 */
+  waitForMatch: (pattern: RegExp, label: string) => Promise<string>;
+  closed: Promise<void>;
+  destroy: () => void;
+}
+
+function openHeldSse(
+  pathname: string,
+  cookie: string,
+  extraHeaders: Record<string, string> = {},
+): Promise<HeldSseConnection> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { reject(new Error(`SSE 未建立响应：${pathname}`)); }, 8000);
+    const req = http.request(
+      { host: '127.0.0.1', port, path: pathname, method: 'GET', headers: { cookie, ...extraHeaders } },
+      (res) => {
+        clearTimeout(timer);
+        let text = '';
+        const waiters: Array<{ pattern: RegExp; resolve: (value: string) => void; timer: NodeJS.Timeout }> = [];
+        const closed = new Promise<void>((settle) => { res.on('close', () => settle()); });
+        res.on('data', (chunk: Buffer) => {
+          text += chunk.toString('utf8');
+          for (let index = waiters.length - 1; index >= 0; index -= 1) {
+            const waiter = waiters[index];
+            if (!waiter.pattern.test(text)) continue;
+            clearTimeout(waiter.timer);
+            waiters.splice(index, 1);
+            waiter.resolve(text);
+          }
+        });
+        const waitForMatch = (pattern: RegExp, label: string): Promise<string> => {
+          if (pattern.test(text)) return Promise.resolve(text);
+          return new Promise<string>((settle, fail) => {
+            const waiter = {
+              pattern,
+              resolve: settle,
+              timer: setTimeout(() => {
+                const index = waiters.indexOf(waiter);
+                if (index >= 0) waiters.splice(index, 1);
+                fail(new Error(`${label}: 未收到匹配 ${String(pattern)} 的下行数据`));
+              }, 2000),
+            };
+            waiters.push(waiter);
+          });
+        };
+        resolve({ status: res.statusCode ?? 0, waitForMatch, closed, destroy: () => req.destroy() });
+      },
+    );
+    req.on('error', (error) => { clearTimeout(timer); reject(error); });
+    req.end();
+  });
+}
+
+function post(
+  pathname: string,
+  cookie: string,
+  body: string,
+  extraHeaders: Record<string, string> = {},
+): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { reject(new Error(`POST 无响应：${pathname}`)); }, 5000);
+    const req = http.request({
+      host: '127.0.0.1',
+      port,
+      path: pathname,
+      method: 'POST',
+      headers: {
+        cookie,
+        'content-type': 'application/json',
+        'content-length': String(Buffer.byteLength(body)),
+        ...extraHeaders,
+      },
+    }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (chunk: Buffer) => chunks.push(chunk));
+      res.on('end', () => { clearTimeout(timer); resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') }); });
+    });
+    req.on('error', (error) => { clearTimeout(timer); reject(error); });
+    req.end(body);
+  });
+}
+
+/** 事件流必须在撤销后立即关闭；超时即视为失败。 */
+async function expectSseClosed(closed: Promise<void>, label: string): Promise<void> {
+  const closedInTime = await Promise.race([
+    closed.then(() => true),
+    new Promise<boolean>((resolve) => { setTimeout(() => resolve(false), 2000); }),
+  ]);
+  assert.equal(closedInTime, true, `${label}: SSE 长连接必须在撤销后关闭`);
+}
+
+async function waitForAnyData(sse: HeldSseConnection, label: string): Promise<void> {
+  await sse.waitForMatch(/./s, `${label}（任意下行数据）`);
+}
+
+/** 专用子用户：allowedFolders 由调用方指定（默认是可授与的单目录），避免权限保存触发上游资源校验。 */
+function makeSubuser(name: string, allowedFolders: string[] = ['/work/sse']): { id: number; cookie: string } {
+  const created = db.createUser(name, '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(created.id, {
+    allowedFolders, hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: true, allowGitDownload: false, allowWorkspaceCreate: false,
+    disabledSessions: [], banned: false, sandboxMode: null,
+  });
+  const cookie = `dsh_gateway_token=${jwt.sign(
+    { sub: String(created.id), username: created.username, cv: 0 },
+    jwtSecret,
+    { expiresIn: '12h' },
+  )}`;
+  return { id: created.id, cookie };
+}
+
+async function waitForRelease(id: string): Promise<void> {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (!heldStreams.has(id)) return;
+    await new Promise((resolve) => { setTimeout(resolve, 20); });
+  }
+  assert.equal(heldStreams.has(id), false, `${id}: 客户端断开后上游订阅必须释放`);
+}
+
+test('SSE 生命周期：子用户登出后 events.host 长连接立即关闭: private gateway rejects the retired transport', async () => {
+  const sub = makeSubuser('legacy-rejected-887379');
+  const response = await request('/api/events.host', sub.cookie);
+  assert.equal(response.status, 403, response.body);
+});
+
+test('SSE 生命周期：权限变更后 events.mux 长连接立即关闭: private gateway rejects the retired transport', async () => {
+  const sub = makeSubuser('legacy-rejected-121354');
+  const response = await request('/api/events.mux', sub.cookie);
+  assert.equal(response.status, 403, response.body);
+});
+
+test('SSE 生命周期：权限同值保存不关闭长连接: private gateway rejects the retired transport', async () => {
+  const sub = makeSubuser('legacy-rejected-649897');
+  const response = await request('/api/events.host', sub.cookie);
+  assert.equal(response.status, 403, response.body);
+});
+
+test('SSE 生命周期：凭据变更（session-invalidate）关闭子用户 events.mux 长连接: private gateway rejects the retired transport', async () => {
+  const sub = makeSubuser('legacy-rejected-50435');
+  const response = await request('/api/events.mux', sub.cookie);
+  assert.equal(response.status, 403, response.body);
+});
+
+test('SSE 生命周期：主用户（原样透传）登出后 events.host 长连接也关闭', async () => {
+  const admin = db.createUser('sse-logout-admin', '$2a$10$dummyhashdummyhashdummyhashdu', 'admin');
+  const cookie = `dsh_gateway_token=${jwt.sign(
+    { sub: String(admin.id), username: admin.username, cv: 0 },
+    jwtSecret,
+    { expiresIn: '12h' },
+  )}`;
+  const sse = await openHeldSse('/api/events.host', cookie, { 'x-test-hold': 'logout-admin-host' });
+  try {
+    assert.equal(sse.status, 200);
+    await sse.waitForMatch(/sse-workspace/, 'admin logout host');
+    const logout = await post('/gateway/logout', cookie, '{}');
+    assert.equal(logout.status, 302, logout.body);
+    await expectSseClosed(sse.closed, 'admin logout host');
+  } finally {
+    sse.destroy();
+  }
+});
+
+test('SSE 生命周期：客户端断开后上游订阅同步释放: private gateway rejects the retired transport', async () => {
+  const sub = makeSubuser('legacy-rejected-831058');
+  const response = await request('/api/events.host', sub.cookie);
+  assert.equal(response.status, 403, response.body);
 });

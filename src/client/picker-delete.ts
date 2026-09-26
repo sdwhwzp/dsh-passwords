@@ -652,6 +652,24 @@ function startObserver(): void {
  * 只有在确认主用户之后才会调用；解析始终用 clone()，任何异常都被吞掉，
  * 原响应照常返回——最坏情况只是拿不到路径（于是不注入按钮），不影响官方功能。
  */
+function isListingRequest(rawUrl: string, method: string): boolean {
+  if (method.toUpperCase() !== 'POST') return false;
+  try {
+    const parsed = new URL(rawUrl, window.location.href);
+    return parsed.pathname === LIST_ENDPOINT_SUFFIX;
+  } catch {
+    return rawUrl.split('?', 1)[0].split('#', 1)[0].endsWith(LIST_ENDPOINT_SUFFIX);
+  }
+}
+
+function captureListingEnvelope(envelope: unknown): void {
+  try {
+    for (const entries of extractPickerListings(envelope)) rememberListings(entries);
+  } catch {
+    /* 形状不符：忽略 */
+  }
+}
+
 function wrapFetchForListings(): void {
   const original = window.fetch;
   if (typeof original !== 'function') return;
@@ -665,18 +683,8 @@ function wrapFetchForListings(): void {
             init?.method ??
             (input instanceof Request ? input.method : 'GET')
           ).toUpperCase();
-          if (method !== 'POST' || !url.endsWith(LIST_ENDPOINT_SUFFIX)) return;
-          void res
-            .clone()
-            .json()
-            .then((envelope: unknown) => {
-              try {
-                for (const entries of extractPickerListings(envelope)) rememberListings(entries);
-              } catch {
-                /* 形状不符：忽略 */
-              }
-            })
-            .catch(() => {});
+          if (!isListingRequest(url, method)) return;
+          void res.clone().json().then(captureListingEnvelope).catch(() => {});
         } catch {
           /* 非标准 input：忽略 */
         }
@@ -686,6 +694,39 @@ function wrapFetchForListings(): void {
     return response;
   };
   window.fetch = wrapped;
+}
+
+/**
+ * rc.2 的 client-connection 在部分浏览器路径使用 XMLHttpRequest，而不是 window.fetch。
+ * 两条捕获路径只读取响应副本，不修改请求或响应，拿不到明确路径时仍保持 fail-closed。
+ */
+function wrapXhrForListings(): void {
+  const Xhr = window.XMLHttpRequest;
+  if (typeof Xhr !== 'function') return;
+  const originalOpen = Xhr.prototype.open;
+  const originalSend = Xhr.prototype.send;
+  Xhr.prototype.open = function open(method: string, url: string | URL, ...rest: unknown[]): void {
+    Object.defineProperty(this, '__dshpwListingRequest', {
+      configurable: true,
+      value: { method, url: String(url) },
+    });
+    originalOpen.call(this, method, String(url), rest[0] === undefined ? true : Boolean(rest[0]), rest[1] as string | undefined, rest[2] as string | undefined);
+  };
+  Xhr.prototype.send = function send(body?: Document | XMLHttpRequestBodyInit | null): void {
+    const request = (this as XMLHttpRequest & { __dshpwListingRequest?: { method: string; url: string } }).__dshpwListingRequest;
+    if (request !== undefined && isListingRequest(request.url, request.method)) {
+      this.addEventListener('load', () => {
+        if (this.status < 200 || this.status >= 300) return;
+        try {
+          const envelope = this.responseType === 'json' ? this.response : JSON.parse(this.responseText);
+          captureListingEnvelope(envelope);
+        } catch {
+          /* 非 JSON 或响应仍在流式处理中：忽略 */
+        }
+      }, { once: true });
+    }
+    originalSend.call(this, body);
+  };
 }
 
 /** 启动幂等：插件重载/多次 apply 时不会叠加 observer 或包装层。 */
@@ -709,6 +750,7 @@ export function startPickerDelete(): void {
       if (me?.role !== 'admin') return;
       injectStyleOnce();
       wrapFetchForListings();
+      wrapXhrForListings();
       startObserver();
     })
     .catch(() => {

@@ -108,7 +108,7 @@ MySQL 模式会在空闲超时、服务重启或短暂网络断开后自动替�
 
 ### 0. 前置条件（三样）
 
-宿主机安装需要 Node.js 22.19+ 或 24+、git 和带本 fork 租户扩展的 Harness。当前部署目标为私有 Harness `0.1.7-rc.1`；0.1.7 线仅接受已审查的 `0.1.7-alpha.2` 与 `0.1.7-rc.1`。安装器与 bundled Docker 继承上游的公开 alpha.2 默认值，不能代替本部署的私有构建。实际检查与部署状态见部署记录及 [兼容说明](docs/compatibility-matrix.md)。
+宿主机安装需要 Node.js 22.19+ 或 24+、git 和带本 fork 租户扩展的 Harness。当前部署目标为私有 Harness `0.1.7-rc.2`；0.1.7 线仅接受已审查的 `0.1.7-alpha.2`、`0.1.7-rc.1` 与 `0.1.7-rc.2`。安装器与 bundled Docker 继承上游的公开 rc.2 默认值，不能代替本部署的私有构建。实际检查与部署状态见部署记录及 [兼容说明](docs/compatibility-matrix.md)。
 
 ### 1. 安装（按平台）
 
@@ -145,7 +145,7 @@ docker run -d \
   -p 127.0.0.1:3088:3088 \
   -v dsh-home:/data/dsh \
   -v dsh-passwords-state:/data/dsh-passwords \
-  skywalker237234/dsh-passwords:2.7.4
+  skywalker237234/dsh-passwords:2.7.5
 ```
 
 `.env` 至少包含 `DEEPSEEK_API_KEY`。`MCP_GATEWAY_PUBLIC_HOST` 建议填实际访问的域名。宿主端口只发布在回环地址 `127.0.0.1:3088`，容器内监听 `0.0.0.0:3088`；公网访问由 nginx 或 Caddy 终结 TLS 后转发。镜像默认内置公开 DSH `0.1.7-alpha.2`（不包含本 fork 所需的租户扩展）；初始化完成以 healthz/readyz 均返回 `ok:true` 为准。
@@ -434,7 +434,7 @@ curl -so /dev/null -w "TLS:%{time_appconnect}s\n" https://地址/gateway/login
 
 ### 手动安装
 
-> v2.7.4 的上游功能已进入本 fork 的适配流程；本部署使用私有 Harness `0.1.7-rc.1`，账号隔离和受管目录规则见 [兼容说明](docs/compatibility-matrix.md)。上游测试服务器的结果不代表本 fork 已部署。
+> v2.7.5 的上游功能已合入本 fork；本部署使用私有 Harness `0.1.7-rc.2`，账号隔离和受管目录规则见 [兼容说明](docs/compatibility-matrix.md)。上游测试服务器的结果不代表本 fork 已部署。
 
 1. `git clone https://github.com/sdwhwzp/dsh-passwords && cd dsh-passwords`
 2. `npm install && npm run build`
@@ -625,6 +625,6 @@ Linux 部署由管理员将 `scripts/tenant-terminal-launcher.py` 安装为 root
 
 Host 登录交换兼容根目录重定向 `/` 与 `./`；不跟随跳转，拒绝外部地址和带查询参数的目标。
 
-已验证的 Harness 0.1.7-alpha.2 与 0.1.7-rc.1 可启动网关并使用原生权限接口，无需改写安装包；未验证的新版本仍由启动检查拒绝。
+已验证的 Harness 0.1.7-alpha.2 与 0.1.7-rc.2 可启动网关并使用原生权限接口，无需改写安装包；未验证的新版本仍由启动检查拒绝。
 
 会话归属校验接受旧版投影以及新版 `cached`／`sequenced` 投影和 `agentAvailable` 标记，仍严格校验类型与允许字段。
