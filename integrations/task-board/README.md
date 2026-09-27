@@ -1,6 +1,6 @@
 # Task board Host engine
 
-Pinned from [sdwhwzp/dsh-web](https://github.com/sdwhwzp/dsh-web) commit `282c164b27af96b4faa97ea2e6fdc5320a465007`, package `@linxin666/dsh-client-ui-task-board` version `0.4.3-dsh.20260927.1` (Apache-2.0). [source.json](source.json) records the 24 files in the Host service, ledger, routes and parser dependency closure with their Git blob hashes. Files under `upstream/` are unchanged copies of that commit.
+Pinned from [sdwhwzp/dsh-web](https://github.com/sdwhwzp/dsh-web) commit `c38734baf3723c6309abb67fa72c743d0a38b98a`, package `@linxin666/dsh-client-ui-task-board` version `0.4.3-dsh.20260927.2` (Apache-2.0). [source.json](source.json) records the 24 files in the Host service, ledger, routes and parser dependency closure with their Git blob hashes. Files under `upstream/` are unchanged copies of that commit.
 
 The tenant adapter authenticates requests, isolates ledgers by account and sends every execution RPC through the passwords gateway. Parent-child links, workspace IDs, tags and session-reuse preferences survive ledger reloads; the matching dsh-web client uses those workspace IDs for project partitions. Parent links can reference only tasks in the same account ledger; absent parents and cycles are rejected. Workspace creation and session reuse retain the gateway's account permissions and session ownership checks.
 
@@ -13,3 +13,5 @@ Synchronizing dsh-web task-board changes also requires refreshing this Host depe
 Rebuild with `node scripts/build-task-board.mjs` after compiling `src/tenant-task-board.ts`. Run `node --import tsx --test test/tenant-task-board-parse.test.ts test/tenant-workspace-access.test.ts` for account isolation, project persistence, model admission, quotas, usage recording, provider failures and cancellation.
 
 Each account arms one deadline timer for its earliest cron occurrence through the Host timer service when available. Creating or importing an enabled schedule arms it immediately; rescheduling, archiving, deletion and disposal cancel obsolete timers. Startup and resume skip missed occurrences. Ledger schema 3 and per-account storage locations are unchanged.
+
+Goal runs default to enabled, including existing tasks without `goalRun`. An explicit `false` persists in the schema 3 ledger and runs one plain turn. Both the goal command and its completion projection pass through the current account gateway; an active goal keeps its task running, a blocked goal fails it, and an authorization refusal never settles the task from an unreadable projection. The execution prompt is submitted before the goal command, so an unsupported or refused goal command retains that single turn.

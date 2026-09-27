@@ -279,6 +279,16 @@ export interface TaskRecord {
    */
   teamRun?: boolean
   /**
+   * Start every execution of this task with dsh's built-in `/goal` command,
+   * armed with the composed execution prompt as its objective. The session then
+   * keeps working automatic continuation rounds until the agent marks the goal
+   * complete, and this board settles the execution on the goal's own end
+   * instead of at the first turn end. Absent means ON — the option is checked
+   * by default, so only an explicit `false` runs the task as a single plain
+   * turn. A session whose `/goal` command is refused still runs the prompt.
+   */
+  goalRun?: boolean
+  /**
    * Frozen context snapshot for a continuation card; absent on plain tasks.
    * Sanitized before it enters the ledger (redaction, slash-command taint,
    * 8 KiB per-field cap) by the protocol gate and re-normalized on load.
@@ -354,6 +364,11 @@ export interface NewTaskInput {
   reuseSession?: boolean
   /** Run the subtree as an Agent Team (Team Lead session plus one teammate per direct subtask). */
   teamRun?: boolean
+  /**
+   * Start the execution with dsh's built-in `/goal`. Absent/true keeps the
+   * default (goal run); an explicit false requests a single plain turn.
+   */
+  goalRun?: boolean
   /**
    * Optional scheduled-run rule requested at creation time (the new-task
    * dialog): an enable flag plus a 5-field cron expression. The create use
@@ -449,7 +464,11 @@ export function createTask(input: NewTaskInput, now: number, id: string): TaskRe
     permission: isTaskPermission(input.permission) ? input.permission : undefined,
     model: normalizeTargetId(input.model),
     reuseSession: input.reuseSession === true ? true : undefined,
-  teamRun: input.teamRun === true ? true : undefined,
+    teamRun: input.teamRun === true ? true : undefined,
+    // Default ON: only an explicit false is stored, so a card that never
+    // touched the option (and every card written before the field existed)
+    // keeps starting its runs with /goal.
+    goalRun: input.goalRun === false ? false : undefined,
     ...(input.freeze === undefined ? {} : { freeze: freezeOf(input.freeze, now) }),
     ...(input.handover === undefined ? {} : { handover: { ...input.handover, bundledAt: now } }),
     ...(tags === undefined ? {} : { tags }),

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import http, { type RequestListener } from 'node:http';
@@ -60,9 +60,9 @@ async function fixture(t: TestContext, timer?: HostTimerFace) {
       res.end(JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: { ok: true, value: { items: [] } } }));
       return;
     }
-    if (timer && ['session/create', 'session/rename', 'session/prompt'].includes(body.method)) {
+    if (timer && ['session/create', 'session/rename', 'session/prompt', 'commands/execute'].includes(body.method)) {
       taskCalls.push({ id, method: body.method, args: body.payload.args });
-      const value = body.method === 'session/create' ? { sessionId: `scheduled-${id}-${taskCalls.length}` } : {};
+      const value = body.method === 'session/create' ? { sessionId: `scheduled-${id}-${taskCalls.length}` } : body.method === 'commands/execute' ? { kind: 'success', text: 'ok' } : {};
       res.end(JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: { ok: true, value } }));
       return;
     }
@@ -110,7 +110,7 @@ async function fixture(t: TestContext, timer?: HostTimerFace) {
     for (const dispose of disposers.splice(0).reverse()) dispose();
     register();
   };
-  return { state, users, calls, catalogCalls, taskCalls, billed, spend, parse, origin, headers, reload };
+  return { state, users, calls, catalogCalls, taskCalls, billed, spend, parse, origin, headers, reload, directory };
 }
 
 /** Advance only board deadlines; HTTP sockets and gateway deadlines keep real timers. */
@@ -288,6 +288,42 @@ test('current task-board child creation, attach and detach survive tenant ledger
   assert.equal(f.calls.length, 0, 'creating and linking tasks does not invoke a model');
 });
 
+test('tenant goal opt-out persists in schema 3 and rejects invalid or foreign-account updates', async t => {
+  const f = await fixture(t);
+  const action = async (id: number, value: object, expected = 200) => {
+    const response = await fetch(f.origin + '/api/task-board/action', {
+      method: 'POST', headers: f.headers(id), body: JSON.stringify({ requestId: randomUUID(), action: value }),
+    });
+    const body = await response.json();
+    assert.equal(response.status, expected, JSON.stringify(body));
+    return body;
+  };
+  for (const [id, goalRun] of [['default-goal', undefined], ['plain-turn', false]] as const) {
+    const created = await action(2, { kind: 'create', id, input: { title: id, description: '', prompt: id, goalRun } });
+    assert.equal(created.tasks.find((task: { id: string }) => task.id === id).goalRun, goalRun);
+  }
+  await action(2, { kind: 'create', id: 'invalid-goal', input: { title: 'Invalid', description: '', prompt: '', goalRun: 'false' } }, 400);
+  await action(3, { kind: 'update', taskId: 'plain-turn', patch: { goalRun: true } }, 400);
+  await action(2, { kind: 'update', taskId: 'plain-turn', patch: { goalRun: 0 } }, 400);
+  const disk = JSON.parse(await readFile(path.join(f.directory, 'u2', 'ledger-v2.json'), 'utf8'));
+  assert.equal(disk.schemaVersion, 3);
+  assert.equal(disk.tasks.find((task: { id: string }) => task.id === 'plain-turn').goalRun, false);
+  assert.equal('goalRun' in disk.tasks.find((task: { id: string }) => task.id === 'default-goal'), false);
+  f.reload();
+  const response = await fetch(f.origin + '/api/task-board/state', { headers: f.headers(2) });
+  const restored = await response.json();
+  assert.equal(restored.tasks.find((task: { id: string }) => task.id === 'plain-turn').goalRun, false);
+  for (const goalRun of [true, false, null]) {
+    const updated = await action(2, { kind: 'update', taskId: 'plain-turn', patch: { goalRun } });
+    assert.equal(updated.tasks.find((task: { id: string }) => task.id === 'plain-turn').goalRun, goalRun === false ? false : undefined);
+  }
+  const imported = await action(3, { kind: 'import', sourceId: 'own-import', tasks: [
+    { id: 'import-plain', title: 'Imported', description: '', prompt: '', goalRun: false, status: 'todo', executions: [], createdAt: 1, updatedAt: 1 },
+  ] });
+  assert.equal(imported.tasks[0].goalRun, false);
+  assert.equal(f.calls.length, 0);
+});
+
 test('tenant task-board parent creation and relinking reject references to another account', async t => {
   const f = await fixture(t);
   const action = async (id: number, value: object, expected = 200) => {
@@ -355,10 +391,12 @@ for (const creation of ['create', 'import'] as const) {
         assert.ok(performance.now() < deadline, 'scheduled execution did not finish gateway admission');
       }
       const calls = f.taskCalls.filter(call => call.id === id);
-      assert.deepEqual(calls.map(call => call.method), ['session/create', 'session/rename', 'session/prompt']);
+      assert.deepEqual(calls.map(call => call.method), ['session/create', 'session/rename', 'session/prompt', 'commands/execute']);
       const prompt = calls[2].args.request as { sessionId: string; content: unknown };
       assert.match(prompt.sessionId, new RegExp(`^scheduled-${id}-`));
       assert.match(JSON.stringify(prompt.content), new RegExp(`Only account ${id}`));
+      assert.equal(calls[3].args.agentId, prompt.sessionId);
+      assert.equal(calls[3].args.line, `/goal Only account ${id}`);
     }
     assert.equal(f.calls.length, 0, 'fake gateway never makes a real model call');
   });

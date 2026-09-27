@@ -25,7 +25,7 @@ function catalogAllows(catalog: unknown, provider: string, model: string): boole
   });
 }
 
-/** Gateway transport never calls Host mutations directly; account policy runs for each RPC. */
+/** Account policy runs for each gateway RPC; authentication denials retain their code for task completion checks. */
 export class TenantBoardGateway {
   constructor(private readonly origin: string, private readonly issueToken: () => string) {}
 
@@ -38,7 +38,12 @@ export class TenantBoardGateway {
       headers: { 'content-type': 'application/json', origin: this.origin, cookie: `dsh_gateway_token=${this.issueToken()}` },
       body: JSON.stringify({ type: 'client-request', rpcId, method, payload: { args: request.args } }),
     });
-    if (!response.ok) { await response.body?.cancel(); throw new Error(`task gateway HTTP ${response.status}`); }
+    if (!response.ok) {
+      await response.body?.cancel();
+      const error = new Error(`task gateway HTTP ${response.status}`);
+      if (response.status === 401 || response.status === 403) throw Object.assign(error, { code: 'PRINCIPAL_ACCESS_DENIED' });
+      throw error;
+    }
     const result = await response.json() as { type?: string; rpcId?: string; result?: { ok?: boolean; value?: unknown; error?: { code?: string; message?: string } } };
     if (result.type !== 'server-response' || result.rpcId !== rpcId || !result.result?.ok) {
       throw Object.assign(new Error(result.result?.error?.message ?? 'task gateway rejected request'), { code: result.result?.error?.code });
@@ -91,9 +96,9 @@ export function registerTenantTaskBoard(ctx: Context, db: Database, config: Plat
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const boards = new Map<string, { principal: AuthenticatedPrincipal; service: TaskBoardHostService; routes: ReturnType<typeof makeTaskBoardRoutes> }>();
   const validate = (principal: AuthenticatedPrincipal) => {
-    if (principal.source !== 'dsh-passwords' || !/^[1-9][0-9]*$/.test(principal.id)) throw new Error('invalid task owner');
+    if (principal.source !== 'dsh-passwords' || !/^[1-9][0-9]*$/.test(principal.id)) throw Object.assign(new Error('invalid task owner'), { code: 'PRINCIPAL_ACCESS_DENIED' });
     const user = db.getUserById(Number(principal.id));
-    if (!user || user.username !== principal.username || user.role !== principal.role || db.getPermissions(user.id)?.banned) throw new Error('task owner unavailable');
+    if (!user || user.username !== principal.username || user.role !== principal.role || db.getPermissions(user.id)?.banned) throw Object.assign(new Error('task owner unavailable'), { code: 'PRINCIPAL_ACCESS_DENIED' });
     return user;
   };
   const origin = new URL(settings.gatewayOrigin).origin;

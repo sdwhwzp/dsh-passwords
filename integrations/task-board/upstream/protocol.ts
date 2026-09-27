@@ -210,6 +210,7 @@ function importedTask(value: unknown): TaskRecord | undefined {
     ...(task.mode === undefined ? {} : { mode: task.mode }),
     ...(task.permission === undefined ? {} : { permission: task.permission }),
     ...(task.reuseSession === undefined ? {} : { reuseSession: task.reuseSession }),
+    ...(task.goalRun === undefined ? {} : { goalRun: task.goalRun }),
     ...(task.archivedAt === undefined ? {} : { archivedAt: task.archivedAt }),
     ...(task.freeze === undefined ? {} : { freeze: task.freeze }),
     ...(task.handover === undefined ? {} : { handover: task.handover }),
@@ -247,12 +248,13 @@ function handoverPayload(value: unknown): TaskHandoverInput | undefined {
 
 function createInput(value: unknown): value is NewTaskInput {
   const input = record(value)
-  if (input === undefined || !exactKeys(input, ['title', 'description', 'prompt', 'parentId', 'workspaceId', 'mode', 'permission', 'schedule', 'freeze', 'handover', 'model', 'reuseSession', 'teamRun', 'tags'])) return false
+  if (input === undefined || !exactKeys(input, ['title', 'description', 'prompt', 'parentId', 'workspaceId', 'mode', 'permission', 'schedule', 'freeze', 'handover', 'model', 'reuseSession', 'teamRun', 'goalRun', 'tags'])) return false
   if (input.parentId !== undefined && (typeof input.parentId !== 'string' || input.parentId.trim() === '')) return false
   if (typeof input.title !== 'string' || typeof input.description !== 'string' || typeof input.prompt !== 'string') return false
   if (!optionalString(input.workspaceId) || !optionalString(input.mode) || !optionalString(input.model)) return false
   if (input.reuseSession !== undefined && typeof input.reuseSession !== 'boolean') return false
   if (input.teamRun !== undefined && typeof input.teamRun !== 'boolean') return false
+  if (input.goalRun !== undefined && typeof input.goalRun !== 'boolean') return false
   if (input.permission !== undefined && !isTaskPermission(input.permission)) return false
   if (input.tags !== undefined && !isTaskTagList(input.tags)) return false
   if (input.freeze !== undefined && freezePayload(input.freeze) === undefined) return false
@@ -267,10 +269,13 @@ function createInput(value: unknown): value is NewTaskInput {
 
 function updatePatch(value: unknown): boolean {
   const patch = record(value)
-  if (patch === undefined || !exactKeys(patch, ['title', 'description', 'prompt', 'workspaceId', 'mode', 'permission', 'freeze', 'handover', 'model', 'reuseSession', 'teamRun', 'tags'])) return false
+  if (patch === undefined || !exactKeys(patch, ['title', 'description', 'prompt', 'workspaceId', 'mode', 'permission', 'freeze', 'handover', 'model', 'reuseSession', 'teamRun', 'goalRun', 'tags'])) return false
   // null (or false) clears the reuse opt-in; only a real boolean is accepted.
   if (patch.reuseSession !== undefined && patch.reuseSession !== null && typeof patch.reuseSession !== 'boolean') return false
   if (patch.teamRun !== undefined && patch.teamRun !== null && typeof patch.teamRun !== 'boolean') return false
+  // The goal opt-in is tri-state: null/true return the card to its default
+  // (goal run), false pins a single plain turn.
+  if (patch.goalRun !== undefined && patch.goalRun !== null && typeof patch.goalRun !== 'boolean') return false
   for (const key of ['title', 'description', 'prompt', 'workspaceId', 'mode', 'model'] as const) {
     if (!optionalString(patch[key])) return false
   }

@@ -195,6 +195,27 @@ export function promptText(task: TaskRecord, context: PromptContext = {}): strin
 }
 
 /**
+ * The parts of an objective the built-in `/goal` command reads as an operation
+ * rather than as an objective: an exact `clear`/`pause`/`resume`/`edit`
+ * (case-insensitive) and a leading `edit <objective>`.
+ */
+const GOAL_COMMAND_KEYWORD = /^(?:clear|pause|resume|edit)$|^edit\s/i
+
+/**
+ * Build the objective the built-in `/goal` command receives. A prompt whose
+ * text would be read as a goal operation is prefixed with a neutral label: the
+ * instruction stays intact, and the command arms an objective instead of
+ * clearing, pausing, or editing an unrelated goal (or refusing for a missing
+ * one).
+ * @param prompt - the composed execution prompt.
+ * @returns the objective text for `/goal <objective>`.
+ */
+export function goalObjective(prompt: string): string {
+  const text = prompt.trim()
+  return GOAL_COMMAND_KEYWORD.test(text) ? `Goal: ${text}` : text
+}
+
+/**
  * Build the tag section of the execution prompt (issue #1521). Only tags with
  * a non-blank `promptPrefix` contribute; a task whose tags are all bare names
  * (or which has no tags at all) yields undefined and the prompt is byte-for-byte
@@ -413,6 +434,85 @@ export class HostExecutionRunner {
       mode: 'queue' as const,
       content: [{ type: 'text' as const, text: promptText(task, context) }],
     }, principal)
+    await this.armGoal(sessionId, task, context, principal)
+  }
+
+  /**
+   * Arm dsh's built-in goal on the session. The task prompt is queued FIRST, so
+   * the session's first turn carries the instruction verbatim; `/goal
+   * <objective>` then turns the same text into a persistent objective, and
+   * dsh's goal-round driver keeps starting continuation rounds until the agent
+   * marks it complete (see {@link goalVerdict} for how the run settles).
+   *
+   * Opt-out: a task whose `goalRun` is an explicit false runs one plain turn.
+   * A refusal (no command dispatcher, no `/goal` command in this cohort, an
+   * objective the command rejects) is reported and the run continues as that
+   * plain turn: the task was asked to run, and a missing goal mode must not
+   * lose the work.
+   */
+  private async armGoal(sessionId: ExecutionSessionId, task: TaskRecord, context: PromptContext, principal?: TaskBoardPrincipal): Promise<void> {
+    if (task.goalRun === false) return
+    if (this.commands === undefined) {
+      console.warn('[dsh-task-board] no command dispatcher is available; task ' + task.id + ' runs without /goal')
+      return
+    }
+    this.assertPrincipal?.(principal)
+    try {
+      const command = await this.commands.execute(
+        sessionId,
+        '/goal ' + goalObjective(promptText(task, context)),
+        AbortSignal.timeout(30_000),
+      )
+      if (command === undefined) {
+        console.warn('[dsh-task-board] /goal was not acknowledged for session ' + sessionId + '; the run continues as a plain turn')
+        return
+      }
+      if (command.kind !== 'success') {
+        console.warn('[dsh-task-board] /goal was refused for session ' + sessionId + ': ' + (command.text ?? 'no reason reported') + '; the run continues as a plain turn')
+      }
+    } catch (error) {
+      console.warn('[dsh-task-board] could not arm /goal on session ' + sessionId + '; the run continues as a plain turn', error)
+    }
+  }
+
+  /**
+   * The verdict an armed dsh goal imposes on an otherwise completed turn.
+   *
+   * A goal run is one session working many automatic continuation rounds:
+   * dsh's goal-round driver queues the next round whenever the agent goes
+   * idle, so the first completed `turn/end` is not the execution's result.
+   * Settling there would leave the card in `done` while the session keeps
+   * working, and a scheduled task would fire a second, concurrent session.
+   * The session projection is the authority: an `active` goal keeps the
+   * execution pending, a `blocked` goal fails it with the recorded reason, and
+   * any other phase (complete, paused, or no goal at all) leaves the turn
+   * verdict in place.
+   *
+   * An unreadable projection falls back to that turn verdict: a cohort whose
+   * gateway withdrew `session/projections` must not hang every execution.
+   */
+  private async goalVerdict(sessionId: string, principal?: TaskBoardPrincipal): Promise<ExecutionInspection | undefined> {
+    this.assertPrincipal?.(principal)
+    let projections: { values?: { goal?: unknown } } | null
+    try {
+      projections = await this.invoke('session', 'projections', { sessionId }, principal) as { values?: { goal?: unknown } } | null
+    } catch (error) {
+      if (isPrincipalRequired(error)) return { outcome: 'pending' }
+      console.warn('[dsh-task-board] session/projections failed while reading the goal phase; settling from the turn result', error)
+      return undefined
+    }
+    const goal = projections?.values?.goal
+    if (goal === undefined || goal === null) return undefined
+    const view = (goal as { goal?: { phase?: unknown; blockedReason?: { message?: unknown } } }).goal
+    if (view?.phase === 'active') return { outcome: 'pending' }
+    if (view?.phase === 'blocked') {
+      const message = view.blockedReason?.message
+      return {
+        outcome: 'failed',
+        error: 'goal is blocked: ' + (typeof message === 'string' && message !== '' ? message : 'no reason recorded'),
+      }
+    }
+    return undefined
   }
 
   async listRunning(principal?: TaskBoardPrincipal): Promise<{ known: true; count: number; items: SessionSummary[] } | { known: false }> {
@@ -547,7 +647,7 @@ export class HostExecutionRunner {
     }
     this.scanMemos.delete(sessionId)
     const reason = nonCompletedTurnEnd(turnEnd.event.data)
-    if (reason === undefined) return { outcome: 'succeeded' }
+    if (reason === undefined) return await this.goalVerdict(sessionId, principal) ?? { outcome: 'succeeded' }
     // `error` keeps its historical wording; every other non-completed reason
     // (aborted / blocked / max-tokens / interrupted) now reports instead of
     // silently counting as success.
