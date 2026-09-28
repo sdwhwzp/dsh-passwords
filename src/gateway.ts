@@ -27,6 +27,7 @@ import { UpstreamHttpAgent } from './upstream-agent.js';
 import { createSandboxApplier } from './proxy.js';
 import { registerMediaRoutes } from './media.js';
 import { MobileAuth, isMobileRequest, mobileRequestToken } from './mobile-auth.js';
+import { attachMobileAccount, loadMobileAccountProtocol } from './mobile-account-bridge.js';
 import { registerDesktopDownloads } from './desktop-downloads.js';
 import { registerTenantServiceRoutes } from './tenant-service-routes.js';
 import WebSocket, { type RawData, WebSocketServer } from 'ws';
@@ -10661,7 +10662,7 @@ export function createGatewayServer(
               endpoint: frame.endpoint,
               events: frame.endpoint === '$events' ? new TenantRemoteEventFilter() : null,
               authorizedSessionId,
-              filtered: frame.endpoint === 'workspaceFiles/changes' || frame.endpoint === 'workspace/follow' || frame.endpoint === 'session/follow' || frame.endpoint === 'job/list' || frame.endpoint === 'job/follow'
+              filtered: frame.endpoint === 'session/control' || frame.endpoint === 'workspaceFiles/changes' || frame.endpoint === 'workspace/follow' || frame.endpoint === 'session/follow' || frame.endpoint === 'job/list' || frame.endpoint === 'job/follow'
                 ? { streamId: frame.streamId, endpoint: frame.endpoint, followAddress,
                     ...(fileTarget === null ? {} : { workspaceFileScopeId: fileTarget.scopeId, workspaceFileRoot: fileTarget.root, workspaceFileTarget: fileTarget.target, workspaceFileRootCanonical: fileTarget.rootCanonical, workspaceFileTargetCanonical: fileTarget.targetCanonical }),
                     ...(jobSessionId === null ? {} : { jobSessionId }),
@@ -10776,7 +10777,9 @@ export function createGatewayServer(
           if (frame.type === 'item' && stream.filtered !== null) {
             const value = filterRemoteMuxUserItem(userId, effectivePermissions(userId), stream.filtered, frame.value);
             if (value !== null) sendDownstream(JSON.stringify({ type: 'item', streamId: frame.streamId, value }));
-            else if (stream.endpoint !== 'workspace/follow' && stream.endpoint !== 'workspaceFiles/changes') {
+            else if (stream.endpoint !== 'workspace/follow' && stream.endpoint !== 'workspaceFiles/changes' &&
+              !(stream.endpoint === 'session/control' && isPlainJsonRecord(frame.value) &&
+                ['projection', 'queue', 'jobs'].includes(String(frame.value.type)))) {
               streams.delete(frame.streamId); cancelledStreamIds.add(frame.streamId);
               sendUpstream(JSON.stringify({ type: 'cancel', streamId: frame.streamId }));
               sendDownstream(JSON.stringify(stream.endpoint === 'session/follow' ? { type: 'error', streamId: frame.streamId, error: { code: 'gateway/invalid-snapshot', message: 'Remote session follow snapshot rejected', details: {} } } : { type: 'end', streamId: frame.streamId }));
@@ -10937,6 +10940,40 @@ export function createGatewayServer(
     }
     if (!authed) {
       socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+      return;
+    }
+
+    if (gatePath.startsWith('/api/mobile.v1/')) {
+      if (!config.gateway.tls || !authedToken?.startsWith('dshm.') || authedUserId === null ||
+          req.headers.origin !== undefined ||
+          !String(req.headers['sec-websocket-protocol'] ?? '').split(',').map(value => value.trim()).includes('dsh-mobile-v1')) {
+        rejectUpgrade(socket, 403); return;
+      }
+      const account = db.getUserById(authedUserId);
+      if (!account) { rejectUpgrade(socket, 403); return; }
+      const identity = mobileAuth.gatewayIdentity(account.id, account.username);
+      if (gatePath !== identity.path) { rejectUpgrade(socket, 403); return; }
+      const accountToken = authedToken;
+      const accountUserId = authedUserId;
+      const release = registerTenantConnection(accountUserId, accountToken, () => socket.destroy());
+      socket.once('close', release);
+      void loadMobileAccountProtocol().then(modules => {
+        if (socket.destroyed) return;
+        mobileAuth.verifyAccess(accountToken);
+        const address = server.address();
+        if (!address || typeof address === 'string' || !config.gateway.tls) throw new Error('Gateway listener unavailable');
+        const target = {
+          hostname: address.address === '::' ? '::1' : address.address === '0.0.0.0' ? '127.0.0.1' : address.address,
+          port: address.port,
+          certificate: readFileSync(config.gateway.tls.cert),
+        };
+        const mobileServer = new WebSocketServer({ noServer: true, maxPayload: 32 * 1024 * 1024,
+          handleProtocols: protocols => protocols.has('dsh-mobile-v1') ? 'dsh-mobile-v1' : false });
+        mobileServer.handleUpgrade(req, socket, head, client => {
+          client.once('close', () => mobileServer.close());
+          attachMobileAccount(client, target, accountToken, identity, modules);
+        });
+      }).catch(() => { if (!socket.destroyed) rejectUpgrade(socket, 503); });
       return;
     }
 

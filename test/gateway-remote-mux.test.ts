@@ -53,7 +53,7 @@ test('remote mux and configured SSH sockets receive signed principals and close 
       websocket.on('message', (data) => {
         const frame = JSON.parse(data.toString()) as { type: string; streamId: string };
         if (frame.type === 'open') {
-          websocket.send(JSON.stringify({ type: 'item', streamId: frame.streamId, value: 'pong' }));
+          websocket.send(JSON.stringify({ type: 'item', streamId: frame.streamId, value: { type: 'baseline', value: { projections: {} } } }));
         }
       });
     });
@@ -104,7 +104,7 @@ test('remote mux and configured SSH sockets receive signed principals and close 
     downstream.send(JSON.stringify({
       type: 'open', streamId: 'control', endpoint: 'session/control', payload: { args: {} },
     }));
-    assert.deepEqual(await echoed, { type: 'item', streamId: 'control', value: 'pong' });
+    assert.deepEqual(await echoed, { type: 'item', streamId: 'control', value: { type: 'baseline', value: { projections: {} } } });
     assert.ok(upstreamHeaders !== undefined);
     assert.equal(upstreamHeaders.cookie, HOST_BROWSER_COOKIE);
     const headers = new Headers();

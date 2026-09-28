@@ -205,3 +205,135 @@ test('HTTP cannot enable mobile auth with a forged forwarded-proto header', asyn
     await response.arrayBuffer();
   }
 });
+
+test('native mobile profiles isolate account identity, session follow and logout', { timeout: 15000 }, async t => {
+  let upstream: http.Server | undefined;
+  let gateway: ReturnType<typeof createGatewayServer> | undefined;
+  let wss: WebSocketServer | undefined;
+  const clients = new Set<WebSocket>();
+  // Register network cleanup before fixture() registers database disposal.
+  t.after(async () => {
+    for (const client of clients) client.terminate();
+    if (wss) {
+      for (const ws of wss.clients) ws.terminate();
+      await new Promise<void>(resolve => wss!.close(() => resolve()));
+    }
+    if (gateway) { gateway.closeAllConnections(); await new Promise<void>(resolve => gateway!.close(() => resolve())); }
+    if (upstream) { upstream.closeAllConnections(); await new Promise<void>(resolve => upstream!.close(() => resolve())); }
+  });
+  const f = await fixture(t);
+  f.db.setManagedWorkspace(f.other.id, '/managed/bob');
+  f.db.setPermissions(f.other.id, { allowedFolders: ['/managed/bob'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: true, allowGitDownload: false, banned: false, allowWorkspaceCreate: false, disabledSessions: [] });
+  f.db.claimSessionOwner('own-session', f.other.id);
+  f.db.claimSessionOwner('other-session', f.user.id);
+  const followed: string[] = [];
+  const answers: Array<Record<string, any>> = []; // Capture plugin-extensible Remote event JSON from the fixture.
+  upstream = http.createServer((req, res) => {
+    res.setHeader('content-type', 'application/json');
+    if (req.url === '/api/workspace.list') {
+      res.end(JSON.stringify({ type: 'server-response', rpcId: 'workspaces', result: { ok: true, value: {
+        items: [{ workspaceId: 'bob', path: '/managed/bob', sessionIds: ['own-session'] }, { workspaceId: 'alice', path: '/managed/alice', sessionIds: ['other-session'] }], archivedSessionIds: [],
+      } } }));
+    } else if (req.url === '/api/session/modelCatalog') {
+      let data = '';
+      req.on('data', chunk => { data += chunk; });
+      req.on('end', () => {
+        const request = JSON.parse(data);
+        res.end(JSON.stringify({ type: 'server-response', rpcId: request.rpcId, result: { ok: true,
+          value: { default: { provider: 'test', model: 'test-model' }, groups: [], failures: [], routableProviders: ['test'] } } }));
+      });
+    } else if (req.url === '/api/$events/result') {
+      let data = '';
+      req.on('data', chunk => { data += chunk; });
+      req.on('end', () => {
+        const request = JSON.parse(data);
+        answers.push(request.payload.args);
+        res.end(JSON.stringify({ type: 'server-response', rpcId: request.rpcId, result: { ok: true } }));
+      });
+    } else res.writeHead(404).end('{}');
+  });
+  wss = new WebSocketServer({ server: upstream });
+  wss.on('connection', ws => ws.on('message', raw => {
+    const frame = JSON.parse(raw.toString());
+    if (frame.type !== 'open') return;
+    const send = (value: unknown) => ws.send(JSON.stringify({ type: 'item', streamId: frame.streamId, value }));
+    if (frame.endpoint === '$events') {
+      send({ type: 'ready', clientId: 'client-' + frame.streamId, host: { home: '/administrator-home' } });
+      send({ type: 'waterfall', event: 'user-questions/request', eventId: 'own-question', agentId: 'own-session', request: { questions: [] } });
+      send({ type: 'waterfall', event: 'user-questions/request', eventId: 'other-question', agentId: 'other-session', request: { questions: [] } });
+    }
+    else if (frame.endpoint === 'session/control') {
+      send({ type: 'baseline', value: { projections: {
+        'own-session': { asOfSeq: -1, values: { todos: null, goal: null } },
+        'other-session': { asOfSeq: -1, values: { todos: ['private'], goal: null } },
+      } } });
+      send({ type: 'projection', sessionId: 'own-session', seq: 0, key: 'goal', value: null });
+      send({ type: 'projection', sessionId: 'other-session', seq: 1, key: 'goal', value: { objective: 'private' } });
+    }
+    else if (frame.endpoint === 'session/follow') {
+      const sessionId = frame.payload.args.request.address.sessionId;
+      followed.push(sessionId);
+      send({ type: 'snapshot', header: { id: sessionId, origin: 'user', version: 4 }, cursor: -1, records: [], hasMore: false,
+        projections: { asOfSeq: -1, values: {} }, assistantStream: { revision: 0 } });
+    }
+  }));
+  upstream.listen(0, '127.0.0.1'); await once(upstream, 'listening');
+  f.config.gateway.upstream = `http://127.0.0.1:${(upstream.address() as { port: number }).port}`;
+  const fixtures = fileURLToPath(new URL('./fixtures/mobile-auth/', import.meta.url));
+  f.config.gateway.tls = { cert: join(fixtures, 'localhost.crt'), key: join(fixtures, 'localhost.key') };
+  gateway = createGatewayServer(f.config, f.auth, f.db);
+  gateway.listen(0, '127.0.0.1'); await once(gateway, 'listening');
+  const port = (gateway.address() as { port: number }).port;
+  const alice = await f.login();
+  const bob = await f.mobile.login('bob', 'TestPassword1!', {});
+  assert.notEqual(alice.mobileGateway.gatewayId, bob.mobileGateway.gatewayId);
+  assert.equal(f.mobile.refresh(bob.credential).mobileGateway.gatewayId, bob.mobileGateway.gatewayId);
+  const client = new WebSocket(`wss://127.0.0.1:${port}${bob.mobileGateway.path}`, ['dsh-mobile-v1'], {
+    rejectUnauthorized: false, headers: { authorization: `Bearer ${bob.accessToken}` },
+  });
+  clients.add(client);
+  const frames: Array<Record<string, unknown>> = [];
+  const waiters: Array<() => void> = [];
+  client.on('message', raw => { frames.push(JSON.parse(raw.toString())); waiters.splice(0).forEach(wake => wake()); });
+  client.on('error', () => {});
+  async function next(kind: string): Promise<Record<string, unknown>> {
+    for (;;) {
+      const index = frames.findIndex(frame => frame.kind === kind);
+      if (index >= 0) return frames.splice(index, 1)[0];
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`Missing ${kind}: ${JSON.stringify(frames)}`)), 5000);
+        waiters.push(() => { clearTimeout(timer); resolve(); });
+      });
+    }
+  }
+  try {
+    const hello = await next('hello');
+    assert.equal(hello.gatewayId, bob.mobileGateway.gatewayId);
+    const baseline = await next('projection-baseline');
+    assert.deepEqual(Object.keys(baseline.projections as object), ['own-session']);
+    assert.equal((await next('goal-updated')).sessionId, 'own-session');
+    const question = await next('question-requested');
+    assert.equal(question.rpcId, 'own-question');
+    client.send(JSON.stringify({ type: 'question-cancel', rpcId: question.rpcId, sessionId: question.sessionId }));
+    assert.equal((await next('question-response')).accepted, true);
+    assert.equal(answers[0].eventId, 'own-question');
+    assert.equal(answers[0].outcome.error.code, 'ASK_CANCELLED');
+    assert.equal(answers[0].outcome.error.name, 'Error');
+    client.send(JSON.stringify({ type: 'host' }));
+    assert.equal((await next('host')).home, '/managed/bob');
+    client.send(JSON.stringify({ type: 'subscribe', sessionId: 'own-session', assistantStream: true }));
+    assert.equal((await next('session-snapshot')).sessionId, 'own-session');
+    client.send(JSON.stringify({ type: 'subscribe', sessionId: 'other-session', assistantStream: true }));
+    await next('session-stream-reset');
+    assert.deepEqual(followed, ['own-session']);
+    client.send(JSON.stringify({ type: 'directories', path: '/' }));
+    assert.equal((await next('error')).requestType, 'directories');
+    const closed = once(client, 'close');
+    f.mobile.logout(bob.credential, null);
+    await closed;
+    assert.equal(f.mobile.verifyAccess(alice.accessToken).userId, f.user.id);
+  } finally {
+    client.terminate();
+  }
+});

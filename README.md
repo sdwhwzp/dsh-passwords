@@ -95,6 +95,8 @@ MySQL 模式会在空闲超时、服务重启或短暂网络断开后自动替�
 
 可选移动 JSON 认证、设备会话撤销和 HTTP/WS bearer 接入见 [移动端集成说明](docs/mobile-rn-integration.md)。默认关闭，启用时要求网关自身 HTTPS 监听；手机长期登录和热更新需通过实际安装包验收。
 
+Android / iOS 原生 `dsh-mobile` 的多账号登录、账号切换及协议桥接见[原生移动端接入](docs/native-mobile.md)。账号请求与会话状态流均经过现有权限过滤，客户端不使用 WebView。
+
 ## 界面截图
 
 | 登录页 · 浅色 | 登录页 · 深色 | 登录页 · English |

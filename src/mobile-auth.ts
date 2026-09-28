@@ -123,7 +123,17 @@ export class MobileAuth {
     if (user === null) throw new MobileAuthError('MOBILE_SESSION_EXPIRED');
     const expiresAt = Math.floor(Math.min(this.now() + this.settings().accessTtlSeconds * 1000, row.active_until_ms, row.expires_at_ms) / 1000) * 1000;
     const token = jwt.sign({ sub: String(user.id), sid: row.id, cv: row.credential_version, iat: Math.floor(this.now() / 1000), exp: expiresAt / 1000 }, this.key, { algorithm: 'HS256', audience: AUDIENCE, issuer: this.serverId });
-    return { accessToken: ACCESS_PREFIX + token, expiresAt, refreshExpiresAt: Math.min(row.active_until_ms, row.expires_at_ms), user: { userId: user.id, username: user.username, role: user.role }, serverId: this.serverId };
+    return { accessToken: ACCESS_PREFIX + token, expiresAt, refreshExpiresAt: Math.min(row.active_until_ms, row.expires_at_ms), user: { userId: user.id, username: user.username, role: user.role }, serverId: this.serverId, mobileGateway: this.gatewayIdentity(user.id, user.username) };
+  }
+
+  /** Stable account-specific mobile identity keeps native caches separate on the same server. */
+  gatewayIdentity(userId: number, username: string) {
+    const bytes = createHmac('sha256', this.key).update(`native-gateway:${userId}`).digest().subarray(0, 16);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = bytes.toString('hex');
+    const gatewayId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    return { gatewayId, gatewayName: username, path: `/api/mobile.v1/${gatewayId}` };
   }
 
   /** Verify both the signed token and its current persisted device/account state. */
