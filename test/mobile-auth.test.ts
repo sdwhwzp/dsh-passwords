@@ -227,8 +227,11 @@ test('native mobile profiles isolate account identity, session follow and logout
     allowUpload: true, allowGitDownload: false, banned: false, allowWorkspaceCreate: false, disabledSessions: [] });
   f.db.claimSessionOwner('own-session', f.other.id);
   f.db.claimSessionOwner('other-session', f.user.id);
+  f.db.claimSessionOwner('own-child', f.other.id);
+  f.db.claimSessionOwner('other-child', f.user.id);
   const followed: string[] = [];
   const permissionReads: string[] = [];
+  const pages: Array<Record<string, unknown>> = [];
   const permissionOption = { name: 'workspace-write', label: 'Workspace', description: '', selected: true };
   const answers: Array<Record<string, any>> = []; // Capture plugin-extensible Remote event JSON from the fixture.
   upstream = http.createServer((req, res) => {
@@ -237,6 +240,26 @@ test('native mobile profiles isolate account identity, session follow and logout
       res.end(JSON.stringify({ type: 'server-response', rpcId: 'workspaces', result: { ok: true, value: {
         items: [{ workspaceId: 'bob', path: '/managed/bob', sessionIds: ['own-session'] }, { workspaceId: 'alice', path: '/managed/alice', sessionIds: ['other-session'] }], archivedSessionIds: [],
       } } }));
+    } else if (req.url === '/api/session/list' || req.url === '/api/session.list') {
+      let data = '';
+      req.on('data', chunk => { data += chunk; });
+      req.on('end', () => {
+        const request = JSON.parse(data);
+        res.end(JSON.stringify({ type: 'server-response', rpcId: request.rpcId, result: { ok: true, value: { items: [
+          { sessionId: 'own-session', cwd: '/managed/bob', running: false, blank: true, updatedAt: 1, agentAvailable: false },
+          { sessionId: 'own-child', parentSessionId: 'own-session', origin: 'subagent', cwd: '/managed/bob', running: false, blank: true, updatedAt: 1, agentAvailable: false },
+          { sessionId: 'other-child', parentSessionId: 'other-session', origin: 'subagent', cwd: '/managed/alice', running: false, blank: true, updatedAt: 1, agentAvailable: false },
+          { sessionId: 'other-session', cwd: '/managed/alice', running: false, blank: true, updatedAt: 1, agentAvailable: false },
+        ] } } }));
+      });
+    } else if (req.url === '/api/session/page') {
+      let data = '';
+      req.on('data', chunk => { data += chunk; });
+      req.on('end', () => {
+        const request = JSON.parse(data);
+        pages.push(request.payload.args.request);
+        res.end(JSON.stringify({ type: 'server-response', rpcId: request.rpcId, result: { ok: true, value: { records: [], hasMore: false } } }));
+      });
     } else if (req.url === '/api/permissionPresets/catalog' || req.url === '/api/session/projections') {
       let data = '';
       req.on('data', chunk => { data += chunk; });
@@ -286,9 +309,14 @@ test('native mobile profiles isolate account identity, session follow and logout
       send({ type: 'projection', sessionId: 'other-session', seq: 1, key: 'goal', value: { objective: 'private' } });
     }
     else if (frame.endpoint === 'session/follow') {
-      const sessionId = frame.payload.args.request.address.sessionId;
+      const address = frame.payload.args.request.address;
+      const sessionId = address.kind === 'subagent' ? address.childSessionId : address.sessionId;
       followed.push(sessionId);
-      send({ type: 'snapshot', header: { id: sessionId, origin: 'user', version: 4 }, cursor: -1, records: [], hasMore: false,
+      if (sessionId === 'own-child' && (address.kind !== 'subagent' || address.parentSessionId !== 'own-session')) {
+        ws.send(JSON.stringify({ type: 'error', streamId: frame.streamId, error: { code: 'session/agent-busy', message: 'subagent Sessions require their durable parent address' } }));
+        return;
+      }
+      send({ type: 'snapshot', header: { id: sessionId, ...(sessionId === 'own-child' ? { origin: 'subagent', parentSession: 'own-session' } : {}), version: 4 }, cursor: -1, records: [], hasMore: false,
         projections: { asOfSeq: -1, values: {} }, assistantStream: { revision: 0 } });
     }
   }));
@@ -349,9 +377,18 @@ test('native mobile profiles isolate account identity, session follow and logout
     assert.deepEqual(permissionReads, ['own-session']);
     client.send(JSON.stringify({ type: 'subscribe', sessionId: 'own-session', assistantStream: true }));
     assert.equal((await next('session-snapshot')).sessionId, 'own-session');
+    client.send(JSON.stringify({ type: 'history', sessionId: 'own-child' }));
+    assert.equal((await next('history')).sessionId, 'own-child');
+    client.send(JSON.stringify({ type: 'history', sessionId: 'own-child', beforeSeq: 0, maxMessages: 7, historyFormatVersion: 4 }));
+    assert.equal((await next('history')).sessionId, 'own-child');
+    assert.deepEqual(pages, [{ address: { kind: 'subagent', parentSessionId: 'own-session', childSessionId: 'own-child', mode: 'unknown' }, throughSeq: -1, beforeSeq: 0, maxMessages: 7 }]);
+    client.send(JSON.stringify({ type: 'subscribe', sessionId: 'own-child', assistantStream: true }));
+    assert.equal((await next('session-snapshot')).sessionId, 'own-child');
     client.send(JSON.stringify({ type: 'subscribe', sessionId: 'other-session', assistantStream: true }));
     await next('session-stream-reset');
-    assert.deepEqual(followed, ['own-session']);
+    client.send(JSON.stringify({ type: 'subscribe', sessionId: 'other-child', parentSessionId: 'own-session', assistantStream: true }));
+    await next('session-stream-reset');
+    assert.deepEqual(followed, ['own-session', 'own-child', 'own-child', 'own-child']);
     client.send(JSON.stringify({ type: 'directories', path: '/' }));
     assert.equal((await next('error')).requestType, 'directories');
     const closed = once(client, 'close');

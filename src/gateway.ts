@@ -10971,7 +10971,10 @@ export function createGatewayServer(
           handleProtocols: protocols => protocols.has('dsh-mobile-v1') ? 'dsh-mobile-v1' : false });
         mobileServer.handleUpgrade(req, socket, head, client => {
           client.once('close', () => mobileServer.close());
-          attachMobileAccount(client, target, accountToken, identity, modules);
+          attachMobileAccount(client, target, accountToken, identity, modules, async sessionId => {
+            await ensureSessionAccessSnapshot(sessionId);
+            return sessionParentById.get(sessionId);
+          });
         });
       }).catch(() => { if (!socket.destroyed) rejectUpgrade(socket, 503); });
       return;

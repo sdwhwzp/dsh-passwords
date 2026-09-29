@@ -53,9 +53,10 @@ export function attachMobileAccount(
   token: string,
   identity: { gatewayId: string; gatewayName: string },
   modules: Awaited<ReturnType<typeof loadMobileAccountProtocol>>,
+  parentOf: (sessionId: string) => Promise<string | undefined>,
 ) {
   const lifetime = new AbortController();
-  const carrier = createMobileRemoteCarrier(target, token, lifetime.signal);
+  const carrier = createMobileRemoteCarrier(target, token, lifetime.signal, parentOf);
   const api = modules.adapter.createDshHostAdapter(carrier);
   const send = (frame: Frame) => {
     if (socket.readyState !== 1) return;

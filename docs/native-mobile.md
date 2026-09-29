@@ -25,3 +25,7 @@ Run `npm run build` and `node --import tsx --test test/mobile-auth.test.ts test/
 The native permission picker reads `permissionPresets/catalog` and the authorized Session projection. It does not request the administrator-only settings schema.
 
 原生权限选项只读取预设目录和有访问权限的会话投影，不调用仅供管理员使用的全局设置描述接口。
+
+Native history, pagination, and live subscriptions resolve subagent Session addresses from the Host roster, including the durable parent id. Every resolved read still passes the account gateway policy; a client-supplied parent cannot override the recorded relationship.
+
+原生历史读取、翻页与实时订阅会根据 Host 会话目录补齐子代理会话的持久父会话地址。补齐后的请求仍经过账号网关授权，客户端传入的父会话不能覆盖已记录的父子关系。

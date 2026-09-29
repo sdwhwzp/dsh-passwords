@@ -25,7 +25,7 @@ export function mobileRecord(value: unknown): Record<string, unknown> {
 }
 
 /** One connection-scoped carrier; abort closes HTTP requests and streaming sockets together. */
-export function createMobileRemoteCarrier(target: MobileRemoteTarget, token: string, lifetime: AbortSignal) {
+export function createMobileRemoteCarrier(target: MobileRemoteTarget, token: string, lifetime: AbortSignal, parentOf: (sessionId: string) => Promise<string | undefined>) {
   const pinned = new X509Certificate(target.certificate);
   const options = {
     hostname: target.hostname,
@@ -40,8 +40,23 @@ export function createMobileRemoteCarrier(target: MobileRemoteTarget, token: str
     headers: { Authorization: `Bearer ${token}`, 'X-Dsh-Mobile': '1' },
   };
   const signalFor = (signal?: AbortSignal) => signal ? AbortSignal.any([signal, lifetime]) : lifetime;
+  const resolveRequest = async (request: MobileRemoteRequest): Promise<MobileRemoteRequest> => {
+    if (request.namespace !== 'session' || !['follow', 'page'].includes(request.method)) return request;
+    const args = mobileRecord(request.args.request);
+    const address = mobileRecord(args.address);
+    if (address.kind !== 'session' || typeof address.sessionId !== 'string') return request;
+    // The native codec carries only a Session id. Durable parentage comes from
+    // the Host roster; the resulting request still passes tenant authorization.
+    const parentSessionId = await parentOf(address.sessionId);
+    signalFor(request.signal).throwIfAborted();
+    if (!parentSessionId) return request;
+    return { ...request, args: { ...request.args, request: { ...args,
+      address: { kind: 'subagent', parentSessionId, childSessionId: address.sessionId, mode: 'unknown' },
+    } } };
+  };
   return {
     async invoke(request: MobileRemoteRequest): Promise<unknown> {
+      request = await resolveRequest(request);
       const rpcId = randomUUID();
       const path = `/api/${encodeURIComponent(request.namespace)}/${encodeURIComponent(request.method)}`;
       const payload = JSON.stringify({ type: 'client-request', rpcId, method: `${request.namespace}/${request.method}`, payload: { args: request.args } });
@@ -78,6 +93,7 @@ export function createMobileRemoteCarrier(target: MobileRemoteTarget, token: str
       });
     },
     async *stream(request: MobileRemoteRequest): AsyncGenerator<unknown> {
+      request = await resolveRequest(request);
       const signal = signalFor(request.signal);
       signal.throwIfAborted();
       const authority = target.hostname.includes(':') ? `[${target.hostname}]` : target.hostname;
