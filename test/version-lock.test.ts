@@ -9,7 +9,7 @@ const read = (...parts: string[]) => readFileSync(path.join(projectRoot, ...part
 // Private development links and public installer defaults target the reviewed RC2 release.
 // Bump this constant together with package.json, the lockfile, the installers, Docker
 // defaults, and the public baseline docs.
-const PRIVATE_HARNESS = '0.1.7-rc.2';
+const PRIVATE_HARNESS = '0.2.0-rc.1';
 const DSH_PIN = '0.1.7-rc.2';
 const PREVIOUS_ALPHA = '0.1.7-alpha.1';
 // Exact-match detector: the `(?!\d)` guard keeps a future alpha.10 / alpha.11
@@ -35,7 +35,7 @@ test('development links and runtime peer ranges target the private Harness relea
     assert.equal(linked.version, PRIVATE_HARNESS);
   }
   for (const [name, spec] of Object.entries(pkg.peerDependencies)) {
-    if (isDshPackage(name)) assert.equal(spec, `^${PRIVATE_HARNESS}`, name);
+    if (isDshPackage(name)) assert.equal(spec, `^0.1.7-rc.2 || ^${PRIVATE_HARNESS}`, name);
   }
 });
 

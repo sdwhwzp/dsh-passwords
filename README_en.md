@@ -598,3 +598,6 @@ Host login exchange accepts root redirects `/` and `./` without following them; 
 The verified Harness 0.1.7-alpha.2 and 0.1.7-rc.2 runtimes start the gateway through native permission APIs without rewriting installed bundles. Unreviewed future versions remain rejected at startup.
 
 Session ownership validation accepts legacy projections and current `cached`/`sequenced` projections with the `agentAvailable` flag, while retaining strict type and field validation.
+## Harness 0.2 deployment
+
+This fork accepts Harness `0.2.0-rc.1` in addition to its existing runtime peer ranges. Deploy all Harness peers from one runtime release; account authorization, settings persistence, and browser/desktop behavior remain owned by the existing integrations.
