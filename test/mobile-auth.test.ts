@@ -228,6 +228,8 @@ test('native mobile profiles isolate account identity, session follow and logout
   f.db.claimSessionOwner('own-session', f.other.id);
   f.db.claimSessionOwner('other-session', f.user.id);
   const followed: string[] = [];
+  const permissionReads: string[] = [];
+  const permissionOption = { name: 'workspace-write', label: 'Workspace', description: '', selected: true };
   const answers: Array<Record<string, any>> = []; // Capture plugin-extensible Remote event JSON from the fixture.
   upstream = http.createServer((req, res) => {
     res.setHeader('content-type', 'application/json');
@@ -235,6 +237,18 @@ test('native mobile profiles isolate account identity, session follow and logout
       res.end(JSON.stringify({ type: 'server-response', rpcId: 'workspaces', result: { ok: true, value: {
         items: [{ workspaceId: 'bob', path: '/managed/bob', sessionIds: ['own-session'] }, { workspaceId: 'alice', path: '/managed/alice', sessionIds: ['other-session'] }], archivedSessionIds: [],
       } } }));
+    } else if (req.url === '/api/permissionPresets/catalog' || req.url === '/api/session/projections') {
+      let data = '';
+      req.on('data', chunk => { data += chunk; });
+      req.on('end', () => {
+        const request = JSON.parse(data);
+        const sessionId = request.payload.args.request?.sessionId;
+        if (sessionId) permissionReads.push(sessionId);
+        const value = sessionId
+          ? { asOfSeq: 1, values: { permissions: { preset: 'workspace-write' } } }
+          : { options: [permissionOption], defaultOptions: [permissionOption], defaultPreset: 'workspace-write' };
+        res.end(JSON.stringify({ type: 'server-response', rpcId: request.rpcId, result: { ok: true, value } }));
+      });
     } else if (req.url === '/api/session/modelCatalog') {
       let data = '';
       req.on('data', chunk => { data += chunk; });
@@ -322,6 +336,17 @@ test('native mobile profiles isolate account identity, session follow and logout
     assert.equal(answers[0].outcome.error.name, 'Error');
     client.send(JSON.stringify({ type: 'host' }));
     assert.equal((await next('host')).home, '/managed/bob');
+    client.send(JSON.stringify({ type: 'permission-options' }));
+    assert.deepEqual((await next('permission-options')).options, [permissionOption]);
+    client.send(JSON.stringify({ type: 'permission-options', sessionId: 'own-session' }));
+    const permissions = await next('permission-options');
+    assert.equal(permissions.sessionId, 'own-session');
+    assert.deepEqual(permissions.sessionPermissions, { preset: 'workspace-write', options: [permissionOption] });
+    client.send(JSON.stringify({ type: 'permission-options', sessionId: 'other-session' }));
+    const rejected = await next('error');
+    assert.equal(rejected.requestType, 'permission-options');
+    assert.equal(rejected.sessionId, 'other-session');
+    assert.deepEqual(permissionReads, ['own-session']);
     client.send(JSON.stringify({ type: 'subscribe', sessionId: 'own-session', assistantStream: true }));
     assert.equal((await next('session-snapshot')).sessionId, 'own-session');
     client.send(JSON.stringify({ type: 'subscribe', sessionId: 'other-session', assistantStream: true }));

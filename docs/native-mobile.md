@@ -21,3 +21,7 @@ Run `npm run build` and `node --import tsx --test test/mobile-auth.test.ts test/
 同一服务器的不同账号分别保存凭据、偏好、会话缓存和附件。密码不落盘，短期 access token 只保留在内存；长期 refresh cookie 存入 iOS Keychain 或 Android Keystore 加密存储。切换账号使用主机列表，断线重连自动续期并核对账号身份。删除账号先向服务器撤销设备会话；撤销失败会保留资料并提示错误。
 
 所有请求和订阅仍经过现有网关的账号权限检查、签名 principal、工作区和会话访问检查、状态过滤及设备撤销。桥接不开放宿主机原始目录浏览、文件下载、全局默认模型修改和定时任务管理；有权限时可使用现有账号网页操作。原来的设备扫码配对模式独立保留。
+
+The native permission picker reads `permissionPresets/catalog` and the authorized Session projection. It does not request the administrator-only settings schema.
+
+原生权限选项只读取预设目录和有访问权限的会话投影，不调用仅供管理员使用的全局设置描述接口。

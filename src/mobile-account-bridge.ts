@@ -205,6 +205,20 @@ export function attachMobileAccount(
             historyFormatVersion: 4, canOpenPath: false, defaultProvider: selection.provider, defaultModel: selection.model });
           return;
         }
+        if (message.type === 'permission-options') {
+          // Native pickers need the public preset catalog, not the administrator's settings schema.
+          const catalog = mobileRecord(await carrier.invoke({ namespace: 'permissionPresets', method: 'catalog', args: {} }));
+          const sessionId = typeof message.sessionId === 'string' && message.sessionId.trim() ? message.sessionId.trim() : null;
+          const frame: Frame = { kind: 'permission-options', namespace: null, options: catalog.options,
+            defaultOptions: catalog.defaultOptions, defaultPreset: catalog.defaultPreset };
+          if (sessionId) {
+            const projection = mobileRecord(await carrier.invoke({ namespace: 'session', method: 'projections', args: { request: { sessionId } } }));
+            const permissions = mobileRecord(projection.values).permissions;
+            frame.sessionId = sessionId;
+            frame.sessionPermissions = permissions == null ? null : { ...mobileRecord(permissions), options: catalog.options };
+          }
+          send(frame); return;
+        }
         if (message.type === 'subscribe') {
           if (typeof message.sessionId !== 'string' || !message.sessionId) throw new Error('A session is required');
           if (message.assistantStream !== true) throw new Error('Account connections require assistant streaming');

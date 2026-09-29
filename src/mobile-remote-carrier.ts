@@ -60,7 +60,7 @@ export function createMobileRemoteCarrier(target: MobileRemoteTarget, token: str
           response.on('error', reject);
           response.on('end', () => {
             try {
-              if (response.statusCode !== 200) throw Object.assign(new Error(`Gateway rejected request (${response.statusCode})`), { code: 'gateway/rejected' });
+              if (response.statusCode !== 200) throw Object.assign(new Error(`Gateway rejected ${request.namespace}/${request.method} (${response.statusCode})`), { code: 'gateway/rejected' });
               const envelope = mobileRecord(JSON.parse(Buffer.concat(chunks).toString('utf8')));
               if (envelope.type !== 'server-response' || envelope.rpcId !== rpcId) throw new Error('Unexpected Remote response');
               const result = mobileRecord(envelope.result);
