@@ -1,5 +1,7 @@
 # dsh-passwords
 
+Sidebar file and Git requests require session ownership and authorized paths; ordinary accounts also need file-write permission for mutations. Paired local folders support batched directory reads.
+
 [简体中文](README.md) | English
 
 Adds login, account management, and access controls to the DeepSeek Harness (dsh) web entry point. Use it when dsh is running on a server for a team or for customers.

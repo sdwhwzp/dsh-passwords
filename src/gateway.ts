@@ -9499,6 +9499,10 @@ export function createGatewayServer(
       reqAs.dshpwIsAdmin !== true &&
       req.method === 'POST' &&
       proxyPath === '/open-in-app/open';
+    const sidebarMethod = proxyPath.startsWith('/sidebar/api/') ? proxyPath.slice('/sidebar/api/'.length) : '';
+    const needsSidebarFilesCheck = reqAs.dshpwPerms !== undefined && reqAs.dshpwIsAdmin !== true &&
+      req.method === 'POST' && (sidebarMethod === 'session.cwd' || /^(?:fs|git)\./.test(sidebarMethod));
+
     // ── workspaceFiles 会话作用域 + 目标路径守卫 ──
     // 上游 read/readAll/readBytes/readRelated/stat 接受绝对路径且明确不做工作区
     // 包含检查，list 只保证在会话根内；请求里的 workspaceFileScopeId 完全由客户端
@@ -9516,7 +9520,7 @@ export function createGatewayServer(
     if (getListRpcBody !== null) {
       completeProxyRequestBody();
       upstreamReq.end(getListRpcBody);
-    } else if (needsFolderCheck || needsSandboxCheck || needsCommandCheck || needsApprovalCheck || needsOwnershipCheck || needsAgentPresetCheck || needsSshHostCheck || needsSshPermissionCheck || needsWorkspaceOrderCheck || needsImageAttachmentCheck || needsRemoteEventResultCheck || needsOpenInAppCheck || needsWorkspaceFilesCheck || needsDirectoryListCheck) {
+    } else if (needsFolderCheck || needsSandboxCheck || needsCommandCheck || needsApprovalCheck || needsOwnershipCheck || needsAgentPresetCheck || needsSshHostCheck || needsSshPermissionCheck || needsWorkspaceOrderCheck || needsImageAttachmentCheck || needsRemoteEventResultCheck || needsOpenInAppCheck || needsWorkspaceFilesCheck || needsSidebarFilesCheck || needsDirectoryListCheck) {
       const chunks: Buffer[] = [];
       let size = 0;
       let settled = false;
@@ -9605,6 +9609,31 @@ export function createGatewayServer(
             res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
             return;
           }
+        }
+
+        if (needsSidebarFilesCheck) {
+          const fields = isPlainJsonRecord(bodyObj) ? bodyObj : {};
+          const id = typeof fields.sessionId === 'string' ? fields.sessionId : '';
+          try { await ensureSessionAccessSnapshot(id); }
+          catch { upstreamReq.destroy(); sendApiError(res, 502, 'UPSTREAM_UNAVAILABLE', 'workspace registry is unavailable'); return; }
+          const root = authorizedSubuserSessionRoot(reqAs.dshpwUser!, id, reqAs.dshpwPerms!);
+          const readable = new Set(['session.cwd', 'fs.tree', 'fs.trees', 'fs.search', 'fs.read',
+            'git.worktrees', 'git.status', 'git.diff', 'git.branch', 'git.log', 'git.commit-diff', 'git.show']);
+          const writable = new Set(['fs.write', 'fs.rename', 'fs.mkdir', 'fs.remove',
+            'git.stage', 'git.unstage', 'git.commit', 'git.checkout', 'git.discard', 'git.revert', 'git.cherry-pick']);
+          // The plugin accepts absolute targets outside cwd; account permission remains the gateway's responsibility.
+          const targetAllowed = (value: unknown): boolean => {
+            if (root === null || typeof value !== 'string' || value.includes('\0') || value === '') return false;
+            const target = path.resolve(root, value);
+            return pathAllowedFor(reqAs.dshpwUser!, target, reqAs.dshpwPerms!.allowed_folders) &&
+              pathAllowedFor(reqAs.dshpwUser!, canonicalizePathBestEffort(target), reqAs.dshpwPerms!.allowed_folders);
+          };
+          const paths = fields.paths === undefined ? [] : Array.isArray(fields.paths) ? fields.paths : [null];
+          const targets = ['path', 'repoRoot', 'worktree'].filter(key => fields[key] !== undefined).map(key => fields[key]);
+          const allowed = root !== null && (readable.has(sidebarMethod) || (writable.has(sidebarMethod) && reqAs.dshpwPerms!.allow_upload)) &&
+            (fields.cwd === undefined || (typeof fields.cwd === 'string' && normalizePath(fields.cwd) === normalizePath(root))) &&
+            [...targets, ...paths].every(targetAllowed);
+          if (!allowed) { upstreamReq.destroy(); denyRequest(req, res, lang, t(lang, 'gw.folderDenied')); return; }
         }
 
         if (needsWorkspaceFilesCheck) {

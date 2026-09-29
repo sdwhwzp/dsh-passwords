@@ -4012,3 +4012,30 @@ test('SSH permission does not authorize unknown terminal endpoints or another ac
     fixture.connection.client.close();
   }
 });
+
+
+test('sidebar file and Git requests require an owned session and authorized targets', async () => {
+  const post = (method: string, fields: Record<string, unknown>, cookie = customerCookie) => gatewayReq('POST', '/sidebar/api/' + method,
+    { cookie, 'content-type': 'application/json' }, JSON.stringify(fields));
+  const own = { sessionId: 's-sidebar-owned', cwd: sidebarWorkspace };
+  assert.equal((await post('fs.tree', { ...own, path: sidebarWorkspace })).status, 200);
+  assert.equal((await post('fs.trees', { ...own, paths: [sidebarWorkspace, 'reports'] })).status, 200);
+  assert.equal((await post('git.status', own)).status, 200);
+  for (const fields of [
+    { ...own, sessionId: 's-other' },
+    { ...own, cwd: '/workspaces/b' },
+    { ...own, path: '/workspaces/b/private.txt' },
+    { ...own, path: '../outside' },
+    { ...own, paths: [sidebarWorkspace, '/workspaces/b'] },
+    { ...own, worktree: '/workspaces/b' },
+    { ...own, repoRoot: '/workspaces/b' },
+    { ...own, paths: 'invalid' },
+  ]) assert.equal((await post('fs.tree', fields)).status, 403, JSON.stringify(fields));
+  if (process.platform !== 'win32') {
+    symlinkSync(tempDir, path.join(sidebarWorkspace, 'escape'));
+    assert.equal((await post('fs.read', { ...own, path: 'escape/private.txt' })).status, 403);
+  }
+  assert.equal((await post('fs.future-unknown', own)).status, 403);
+  assert.equal((await post('fs.write', { ...own, path: 'reports/new.txt', content: 'x' })).status, 403);
+  assert.equal((await post('fs.tree', { sessionId: 's-other', cwd: '/workspaces/b' }, cookie)).status, 200);
+});

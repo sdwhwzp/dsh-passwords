@@ -1,5 +1,7 @@
 # dsh-passwords
 
+文件侧栏的文件与 Git 请求按会话所有权和授权目录校验；普通账号的写操作还需文件写入权限。本机目录支持批量目录读取。
+
 [English](README_en.md) | 简体中文
 
 为 DeepSeek Harness（dsh）的网页入口加上登录、账号管理和访问控制，适合把 dsh 放到服务器上给团队或客户使用。

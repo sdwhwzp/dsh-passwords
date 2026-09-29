@@ -64,6 +64,14 @@ export class LocalWorkspaceFileRoutes {
     }
     const invoke = (name: string, fields: Record<string, unknown>) => this.invoke(`workspaceFiles/${name}`, { workspaceFileScopeId: sessionId, ...fields }, principal, signal);
     const input = typeof args.path === 'string' ? args.path : '.';
+    if (method === 'fs.trees') {
+      if (!Array.isArray(args.paths) || args.paths.length === 0 || args.paths.length > 64 || args.paths.some(value => typeof value !== 'string' || value === '')) throw new Error('Invalid directory batch');
+      const levels = await Promise.all(args.paths.map(async selected => {
+        const result = await this.sidebar('fs.tree', { sessionId, path: selected }, request, signal);
+        return result!.value;
+      }));
+      return { value: { levels } };
+    }
     if (method === 'fs.tree') {
       const result = object(await invoke('list', { path: input }));
       const directory = path.resolve(workspace.placeholder_path, text(result.path));

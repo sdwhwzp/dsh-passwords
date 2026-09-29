@@ -99,6 +99,9 @@ for (const shellEnabled of [false, true]) test(`paired file and Git routes use t
   await assert.rejects(file('readAll', { path: 'image.pdf', ownerId: other.id }), /Unexpected/);
   const sidebar = await routes.sidebar('fs.tree', { sessionId: header.id, path: placeholder }, { headers: {} }, new AbortController().signal);
   assert.ok((sidebar!.value as { entries: Array<{name:string}> }).entries.some(entry => entry.name === '空目录'));
+  const batch = await routes.sidebar('fs.trees', { sessionId: header.id, paths: [placeholder, 'src'] }, { headers: {} }, new AbortController().signal);
+  assert.equal((batch?.value as { levels: unknown[] }).levels.length, 2);
+  await assert.rejects(routes.sidebar('fs.trees', { sessionId: header.id, paths: ['../outside'] }, { headers: {} }, new AbortController().signal), /outside/);
   const sidebarText = await routes.sidebar('fs.read', { sessionId: header.id, path: 'src/中文 文件.md' }, { headers: {} }, new AbortController().signal);
   assert.deepEqual(sidebarText?.value, { kind: 'text', content: '第一行\n第二行\n', truncated: false });
   if (shellEnabled) {
