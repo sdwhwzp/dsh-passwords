@@ -4,7 +4,7 @@ import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readd
 import { dirname, join } from 'node:path'
 import { dshHome } from './dsh-home.ts'
 import { parseTaskPrincipals, principalKey, type TaskBoardPrincipal } from './host-accounts.ts'
-import { isValidCron, nextRunAtMs } from './core/schedule.ts'
+import { isValidCron, isValidTimeZone, nextRunAtMs, resolveHostTimeZone } from './core/schedule.ts'
 import { isTaskRecord, parseLedger } from './core/store.ts'
 import { canMoveManually, retainRecentExecutions, settleExecution, startExecution, withStatus, type ExecutionOutcome, type ExecutionRecord, type TaskRecord } from './core/tasks.ts'
 import {
@@ -22,7 +22,7 @@ import { applyDeleteTask } from './core/use-cases/task-delete.ts'
 import { applySetSchedule, applyScheduleNextRun } from './core/use-cases/task-schedule.ts'
 import { applySetParent } from './core/use-cases/task-parent.ts'
 import { applyUpdateTask, canEditTaskContent, hasContentPatch } from './core/use-cases/task-update.ts'
-import { TASK_BOARD_LEGACY_SCHEMA_VERSION, TASK_BOARD_SCHEMA_VERSION, type TaskBoardAction, type TaskBoardSchedulerSnapshot } from './protocol.ts'
+import { TASK_BOARD_LEGACY_SCHEMA_VERSION, TASK_BOARD_OLDER_SCHEMA_VERSION, TASK_BOARD_SCHEMA_VERSION, type TaskBoardAction, type TaskBoardSchedulerSnapshot } from './protocol.ts'
 import { DEFAULT_SESSION_PERMISSION, requiresPermissionConfirmation, type TaskPermission } from './core/handover.ts'
 
 interface PersistedScheduler extends TaskBoardSchedulerSnapshot {
@@ -89,12 +89,21 @@ export interface OpenExecutionReference {
   readonly sessionId: string | undefined
   readonly startedAt: number
   readonly principal?: TaskBoardPrincipal
+  /**
+   * True for a member of a team-mode run other than its Lead. A teammate is a
+   * durable member of the Team: it stays alive after its turn ends, so the
+   * roster may keep reporting its session as running, and the turn it completed
+   * is the only verdict it exposes.
+   */
+  readonly teamMember: boolean
 }
 
 /** Minimal value copy used by the Host scheduler. */
 export interface DueScheduleReference {
   readonly taskId: string
   readonly cron: string
+  /** Zone this rule's wall clock is read in. */
+  readonly timeZone: string
   readonly nextRunAt: number
 }
 
@@ -111,7 +120,12 @@ interface CachedRequest {
 }
 
 function timeZone(): string {
-  return Intl.DateTimeFormat().resolvedOptions().timeZone || 'local'
+  return resolveHostTimeZone()
+}
+
+/** The zone a schedule is evaluated in: its own, or the Host zone when it stores none. */
+function scheduleZone(schedule: { timeZone?: string }): string {
+  return schedule.timeZone ?? timeZone()
 }
 
 function cloneTasks(tasks: readonly TaskRecord[]): TaskRecord[] {
@@ -386,6 +400,7 @@ function parseHostTasks(values: readonly unknown[]): TaskRecord[] {
       schedule: {
         enabled: false,
         cron: schedule.cron,
+        ...(typeof schedule.timeZone === 'string' && isValidTimeZone(schedule.timeZone) ? { timeZone: schedule.timeZone } : {}),
         nextRunAt: undefined,
         lastTriggeredAt: typeof schedule.lastTriggeredAt === 'number' && Number.isFinite(schedule.lastTriggeredAt)
           ? schedule.lastTriggeredAt
@@ -431,6 +446,10 @@ export class HostTaskLedger {
       }
       this.repairSchedules(true)
       this.reconcileInterruptedStarts()
+      // Boot recovery also folds every already-decided run: a team run whose
+      // Lead recorded its verdict in an earlier process, and a lineage whose
+      // last settle never reached its parent, both leave the running column here.
+      this.finalizeReadyRuns(false)
       // Persist a freshly generated ledger identity and any recovery error
       // immediately, even when there are no tasks to trigger a later action.
       this.commit(false)
@@ -493,6 +512,15 @@ export class HostTaskLedger {
    */
   runtimeView(): LedgerRuntimeView {
     let armedSchedules = 0
+    // Run groups opened by a team-mode card: every other member of those groups
+    // runs as a teammate inside that card's Lead session.
+    const teamGroups = new Set<string>()
+    for (const task of this.document.tasks) {
+      if (task.teamRun !== true) continue
+      for (const execution of task.executions) {
+        if (execution.runGroupId !== undefined) teamGroups.add(execution.runGroupId)
+      }
+    }
     const openExecutions: OpenExecutionReference[] = []
     for (const task of this.document.tasks) {
       if (task.archivedAt === undefined && task.schedule?.enabled === true) armedSchedules += 1
@@ -508,6 +536,9 @@ export class HostTaskLedger {
           sessionId: execution.sessionId,
           startedAt: execution.startedAt,
           ...(principal === undefined ? {} : { principal }),
+          teamMember: task.teamRun !== true
+            && execution.runGroupId !== undefined
+            && teamGroups.has(execution.runGroupId),
         })
       }
     }
@@ -562,7 +593,7 @@ export class HostTaskLedger {
       if (task.archivedAt !== undefined) continue
       const schedule = task.schedule
       if (schedule === undefined || !schedule.enabled || schedule.nextRunAt === undefined || schedule.nextRunAt > now) continue
-      due.push({ taskId: task.id, cron: schedule.cron, nextRunAt: schedule.nextRunAt })
+      due.push({ taskId: task.id, cron: schedule.cron, timeZone: scheduleZone(schedule), nextRunAt: schedule.nextRunAt })
     }
     return due
   }
@@ -646,7 +677,7 @@ export class HostTaskLedger {
       const schedule = task.schedule
       if (schedule === undefined || !schedule.enabled || schedule.nextRunAt === undefined || schedule.nextRunAt > now) return task
       changed = true
-      return { ...task, schedule: { ...schedule, nextRunAt: nextRunAtMs(schedule.cron, now) }, updatedAt: now }
+      return { ...task, schedule: { ...schedule, nextRunAt: nextRunAtMs(schedule.cron, now, scheduleZone(schedule)) }, updatedAt: now }
     })
     if (changed) this.commit()
   }
@@ -701,16 +732,26 @@ export class HostTaskLedger {
       })
       changed = true
     }
+    // A team run is governed by its Lead: the Lead's own outcome closes whatever
+    // the Team still holds open, so the tree can never wait on a teammate that
+    // will never report one.
+    if (task.teamRun === true
+      && this.closeTeamMembers(taskId, groupId, execution.ownResult ?? outcome, execution.ownError ?? error, now)) changed = true
     if (this.settleCascade(taskId, groupId, now)) changed = true
     if (changed) this.commit()
   }
 
   attachSession(taskId: string, executionId: string, sessionId: string): void {
     const now = this.now()
-    this.document.tasks = this.document.tasks.map(task => task.id !== taskId ? task : {
-      ...task,
+    const task = this.document.tasks.find(item => item.id === taskId)
+    // A run the Lead's verdict already closed keeps its record: attaching a
+    // session to a settled execution would rewrite history the Host no longer
+    // observes (a teammate spawn that resolved after its Team was closed).
+    if (task?.executions.find(entry => entry.id === executionId)?.endedAt !== undefined) return
+    this.document.tasks = this.document.tasks.map(item => item.id !== taskId ? item : {
+      ...item,
       updatedAt: now,
-      executions: task.executions.map(entry => entry.id === executionId ? { ...entry, sessionId } : entry),
+      executions: item.executions.map(entry => entry.id === executionId ? { ...entry, sessionId } : entry),
     })
     this.commit()
   }
@@ -746,17 +787,22 @@ export class HostTaskLedger {
           : `invalid cron disabled for task(s): ${invalidScheduleIds.join(', ')}`
         this.repairSchedules(true, false)
         this.reconcileInterruptedStarts(false)
+        // An imported document may carry a decided-but-open run; fold it in the
+        // same action (apply() commits once at the end).
+        this.finalizeReadyRuns(false)
         break
       }
       case 'create': {
         if (this.document.tasks.some(task => task.id === action.id)) throw new Error('task id already exists')
-        if (action.input.schedule?.enabled === true && (!isValidCron(action.input.schedule.cron) || nextRunAtMs(action.input.schedule.cron, now) === undefined)) {
+        if (action.input.schedule?.enabled === true && (!isValidCron(action.input.schedule.cron)
+          || !isValidTimeZone(action.input.schedule.timeZone ?? timeZone())
+          || nextRunAtMs(action.input.schedule.cron, now, action.input.schedule.timeZone ?? timeZone()) === undefined)) {
           throw new Error('invalid schedule')
         }
         const input = action.input.freeze === undefined || initiator === undefined || initiator === ''
           ? action.input
           : { ...action.input, freeze: { ...action.input.freeze, frozenBy: initiator } }
-        const result = applyCreateTask(this.document.tasks, input, now, action.id, this.maxSubtaskDepth)
+        const result = applyCreateTask(this.document.tasks, input, now, action.id, this.maxSubtaskDepth, timeZone())
         if (result.task === undefined) throw new Error(result.error ?? 'invalid task')
         this.document.tasks = [...result.tasks]
         break
@@ -815,6 +861,34 @@ export class HostTaskLedger {
         this.document.tasks = [...result.tasks]
         break
       }
+      case 'settle': {
+        const task = this.document.tasks.find(item => item.id === action.taskId)
+        if (task === undefined) throw new Error('task not found')
+        if (task.archivedAt !== undefined) throw new Error('archived task is read-only')
+        if (!task.executions.some(entry => entry.endedAt === undefined)) throw new Error('task has no open execution')
+        // Force-close the executions this card governs. The verdict is
+        // 'cancelled', never 'succeeded': a card whose execution produced no
+        // evidence of a completed turn must not be recorded as finished work,
+        // and a cancelled settlement returns the card to the todo column so the
+        // operator can run it again. Nothing else clears a running card: move,
+        // archive and delete all refuse one, which is what made a stuck card
+        // unrecoverable from the board.
+        const reason = 'execution closed manually by '
+          + (initiator === undefined || initiator === '' ? 'the operator' : initiator)
+          + ': no verdict was recorded'
+        for (const member of cascadeTargets(this.document.tasks, action.taskId, this.maxSubtaskDepth)) {
+          for (const execution of member.executions) {
+            if (execution.endedAt !== undefined) continue
+            this.document.tasks = this.document.tasks.map(item => item.id !== member.id
+              ? item
+              : settleExecution(item, execution.id, 'cancelled', now, reason))
+          }
+        }
+        // Fold whatever became ready in the same action: an ancestor whose last
+        // member this closed leaves the running column with it.
+        this.finalizeReadyRuns(false)
+        break
+      }
       case 'restore': {
         if (this.subtreeHasOpenExecution(action.taskId)) throw new Error('running task cannot be restored')
         const result = applyRestoreTask(this.document.tasks, action.taskId, now, this.maxSubtaskDepth)
@@ -834,7 +908,7 @@ export class HostTaskLedger {
       case 'set-schedule': {
         const task = this.document.tasks.find(task => task.id === action.taskId)
         if (task?.archivedAt !== undefined) throw new Error('archived task is read-only')
-        const result = applySetSchedule(this.document.tasks, action.taskId, action.patch, now)
+        const result = applySetSchedule(this.document.tasks, action.taskId, action.patch, now, timeZone())
         if (!result.applied) throw new Error('invalid schedule')
         this.document.tasks = [...result.tasks]
         break
@@ -1004,6 +1078,95 @@ export class HostTaskLedger {
     return changed
   }
 
+  /**
+   * Close every run that is already decided, and fold every lineage whose
+   * members are all settled. The Host poll calls this on every tick, so a run
+   * can no longer be left in the running column by a settle nobody observed:
+   *
+   * - A team run is governed by its Lead. Once the Lead's own outcome is
+   *   recorded, its still-open members are settled with that verdict. A
+   *   teammate is a durable member of the Team and may never report a turn of
+   *   its own, and without this the whole lineage waits on it forever.
+   * - A cascade parent whose members are all settled is finalized here even
+   *   when the settle that completed the tree happened in another process, or
+   *   was interrupted between its child write and its parent write.
+   *
+   * Idempotent: a run that is already folded is left untouched, so a caller may
+   * invoke it on every tick.
+   * @param persist - false to leave the document for the caller to commit.
+   * @returns whether the document changed.
+   */
+  finalizeReadyRuns(persist = true): boolean {
+    const now = this.now()
+    let changed = false
+    const groups = new Set<string>()
+    for (const task of this.document.tasks) {
+      for (const execution of task.executions) {
+        if (execution.endedAt === undefined && execution.runGroupId !== undefined) groups.add(execution.runGroupId)
+      }
+    }
+    for (const groupId of groups) {
+      const lead = this.document.tasks.find(task => task.teamRun === true
+        && task.executions.some(entry => entry.runGroupId === groupId))
+      const verdict = lead === undefined ? undefined : this.leadVerdict(lead, groupId)
+      if (lead !== undefined && verdict !== undefined
+        && this.closeTeamMembers(lead.id, groupId, verdict.result, verdict.error, now)) changed = true
+      // Fold the lineage: a member may itself be a parent of a deeper member.
+      for (const task of this.document.tasks) {
+        if (this.settleCascade(task.id, groupId, now)) changed = true
+      }
+    }
+    if (changed && persist) this.commit()
+    return changed
+  }
+
+  /**
+   * The verdict a team run's Lead has already recorded: its own turn outcome
+   * once that turn ended, or the folded outcome once its card settled.
+   */
+  private leadVerdict(lead: TaskRecord, groupId: string): { result: ExecutionOutcome; error: string | undefined } | undefined {
+    const execution = lead.executions.find(entry => entry.runGroupId === groupId)
+    const result = execution?.ownResult ?? execution?.result
+    if (result === undefined) return undefined
+    return { result, error: execution?.ownError ?? execution?.error }
+  }
+
+  /**
+   * Settle every still-open member of a team run with the Lead's verdict.
+   * A teammate that already reported its own outcome keeps it: the ordinary
+   * fold still lets a failure dominate.
+   * @param leadId - the Lead card's task id (never settled here).
+   * @param groupId - the team run's group.
+   * @param verdict - the Lead's outcome, inherited by members that never reported.
+   * @param error - the Lead's failure text, inherited with a failed verdict.
+   * @param now - clock instant (ms epoch).
+   * @returns whether the document changed.
+   */
+  private closeTeamMembers(leadId: string, groupId: string, verdict: ExecutionOutcome, error: string | undefined, now: number): boolean {
+    const members: string[] = []
+    let recorded = false
+    this.document.tasks = this.document.tasks.map(task => {
+      if (task.id === leadId) return task
+      const execution = openGroupExecution(task, groupId)
+      if (execution === undefined) return task
+      members.push(task.id)
+      if (execution.ownResult !== undefined) return task
+      recorded = true
+      return {
+        ...task,
+        updatedAt: now,
+        executions: task.executions.map(entry => entry.id === execution.id
+          ? { ...entry, ownResult: verdict, ownError: error }
+          : entry),
+      }
+    })
+    let changed = recorded
+    for (const memberId of members) {
+      if (this.settleCascade(memberId, groupId, now)) changed = true
+    }
+    return changed
+  }
+
   private repairSchedules(skipPast: boolean, persist = true): void {
     const now = this.now()
     let changed = false
@@ -1011,7 +1174,7 @@ export class HostTaskLedger {
       const schedule = task.schedule
       if (schedule === undefined || !schedule.enabled) return task
       if (!skipPast && schedule.nextRunAt !== undefined) return task
-      const next = nextRunAtMs(schedule.cron, now)
+      const next = nextRunAtMs(schedule.cron, now, scheduleZone(schedule))
       if (next === undefined) {
         changed = true
         this.document.scheduler.error = `invalid cron disabled for task: ${task.id}`
@@ -1048,22 +1211,38 @@ export class HostTaskLedger {
   }
 
   /**
-   * Field-preserving v2 to v3 migration. v3 adds no fields yet, so the
-   * migration reuses the v3 normalization, but it first proves every task
-   * row is structurally valid: a v2 document that would silently drop or
-   * coerce rows fails loudly instead (no quarantined-empty restart).
+   * Field-preserving migration of a pre-v4 document. It first proves every task
+   * row is structurally valid, so a document that would silently drop or coerce
+   * rows fails loudly instead (no quarantined-empty restart), and then reuses
+   * the current normalization.
+   *
+   * v4 adds `ScheduleRule.timeZone`. A rule written before v4 was evaluated in
+   * whatever zone the Host process happened to report, so the migration stamps
+   * that zone onto every enabled rule: the trigger instant is preserved exactly
+   * (the stored `nextRunAt` already encodes the old zone), but the rule stops
+   * following a later `TZ` change, which is what made an existing schedule
+   * silently move when the Host's zone changed.
    */
   private migrateLegacyDocument(parsed: ParsedLedgerDocument): LedgerDocument {
     if (!Array.isArray(parsed.tasks) || !parsed.tasks.every(row => isTaskRecord(row))) {
-      throw new Error('v2 document contains structurally invalid task rows')
+      throw new Error(`v${String(parsed.schemaVersion)} document contains structurally invalid task rows`)
     }
-    return this.normalizeDocument(parsed)
+    // Every row passed `isTaskRecord` above, so the stamped rows are still
+    // task records; the cast only re-narrows the unknown-typed on-disk array.
+    const rows = (parsed.tasks as readonly unknown[]).map((value) => {
+      const row = value as { schedule?: unknown }
+      const schedule = row.schedule
+      if (typeof schedule !== 'object' || schedule === null) return value
+      if (typeof (schedule as { timeZone?: unknown }).timeZone === 'string') return value
+      return { ...(value as object), schedule: { ...(schedule as object), timeZone: timeZone() } }
+    })
+    return this.normalizeDocument({ ...parsed, tasks: rows as TaskRecord[] })
   }
 
   private load(dir: string): LedgerDocument {
     const existed = existsSync(this.file)
-    // schemaVersion stays unknown-typed here: on-disk documents may be v2
-    // (legacy), v3, or any future/invalid value the branches below sort out.
+    // schemaVersion stays unknown-typed here: on-disk documents may be v2 or
+    // v3 (legacy), v4, or any future/invalid value the branches below sort out.
     let parsed: ParsedLedgerDocument
     try {
       parsed = JSON.parse(readFileSync(this.file, 'utf8')) as ParsedLedgerDocument
@@ -1071,13 +1250,14 @@ export class HostTaskLedger {
       return this.recoverCorrupt(dir, existed, error)
     }
     if (typeof parsed === 'object' && parsed !== null) parseTaskPrincipals(parsed.taskPrincipals)
-    if (parsed.schemaVersion === TASK_BOARD_LEGACY_SCHEMA_VERSION) {
+    if (parsed.schemaVersion === TASK_BOARD_LEGACY_SCHEMA_VERSION
+      || parsed.schemaVersion === TASK_BOARD_OLDER_SCHEMA_VERSION) {
       try {
         return this.migrateLegacyDocument(parsed)
       } catch (error) {
-        // Migration failure is explicit: the original v2 file stays in place
+        // Migration failure is explicit: the original file stays in place
         // for manual recovery and the ledger refuses to start (fail closed).
-        throw new Error(`ledger v2 to v3 migration failed; original file kept at ${this.file}: ${error instanceof Error ? error.message : String(error)}`)
+        throw new Error(`ledger v${String(parsed.schemaVersion)} to v${TASK_BOARD_SCHEMA_VERSION} migration failed; original file kept at ${this.file}: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
     try {

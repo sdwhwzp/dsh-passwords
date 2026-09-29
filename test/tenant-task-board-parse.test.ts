@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import http, { type RequestListener } from 'node:http';
@@ -21,7 +21,7 @@ async function listen(t: TestContext, handler: RequestListener): Promise<string>
   return `http://127.0.0.1:${(server.address() as { port: number }).port}`;
 }
 
-async function fixture(t: TestContext, timer?: HostTimerFace) {
+async function fixture(t: TestContext, timer?: HostTimerFace, seed?: (directory: string) => Promise<void>) {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'tenant-board-parse-'));
   const disposers: Array<() => void> = [];
   t.after(async () => {
@@ -97,6 +97,7 @@ async function fixture(t: TestContext, timer?: HostTimerFace) {
     internalSecret: 'principal-test', jwtSecret: 'jwt-test',
     tenantTaskBoard: { enabled: true, directory, gatewayOrigin },
   } as never);
+  await seed?.(directory);
   register();
   const origin = await listen(t, (req, res) => {
     const handler = routes.get(req.url!);
@@ -288,7 +289,7 @@ test('current task-board child creation, attach and detach survive tenant ledger
   assert.equal(f.calls.length, 0, 'creating and linking tasks does not invoke a model');
 });
 
-test('tenant goal opt-out persists in schema 3 and rejects invalid or foreign-account updates', async t => {
+test('tenant goal opt-out persists in schema 4 and rejects invalid or foreign-account updates', async t => {
   const f = await fixture(t);
   const action = async (id: number, value: object, expected = 200) => {
     const response = await fetch(f.origin + '/api/task-board/action', {
@@ -306,7 +307,7 @@ test('tenant goal opt-out persists in schema 3 and rejects invalid or foreign-ac
   await action(3, { kind: 'update', taskId: 'plain-turn', patch: { goalRun: true } }, 400);
   await action(2, { kind: 'update', taskId: 'plain-turn', patch: { goalRun: 0 } }, 400);
   const disk = JSON.parse(await readFile(path.join(f.directory, 'u2', 'ledger-v2.json'), 'utf8'));
-  assert.equal(disk.schemaVersion, 3);
+  assert.equal(disk.schemaVersion, 4);
   assert.equal(disk.tasks.find((task: { id: string }) => task.id === 'plain-turn').goalRun, false);
   assert.equal('goalRun' in disk.tasks.find((task: { id: string }) => task.id === 'default-goal'), false);
   f.reload();
@@ -392,11 +393,13 @@ for (const creation of ['create', 'import'] as const) {
       }
       const calls = f.taskCalls.filter(call => call.id === id);
       assert.deepEqual(calls.map(call => call.method), ['session/create', 'session/rename', 'session/prompt', 'commands/execute']);
-      const prompt = calls[2].args.request as { sessionId: string; content: unknown };
+      const prompt = calls[2].args.request as { sessionId: string; content: Array<{ type: string; text: string }> };
       assert.match(prompt.sessionId, new RegExp(`^scheduled-${id}-`));
       assert.match(JSON.stringify(prompt.content), new RegExp(`Only account ${id}`));
       assert.equal(calls[3].args.agentId, prompt.sessionId);
-      assert.equal(calls[3].args.line, `/goal Only account ${id}`);
+      assert.equal(calls[3].args.line, `/goal ${prompt.content[0].text}`);
+      assert.match(prompt.content[0].text, /规则时区/);
+      assert.ok(prompt.content[0].text.includes(new Date(start + 30_000).toISOString()));
     }
     assert.equal(f.calls.length, 0, 'fake gateway never makes a real model call');
   });
@@ -466,4 +469,145 @@ test('a revoked tenant cannot execute an already armed cron occurrence', { timeo
   const board = await response.json();
   assert.equal(board.tasks[0].executions[0].result, 'failed');
   assert.match(board.tasks[0].executions[0].error, /task owner unavailable/);
+});
+
+test('schema 3 tenant ledgers migrate to schema 4 without losing task history or account partitions', async t => {
+  const expected = new Map<number, object[]>();
+  const f = await fixture(t, boardTimers().timer, async directory => {
+    for (const id of [2, 3]) {
+      const root = path.join(directory, `u${id}`);
+      await mkdir(root);
+      await writeFile(path.join(root, 'owner.json'), JSON.stringify({ id: String(id), username: `user${id}`, role: 'user', source: 'dsh-passwords' }));
+      const tasks = [
+        {
+          id: 'parent', title: `Account ${id}`, description: 'Saved description', prompt: `Private prompt ${id}`,
+          status: 'done', createdAt: 10, updatedAt: 30, workspaceId: `workspace-${id}`, mode: 'mode-a',
+          permission: 'read-only', reuseSession: true, goalRun: false, tags: [{ name: 'project', promptPrefix: 'Use project context' }],
+          schedule: { enabled: false, cron: '0 9 * * *', nextRunAt: 2_000_000_000_000, lastTriggeredAt: 20 },
+          executions: [{ id: `execution-${id}`, sessionId: `session-${id}`, startedAt: 20, endedAt: 30, result: 'succeeded', initiatedBy: `author-${id}` }],
+        },
+        { id: 'child', title: 'Child', description: '', prompt: '', status: 'todo', createdAt: 11, updatedAt: 31, parentId: 'parent', workspaceId: `workspace-${id}`, executions: [] },
+      ];
+      expected.set(id, tasks);
+      await writeFile(path.join(root, 'ledger-v2.json'), JSON.stringify({
+        schemaVersion: 3, revision: 41, tasks,
+        scheduler: { timeZone: 'UTC', ledgerId: `ledger-${id}`, importedSources: [`import-${id}`] },
+        recentRequests: [{ requestId: `request-${id}`, fingerprint: `fingerprint-${id}` }],
+      }));
+    }
+  });
+  for (const id of [2, 3]) {
+    const response = await fetch(f.origin + '/api/task-board/state', { headers: f.headers(id) });
+    const board = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(board.schemaVersion, 4);
+    const tasks = structuredClone(expected.get(id)!) as Array<{ schedule?: { timeZone?: string } }>;
+    tasks[0].schedule!.timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    assert.deepEqual(board.tasks, tasks);
+    const disk = JSON.parse(await readFile(path.join(f.directory, `u${id}`, 'ledger-v2.json'), 'utf8'));
+    assert.equal(disk.schemaVersion, 4);
+    assert.deepEqual(disk.tasks, tasks);
+    assert.equal(disk.scheduler.ledgerId, `ledger-${id}`);
+    assert.deepEqual(disk.scheduler.importedSources, [`import-${id}`]);
+    assert.deepEqual(disk.recentRequests, [{ requestId: `request-${id}`, fingerprint: `fingerprint-${id}` }]);
+  }
+  f.reload();
+  for (const id of [2, 3]) {
+    const response = await fetch(f.origin + '/api/task-board/state', { headers: f.headers(id) });
+    const board = await response.json();
+    assert.equal(board.tasks[0].executions[0].sessionId, `session-${id}`);
+    assert.equal(board.tasks[1].parentId, 'parent');
+  }
+  assert.deepEqual(f.taskCalls, []);
+});
+
+test('tenant schedule zones persist independently and trigger with only the owner gateway identity', { timeout: 10_000 }, async t => {
+  const start = Date.parse('2026-09-29T00:00:00Z');
+  t.mock.timers.enable({ apis: ['Date'], now: start });
+  const probe = boardTimers();
+  const f = await fixture(t, probe.timer);
+  const action = async (id: number, value: object, expected = 200) => {
+    const response = await fetch(f.origin + '/api/task-board/action', {
+      method: 'POST', headers: f.headers(id), body: JSON.stringify({ requestId: randomUUID(), action: value }),
+    });
+    const body = await response.json();
+    assert.equal(response.status, expected, JSON.stringify(body));
+    return body;
+  };
+  for (const [id, timeZone] of [[2, 'UTC'], [3, 'Asia/Shanghai']] as const) {
+    await action(id, { kind: 'create', id: 'daily', input: { title: `Account ${id}`, description: '', prompt: `Account ${id} only`, schedule: { enabled: true, cron: '0 9 * * *', timeZone } } });
+  }
+  await action(2, { kind: 'create', id: 'private-2', input: { title: 'Private', description: '', prompt: '' } });
+  await action(3, { kind: 'set-schedule', taskId: 'private-2', patch: { timeZone: 'UTC' } }, 400);
+  await action(2, { kind: 'set-schedule', taskId: 'daily', patch: { timeZone: 'Invalid/Zone' } }, 400);
+  await action(2, { kind: 'set-schedule', taskId: 'daily', patch: { timeZone: 'Europe/London' } });
+  f.reload();
+  for (const [id, timeZone, hours] of [[2, 'Europe/London', 8], [3, 'Asia/Shanghai', 1]] as const) {
+    const response = await fetch(f.origin + '/api/task-board/state', { headers: f.headers(id) });
+    const board = await response.json();
+    assert.equal(board.tasks[0].schedule.timeZone, timeZone);
+    assert.equal(board.tasks[0].schedule.nextRunAt, start + hours * 3_600_000);
+  }
+  assert.deepEqual([...probe.deadlines].map(item => item.at).sort(), [start + 3_600_000, start + 8 * 3_600_000]);
+  t.mock.timers.setTime(start + 3_600_000);
+  probe.fireDue();
+  const deadline = performance.now() + 3_000;
+  for (;;) {
+    const response = await fetch(f.origin + '/api/task-board/state', { headers: f.headers(3) });
+    const board = await response.json();
+    if (board.tasks[0].executions[0]?.sessionId) break;
+    assert.ok(performance.now() < deadline, 'zoned schedule did not finish gateway admission');
+  }
+  assert.ok(f.taskCalls.every(call => call.id === 3));
+  const prompt = f.taskCalls.find(call => call.method === 'session/prompt')!;
+  assert.match(JSON.stringify(prompt.args), /Asia\/Shanghai/);
+  assert.match(JSON.stringify(prompt.args), /2026-09-29T01:00:00/);
+  assert.match(JSON.stringify(prompt.args), /Account 3 only/);
+});
+
+test('settle cancels only the signed account ledger and cannot control another account execution', { timeout: 10_000 }, async t => {
+  const f = await fixture(t, boardTimers().timer);
+  const action = async (id: number, value: object, expected = 200) => {
+    const response = await fetch(f.origin + '/api/task-board/action', {
+      method: 'POST', headers: f.headers(id), body: JSON.stringify({ requestId: randomUUID(), action: value }),
+    });
+    const body = await response.json();
+    assert.equal(response.status, expected, JSON.stringify(body));
+    return body;
+  };
+  for (const id of [2, 3]) {
+    await action(id, { kind: 'create', id: `private-${id}`, input: { title: `Account ${id}`, description: '', prompt: `Account ${id} only` } });
+    await action(id, { kind: 'run', taskId: `private-${id}` });
+    const deadline = performance.now() + 3_000;
+    for (;;) {
+      const response = await fetch(f.origin + '/api/task-board/state', { headers: f.headers(id) });
+      const board = await response.json();
+      if (board.tasks[0].executions[0]?.sessionId) {
+        assert.match(board.tasks[0].executions[0].sessionId, new RegExp(`^scheduled-${id}-`));
+        break;
+      }
+      assert.ok(performance.now() < deadline, 'run did not finish gateway admission');
+    }
+  }
+  const dispatched = structuredClone(f.taskCalls);
+  for (const kind of ['settle', 'run', 'rerun']) await action(3, { kind, taskId: 'private-2' }, 400);
+  await action(3, { kind: 'settle', taskId: 'private-3', sessionId: 'scheduled-2-1' }, 400);
+  const settled = await action(3, { kind: 'settle', taskId: 'private-3' });
+  assert.equal(settled.tasks[0].status, 'todo');
+  assert.equal(settled.tasks[0].executions[0].result, 'cancelled');
+  assert.match(settled.tasks[0].executions[0].error, /closed manually/);
+  assert.deepEqual(f.taskCalls, dispatched, 'settlement cannot issue session control RPCs');
+  const response = await fetch(f.origin + '/api/task-board/state', { headers: f.headers(2) });
+  const untouched = await response.json();
+  assert.equal(untouched.tasks[0].status, 'running');
+  assert.equal(untouched.tasks[0].executions[0].result, undefined);
+  await action(2, { kind: 'settle', taskId: 'private-2' });
+  f.reload();
+  for (const id of [2, 3]) {
+    const response = await fetch(f.origin + '/api/task-board/state', { headers: f.headers(id) });
+    const board = await response.json();
+    assert.deepEqual(board.tasks.map((task: { id: string }) => task.id), [`private-${id}`]);
+    assert.equal(board.tasks[0].executions[0].result, 'cancelled');
+    assert.match(board.tasks[0].executions[0].sessionId, new RegExp(`^scheduled-${id}-`));
+  }
 });

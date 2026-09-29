@@ -4,7 +4,7 @@
  * (no persistence or notify - the controller orchestrates those), so it is
  * unit-testable without any runtime face.
  */
-import { isValidCron, nextRunAtMs } from '../schedule.ts'
+import { isValidCron, isValidTimeZone, nextRunAtMs, resolveHostTimeZone } from '../schedule.ts'
 import { DEFAULT_SUBTASK_DEPTH, normalizeSubtaskDepth, taskDepth } from '../subtask.ts'
 import { createTask, withSchedule, type NewTaskInput, type TaskRecord } from '../tasks.ts'
 
@@ -32,6 +32,7 @@ export interface CreateTaskResult {
  * @param now - clock instant (ms epoch).
  * @param id - minted task id.
  * @param maxSubtaskDepth - deployment subtask depth limit.
+ * @param hostTimeZone - zone a rule that stores no zone of its own follows.
  */
 export function applyCreateTask(
   tasks: readonly TaskRecord[],
@@ -39,6 +40,7 @@ export function applyCreateTask(
   now: number,
   id: string,
   maxSubtaskDepth: number = DEFAULT_SUBTASK_DEPTH,
+  hostTimeZone: string = resolveHostTimeZone(),
 ): CreateTaskResult {
   if (input.title.trim() === '') return { task: undefined, tasks, error: 'title is required' }
   const limit = normalizeSubtaskDepth(maxSubtaskDepth)
@@ -71,7 +73,17 @@ export function applyCreateTask(
   const requested = input.schedule
   if (requested?.enabled === true && requested.cron.trim() !== '' && isValidCron(requested.cron)) {
     const cron = requested.cron.trim()
-    task = withSchedule(task, { enabled: true, cron, nextRunAt: nextRunAtMs(cron, now) }, now)
+    const requestedZone = requested.timeZone
+    // An unusable zone is refused rather than silently reinterpreted as the
+    // Host zone: the caller asked for a specific wall clock.
+    if (requestedZone !== undefined && !isValidTimeZone(requestedZone)) {
+      return { task: undefined, tasks, error: 'invalid schedule time zone' }
+    }
+    const zone = requestedZone ?? hostTimeZone
+    const nextRunAt = nextRunAtMs(cron, now, zone)
+    if (nextRunAt !== undefined) {
+      task = withSchedule(task, { enabled: true, cron, timeZone: requestedZone, nextRunAt }, now)
+    }
   }
   return { task, tasks: [...tasks, task] }
 }

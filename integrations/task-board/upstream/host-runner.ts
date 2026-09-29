@@ -72,6 +72,17 @@ function isDefinitionWithdrawn(error: unknown): boolean {
 
 const SERVICE_UNAVAILABLE_ATTEMPTS = 5
 const SERVICE_UNAVAILABLE_BACKOFF_MS = 2_000
+/**
+ * Largest number of history pages one inspection walks back. A session whose
+ * window is wider than this cannot be resolved from its log, which the caller
+ * treats as an unreadable history rather than as pending work.
+ */
+const HISTORY_PAGE_LIMIT = 100
+
+/** One-line text of a gateway or stream failure, for a decideable reason. */
+function failureText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
 
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => { setTimeout(resolve, ms) })
@@ -99,7 +110,14 @@ export interface SessionCommandDispatcher {
 }
 
 export type ExecutionInspection =
-  | { outcome: 'pending' }
+  /**
+   * No verdict yet. `unreadable` separates "the work may still be in progress"
+   * from "this session's history could not be read at all": a reader failure is
+   * not progress, and the caller decides how long to keep waiting before it
+   * reports the execution as undeterminable instead of holding a card open
+   * forever.
+   */
+  | { outcome: 'pending'; unreadable?: true; reason?: string }
   | { outcome: 'succeeded' }
   | { outcome: 'failed'; error: string }
   | { outcome: 'cancelled'; error: string }
@@ -148,6 +166,13 @@ export interface PromptContext {
   peers?: readonly PromptPeer[]
   /** True when those members run as teammates inside this session (Team Lead). */
   team?: boolean
+  /**
+   * Scheduled-run provenance: the instant the cron rule actually fired and the
+   * IANA zone its wall clock was read in. Present only for a cron-triggered
+   * run, so the model can resolve an unqualified date in the run's own terms
+   * instead of guessing from the Host clock (issue #1722).
+   */
+  schedule?: { triggeredAt: number; timeZone: string; cron: string }
 }
 
 /**
@@ -159,11 +184,25 @@ function peerPromptPreamble(context: PromptContext): string | undefined {
   const peers = context.peers ?? []
   if (peers.length === 0) return undefined
   if (context.team === true) {
-    const lines = peers.map(peer => `- ${escapeProvenanceDelimiter(peer.title)}（teammate: ${peer.name ?? teammateName(peer.title, peer.id)}）`)
+    const lines = peers.map(peer => `- ${escapeProvenanceDelimiter(peer.title)}（teammate: ${peer.name ?? teammateName(peer.title, peer.id, peer.id)}）`)
     return `本任务是 Agent Team 的 Lead：本次运行不额外开启独立会话，以下 ${peers.length} 个子任务成员已在本会话中作为 teammate 启动。用 list_agents / send_message / wait_agent 协调它们，用任务看板工具读写它们在看板上的卡片：\n${lines.join('\n')}`
   }
   const lines = peers.map(peer => `- ${escapeProvenanceDelimiter(peer.title)}（任务 ${peer.id}）`)
   return `本次运行同时并发开启 ${peers.length} 个独立 DSH 会话执行下列子任务成员（可用 task_board_* 工具查看它们的进度）：\n${lines.join('\n')}`
+}
+
+/**
+ * The scheduled-run section: this execution was triggered by the card's cron
+ * rule rather than by a person. It states the firing instant, the rule's zone,
+ * and the rule text, so the run's own clock is unambiguous — the board's
+ * scheduler fires on a wall clock in a specific IANA zone, which is not
+ * necessarily the zone of whatever session the run lands in.
+ */
+function schedulePromptPreamble(context: PromptContext): string | undefined {
+  const schedule = context.schedule
+  if (schedule === undefined) return undefined
+  const stamp = new Date(schedule.triggeredAt).toISOString()
+  return `本次执行由任务看板的定时规则自动触发：触发时间 ${stamp}（UTC），规则时区 ${schedule.timeZone}，cron 表达式 ${schedule.cron}。需要判断「今天」「现在」或计算时间窗口时，以该时区的触发时间为准。`
 }
 
 /**
@@ -179,11 +218,14 @@ export function promptText(task: TaskRecord, context: PromptContext = {}): strin
     ? undefined
     : `交接包引用（来自任务看板续接卡片，冻结于 ${new Date(handover.bundledAt).toISOString()}）：\n${handover.references.map(reference => `- ${reference}`).join('\n')}`
   // Tag prompts come first: they are the run's standing context (business line,
-  // output location), the handover preamble is a per-card note, and the task
-  // body is the instruction itself.
+  // output location), the handover preamble is a per-card note, the scheduled
+  // section states why this run exists, and the task body is the instruction.
   const tagPreamble = tagPromptPreamble(task)
+  const handoverSection = handoverPreamble
+  const schedulePreamble = schedulePromptPreamble(context)
   const runPreamble = peerPromptPreamble(context)
-  const preambles = [tagPreamble, handoverPreamble, runPreamble].filter((part): part is string => part !== undefined)
+  const preambles = [tagPreamble, handoverSection, schedulePreamble, runPreamble]
+    .filter((part): part is string => part !== undefined)
   const preamble = preambles.length === 0 ? undefined : preambles.join('\n\n')
   const freeze = task.freeze
   if (freeze === undefined) {
@@ -551,8 +593,18 @@ export class HostExecutionRunner {
     }
   }
 
-  /** Resolve an execution outcome from the session list and bounded history pages. */
-  async inspect(sessionId: string, startedAt = 0, sessions?: readonly SessionSummary[], principal?: TaskBoardPrincipal): Promise<ExecutionInspection> {
+  /**
+   * Resolve an execution outcome from the session list and bounded history pages.
+   * @param sessionId - the session the execution runs in.
+   * @param startedAt - instant the execution opened; earlier events are not its own.
+   * @param sessions - roster from the caller's own poll, when it already has one.
+   * @param options.whileRunning - read the first completed turn even while the
+   *   roster reports the session as running. A durable Agent Teams teammate
+   *   stays alive after its turn ends, so `running` never clears for it and the
+   *   turn it completed is the only verdict it will ever expose.
+   * @param principal - authenticated owner used for every execution inspection request.
+   */
+  async inspect(sessionId: string, startedAt = 0, sessions?: readonly SessionSummary[], options: { whileRunning?: boolean } = {}, principal?: TaskBoardPrincipal): Promise<ExecutionInspection> {
     this.assertPrincipal?.(principal)
     let items: readonly SessionSummary[]
     if (sessions !== undefined) {
@@ -590,7 +642,7 @@ export class HostExecutionRunner {
       this.scanMemos.delete(sessionId)
       return { outcome: 'cancelled', error: 'execution session no longer exists' }
     }
-    if (summary.running) return { outcome: 'pending' }
+    if (summary.running && options.whileRunning !== true) return { outcome: 'pending' }
 
     let opening: { cursor: number; records: readonly SessionHistoryRecord[]; hasMore: boolean }
     try {
@@ -600,12 +652,12 @@ export class HostExecutionRunner {
       if (typeof iterator.return === 'function') await iterator.return()
       const follow = next.done === true ? undefined : next.value as { type?: string; cursor?: number; records?: readonly SessionHistoryRecord[]; hasMore?: boolean }
       if (follow === undefined || follow.type !== 'snapshot' || typeof follow.cursor !== 'number' || follow.records === undefined || typeof follow.hasMore !== 'boolean') {
-        return { outcome: 'pending' }
+        return { outcome: 'pending', unreadable: true, reason: 'session/follow returned no opening frame' }
       }
       opening = { cursor: follow.cursor, records: follow.records, hasMore: follow.hasMore }
     } catch (error) {
       console.warn('[dsh-task-board] session/follow failed during execution inspection; keeping the outcome pending', error)
-      return { outcome: 'pending' }
+      return { outcome: 'pending', unreadable: true, reason: 'session/follow failed: ' + failureText(error) }
     }
     const openingEvents = opening.records.map(record => ({ event: recordEvent(record) }))
     const newestSeq = openingEvents.reduce<number | undefined>((newest, entry) => newest === undefined ? entry.event.seq : Math.max(newest, entry.event.seq), undefined)
@@ -613,7 +665,7 @@ export class HostExecutionRunner {
     const events: Array<{ event: { type: string; seq: number; time: number; data: unknown } }> = [...openingEvents]
     let beforeSeq: number | undefined
     let reachedExecutionBoundary = !opening.hasMore
-    for (let page = 0; page < 100 && !reachedExecutionBoundary; page += 1) {
+    for (let page = 0; page < HISTORY_PAGE_LIMIT && !reachedExecutionBoundary; page += 1) {
       let history: SessionPage
       try {
         history = await this.invoke('session', 'page', {
@@ -624,7 +676,7 @@ export class HostExecutionRunner {
         }, principal) as SessionPage
       } catch (error) {
         console.warn('[dsh-task-board] session/page failed during execution inspection; keeping the outcome pending', error)
-        return { outcome: 'pending' }
+        return { outcome: 'pending', unreadable: true, reason: 'session/page failed: ' + failureText(error) }
       }
       const pageEntries = pageEvents(history)
       events.push(...pageEntries)
@@ -637,7 +689,9 @@ export class HostExecutionRunner {
       if (oldestSeq === undefined || oldestSeq === beforeSeq) return { outcome: 'pending' }
       beforeSeq = oldestSeq
     }
-    if (!reachedExecutionBoundary) return { outcome: 'pending' }
+    if (!reachedExecutionBoundary) {
+      return { outcome: 'pending', unreadable: true, reason: 'history scan did not reach the execution start within ' + HISTORY_PAGE_LIMIT + ' pages' }
+    }
     const turnEnd = events
       .filter(entry => entry.event.type === 'turn/end' && (startedAt <= 0 || entry.event.time >= startedAt))
       .sort((a, b) => a.event.seq - b.event.seq)[0]

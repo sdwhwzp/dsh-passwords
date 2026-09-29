@@ -9,7 +9,7 @@
  * channel later); tests run against the in-memory backend and a jsdom
  * localStorage backend.
  */
-import { isValidCron } from './schedule.ts'
+import { isValidCron, isValidTimeZone } from './schedule.ts'
 import { isTaskPermission, isTaskStatus, normalizeTags, normalizeTargetId, type ScheduleRule, type TaskFreeze, type TaskRecord, type TaskPermission, type TaskStatus } from './tasks.ts'
 import { isExecutionOutcome } from './subtask.ts'
 import type { TaskHandover } from './handover.ts'
@@ -109,9 +109,14 @@ function normalizeSchedule(schedule: unknown): ScheduleRule | undefined {
   // schedule instead of being dropped for later repair.
   if (typeof rule.cron !== 'string') return undefined
   if (rule.cron.trim() === '' || !isValidCron(rule.cron)) return undefined
+  // A stored zone survives only when this runtime can resolve it; an unusable
+  // name is dropped (the rule then follows the Host zone) instead of being
+  // kept to fail every later resolve.
+  const timeZone = typeof rule.timeZone === 'string' && isValidTimeZone(rule.timeZone) ? rule.timeZone : undefined
   return {
     enabled: rule.enabled === true,
     cron: rule.cron,
+    ...(timeZone === undefined ? {} : { timeZone }),
     nextRunAt: typeof rule.nextRunAt === 'number' ? rule.nextRunAt : undefined,
     lastTriggeredAt: typeof rule.lastTriggeredAt === 'number' ? rule.lastTriggeredAt : undefined,
   }

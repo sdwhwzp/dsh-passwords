@@ -51,6 +51,26 @@ const SESSION_POLL_MS = 5_000
 const RECOVERY_TOLERANCE_MS = 60_000
 /** Largest delay a Node timer represents without clamping; longer targets re-arm in segments. */
 const MAX_TIMER_DELAY_MS = 2_147_483_647
+/**
+ * Consecutive polls that may report one execution's session history as
+ * unreadable before it is reported failed. The roster poll runs every 5 s, so
+ * this is two minutes of a session that is NOT running: no turn is executing
+ * there and its history cannot be read, which means no verdict will ever
+ * arrive. Reporting that as a failure keeps a card — and every ancestor of it —
+ * out of the running column, which nothing else can rescue.
+ */
+const UNREADABLE_SETTLE_POLLS = 24
+
+/**
+ * Provenance of one cron-triggered cascade: when the rule fired and the zone
+ * its wall clock was read in. Passed into every launched prompt of that run so
+ * a scheduled job knows its own clock rather than inferring one.
+ */
+export interface ScheduledRunContext {
+  triggeredAt: number
+  timeZone: string
+  cron: string
+}
 
 /**
  * Actions that can move an armed trigger. Only these re-arm the native timer;
@@ -105,6 +125,12 @@ export class TaskBoardHostService {
   private readonly accountIdleSessionIds = new Map<string, ReadonlySet<string>>()
   private observerPrincipal: TaskBoardPrincipal | undefined
   private readonly accounts: TaskBoardAccounts | undefined
+  /**
+   * Consecutive unreadable-history polls per open execution (see
+   * {@link noteUnreadableInspection}). Cleared as soon as an inspection
+   * resolves, so a transient reader failure never fails a card.
+   */
+  private readonly unreadablePolls = new Map<string, number>()
   private preventIdleSleep = false
   private readonly team: TaskBoardTeamDispatcher | undefined
   private readonly timers: HostTimerFace
@@ -251,7 +277,7 @@ export class TaskBoardHostService {
     this.listeners.clear()
   }
 
-  private async launch(opened: OpenedRun, others: readonly OpenedRun[] = []): Promise<void> {
+  private async launch(opened: OpenedRun, others: readonly OpenedRun[] = [], schedule?: ScheduledRunContext): Promise<void> {
     try {
       // A team run always mints a fresh Lead session: teammates are immutable
       // children of that session, so reusing an older one would collide on
@@ -261,13 +287,17 @@ export class TaskBoardHostService {
       const reuseSessionId = team ? undefined : reusableSessionId(opened.task, idleIds)
       // Both modes tell the launched agent what else this run opens; only a team
       // run names teammates, because only then does this session own them.
-      const promptContext = others.length === 0 ? undefined : {
-        peers: others.map(other => ({
-          id: other.task.id,
-          title: other.task.title,
-          ...(team ? { name: teammateName(other.task.title, other.execution.runGroupId ?? other.task.id) } : {}),
-        })),
+      const peers = others.length === 0 ? undefined : others.map(other => ({
+        id: other.task.id,
+        title: other.task.title,
+        ...(team ? { name: teammateName(other.task.title, other.execution.runGroupId ?? other.task.id, other.task.id) } : {}),
+      }))
+      // A cron-triggered run additionally states its own firing instant and
+      // rule zone, so a scheduled job can resolve "today" without guessing.
+      const promptContext = peers === undefined && schedule === undefined ? undefined : {
+        ...(peers === undefined ? {} : { peers }),
         ...(team ? { team: true } : {}),
+        ...(schedule === undefined ? {} : { schedule }),
       }
       const sessionId = await this.runner.launch(opened.task, {
         ...(opened.principal === undefined ? {} : { principal: opened.principal }),
@@ -307,7 +337,7 @@ export class TaskBoardHostService {
       this.accounts?.assert(opened.principal)
       const member = await team.spawn({
         leadSessionId,
-        name: teammateName(opened.task.title, opened.execution.runGroupId ?? opened.task.id),
+        name: teammateName(opened.task.title, opened.execution.runGroupId ?? opened.task.id, opened.task.id),
         description: opened.task.title,
         prompt: promptText(opened.task),
       })
@@ -342,6 +372,12 @@ export class TaskBoardHostService {
       return
     }
     const sessions = new Map([...rosters.values()].flatMap(items => items.map(item => [item.sessionId, item] as const)))
+    // Fold whatever the board can already decide before spending inspection
+    // RPCs: a team run whose Lead recorded its verdict, and any lineage whose
+    // members are all settled. Idempotent, so an already folded board is free.
+    this.ledger.finalizeReadyRuns()
+    // Read after the RPC so executions attached while it was in flight are
+    // included in this pass, matching the former full-state snapshot timing.
     const runtime = this.ledger.runtimeView()
     this.power.updateReasons({
       runningSessions: known ? [...sessions.values()].filter(item => item.running).length : previous.runningSessions,
@@ -350,6 +386,10 @@ export class TaskBoardHostService {
     })
     for (const [key, items] of rosters) {
       await this.reconcileExecutions(items, runtime.openExecutions.filter(execution => principalKey(execution.principal) === key))
+    }
+    const open = new Set(runtime.openExecutions.map(execution => execution.executionId))
+    for (const executionId of [...this.unreadablePolls.keys()]) {
+      if (!open.has(executionId)) this.unreadablePolls.delete(executionId)
     }
   }
 
@@ -361,13 +401,49 @@ export class TaskBoardHostService {
     for (const execution of executions) {
       if (execution.sessionId === undefined) continue
       try {
-        const result = await this.runner.inspect(execution.sessionId, execution.startedAt, sessions, execution.principal)
-        if (result.outcome === 'pending') continue
+        // A team member's turn is read even while the roster calls its session
+        // running: a durable teammate never goes idle for good.
+        const result = await this.runner.inspect(execution.sessionId, execution.startedAt, sessions, {
+          whileRunning: execution.teamMember,
+        }, execution.principal)
+        if (result.outcome === 'pending') {
+          if (result.unreadable === true) this.noteUnreadableInspection(execution, result.reason)
+          else this.unreadablePolls.delete(execution.executionId)
+          continue
+        }
+        this.unreadablePolls.delete(execution.executionId)
         this.ledger.settle(execution.taskId, execution.executionId, result.outcome, 'error' in result ? result.error : undefined)
       } catch {
         // A transient inspection failure never settles a running execution.
       }
     }
+  }
+
+  /**
+   * Count one poll whose session history could not be read. A reader failure is
+   * not progress: the session is not running (the runner only reads history for
+   * one that is idle), so nothing will ever change that verdict. After
+   * {@link UNREADABLE_SETTLE_POLLS} consecutive polls the execution is reported
+   * failed with the recorded reason, instead of holding its card — and every
+   * ancestor of it — in the running column with no way out. The first poll of
+   * each streak is logged, so the Host log names the session.
+   */
+  private noteUnreadableInspection(execution: OpenExecutionReference, reason: string | undefined): void {
+    const polls = (this.unreadablePolls.get(execution.executionId) ?? 0) + 1
+    this.unreadablePolls.set(execution.executionId, polls)
+    const detail = reason ?? 'no reason reported'
+    if (polls === 1) {
+      safeConsoleError('[dsh-task-board] execution session ' + (execution.sessionId ?? 'unknown')
+        + ' history is unreadable; it stays pending for up to ' + UNREADABLE_SETTLE_POLLS + ' polls: ' + detail)
+    }
+    if (polls < UNREADABLE_SETTLE_POLLS) return
+    this.unreadablePolls.delete(execution.executionId)
+    this.ledger.settle(
+      execution.taskId,
+      execution.executionId,
+      'failed',
+      'execution session history is unreadable (' + UNREADABLE_SETTLE_POLLS + ' consecutive polls); the outcome cannot be determined: ' + detail,
+    )
   }
 
   /** Drop the armed schedule timer and forget its target. */
@@ -430,8 +506,11 @@ export class TaskBoardHostService {
       return
     }
     for (const schedule of this.ledger.dueSchedules(now)) {
-      const next = nextRunAtMs(schedule.cron, schedule.nextRunAt)
-      this.dispatchRuns(this.ledger.openScheduled(schedule.taskId, next, now))
+      const next = nextRunAtMs(schedule.cron, schedule.nextRunAt, schedule.timeZone)
+      this.dispatchRuns(
+        this.ledger.openScheduled(schedule.taskId, next, now),
+        { triggeredAt: now, timeZone: schedule.timeZone, cron: schedule.cron },
+      )
     }
     // The launched run (or the rolled-forward target) moved every due schedule,
     // so the next nearest target has to be recomputed from the ledger.
@@ -449,18 +528,18 @@ export class TaskBoardHostService {
    * others back. A team run's members are spawned inside the root's Lead
    * session instead, once that session exists.
    */
-  private dispatchRuns(runs: readonly OpenedRun[]): void {
+  private dispatchRuns(runs: readonly OpenedRun[], schedule?: ScheduledRunContext): void {
     if (runs.length === 0) return
     const root = runs.find(run => run.dispatch !== 'teammate') ?? runs[0]
     const others = runs.filter(run => run !== root)
-    this.scheduleLaunch(root, others)
+    this.scheduleLaunch(root, others, schedule)
     for (const run of others) {
-      if (run.dispatch !== 'teammate') this.scheduleLaunch(run)
+      if (run.dispatch !== 'teammate') this.scheduleLaunch(run, [], schedule)
     }
   }
 
-  private scheduleLaunch(opened: OpenedRun, others: readonly OpenedRun[] = []): void {
-    void this.launch(opened, others).catch(error => {
+  private scheduleLaunch(opened: OpenedRun, others: readonly OpenedRun[] = [], schedule?: ScheduledRunContext): void {
+    void this.launch(opened, others, schedule).catch(error => {
       safeConsoleError('[dsh-task-board] execution launch settlement failed', error)
     })
   }

@@ -1,15 +1,18 @@
 import type { TaskUpdatePatch } from './core/use-cases/task-update.ts'
 import { isTaskPermission, isTaskStatus, isTaskTagList, type NewTaskInput, type TaskPermission, type TaskRecord, type TaskStatus } from './core/tasks.ts'
 import { parseLedger } from './core/store.ts'
+import { isValidTimeZone } from './core/schedule.ts'
 import { sanitizeFreezeSnapshot, type FreezeSnapshot } from './core/freeze-snapshot.ts'
 import { sanitizeHandover, type TaskHandoverInput } from './core/handover.ts'
 
 /** Freeze payload carried by create/update actions after the gate (redacted in place). */
 type FreezePayload = FreezeSnapshot & { redacted?: boolean; frozenBy?: string }
 
-export const TASK_BOARD_SCHEMA_VERSION = 3 as const
-/** Ledger documents written before v3; loaded once and migrated on startup. */
-export const TASK_BOARD_LEGACY_SCHEMA_VERSION = 2 as const
+export const TASK_BOARD_SCHEMA_VERSION = 4 as const
+/** Ledger documents written before v4; loaded once and migrated on startup. */
+export const TASK_BOARD_LEGACY_SCHEMA_VERSION = 3 as const
+/** Ledger documents written before v3; migrated through the v3 normalization too. */
+export const TASK_BOARD_OLDER_SCHEMA_VERSION = 2 as const
 export const TASK_BOARD_API_PREFIX = '/api/task-board'
 
 export type PowerPhase = 'disabled' | 'idle' | 'acquiring' | 'active' | 'error' | 'unsupported'
@@ -101,7 +104,8 @@ export type TaskBoardAction =
   | { kind: 'move'; taskId: string; status: TaskStatus }
   | { kind: 'archive'; taskId: string }
   | { kind: 'restore'; taskId: string }
-  | { kind: 'set-schedule'; taskId: string; patch: { enabled?: boolean; cron?: string } }
+  | { kind: 'settle'; taskId: string }
+  | { kind: 'set-schedule'; taskId: string; patch: { enabled?: boolean; cron?: string; timeZone?: string | null } }
   | { kind: 'run'; taskId: string }
   | { kind: 'rerun'; taskId: string }
   | { kind: 'confirm-permission'; taskId: string }
@@ -154,6 +158,8 @@ function validImportedKnownFields(value: Record<string, unknown>): boolean {
     const schedule = record(value.schedule)
     if (schedule === undefined || typeof schedule.enabled !== 'boolean' || typeof schedule.cron !== 'string') return false
     if (!optionalFiniteNumber(schedule.nextRunAt) || !optionalFiniteNumber(schedule.lastTriggeredAt)) return false
+    if (schedule.timeZone !== undefined
+      && (typeof schedule.timeZone !== 'string' || !isValidTimeZone(schedule.timeZone))) return false
   }
   if (value.executions !== undefined) {
     if (!Array.isArray(value.executions)) return false
@@ -199,6 +205,7 @@ function importedTask(value: unknown): TaskRecord | undefined {
       schedule: {
         enabled: task.schedule.enabled,
         cron: task.schedule.cron,
+        ...(task.schedule.timeZone === undefined ? {} : { timeZone: task.schedule.timeZone }),
         nextRunAt: task.schedule.nextRunAt,
         lastTriggeredAt: task.schedule.lastTriggeredAt,
       },
@@ -261,8 +268,10 @@ function createInput(value: unknown): value is NewTaskInput {
   if (input.handover !== undefined && handoverPayload(input.handover) === undefined) return false
   if (input.schedule !== undefined) {
     const schedule = record(input.schedule)
-    if (schedule === undefined || !exactKeys(schedule, ['enabled', 'cron'])) return false
+    if (schedule === undefined || !exactKeys(schedule, ['enabled', 'cron', 'timeZone'])) return false
     if (typeof schedule.enabled !== 'boolean' || typeof schedule.cron !== 'string') return false
+    if (schedule.timeZone !== undefined
+      && (typeof schedule.timeZone !== 'string' || !isValidTimeZone(schedule.timeZone))) return false
   }
   return true
 }
@@ -291,9 +300,13 @@ function updatePatch(value: unknown): boolean {
 function schedulePatch(value: unknown): boolean {
   const patch = record(value)
   return patch !== undefined
-    && exactKeys(patch, ['enabled', 'cron'])
+    && exactKeys(patch, ['enabled', 'cron', 'timeZone'])
     && (patch.enabled === undefined || typeof patch.enabled === 'boolean')
     && (patch.cron === undefined || typeof patch.cron === 'string')
+    // `null` clears the stored zone back to the Host zone; an unknown name is
+    // rejected here so the Host never has to guess at an unusable zone.
+    && (patch.timeZone === undefined || patch.timeZone === null
+      || (typeof patch.timeZone === 'string' && isValidTimeZone(patch.timeZone)))
 }
 
 export function parseActionEnvelope(value: unknown): TaskBoardActionEnvelope | undefined {
@@ -369,6 +382,7 @@ function parseEnvelopeAction(value: unknown): TaskBoardActionEnvelope | undefine
     case 'delete':
     case 'archive':
     case 'restore':
+    case 'settle':
     case 'run':
     case 'rerun':
       if (!exactKeys(action, ['kind', 'taskId'])) return undefined

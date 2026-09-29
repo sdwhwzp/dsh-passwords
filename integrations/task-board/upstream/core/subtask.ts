@@ -36,6 +36,31 @@ export function isExecutionOutcome(value: unknown): value is ExecutionOutcome {
   return value === 'succeeded' || value === 'failed' || value === 'cancelled'
 }
 
+/**
+ * Reusable lineage index over ONE task list: the id lookup and the direct
+ * children per parent. A caller that runs several lineage queries over the same
+ * ledger (the link-subtask candidate gate runs one per task) builds this once
+ * instead of rescanning the list per query.
+ */
+export interface LineageIndex {
+  readonly byId: ReadonlyMap<string, TaskRecord>
+  readonly childrenByParent: ReadonlyMap<string, readonly TaskRecord[]>
+}
+
+/** Build the reusable index for a task list (ledger order preserved). */
+export function buildLineageIndex(tasks: readonly TaskRecord[]): LineageIndex {
+  const byId = new Map<string, TaskRecord>()
+  const childrenByParent = new Map<string, TaskRecord[]>()
+  for (const task of tasks) {
+    byId.set(task.id, task)
+    if (task.parentId === undefined) continue
+    const siblings = childrenByParent.get(task.parentId)
+    if (siblings === undefined) childrenByParent.set(task.parentId, [task])
+    else siblings.push(task)
+  }
+  return { byId, childrenByParent }
+}
+
 function indexOf(tasks: readonly TaskRecord[]): Map<string, TaskRecord> {
   return new Map(tasks.map(task => [task.id, task]))
 }
@@ -46,8 +71,8 @@ function indexOf(tasks: readonly TaskRecord[]): Map<string, TaskRecord> {
  * under a larger limit survives that limit being lowered, and restore and
  * inheritance must still see all of it.
  */
-export function ancestorChain(tasks: readonly TaskRecord[], task: TaskRecord): TaskRecord[] {
-  const index = indexOf(tasks)
+export function ancestorChain(tasks: readonly TaskRecord[], task: TaskRecord, lineage?: LineageIndex): TaskRecord[] {
+  const index = lineage?.byId ?? indexOf(tasks)
   const chain: TaskRecord[] = []
   const seen = new Set<string>([task.id])
   let current = task.parentId === undefined ? undefined : index.get(task.parentId)
@@ -61,13 +86,14 @@ export function ancestorChain(tasks: readonly TaskRecord[], task: TaskRecord): T
 }
 
 /** Root-to-task depth: a root task is 0, its subtask 1, and so on. */
-export function taskDepth(tasks: readonly TaskRecord[], id: string): number {
-  const task = indexOf(tasks).get(id)
-  return task === undefined ? 0 : ancestorChain(tasks, task).length
+export function taskDepth(tasks: readonly TaskRecord[], id: string, lineage?: LineageIndex): number {
+  const task = (lineage?.byId ?? indexOf(tasks)).get(id)
+  return task === undefined ? 0 : ancestorChain(tasks, task, lineage).length
 }
 
 /** Direct subtasks of a task, in ledger order. */
-export function directSubtasks(tasks: readonly TaskRecord[], id: string): TaskRecord[] {
+export function directSubtasks(tasks: readonly TaskRecord[], id: string, lineage?: LineageIndex): TaskRecord[] {
+  if (lineage !== undefined) return [...(lineage.childrenByParent.get(id) ?? [])]
   return tasks.filter(task => task.parentId === id)
 }
 
@@ -75,15 +101,18 @@ export function directSubtasks(tasks: readonly TaskRecord[], id: string): TaskRe
  * Descendants of a task in breadth-first order, bounded by maxSubtaskDepth
  * total depth. The visited set keeps a malformed ledger from looping.
  */
-export function descendantTasks(tasks: readonly TaskRecord[], id: string, maxSubtaskDepth: number): TaskRecord[] {
+export function descendantTasks(tasks: readonly TaskRecord[], id: string, maxSubtaskDepth: number, lineage?: LineageIndex): TaskRecord[] {
   const visited = new Set<string>([id])
   const found: TaskRecord[] = []
   let frontier = [id]
   for (let depth = 1; depth <= maxSubtaskDepth && frontier.length > 0; depth += 1) {
     const next: string[] = []
     for (const parentId of frontier) {
-      for (const task of tasks) {
-        if (task.parentId !== parentId || visited.has(task.id)) continue
+      const children = lineage === undefined
+        ? tasks.filter(task => task.parentId === parentId)
+        : lineage.childrenByParent.get(parentId) ?? []
+      for (const task of children) {
+        if (visited.has(task.id)) continue
         visited.add(task.id)
         found.push(task)
         next.push(task.id)
@@ -99,13 +128,13 @@ export function descendantTasks(tasks: readonly TaskRecord[], id: string, maxSub
  * The visited set makes the walk terminate on a cyclic hand-edited ledger
  * instead of recursing until the stack overflows.
  */
-export function subtreeHeight(tasks: readonly TaskRecord[], id: string, visited: ReadonlySet<string> = new Set<string>()): number {
+export function subtreeHeight(tasks: readonly TaskRecord[], id: string, visited: ReadonlySet<string> = new Set<string>(), lineage?: LineageIndex): number {
   if (visited.has(id)) return 0
   const seen = new Set([...visited, id])
-  const children = directSubtasks(tasks, id)
+  const children = directSubtasks(tasks, id, lineage)
   if (children.length === 0) return 0
   let height = 0
-  for (const child of children) height = Math.max(height, 1 + subtreeHeight(tasks, child.id, seen))
+  for (const child of children) height = Math.max(height, 1 + subtreeHeight(tasks, child.id, seen, lineage))
   return Math.min(height, SUBTASK_DEPTH_MAX)
 }
 
@@ -137,16 +166,17 @@ export function checkParentLink(
   childId: string,
   parentId: string | null,
   maxSubtaskDepth: number,
+  lineage?: LineageIndex,
 ): ParentLinkCheck {
-  const child = tasks.find(task => task.id === childId)
+  const child = lineage === undefined ? tasks.find(task => task.id === childId) : lineage.byId.get(childId)
   if (child === undefined) return { ok: false, reason: 'unknown-task' }
   if (parentId === null || parentId === '') return { ok: true }
   if (parentId === childId) return { ok: false, reason: 'self-parent' }
-  const parent = tasks.find(task => task.id === parentId)
+  const parent = lineage === undefined ? tasks.find(task => task.id === parentId) : lineage.byId.get(parentId)
   if (parent === undefined) return { ok: false, reason: 'unknown-parent' }
   if (parent.archivedAt !== undefined) return { ok: false, reason: 'archived-parent' }
-  if (descendantTasks(tasks, childId, SUBTASK_DEPTH_MAX).some(task => task.id === parentId)) return { ok: false, reason: 'cycle' }
-  const depth = taskDepth(tasks, parentId) + 1 + subtreeHeight(tasks, childId)
+  if (descendantTasks(tasks, childId, SUBTASK_DEPTH_MAX, lineage).some(task => task.id === parentId)) return { ok: false, reason: 'cycle' }
+  const depth = taskDepth(tasks, parentId, lineage) + 1 + subtreeHeight(tasks, childId, new Set<string>(), lineage)
   if (depth > maxSubtaskDepth) return { ok: false, reason: 'depth-exceeded' }
   return { ok: true }
 }
@@ -241,18 +271,43 @@ export function effectiveTaskPermission(task: TaskRecord): TaskRecord['permissio
  */
 /**
  * The immutable teammate name for one team-mode member. Teammate names are
- * lower-kebab-case and must stay unique for the lifetime of the Team, so the
- * run-group token is appended: two runs of the same tree never collide. A title
- * with no ASCII word characters (a CJK title, for example) keeps a stable
- * generic prefix and is still distinguished by the token.
+ * lower-kebab-case and must stay unique for the lifetime of the Team: the
+ * run-group token separates two runs of the same tree, and the member
+ * discriminator separates two members of one run that reduce to the same slug.
+ *
+ * The discriminator is not cosmetic. A title with no ASCII word characters (a
+ * CJK title, for example) carries no slug at all, so every such title of one
+ * run group collides on the generic prefix; Agent Teams answers every member
+ * after the first with `teammate name "..." was already used in this Team`,
+ * and those subtasks never start. Two ASCII titles that share a slug
+ * (`AI 强度预测` next to `AI 配比优化`) collide the same way.
  * @param title - the member task's title.
  * @param token - the run group id (the task id when no group is recorded).
+ * @param memberId - the member task's id, which makes the name unique in the run.
  * @returns the teammate name handed to the Agent Teams service.
  */
-export function teammateName(title: string, token: string): string {
+export function teammateName(title: string, token: string, memberId?: string): string {
   const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32).replace(/-+$/g, '')
   const suffix = token.replace(/[^a-z0-9]/gi, '').slice(0, 8).toLowerCase()
-  return `${slug === '' ? 'subtask' : slug}-${suffix === '' ? 'run' : suffix}`
+  const member = memberId === undefined || memberId === '' ? undefined : stableTag(memberId)
+  return [slug === '' ? 'subtask' : slug, member, suffix === '' ? 'run' : suffix]
+    .filter((part): part is string => part !== undefined)
+    .join('-')
+}
+
+/**
+ * A stable 4-hex tag for one member id. The name is derived twice for the same
+ * member — once for the Lead's prompt and once for the spawn request — so the
+ * tag must be a pure function of the id, never of a clock or a counter. FNV-1a
+ * keeps it dependency-free in `core/`, which both halves compile.
+ */
+function stableTag(value: string): string {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return hash.toString(16).padStart(8, '0').slice(0, 4)
 }
 
 export function resolveExecutionTargets(

@@ -87,6 +87,13 @@ export interface ScheduleRule {
   enabled: boolean
   /** 5-field cron expression: `分 时 日 月 周`. */
   cron: string
+  /**
+   * IANA zone the cron wall clock is read in (issue #1722). Absent means the
+   * Host process zone, which is what a rule written before zones were
+   * persisted keeps using; the Host stamps its own zone at ledger migration so
+   * a later `TZ` change cannot silently move an existing rule.
+   */
+  timeZone?: string
   /** Next due instant (ms epoch); maintained by the scheduler/controller. */
   nextRunAt: number | undefined
   /** Instant of the latest scheduled trigger (ms epoch). */
@@ -371,10 +378,11 @@ export interface NewTaskInput {
   goalRun?: boolean
   /**
    * Optional scheduled-run rule requested at creation time (the new-task
-   * dialog): an enable flag plus a 5-field cron expression. The create use
-   * case arms it only when enabled and the expression is valid.
+   * dialog): an enable flag, a 5-field cron expression, and the IANA zone its
+   * wall clock is read in (absent means the Host zone). The create use case
+   * arms it only when enabled and the expression is valid.
    */
-  schedule?: { enabled: boolean; cron: string }
+  schedule?: { enabled: boolean; cron: string; timeZone?: string }
   /**
    * Optional frozen context snapshot (goal/progress/next, sanitized by the
    * protocol gate) turning the new task into a continuation card.
@@ -495,11 +503,18 @@ export function withSchedule(
   const schedule: ScheduleRule = {
     enabled: current?.enabled ?? false,
     cron: current?.cron ?? '',
+    ...(current?.timeZone === undefined ? {} : { timeZone: current.timeZone }),
     nextRunAt: current?.nextRunAt,
     lastTriggeredAt: current?.lastTriggeredAt,
   }
   if ('enabled' in patch) schedule.enabled = patch.enabled ?? false
   if ('cron' in patch) schedule.cron = patch.cron ?? ''
+  // An explicit `undefined` drops the stored zone (back to the Host zone);
+  // an absent key keeps it.
+  if ('timeZone' in patch) {
+    if (patch.timeZone === undefined) delete schedule.timeZone
+    else schedule.timeZone = patch.timeZone
+  }
   if ('nextRunAt' in patch) schedule.nextRunAt = patch.nextRunAt
   if ('lastTriggeredAt' in patch) schedule.lastTriggeredAt = patch.lastTriggeredAt
   return { ...task, updatedAt: now, schedule }
