@@ -1,12 +1,12 @@
 # Fork compatibility and deployment
 
-This fork integrates `slywalker2006/dsh-passwords` commit `ff09f16a86fd4d6a85c9566e573c297744f0e4ac` (v2.7.5) on `dev`. Its candidate version is `2.7.5-dsh.20260926.2`; the owned push repository is `git@github.com:sdwhwzp/dsh-passwords.git`.
+This fork integrates `slywalker2006/dsh-passwords` commit `ff09f16a86fd4d6a85c9566e573c297744f0e4ac` (v2.7.5) on `dev`. Its candidate version is `2.7.5-dsh.20260929.3`; the owned push repository is `git@github.com:sdwhwzp/dsh-passwords.git`.
 
 ## Runtime requirements
 
-Use Node.js 22.19+ or 24+ and the matching private Harness `0.1.7-rc.2` build. Development dependencies link to that checkout; runtime peers refer to the same release. An official npm Harness or bundled Docker installation alone does not provide the native principal extensions needed by this tenant deployment. The native adapter does not rewrite installed Harness bundles. Startup validates the version, native settings support, and authenticated Host connection before opening the public listener.
+Use Node.js 22.19+ or 24+ and the matching private Harness `0.2.0-rc.1` build. Development dependencies link to that checkout; runtime peers refer to the same release. An official npm Harness or bundled Docker installation alone does not provide the native principal extensions needed by this tenant deployment. The native adapter does not rewrite installed Harness bundles. Startup validates the version, native settings support, and authenticated Host connection before opening the public listener.
 
-Within the 0.1.7 line, only reviewed `0.1.7-alpha.2`, `0.1.7-rc.1` and `0.1.7-rc.2` identities are accepted. Native version recognition also retains the previously supported `0.1.2-alpha.*`, `0.1.5-alpha.1`, `alpha.2`, `rc.1`, and `rc.2` labels. Recognition does not supply private extensions or establish release acceptance. Record candidate and production verification with each deployment; upstream test-server results do not certify this fork.
+The gateway accepts the reviewed `0.2.0-rc.1` identity and its build metadata; later 0.2 prereleases and stable versions require separate review. Within the 0.1.7 line, only reviewed `0.1.7-alpha.2`, `0.1.7-rc.1` and `0.1.7-rc.2` identities are accepted. Native version recognition also retains the previously supported `0.1.2-alpha.*`, `0.1.5-alpha.1`, `alpha.2`, `rc.1`, and `rc.2` labels. Recognition does not supply private extensions or establish release acceptance. Record candidate and production verification with each deployment; upstream test-server results do not certify this fork.
 
 ## Account authorization
 

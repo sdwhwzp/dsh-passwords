@@ -114,7 +114,7 @@ Android / iOS 原生 `dsh-mobile` 的多账号登录、账号切换及协议桥�
 
 ### 0. 前置条件（三样）
 
-宿主机安装需要 Node.js 22.19+ 或 24+、git 和带本 fork 租户扩展的 Harness。当前部署目标为私有 Harness `0.1.7-rc.2`；0.1.7 线仅接受已审查的 `0.1.7-alpha.2`、`0.1.7-rc.1` 与 `0.1.7-rc.2`。安装器与 bundled Docker 继承上游的公开 rc.2 默认值，不能代替本部署的私有构建。实际检查与部署状态见部署记录及 [兼容说明](docs/compatibility-matrix.md)。
+宿主机安装需要 Node.js 22.19+ 或 24+、git 和带本 fork 租户扩展的 Harness。当前部署目标为私有 Harness `0.2.0-rc.1`；0.1.7 线仅接受已审查的 `0.1.7-alpha.2`、`0.1.7-rc.1` 与 `0.1.7-rc.2`。安装器与 bundled Docker 继承上游的公开 rc.2 默认值，不能代替本部署的私有构建。实际检查与部署状态见部署记录及 [兼容说明](docs/compatibility-matrix.md)。
 
 ### 1. 安装（按平台）
 
@@ -440,7 +440,7 @@ curl -so /dev/null -w "TLS:%{time_appconnect}s\n" https://地址/gateway/login
 
 ### 手动安装
 
-> v2.7.5 的上游功能已合入本 fork；本部署使用私有 Harness `0.1.7-rc.2`，账号隔离和受管目录规则见 [兼容说明](docs/compatibility-matrix.md)。上游测试服务器的结果不代表本 fork 已部署。
+> v2.7.5 的上游功能已合入本 fork；本部署使用私有 Harness `0.2.0-rc.1`，账号隔离和受管目录规则见 [兼容说明](docs/compatibility-matrix.md)。上游测试服务器的结果不代表本 fork 已部署。
 
 1. `git clone https://github.com/sdwhwzp/dsh-passwords && cd dsh-passwords`
 2. `npm install && npm run build`

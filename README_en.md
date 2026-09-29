@@ -111,7 +111,7 @@ External file services and their accounts, passwords and databases are managed b
 
 ### 0. Prerequisites (three things)
 
-Host installs need Node.js 22.19+ or 24+, git, and the private Harness `0.1.7-rc.2` with native tenant extensions. Within the 0.1.7 line, the gateway accepts only reviewed alpha.2, rc.1 and rc.2 identities. Public rc.2 is the inherited installer and Docker default, not an accepted substitute for the private deployment. See the [compatibility notes](docs/compatibility-matrix.md) and deployment records.
+Host installs need Node.js 22.19+ or 24+, git, and the private Harness `0.2.0-rc.1` with native tenant extensions. Within the 0.1.7 line, the gateway accepts only reviewed alpha.2, rc.1 and rc.2 identities. Public rc.2 is the inherited installer and Docker default, not an accepted substitute for the private deployment. See the [compatibility notes](docs/compatibility-matrix.md) and deployment records.
 
 ### 1. Install (by platform)
 
