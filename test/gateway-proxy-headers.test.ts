@@ -27,7 +27,7 @@ const { WebSocketServer, WebSocket: NodeWebSocket } = require('ws') as {
   WebSocket: new (url: string, options?: { headers?: Record<string, string> }) => any;
 };
 
-import { createGatewayServer } from '../src/gateway.js';
+import { createGatewayServer, requestBodyLimitFor, DEFAULT_USER_REQUEST_BODY_BYTES, ADMIN_REQUEST_BODY_BYTES } from '../src/gateway.js';
 import { AuthService } from '../src/auth.js';
 import { Database } from '../src/db.js';
 import { createFieldCrypto } from '../src/encrypt.js';
@@ -198,6 +198,7 @@ let assignableResources = {
   sessions: ['session-visible', 'session-hidden', 'session-newly-shared'],
 };
 let assignableResourcesUnavailable = false;
+let assignableResourcesDelayMs = 0;
 let remoteMuxOpenEndpoints: string[] = [];
 let defaultModelInitializationRequests: string[] = [];
 let remoteMuxOpenFrames: Array<Record<string, unknown>> = [];
@@ -210,10 +211,19 @@ let remoteMuxBaselinePinnedSessionIds: unknown[] | null = null;
 let remoteMuxPinnedIncrement: unknown[] | null = null;
 /** 回归用：workspace/follow baseline 的「可见工作区」路径（默认与旧用例一致）。 */
 let remoteMuxBaselineVisiblePath = '/workspaces/visible';
+let remoteMuxBaselineVisibleSessionIds = ['session-visible'];
 /** 回归用：baseline 是否省略可见工作区（模拟不完整的可见性快照）。 */
 let remoteMuxBaselineOmitVisibleWorkspace = false;
 /** 回归用：上游在收到 cancel 后仍发出该流的迟到 item/end（官方 Remote 契约允许）。 */
 let remoteMuxLateFrameOnCancel = false;
+/** 回归用：workspace.archiveSession/unarchiveSession 成功响应回带的宿主全局归档集合
+ *  （null = 使用默认 mock 响应，不进入归档分支）。 */
+let archiveSessionResponseMode: 'ok' | 'malformed' | null = null;
+/** 回归用：workspace/create 成功响应 workspace.sessionIds（null = 默认空数组；
+ *  非数组用于模拟上游形状回归）。 */
+let workspaceCreateResponseSessionIds: unknown = null;
+/** 回归用：workspace.list 的 pinnedSessionIds 形状（'malformed' = 存在但不是数组）。 */
+let workspaceListPinnedMode: 'ok' | 'malformed' = 'ok';
 /** 回归用：改写 session/follow 首帧 snapshot 的 header.id，制造身份不匹配。 */
 let remoteMuxSnapshotHeaderId: string | null = null;
 let lastRawUploadBody = Buffer.alloc(0);
@@ -363,6 +373,10 @@ function startMockUpstream(): Promise<http.Server> {
           client.send(JSON.stringify({ type: 'end', streamId: frame.streamId }));
           return;
         }
+        if (frame.endpoint === 'future/plugin' || frame.endpoint === 'future/remote/terminal/stream') {
+          client.send(JSON.stringify({ type: 'item', streamId: frame.streamId, value: { type: 'plugin/opaque', ok: true } }));
+          return;
+        }
         if (frame.endpoint === 'job/list') {
           client.send(JSON.stringify({
             type: 'item',
@@ -401,7 +415,7 @@ function startMockUpstream(): Promise<http.Server> {
                     workspaceId: 'workspace-visible',
                     path: remoteMuxBaselineVisiblePath,
                     title: 'Visible workspace',
-                    sessionIds: ['session-visible'],
+                    sessionIds: remoteMuxBaselineVisibleSessionIds,
                   }]),
                   {
                     workspaceId: 'workspace-hidden',
@@ -595,6 +609,14 @@ function startMockUpstream(): Promise<http.Server> {
           setTimeout(() => req.socket.destroy(), 25);
           return;
         }
+        if (testMode === 'pinned-sessions') {
+          const body = JSON.parse(ARCHIVED_WORKSPACES_JSON.replaceAll('s-owned', 'pinned-owned').replaceAll('s-archived', 'pinned-archived'));
+          body.result.value.pinnedSessionIds = workspaceListPinnedMode === 'malformed'
+            ? 'not-an-array' : ['pinned-owned', 'pinned-archived', 'session-other-user', 42];
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify(body));
+          return;
+        }
         res.writeHead(200, { 'content-type': 'application/json' });
         res.write(
           badJson
@@ -723,6 +745,39 @@ function startMockUpstream(): Promise<http.Server> {
             },
           },
         }));
+      } else if (req.url === '/api/workspace/create') {
+        const chunks: Buffer[] = [];
+        req.on('data', (chunk: Buffer) => chunks.push(chunk));
+        req.on('end', () => {
+          const request = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ type: 'server-response', rpcId: request.rpcId, result: {
+            ok: true, value: { created: false, workspace: {
+              workspaceId: 'workspace-visible', path: '/workspaces/visible',
+              sessionIds: workspaceCreateResponseSessionIds ?? [],
+            } },
+          } }));
+        });
+      } else if (/^\/api\/workspace[.\/](?:archiveSession|unarchiveSession)(?:[?]|$)/.test(req.url ?? '')) {
+        // 0.1.7 的 archiveSession/unarchiveSession 成功响应携带宿主全局归档集合。
+        if (archiveSessionResponseMode === 'malformed') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({
+            type: 'server-response',
+            rpcId: 'workspace-archive-mock',
+            result: { ok: true, value: { archivedSessionIds: 'not-an-array' } },
+          }));
+        } else {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({
+            type: 'server-response',
+            rpcId: 'workspace-archive-mock',
+            result: {
+              ok: true,
+              value: { archivedSessionIds: ['session-visible', 'session-hidden', 'session-other-user', 42] },
+            },
+          }));
+        }
       } else if (/^\/api\/workspace[.\/](?:pinSession|unpinSession)(?:[?]|$)/.test(req.url ?? '')) {
         // 0.1.7-alpha.1 的 pin 响应携带宿主机全局 pin 集合（会被网关收租）。
         res.writeHead(200, { 'content-type': 'application/json' });
@@ -1130,7 +1185,6 @@ beforeEach(async () => {
       '/api/dynamicCordisRunner/*',
       'ws:/api/dynamicCordisRunner/*',
     ],
-    pluginCompat: false,
   };
 
   auth = new AuthService(config, db);
@@ -1280,6 +1334,7 @@ test('Remote job streams require a session and filter jobs to that authorized se
     allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
     allowedSessionIds: [], allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [],
   });
+  db.addUserSessionGrant(subUser.id, 'session-visible');
   const subCookie = `dsh_gateway_token=${jwt.sign({ sub: String(subUser.id), username: subUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' })}`;
   const connection = await openRemoteMux({ cookie: subCookie, origin: 'http://127.0.0.1', host: '127.0.0.1' });
   try {
@@ -1548,7 +1603,7 @@ test('子用户第三方 WebSocket：除内置事件与已配置 SSH 端点外�
     assert.equal(overview.status, 200);
     const overviewBody = JSON.parse(overview.body) as {
       endpoints: string[];
-      pluginCompat: boolean;
+
       users: Array<{ id: number; permissions: { allowSsh: boolean } }>;
     };
     assert.deepEqual(overviewBody.endpoints, [
@@ -1563,7 +1618,7 @@ test('子用户第三方 WebSocket：除内置事件与已配置 SSH 端点外�
       '/api/dynamicCordisRunner/*',
       'ws:/api/dynamicCordisRunner/*',
     ]);
-    assert.equal(overviewBody.pluginCompat, false, '默认关闭第三方插件兼容层');
+
 
     const afterGrant = await websocketHandshake('/plugin/ws/run', {
       cookie: subCookie,
@@ -2733,6 +2788,162 @@ test('普通文件预览和下载不再依赖 Git 下载权限', async () => {
   }
 });
 
+test('workspace.list：子用户只收到已授权会话的 pinnedSessionIds，形状异常时 fail-closed', async () => {
+  const subUser = createOwnedFixtureUser('list-pinned-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: ['/workspaces/a'],
+    hourlyTokenLimit: null,
+    dailyMinutesLimit: null,
+    allowUpload: false,
+    allowGitDownload: false,
+    allowWorkspaceCreate: false,
+    banned: false,
+    sandboxMode: null,
+    disabledSessions: [],
+    allowedSessionIds: ['pinned-owned', 'pinned-archived'],
+  });
+  db.markSessionGrantsSeeded(subUser.id);
+  db.claimSessionOwner('pinned-owned', subUser.id);
+  db.claimSessionOwner('pinned-archived', subUser.id);
+  const subToken = jwt.sign(
+    { sub: String(subUser.id), username: subUser.username, cv: 0 },
+    'test-secret',
+    { expiresIn: '12h' },
+  );
+  const originalCookie = cookie;
+  cookie = `dsh_gateway_token=${subToken}`;
+  try {
+    const allowed = await gatewayReq(
+      'POST',
+      '/api/workspace.list',
+      { 'content-type': 'application/json', 'x-test-mode': 'pinned-sessions' },
+      '{}',
+    );
+    assert.equal(allowed.status, 200, allowed.body);
+    const value = (JSON.parse(allowed.body) as {
+      result: { value: { pinnedSessionIds: unknown[] } };
+    }).result.value;
+    assert.deepEqual(
+      value.pinnedSessionIds,
+      ['pinned-owned', 'pinned-archived'],
+      '全局 pin 集合里的其他租户会话与非法元素必须被过滤',
+    );
+
+    workspaceListPinnedMode = 'malformed';
+    const malformed = await gatewayReq(
+      'POST',
+      '/api/workspace.list',
+      { 'content-type': 'application/json', 'x-test-mode': 'pinned-sessions' },
+      '{}',
+    );
+    assert.equal(malformed.status, 502, 'pinnedSessionIds 形状不符必须 fail-closed，不回放全局集合');
+  } finally {
+    workspaceListPinnedMode = 'ok';
+    cookie = originalCookie;
+  }
+});
+
+test('workspace.archiveSession：响应体的全局归档集合只保留已授权会话，形状异常 fail-closed', async () => {
+  const fixture = await authorizedSubuserFixture('archive-response-user');
+  const originalCookie = cookie;
+  cookie = fixture.cookie;
+  const json = { 'content-type': 'application/json' };
+  try {
+    archiveSessionResponseMode = 'ok';
+    const archived = await gatewayReq(
+      'POST',
+      '/api/workspace.archiveSession',
+      json,
+      JSON.stringify({ sessionId: 'session-visible' }),
+    );
+    assert.equal(archived.status, 200, archived.body);
+    const archivedValue = (JSON.parse(archived.body) as {
+      result?: { value?: { archivedSessionIds?: unknown } };
+    }).result?.value;
+    assert.deepEqual(
+      archivedValue?.archivedSessionIds,
+      ['session-visible'],
+      '全局归档集合里的其他租户会话与非法元素必须被过滤',
+    );
+
+    const unarchived = await gatewayReq(
+      'POST',
+      '/api/workspace.unarchiveSession',
+      json,
+      JSON.stringify({ sessionId: 'session-visible' }),
+    );
+    assert.equal(unarchived.status, 200, unarchived.body);
+    const unarchiveValue = (JSON.parse(unarchived.body) as {
+      result?: { value?: { archivedSessionIds?: unknown } };
+    }).result?.value;
+    assert.deepEqual(unarchiveValue?.archivedSessionIds, ['session-visible']);
+
+    archiveSessionResponseMode = 'malformed';
+    const malformed = await gatewayReq(
+      'POST',
+      '/api/workspace.archiveSession',
+      json,
+      JSON.stringify({ sessionId: 'session-visible' }),
+    );
+    assert.equal(malformed.status, 502, 'archivedSessionIds 形状不符必须 fail-closed，不回放全局集合');
+  } finally {
+    archiveSessionResponseMode = null;
+    cookie = originalCookie;
+    fixture.connection.client.close();
+  }
+});
+
+test('workspace/create：响应体的 workspace.sessionIds 只保留已授权会话，形状异常 fail-closed', async () => {
+  const subUser = createOwnedFixtureUser('create-response-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: ['/workspaces/visible'],
+    hourlyTokenLimit: null,
+    dailyMinutesLimit: null,
+    allowUpload: false,
+    allowGitDownload: false,
+    allowWorkspaceCreate: true,
+    banned: false,
+    sandboxMode: null,
+    disabledSessions: [],
+    allowedSessionIds: ['session-visible'],
+  });
+  db.markSessionGrantsSeeded(subUser.id);
+  const subToken = jwt.sign(
+    { sub: String(subUser.id), username: subUser.username, cv: 0 },
+    'test-secret',
+    { expiresIn: '12h' },
+  );
+  const originalCookie = cookie;
+  cookie = `dsh_gateway_token=${subToken}`;
+  const json = { 'content-type': 'application/json' };
+  try {
+    workspaceCreateResponseSessionIds = ['session-visible', 'session-hidden', 'session-other-user', 42];
+    const allowed = await gatewayReq('POST', '/api/workspace/create', json, JSON.stringify({
+      type: 'client-request', rpcId: 'create-response-scope', method: 'workspace/create',
+      payload: { args: { request: { path: '/workspaces/visible' } } },
+    }));
+    assert.equal(allowed.status, 200, allowed.body);
+    const workspace = (JSON.parse(allowed.body) as {
+      result: { value: { workspace: { sessionIds: unknown[] } } };
+    }).result.value.workspace;
+    assert.deepEqual(
+      workspace.sessionIds,
+      ['session-visible'],
+      '响应 workspace 投影里其他租户的会话 ID 必须被过滤',
+    );
+
+    workspaceCreateResponseSessionIds = { malformed: true };
+    const malformed = await gatewayReq('POST', '/api/workspace/create', json, JSON.stringify({
+      type: 'client-request', rpcId: 'create-response-malformed', method: 'workspace/create',
+      payload: { args: { request: { path: '/workspaces/visible' } } },
+    }));
+    assert.equal(malformed.status, 502, 'sessionIds 形状不符必须 fail-closed，不回放全局集合');
+  } finally {
+    workspaceCreateResponseSessionIds = null;
+    cookie = originalCookie;
+  }
+});
+
 test('流式透传路径（session.list，管理员）：保留 chunked，不带 content-length', async () => {
   const r = await gatewayReq('GET', '/api/session.list');
   assert.equal(r.status, 200);
@@ -3389,7 +3600,7 @@ test('rc.2 schedule/catalog：子用户不再 403，只保留已授权会话的�
       JSON.stringify({ type: 'client-request', rpcId: 'schedule-catalog-sub', method: 'schedule/catalog', payload: { args: {} } }),
     );
     assert.equal(sub.status, 200, sub.body);
-    const subValue = (JSON.parse(sub.body) as { result?: { ok?: boolean; value?: Array<{ id?: unknown; sessionId?: unknown }> } }).result;
+    const subValue = (JSON.parse(sub.body) as { result?: { ok?: boolean; value?: Array<{ id?: unknown; sessionId?: unknown; status?: unknown }> } }).result;
     assert.equal(subValue?.ok, true);
     assert.deepEqual(
       (subValue?.value ?? []).map((entry) => entry.id),

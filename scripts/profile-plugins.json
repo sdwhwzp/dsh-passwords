@@ -13,20 +13,15 @@
         "../dsh-web/packages/dsh-web-all"
       ],
       "localWorkspacePackages": [
-        "../dsh-web/packages/dsh-community-plugins",
         "../dsh-web/packages/dsh-git-graph",
         "../dsh-web/packages/dsh-market",
         "../dsh-web/packages/dsh-plugin-manager",
         "../dsh-web/packages/dsh-skill-explorer",
-        "../dsh-web/packages/skins/skin-center",
         "../dsh-web/packages/dsh-task-board",
         "../dsh-web/packages/dsh-web-settings",
-        "../dsh-web/packages/dsh-doctor",
         "../dsh-web/packages/dsh-liangshen",
-        "../dsh-web/packages/dsh-pet",
         "../dsh-web/packages/dsh-remote-web-ui",
-        "../dsh-web/packages/dsh-ssh",
-        "../dsh-web/packages/dsh-tool-describe-image"
+        "../dsh-web/packages/dsh-ssh"
       ],
       "localPrepare": {
         "cwd": "../dsh-web",

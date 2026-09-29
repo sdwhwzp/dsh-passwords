@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.7.6 - 2026-09-29
+
+### 中文
+
+更新公告：
+
+1. 兼容 DSH `0.2.0-rc.1`，并保留 `0.2.0` 线 alpha/beta/rc 与稳定版的兼容门禁。
+2. 修复 Issue #33：解决 Windows `spawn EINVAL`、部署目录 `EBUSY/EPERM`、配置优先级和自动更新重复安装问题。
+3. 兼容大多数普通插件，普通插件对子用户开放 HTTP/Remote 与已加载 WebSocket；子用户可在主用户分配的工作区中使用并新建会话，SSH/终端等宿主敏感能力仍仅主用户可用。
+4. 修复工作区/会话授权、403/502/503、沙盒、上传下载、目录选择器、插件清单、配置漂移、回滚和多项跨平台生命周期问题；主子用户统一使用网页 browse 目录选择器。
+
+验证：本地 `npm test` 649/649、构建、类型检查、Issue #33 Windows 定向测试、README 安装流程打包验证通过；本地 Windows DSH `0.2.0-rc.1` HTTP 启动与 dsh-passwords 自动拉起通过；测试服务器工作区 E2E 20/20 通过。
+
+### English
+
+Release notes:
+
+1. Compatible with DSH `0.2.0-rc.1`, while retaining the compatibility gate for `0.2.0` alpha/beta/rc prereleases and stable releases.
+2. Fixed Issue #33: Windows `spawn EINVAL`, deployment-directory `EBUSY/EPERM`, configuration precedence, and repeated automatic installation.
+3. Compatible with most ordinary plugins: ordinary HTTP/Remote and loaded WebSocket surfaces are available to subusers; subusers can use and create sessions in workspaces assigned by the owner, while SSH/terminal and other host-sensitive capabilities remain owner-only.
+4. Fixed workspace/session authorization, 403/502/503 responses, sandbox enforcement, upload/download gates, directory picker behavior, plugin manifests, configuration drift, rollback, and multiple cross-platform lifecycle bugs; owners and subusers now use the web browse directory picker.
+
+Validation: local `npm test` 649/649, build, type check, Windows Issue #33 focused tests, and README installation/package checks passed; local Windows DSH `0.2.0-rc.1` HTTP startup and automatic dsh-passwords launch passed; test-server assigned-workspace E2E passed 20/20.
+
 ## 2.7.5 - 2026-09-25
 
 ### 中文

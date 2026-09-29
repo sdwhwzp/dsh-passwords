@@ -9,9 +9,14 @@
 #   dsh web --patch ./cordis.yml
 # 或把本文件内容合并进 ~/.dsh/profiles/web/cordis.patch.yml
 
-# DSH 0.1.2-alpha.1+ 已原生加载目录选择器。这里不能重复插入官方
-# directory-picker-browse/ui-directory-picker-browse，否则 profile 组合后会出现
-# duplicate loader entry id。只注册 dsh-passwords 自身的主机侧插件。
+# 多用户网关固定使用官方 browse 目录交互：Windows 本地的 auto 选择器会因
+# loopback + win32 误选原生 OS 对话框，远程子用户既看不到该对话框，也不能调用
+# directoryPicker/pick。直接覆盖官方 directory-picker 行，使用 browse host/client
+# 组合；不重复插入 auto/native，也不放开原生 pick。
 - insert:
+    - id: directory-picker
+      name: '@deepseek-ai/dsh-host-directory-picker-browse'
+    - id: directory-picker-client
+      name: '@deepseek-ai/dsh-client-ui-directory-picker-browse'
     - id: dsh-passwords
       name: 'dsh-passwords'

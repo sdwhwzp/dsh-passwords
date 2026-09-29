@@ -35,7 +35,9 @@ import {
   SUBUSER_BLOCKED_API_NAMESPACES,
   SUBUSER_BLOCKED_API_ENDPOINTS,
   isSubuserBlockedApiPath,
+  isSubuserBlockedRemoteEndpoint,
   classifySubuserPath,
+  dynamicPluginStreamAllowed,
   isWorkspaceWrite,
   SESSION_SCOPED_RE,
   WORKSPACE_FILES_SESSION_METHODS,
@@ -147,10 +149,22 @@ test('classifySubuserPath：传输过滤 + owner: 优先于 ssh + 官方/第三�
   assert.equal(classifySubuserPath('/plugins/pkg/client.js', { endpointRules, transport: 'http' }), 'official');
   assert.equal(classifySubuserPath('/api/dsh-passwords/state', { endpointRules, transport: 'http' }), 'platform');
 
-  // 未登记的第三方面：/api 与根级插件路由一律 third-party（fail-closed）
+  // 普通 DSH 扩展不需要逐插件登记；未知普通 API/根级路由直接通行。
   assert.equal(classifySubuserPath('/api/plugin-other/x', { endpointRules, transport: 'http' }), 'third-party');
   assert.equal(classifySubuserPath('/api/live-stats', { endpointRules, transport: 'http' }), 'third-party');
   assert.equal(classifySubuserPath('/third-party-panel/status', { endpointRules, transport: 'http' }), 'third-party');
+});
+
+test('classifySubuserPath：运行时清单通用适配 namespace 与根级路由', () => {
+  const dynamicManifest = { generation: 'test', namespaces: new Set(['myPlugin']), streamEndpoints: new Set(['myPlugin/watch']), exactPaths: new Set<string>(), pathPrefixes: new Set<string>() };
+  assert.equal(classifySubuserPath('/api/myPlugin/run', { endpointRules: [], transport: 'http', dynamicManifest }), 'official');
+  assert.equal(classifySubuserPath('/api/unknown/run', { endpointRules: [], transport: 'http', dynamicManifest }), 'third-party');
+  assert.equal(dynamicPluginStreamAllowed('myPlugin/watch', dynamicManifest), true);
+  assert.equal(dynamicPluginStreamAllowed('myPlugin/unknown', dynamicManifest), false);
+  const rootManifest = { generation: 'root', namespaces: new Set<string>(), streamEndpoints: new Set<string>(), exactPaths: new Set(['/extension/status']), pathPrefixes: new Set(['/extension/events']) };
+  assert.equal(classifySubuserPath('/extension/status', { endpointRules: [], transport: 'http', dynamicManifest: rootManifest }), 'official');
+  assert.equal(classifySubuserPath('/extension/events/live', { endpointRules: [], transport: 'http', dynamicManifest: rootManifest }), 'official');
+  assert.equal(classifySubuserPath('/extension/unknown', { endpointRules: [], transport: 'http', dynamicManifest: rootManifest }), 'third-party');
 });
 
 test('classifySubuserPath：尾部 /* 只放行直接子路径（不放行基路径与更深层）', () => {
@@ -228,12 +242,14 @@ test('alpha.2 命名空间门禁：officeToPdf 保持 fail-closed；pluginManage
   assert.equal(classifySubuserPath('/api/pluginManager', { endpointRules, transport: 'http' }), 'third-party');
   assert.equal(classifySubuserPath('/api/pluginManager/install', { endpointRules, transport: 'http' }), 'third-party');
 
-  // agentTeams（@deepseek-ai/dsh-experimental-agent-team）留默认拒绝：无 owner-only 明确授权前不开放
+  // A dynamic manifest must not grant account access to Agent Teams.
   assert.equal(OFFICIAL_API_NAMESPACES.has('agentTeams'), false);
   assert.equal(classifySubuserPath('/api/agentTeams/spawn', { endpointRules, transport: 'http' }), 'third-party');
+  const dynamic = { generation: 'agent-team', namespaces: new Set(['agentTeams']), streamEndpoints: new Set<string>(), exactPaths: new Set<string>(), pathPrefixes: new Set<string>() };
+  assert.equal(classifySubuserPath('/api/agentTeams/spawn', { endpointRules, transport: 'http', dynamicManifest: dynamic }), 'third-party');
 });
 
-test('通用 SSH 登记规则不能改变 pluginManager / agentTeams / officeToPdf / terminal / dynamicCordisRunner 的分类（硬拒绝先于登记表）', () => {
+test('通用 SSH 登记规则不能改变 pluginManager / officeToPdf / terminal / dynamicCordisRunner 的分类；Agent Teams 保持管理员专用', () => {
   // 宽泛规则（运维常见写法）不得把特权/未验证命名空间带进来
   const generic = parseEndpointAllowlist('/api/*,ws:/api/*,http:/api/*', 'TEST');
   const blockedPaths = [
@@ -242,9 +258,7 @@ test('通用 SSH 登记规则不能改变 pluginManager / agentTeams / officeToP
     '/api/pluginManager/runPnpm',
     '/api/pluginManager.change',
     '/api/pluginManager.runPnpm',
-    '/api/agentTeams',
-    '/api/agentTeams/spawn',
-    '/api/agentTeams.spawn',
+
     '/api/officeToPdf',
     '/api/officeToPdf/generation',
     '/api/officeToPdf/render',
@@ -258,15 +272,14 @@ test('通用 SSH 登记规则不能改变 pluginManager / agentTeams / officeToP
     '/api/terminal/shells',
     '/api/terminal.environment',
     '/api/terminal.create',
-    '/api/dynamicCordisRunner',
-    '/api/dynamicCordisRunner/runHostHalf',
-    '/api/dynamicCordisRunner.getClientCode',
-    '/api/dynamicCordisRunner/v1/futureMethod',
   ];
   for (const path of blockedPaths) {
     assert.equal(classifySubuserPath(path, { endpointRules: generic, transport: 'http' }), 'third-party', `http ${path}`);
     assert.equal(classifySubuserPath(path, { endpointRules: generic, transport: 'ws' }), 'third-party', `ws ${path}`);
   }
+  // Agent Teams 是动态已安装插件面；没有 manifest 时仍未知，维持 fail-closed。
+  assert.equal(classifySubuserPath('/api/agentTeams/spawn', { endpointRules: generic, transport: 'http' }), 'third-party');
+  assert.equal(classifySubuserPath('/api/dynamicCordisRunner/runHostHalf', { endpointRules: generic, transport: 'http' }), 'third-party');
 
   // 精确登记（含尾部 /* 通配）同样拿不到 ssh 分类：登记表不是硬拒绝的旁路；
   // terminal 的 allowSsh 放行由 gateway 的显式官方 terminal 分支完成。
@@ -277,7 +290,8 @@ test('通用 SSH 登记规则不能改变 pluginManager / agentTeams / officeToP
   assert.equal(classifySubuserPath('/api/pluginManager/change', { endpointRules: scoped, transport: 'http' }), 'third-party');
   assert.equal(classifySubuserPath('/api/pluginManager/change', { endpointRules: scoped, transport: 'ws' }), 'third-party');
   assert.equal(classifySubuserPath('/api/pluginManager.change', { endpointRules: scoped, transport: 'http' }), 'third-party');
-  assert.equal(classifySubuserPath('/api/agentTeams/spawn', { endpointRules: scoped, transport: 'http' }), 'third-party');
+  assert.equal(classifySubuserPath('/api/dynamicCordisRunner/runHostHalf', { endpointRules: scoped, transport: 'http' }), 'third-party');
+  assert.equal(classifySubuserPath('/api/dynamicCordisRunner/runHostHalf', { endpointRules: scoped, transport: 'ws' }), 'third-party');
   assert.equal(classifySubuserPath('/api/agentTeams/spawn', { endpointRules: scoped, transport: 'ws' }), 'third-party');
   assert.equal(classifySubuserPath('/api/officeToPdf/render', { endpointRules: scoped, transport: 'http' }), 'third-party');
   assert.equal(classifySubuserPath('/api/officeToPdf/render', { endpointRules: scoped, transport: 'ws' }), 'third-party');
@@ -286,6 +300,9 @@ test('通用 SSH 登记规则不能改变 pluginManager / agentTeams / officeToP
   assert.equal(classifySubuserPath('/api/terminal/create', { endpointRules: scoped, transport: 'ws' }), 'third-party');
   assert.equal(classifySubuserPath('/api/terminal/write', { endpointRules: scoped, transport: 'ws' }), 'third-party');
   assert.equal(classifySubuserPath('/api/terminal/list', { endpointRules: scoped, transport: 'http' }), 'third-party', '登记规则场景下 terminal/list 仍归 third-party（空成功伪装依赖此分类）');
+
+  assert.equal(classifySubuserPath('/api/dynamicCordisRunner/runHostHalf', { endpointRules: scoped, transport: 'http' }), 'third-party');
+  assert.equal(classifySubuserPath('/api/dynamicCordisRunner/runHostHalf', { endpointRules: scoped, transport: 'ws' }), 'third-party');
 
   // owner: 登记的既有语义保留：子用户仍 403（owner-only），且不会被误判成 ssh
   const ownerOnly = parseEndpointAllowlist(
@@ -300,8 +317,60 @@ test('通用 SSH 登记规则不能改变 pluginManager / agentTeams / officeToP
   assert.equal(classifySubuserPath('/api/pluginManagerBackup', { endpointRules: generic, transport: 'http' }), 'ssh');
   assert.equal(classifySubuserPath('/api/officeToPdfBackup', { endpointRules: generic, transport: 'http' }), 'ssh');
 
-  // 集合内容精确固定：新增硬拒绝命名空间必须显式改测试与文档
-  assert.deepEqual([...SUBUSER_BLOCKED_API_NAMESPACES].sort(), ['agentTeams', 'dynamicCordisRunner', 'officeToPdf', 'pluginManager', 'terminal']);
+  // Agent Teams 随已安装扩展适配，宿主代码执行与 terminal 仍走专门边界。
+  assert.deepEqual([...SUBUSER_BLOCKED_API_NAMESPACES].sort(), ['agentTeams', 'dynamicCordisRunner', 'officeToPdf', 'pluginManager', 'pluginRegistryProbe', 'productAnalytics', 'speech', 'terminal']);
+});
+
+test('宿主遥测、registry 探针和可选语音命名空间不落入普通插件透传面', () => {
+  const none = parseEndpointAllowlist('', 'TEST');
+  for (const [namespace, method] of [['productAnalytics', 'report'], ['pluginRegistryProbe', 'fastest'], ['speech', 'configure']]) {
+    for (const transport of ['http', 'ws'] as const) {
+      for (const path of [`/api/${namespace}/${method}`, `/api/${namespace}.${method}`]) {
+        assert.equal(isSubuserBlockedApiPath(path), true, path);
+        assert.equal(classifySubuserPath(path, { endpointRules: none, transport }), 'third-party', path);
+      }
+    }
+    assert.equal(isSubuserBlockedRemoteEndpoint(`${namespace}/${method}`), true);
+  }
+  assert.equal(isSubuserBlockedRemoteEndpoint('speech/follow'), true);
+  assert.equal(isSubuserBlockedApiPath('/api/productAnalyticsBackup/report'), false);
+});
+
+test('子用户宿主写/出站探测端点 fail-closed：settings 写方法与 llm/discoverModels', () => {
+  const none = parseEndpointAllowlist('', 'TEST');
+  const generic = parseEndpointAllowlist('/api/*,ws:/api/*,http:/api/*', 'TEST');
+  const exact = parseEndpointAllowlist('/api/settings/*,/api/llm/*,http:/api/settings/*', 'TEST');
+  const hostWrites = ['settings/mutate', 'settings/update', 'settings/replace', 'llm/discoverModels'];
+  // 动态清单声称已加载这些流也不能放行（宿主写面优先于运行时清单）。
+  const dynamicManifest = {
+    generation: 'host-write-guard',
+    namespaces: new Set(['settings', 'llm']),
+    streamEndpoints: new Set(hostWrites),
+    exactPaths: new Set<string>(),
+    pathPrefixes: new Set<string>(),
+  };
+  for (const endpoint of hostWrites) {
+    assert.equal(isSubuserBlockedRemoteEndpoint(endpoint), true, endpoint);
+    assert.equal(dynamicPluginStreamAllowed(endpoint, dynamicManifest), false, endpoint);
+    for (const path of [`/api/${endpoint}`, `/api/${endpoint.replace('/', '.')}`]) {
+      assert.equal(isSubuserBlockedApiPath(path), true, path);
+      for (const transport of ['http', 'ws'] as const) {
+        for (const rules of [none, generic, exact]) {
+          assert.equal(classifySubuserPath(path, { endpointRules: rules, transport }), 'third-party', path);
+        }
+      }
+    }
+  }
+  // 只读对照面保持可用：设置描述与已注册提供方枚举不是写/出站探测。
+  for (const endpoint of ['settings/describe', 'llm/listProviders', 'llm/listConfigurableProviders']) {
+    assert.equal(isSubuserBlockedRemoteEndpoint(endpoint), false, endpoint);
+    assert.equal(isSubuserBlockedApiPath(`/api/${endpoint}`), false, endpoint);
+  }
+  // 边界只按官方端点收紧：第三方插件自己的同名/相近方法不被本边界误伤。
+  for (const endpoint of ['thirdPartyPlugin/mutate', 'thirdPartyPlugin/update', 'settings/mutateExtra', 'llm/listProvidersV2']) {
+    assert.equal(isSubuserBlockedRemoteEndpoint(endpoint), false, endpoint);
+    assert.equal(isSubuserBlockedApiPath(`/api/${endpoint}`), false, endpoint);
+  }
 });
 
 test('terminal 命名空间保持硬拒绝分类：allowSsh 放行由 gateway 显式处理（alpha.2 安全边界）', () => {
@@ -402,7 +471,7 @@ test('OFFICIAL_API_NAMESPACES：alpha.2/rc.2 实测清单精确固定（新增�
     'workspaceFiles',
   ]);
   // 本地名字空间式成员、非 RPC 的通用词、旧线遗留名、硬拒命名空间均不得混入
-  for (const absent of ['dsh-composer', 'file', 'git', 'host', 'present', 'respond', 'events', 'terminal', 'pluginManager', 'agentTeams', 'officeToPdf']) {
+  for (const absent of ['dsh-composer', 'file', 'git', 'host', 'present', 'respond', 'events', 'terminal', 'pluginManager', 'pluginRegistryProbe', 'productAnalytics', 'speech', 'agentTeams', 'officeToPdf']) {
     assert.equal(OFFICIAL_API_NAMESPACES.has(absent), false, absent);
   }
 });
@@ -520,20 +589,26 @@ test('0.1.7：硬拒绝端点集合精确固定（宿主级能力 + 无法校验
     'credentials/set',
     'credentials/unset',
     'directoryPicker/pick',
+    'llm/discoverModels',
     'session/canOpenWorkspacePath',
     'session/initializeDefaultModel',
     'session/openWorkspacePath',
     'session/workspacePathApplications',
+    'settings/mutate',
     'settings/openSettingsDocument',
+    'settings/replace',
+    'settings/update',
   ]);
 });
 
 test('0.1.7 硬拒新端点：精确方法先于登记表，且不按前缀/命名空间扩散', () => {
   const none = parseEndpointAllowlist('', 'TEST');
   const generic = parseEndpointAllowlist('/api/*,ws:/api/*,http:/api/*', 'TEST');
-  const exact = parseEndpointAllowlist('/api/credentials/*,/api/settings/*,/api/session/*,/api/dynamicCordisRunner/*', 'TEST');
+  const exact = parseEndpointAllowlist('/api/credentials/*,/api/settings/*,/api/session/*,/api/dynamicCordisRunner/*,/api/llm/*', 'TEST');
   const blocked = [
     'credentials/set', 'credentials/unset', 'settings/openSettingsDocument',
+    'settings/mutate', 'settings/update', 'settings/replace',
+    'llm/discoverModels',
     'session/openWorkspacePath', 'session/canOpenWorkspacePath', 'session/workspacePathApplications',
     'session/initializeDefaultModel',
 
@@ -552,6 +627,9 @@ test('0.1.7 硬拒新端点：精确方法先于登记表，且不按前缀/命�
   for (const path of [
     '/api/credentials/setExtra', '/api/credentials.settings',
     '/api/settings/openSettingsDocumentExtra',
+    '/api/settings/mutateExtra', '/api/settings.updateSettings', '/api/settings/replacer',
+    '/api/settings2/mutate', '/api/llm/discoverModelsExtra', '/api/llmX/discoverModels',
+    '/api/llm.discoverModelsBackup',
     '/api/session/openWorkspacePathExtra', '/api/session/canOpenWorkspacePathX',
     '/api/credentialsX/set', '/api/settings2/openSettingsDocument',
   ]) {
@@ -559,7 +637,7 @@ test('0.1.7 硬拒新端点：精确方法先于登记表，且不按前缀/命�
   }
   // 普通官方命名空间的其它方法仍可按既有规则进入 official；动态 Cordis 是整体硬拒，
   // 所有已知、未知、未来方法及命名空间根路径都必须 fail-closed。
-  for (const path of ['/api/credentials/rotate', '/api/settings/describe', '/api/session/history']) {
+  for (const path of ['/api/credentials/rotate', '/api/settings/describe', '/api/settings.describe', '/api/llm/listProviders', '/api/llm.listConfigurableProviders', '/api/session/history']) {
     assert.equal(isSubuserBlockedApiPath(path), false, path);
     assert.equal(classifySubuserPath(path, { endpointRules: none, transport: 'http' }), 'official', path);
   }

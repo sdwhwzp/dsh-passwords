@@ -1,5 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { isPermanentGatewayExitCode } from '../dist/plugin.js';
+
+test('gateway permanent exit codes do not accept signal strings', () => {
+  assert.equal(isPermanentGatewayExitCode(1), true);
+  assert.equal(isPermanentGatewayExitCode(37), true);
+  assert.equal(isPermanentGatewayExitCode(0), false);
+  assert.equal(isPermanentGatewayExitCode('1'), false);
+});
 import { listAssignableWorkspaces } from '../src/assignable-workspaces.js';
 
 type Workspace = {
@@ -36,7 +44,7 @@ test('Issue #25: live blank sessions remain assignable when registered by DSH', 
   assert.deepEqual(result[0]?.sessions, [{ id: 'blank-live', title: 'New session' }]);
 });
 
-test('Issue #25: persisted blank sessions remain assignable after a successful empty surface read', async () => {
+test('Issue #25: titled persisted blank sessions remain assignable', async () => {
   const result = await listAssignableWorkspaces(
     registry(workspace(['blank-persisted'])),
     { get: () => undefined },
@@ -48,6 +56,41 @@ test('Issue #25: persisted blank sessions remain assignable after a successful e
   );
 
   assert.deepEqual(result[0]?.sessions, [{ id: 'blank-persisted', title: 'Persisted new session' }]);
+});
+
+test('untitled persisted initialization slots are hidden from the assignment inventory', async () => {
+  const result = await listAssignableWorkspaces(
+    registry(workspace(['session-empty', 'session-message'])),
+    { get: () => undefined },
+    undefined,
+    {
+      readSurface: async (id: string) => ({ events: id === 'session-empty' ? [] : [{ type: 'user/message' }] }),
+      readTitle: async () => undefined,
+      listEvents: async (id: string) => id === 'session-empty'
+        ? [{ type: 'session' }, { type: 'permission/preset' }, { type: 'sandbox/mode' }, { type: 'approval/policy' }, { type: 'subagent/model-selection-policy' }]
+        : [{ type: 'user/message' }],
+    },
+  );
+
+  assert.deepEqual(result[0]?.sessions, [{ id: 'session-message', title: 'session-message' }]);
+});
+
+test('untitled sessions with unknown raw events or empty raw logs are retained', async () => {
+  const result = await listAssignableWorkspaces(
+    registry(workspace(['unknown', 'no-events'])),
+    { get: () => undefined },
+    undefined,
+    {
+      readSurface: async () => ({ events: [] }),
+      readTitle: async () => undefined,
+      listEvents: async (id: string) => id === 'unknown' ? [{ type: 'turn/start' }] : [],
+    },
+  );
+
+  assert.deepEqual(result[0]?.sessions, [
+    { id: 'unknown', title: 'unknown' },
+    { id: 'no-events', title: 'no-events' },
+  ]);
 });
 
 test('Issue #25: archived sessions are never assignable, including blank sessions', async () => {

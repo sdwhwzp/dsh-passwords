@@ -27,10 +27,15 @@ interface SessionTitles {
 interface SessionQuery {
   readSurface(id: string): Promise<{ events: readonly unknown[] }>;
   readTitle?(id: string): Promise<{ title?: string } | undefined>;
+  listEvents?(id: string): Promise<readonly { type: string }[]>;
 }
 
+const INITIAL_SESSION_EVENT_TYPES = new Set([
+  'session', 'permission/preset', 'sandbox/mode', 'approval/policy', 'subagent/model-selection-policy',
+]);
+
 /**
- * Blank sessions are assignable immediately after creation. Only registered,
+ * Live blank sessions are assignable immediately after creation. Only registered,
  * unarchived sessions that are live or readable from persistence are listed.
  * Missing directories and missing sessions are omitted; unavailable services or
  * failed reads reject the inventory so the owner can distinguish failure from an empty list.
@@ -60,14 +65,19 @@ export async function listAssignableWorkspaces(
         continue;
       }
       if (sessionQuery === undefined) throw new Error('session query unavailable');
+      let surface: { events: readonly unknown[] };
       try {
-        await sessionQuery.readSurface(id);
+        surface = await sessionQuery.readSurface(id);
       } catch (error) {
         if (error !== null && typeof error === 'object'
           && 'code' in error && error.code === 'SESSION_QUERY_SESSION_NOT_FOUND') continue;
         throw error;
       }
       const title = await sessionQuery.readTitle?.(id);
+      if (!title?.title?.trim() && surface.events.length === 0 && sessionQuery.listEvents) {
+        const events = await sessionQuery.listEvents(id);
+        if (events.length > 0 && events.every((event) => INITIAL_SESSION_EVENT_TYPES.has(event.type))) continue;
+      }
       entries.push({ id, title: title?.title || id });
     }
     workspaces.push({ path: workspace.path, title: workspace.title, sessions: entries });

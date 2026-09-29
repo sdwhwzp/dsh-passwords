@@ -106,7 +106,7 @@ interface PermDraft {
   disabledSessionsBaseline: string[];
   allowedSessionIds: string[];
   /** 是否显式编辑过会话授权。false 时保存不提交 allowedSessionIds，避免仅切换
-   *  工作区/SSH 等其它字段就把服务端 grants 清空并 markSessionGrantsSeeded。 */
+   *  工作区等其它字段就把服务端 grants 清空并 markSessionGrantsSeeded。 */
   sessionsTouched: boolean;
   agentPresets: string[] | null;
   /** NULL = 不限；[] = 禁用全部；非空 = allowlist（均为 provider/model 稳定 ID） */
@@ -312,8 +312,8 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
                   git: u.permissions.allowGitDownload,
                   ssh: u.permissions.allowSsh,
                   workspaceCreate: u.permissions.allowWorkspaceCreate === true,
-                  agentPresets: u.permissions.allowedAgentPresets ?? null,
-                  models: u.permissions.allowedModels ?? null,
+                  agentPresets: u.permissions.allowedAgentPresets == null ? null : [...u.permissions.allowedAgentPresets],
+                  models: u.permissions.allowedModels == null ? null : [...u.permissions.allowedModels],
                   chatMedia: u.permissions.allowChatMedia === true,
                   banned: u.permissions.banned,
                   sandbox: u.permissions.sandboxMode ?? '',
@@ -643,8 +643,8 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
     );
     setPermsNotice((prev) => ({ ...prev, [userId]: '' }));
     // 会话授权只在被显式编辑过时才提交：网关把「提交了 allowedSessionIds」视为
-    // 一次性会话集合迁移（清空 grants 并 markSessionGrantsSeeded）。仅切换工作区、
-    // SSH 等其它字段却提交 stale 草稿（哪怕是 []）会清空子用户 grants，也会覆盖
+    // 一次性会话集合迁移（清空 grants 并 markSessionGrantsSeeded）。仅切换工作区等
+    // 其它字段却提交 stale 草稿（哪怕是 []）会清空子用户 grants，也会覆盖
     // 网关期间新增的 grant。显式取消全部会话仍提交 []（fail-closed，不退化为不提交）。
     const sessionsTouched = d.sessionsTouched;
     void run(
@@ -662,8 +662,8 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
           ...(d.touched.has('minutes') ? { dailyMinutesLimit: minutesNum } : {}),
           ...(d.touched.has('upload') ? { allowUpload: d.upload } : {}),
           ...(d.touched.has('git') ? { allowGitDownload: d.git } : {}),
-          ...(d.touched.has('workspaceCreate') ? { allowWorkspaceCreate: d.workspaceCreate } : {}),
           ...(d.touched.has('ssh') ? { allowSsh: d.ssh } : {}),
+          ...(d.touched.has('workspaceCreate') ? { allowWorkspaceCreate: d.workspaceCreate } : {}),
           ...(d.touched.has('agentPresets') ? { allowedAgentPresets: d.agentPresets } : {}),
           // NULL = 不限；[] = 禁用全部；非空 = allowlist。保持三态语义原样提交。
           ...(d.touched.has('models') ? { allowedModels: d.models } : {}),

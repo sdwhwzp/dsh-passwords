@@ -255,7 +255,6 @@ before(async () => {
     internalSecret: 'test-internal-secret',
     patch: { dshRoot: '', restartService: '' },
     endpointRules: [],
-    pluginCompat: false,
   };
 
   const auth = new AuthService(config, db);
@@ -281,10 +280,10 @@ after(() => {
 
 // ── C-1：编码路径在授权判定与转发间必须同口径 ─────────────────
 
-test('C-1：受限子用户经 %2F 编码路径调用会话 RPC 被 403（授权判定解码）', async () => {
+test('C-1：受限子用户经 %2F 编码路径调用会话 RPC 无基线时仍不得转发', async () => {
   upstreamUrls.length = 0;
   const r = await gatewayReq('POST', '/api%2Fsession%2Fhistory', {}, subuserCookie, '{}');
-  assert.equal(r.status, 403, '编码路径不得绕过会话归属检查');
+  assert.equal(r.status, 403, '缺少会话地址不得绕过会话归属检查');
   assert.ok(!upstreamUrls.includes('/api/session/history'), '请求不得转发到上游');
 });
 
@@ -627,7 +626,7 @@ test('登出 CSRF：跨源 Origin 强制登出被拒绝（403）且不吊销 tok
   assert.equal(after.status, 200, '被拒登出不得吊销会话');
 });
 
-test('根级第三方路径对子用户 fail-closed：未登记的非官方根路径 403，官方根级与 /api 面保持可用', { skip: '本 fork 不在网关侧对未登记第三方路径 fail-closed：插件路由由账号隔离 Host 按签名 principal 处理' }, async () => {
+test('普通根级插件路径对子用户直通，官方根级与 /api 面保持可用', async () => {
   const tmp = db.createUser('root-scope-tmp', bcrypt.hashSync('Password123!', 4), 'user');
   const token = jwt.sign(
     { sub: String(tmp.id), username: 'root-scope-tmp', cv: 0 },
@@ -635,8 +634,8 @@ test('根级第三方路径对子用户 fail-closed：未登记的非官方根�
     { expiresIn: '12h' },
   );
   const cookie = `dsh_gateway_token=${token}`;
-  const denied = await gatewayReq('GET', '/third-party-panel/status', {}, cookie);
-  assert.equal(denied.status, 403, '未登记的根级第三方路径必须 fail-closed');
+  const ordinaryPlugin = await gatewayReq('GET', '/third-party-panel/status', {}, cookie);
+  assert.equal(ordinaryPlugin.status, 200, '普通根级插件路径对子用户直通');
   const officialRoot = await gatewayReq('GET', '/plugins/example/client.js', {}, cookie);
   assert.equal(officialRoot.status, 200, '官方根级静态/bundle 路径保持可用');
   const officialApi = await gatewayReq('GET', '/api/session/history', {}, cookie);

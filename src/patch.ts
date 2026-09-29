@@ -76,7 +76,9 @@ export function findDshRoot(explicit: string, entrypoints = runtimeEntrypoints()
     if (fromEntrypoint !== null) return fromEntrypoint;
   }
   try {
-    const globalRoot = spawnSync('npm', ['root', '-g'], { encoding: 'utf8' }).stdout.trim();
+    const npm = resolveNpmCommand(['root', '-g']);
+    const result = npm === null ? null : spawnSync(npm.command, npm.args, { encoding: 'utf8', shell: false, windowsHide: true });
+    const globalRoot = result !== null && result.status === 0 && typeof result.stdout === 'string' ? result.stdout.trim() : '';
     const candidate = dshPackageRoot(path.join(globalRoot, '@deepseek-ai', 'dsh'));
     if (candidate !== null) return candidate;
   } catch {
@@ -99,10 +101,66 @@ function nativeHarnessAvailable(dshRoot: string): boolean {
   if (!existsSync(packageFile)) return false;
   try {
     const metadata = JSON.parse(readFileSync(packageFile, 'utf8')) as DshPackageMetadata;
-    return typeof metadata.version === 'string' && /^(?:0\.1\.(?:2-alpha\.[0-9]+|5-(?:alpha\.[12]|rc\.[12])|6-alpha\.[12]|7-(?:alpha\.2|rc\.[12]))(?:$|[-+])|0\.2\.0-rc\.1(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$)/u.test(metadata.version);
+    return typeof metadata.version === 'string' && /^(?:0\.1\.(?:2|3|5|6|7)|0\.2\.0)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u.test(metadata.version);
   } catch {
     return false;
   }
+}
+
+export interface NpmCommand {
+  command: string;
+  args: string[];
+}
+
+/** npm CLI 的 JS 入口；找不到返回 null。 */
+function npmCliEntry(env: NodeJS.ProcessEnv): string | null {
+  // npm start / npm test 启动时 npm_execpath 指向正在使用的 npm CLI 入口，
+  // 优先采信它以跟随调用方实际使用的 npm。只接受 npm 自身的 JS 入口——
+  // pnpm/yarn 的 execpath 拿来执行 npm 参数会跑错包管理器。
+  const execpath = env.npm_execpath?.trim() ?? '';
+  if (execpath !== '' && /^npm[\w.-]*\.(?:cjs|mjs|js)$/i.test(path.basename(execpath)) && existsSync(execpath)) {
+    return path.resolve(execpath);
+  }
+  const nodeDir = path.dirname(process.execPath);
+  for (const candidate of [
+    path.join(nodeDir, 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    path.join(nodeDir, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+  ]) {
+    try {
+      if (existsSync(candidate)) return path.resolve(candidate);
+    } catch {
+      /* 受限环境读不到候选路径时继续尝试下一个 */
+    }
+  }
+  return null;
+}
+
+/**
+ * Windows 回退方式：`cmd /d /s /c "<npm.cmd> …"`（与 scripts/install.mjs 同口径，
+ * 不用 shell:true，避开 DEP0190 弃用警告与参数拼接）。
+ * 参数含双引号、百分号（环境变量展开）或换行会破坏命令串 → 返回 null，调用方必须 fail-closed，
+ * 绝不能把未转义文本拼进 shell 命令串。
+ */
+export function windowsNpmShimArgs(args: string[]): string[] | null {
+  if (args.some((arg) => /["%\r\n]/.test(arg))) return null;
+  const line = ['npm.cmd', ...args].map((arg) => `"${arg}"`).join(' ');
+  return ['/d', '/s', '/c', `"${line}"`];
+}
+
+/**
+ * 解析执行 npm 子命令的方式（Issue #33）：
+ * 1. `node <npm-cli.js>`——首选，Windows/Linux/macOS 通用，shell:false 可执行；
+ * 2. Windows 找不到 npm-cli.js——cmd.exe 显式启动 npm.cmd shim；
+ * 3. 其他平台——直接 `npm`（.cmd shim 问题只存在于 Windows）。
+ * 参数不安全（见 windowsNpmShimArgs）时返回 null。
+ */
+export function resolveNpmCommand(args: string[], env: NodeJS.ProcessEnv = process.env): NpmCommand | null {
+  const cli = npmCliEntry(env);
+  if (cli !== null) return { command: process.execPath, args: [cli, ...args] };
+  if (process.platform !== 'win32') return { command: 'npm', args: [...args] };
+  const shimArgs = windowsNpmShimArgs(args);
+  if (shimArgs === null) return null;
+  return { command: env.ComSpec?.trim() || 'cmd.exe', args: shimArgs };
 }
 
 /** The native Harness exposes Settings and model selection without bundle rewriting. */
@@ -127,7 +185,7 @@ export function rollbackPatch(dshRoot: string): 'rolled-back' | 'no-backup' | 'm
 export function restartDshWebChecked(
   service: string,
   delayMs = 2500,
-): Promise<{ ok: boolean; message: string }> {
+): Promise<{ ok: boolean; message: string; manual?: boolean }> {
   return new Promise((resolve) => {
     if (service === '') {
       resolve({ ok: false, message: '未配置 dsh-web 服务名' });
@@ -135,6 +193,10 @@ export function restartDshWebChecked(
     }
     if (!/^[A-Za-z0-9_.@-]+$/u.test(service)) {
       resolve({ ok: false, message: '重启服务名非法' });
+      return;
+    }
+    if (process.platform === 'win32') {
+      resolve({ ok: false, manual: true, message: 'Windows 不支持 systemd，请重启 DeepSeek Harness' });
       return;
     }
     const timer = setTimeout(() => {
@@ -166,6 +228,7 @@ export function restartDshWeb(service: string, delayMs = 2500): void {
     return;
   }
   void restartDshWebChecked(service, delayMs).then((result) => {
-    if (!result.ok) console.error(`[dsh-passwords] 重启 ${service} 失败: ${result.message}`);
+    if (!result.ok && !result.manual) console.error(`[dsh-passwords] 重启 ${service} 失败（补丁将在下次 dsh 重启后生效）: ${result.message}`);
+    if (result.manual) console.error(`[dsh-passwords] ${result.message}`);
   });
 }

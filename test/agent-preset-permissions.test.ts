@@ -60,7 +60,6 @@ test('新增子用户默认 allowed_agent_presets 为 NULL（不限制 Agent pre
       jwtSecret: 'test-secret', internalSecret: 'test-internal',
       patch: { dshRoot: '', restartService: '' },
       endpointRules: [],
-      pluginCompat: false,
     };
     const auth = new AuthService(config, db);
     const admin = db.createUser('admin', '$2a$10$dummyhashdummyhashdummyhashdu', 'admin');

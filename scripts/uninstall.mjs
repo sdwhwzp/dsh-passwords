@@ -7,6 +7,23 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
+/**
+ * 运行 pnpm。Windows 上 pnpm 只是 `.cmd` shim，Node >=22（含 24）为修复
+ * CVE-2024-27980 已拒绝 shell:false 直接执行 .cmd/.bat，而 shell:true 又会触发
+ * DEP0190 且存在参数拼接注入面。因此用 cmd.exe 显式启动 shim：
+ * `cmd /d /s /c pnpm.cmd install`（不经 shell:true）。
+ * 注意不能给命令串再加一层引号：Node 会把内层引号转义成 \"，cmd /s 剥壳后
+ * 得到非法命令，因此这里只接受不含引号/百分号/空白的固定字面量参数，否则 fail-closed。
+ */
+function runPnpm(args, cwd) {
+  if (process.platform !== 'win32') return spawnSync('pnpm', args, { cwd, stdio: 'inherit' });
+  if (args.some((arg) => /["%\s]/.test(arg))) {
+    return { error: new Error('pnpm 参数不安全，已拒绝执行'), status: null };
+  }
+  const line = ['pnpm.cmd', ...args].join(' ');
+  return spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', line], { cwd, stdio: 'inherit' });
+}
+
 const installRoot = realpathSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'));
 const dshHome = process.env.DSH_HOME?.trim() || path.join(homedir(), '.dsh');
 const profileDir = path.join(dshHome, 'profiles', 'web');
@@ -86,11 +103,7 @@ const bundles = manifest?.dsh?.profile?.bundles;
 if (Array.isArray(bundles)) manifest.dsh.profile.bundles = bundles.filter((entry) => entry !== 'dsh-passwords');
 writeFileSync(manifestPath, JSON.stringify(manifest, undefined, 2) + '\n');
 
-const installed = spawnSync('pnpm', ['install'], {
-  cwd: profileDir,
-  stdio: 'inherit',
-  shell: process.platform === 'win32',
-});
+const installed = runPnpm(['install'], profileDir);
 if (installed.status !== 0 || installed.error !== undefined) {
   try {
     restoreMaterializedState();

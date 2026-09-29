@@ -16,12 +16,12 @@ import https from 'node:https';
 import net from 'node:net';
 import jwt from 'jsonwebtoken';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { createReadStream, existsSync, unlinkSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { databaseTarget, envFilePath, loadConfig, type PlatformConfig } from './config.js';
+import { databaseTarget, deploymentGatewayEnv, envFilePath, loadConfig, type PlatformConfig } from './config.js';
 import { Database, type UserListRow } from './db.js';
 import { createFieldCrypto } from './encrypt.js';
 import { registerTenantTaskBoard } from './tenant-task-board.js';
@@ -58,6 +58,7 @@ import {
   UPSTREAM_BROWSER_AUTH_RESPONSE,
 } from './upstream-browser-auth.js';
 import { updateApplyHttpStatus } from './update.js';
+import { OFFICIAL_API_NAMESPACES, SUBUSER_BLOCKED_API_NAMESPACES, isSubuserBlockedRemoteEndpoint } from './permissions.js';
 
 interface SpendAccounting {
   reconcile(): Promise<void>;
@@ -167,6 +168,139 @@ function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
 }
 
 /** 通知网关进程：重载补丁 + 延迟重启 dsh-web（fire-and-forget）。导出供定向测试使用。 */
+type DynamicTypertDescriptor = {
+  namespace?: unknown;
+  method?: unknown;
+  mode?: unknown;
+  invocation?: { mode?: unknown };
+};
+
+type DynamicManifest = {
+  generation: string;
+  parentPid: number;
+  namespaces: string[];
+  streamEndpoints: string[];
+  exactPaths: string[];
+  pathPrefixes: string[];
+};
+
+/**
+ * 取 DSH 当前已经注册的 Remote namespace/stream 面。
+ * 这不是静态 node_modules 扫描：未挂载、disabled 或不存在 typert.host 的插件不会进入清单。
+ */
+function collectDynamicPluginManifest(ctx: Context): DynamicManifest | null {
+  const typert = ctx.get('typert') as unknown as
+    | { local?: { list?: () => readonly unknown[] } }
+    | undefined;
+  const webServer = ctx.get('webServer') as unknown as
+    | { exact?: unknown; prefixes?: unknown; upgrades?: unknown }
+    | undefined;
+  const rows = typert?.local?.list?.();
+  if (!Array.isArray(rows)) return null;
+  const namespaces = new Set<string>();
+  const streamEndpoints = new Set<string>();
+  const exactPaths = new Set<string>();
+  const pathPrefixes = new Set<string>();
+  const collectRouteKeys = (value: unknown, target: Set<string>): void => {
+    if (value instanceof Map) {
+      for (const key of value.keys()) if (typeof key === 'string') target.add(key);
+      return;
+    }
+    if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+      for (const key of Object.keys(value)) target.add(key);
+    }
+  };
+  collectRouteKeys(webServer?.exact, exactPaths);
+  collectRouteKeys(webServer?.prefixes, pathPrefixes);
+  // WebSocket upgrade routes are ordinary runtime plugin routes too. Reuse the
+  // same path sets so HTTP and WS authorization cannot drift.
+  collectRouteKeys(webServer?.upgrades, exactPaths);
+  for (const value of rows) {
+    if (value === null || typeof value !== 'object') continue;
+    const row = value as DynamicTypertDescriptor;
+    if (typeof row.namespace !== 'string' || !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(row.namespace)) continue;
+    // 官方 Remote namespace 必须始终走网关自己的授权/过滤分支；
+    // 动态清单只描述普通扩展，不能污染 workspace/session baseline 流。
+    if (OFFICIAL_API_NAMESPACES.has(row.namespace) || SUBUSER_BLOCKED_API_NAMESPACES.has(row.namespace)) continue;
+    namespaces.add(row.namespace);
+    const mode = row.mode ?? row.invocation?.mode;
+    if (mode === 'stream' && typeof row.method === 'string' && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(row.method)) {
+      const endpoint = `${row.namespace}/${row.method}`;
+      if (!isSubuserBlockedRemoteEndpoint(endpoint)) streamEndpoints.add(endpoint);
+    }
+  }
+  const sortedNamespaces = [...namespaces].sort();
+  const sortedStreams = [...streamEndpoints].sort();
+  const sortedExact = [...exactPaths]
+    .filter((value) => value.startsWith('/') && !value.startsWith('/gateway') &&
+      !value.startsWith('/api/dsh-passwords') && value !== '/api' && value !== '/api/')
+    .sort()
+    .slice(0, 512);
+  const sortedPrefixes = [...pathPrefixes]
+    .filter((value) => value.startsWith('/') && !value.startsWith('/gateway') &&
+      !value.startsWith('/api/dsh-passwords') && value !== '/api' && value !== '/api/')
+    .sort()
+    .slice(0, 128);
+  const generation = createHash('sha256')
+    .update(JSON.stringify([sortedNamespaces, sortedStreams, sortedExact, sortedPrefixes]))
+    .digest('hex')
+    .slice(0, 32);
+  return {
+    generation,
+    parentPid: process.pid,
+    namespaces: sortedNamespaces,
+    streamEndpoints: sortedStreams,
+    exactPaths: sortedExact,
+    pathPrefixes: sortedPrefixes,
+  };
+}
+
+function notifyGatewayPluginManifest(cfg: PlatformConfig, manifest: DynamicManifest): void {
+  const mod = cfg.gateway.tls !== null ? https : http;
+  const body = JSON.stringify(manifest);
+  const request = mod.request(
+    `${cfg.gateway.tls !== null ? 'https' : 'http'}://127.0.0.1:${String(cfg.gateway.port)}/gateway/internal/plugin-manifest`,
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-internal-secret': cfg.internalSecret,
+        'content-length': String(Buffer.byteLength(body)),
+      },
+      rejectUnauthorized: false,
+      timeout: 3000,
+    },
+    (response) => response.resume(),
+  );
+  request.on('error', () => { /* 网关尚未就绪时由下一轮同步 */ });
+  request.on('timeout', () => request.destroy());
+  request.end(body);
+}
+
+function startPluginManifestSync(ctx: Context, cfg: PlatformConfig): void {
+  ctx.effect(() => {
+    let disposed = false;
+    const publish = (): void => {
+      if (disposed) return;
+      try {
+        const manifest = collectDynamicPluginManifest(ctx);
+        if (manifest !== null) notifyGatewayPluginManifest(cfg, manifest);
+      } catch (error) {
+        console.warn('[dsh-passwords] 动态插件清单采集失败（保留网关上一份清单）:', String(error));
+      }
+    };
+    const first = setTimeout(publish, 1000);
+    first.unref();
+    const timer = setInterval(publish, 30_000);
+    timer.unref();
+    return () => {
+      disposed = true;
+      clearTimeout(first);
+      clearInterval(timer);
+    };
+  }, 'dsh-passwords: dynamic plugin manifest');
+}
+
 export function notifyGateway(cfg: PlatformConfig): void {
   const mod = cfg.gateway.tls !== null ? https : http;
   const url = `${cfg.gateway.tls !== null ? 'https' : 'http'}://127.0.0.1:${String(cfg.gateway.port)}/gateway/internal/patch`;
@@ -272,6 +406,38 @@ export function isPermanentGatewayExitCode(reason: number | string): boolean {
   return typeof reason === 'number' && PERMANENT_GATEWAY_EXIT_CODES.has(reason);
 }
 
+/**
+ * 插件启动快照与部署文件当前关键字段的漂移清单（空数组 = 一致）。
+ * 插件在 apply() 时把配置读进内存快照，而它拉起的网关子进程会重新读取部署文件；
+ * 两者若撕裂，网关会带着与插件不同的 JWT/内部密钥或内网上游地址运行，必须拒绝误启。
+ * 返回具体键名，便于把差异写进诊断日志（而不是一句笼统的“已变更”）。
+ */
+export function gatewayConfigDrift(current: PlatformConfig, next: PlatformConfig): string[] {
+  const drift: string[] = [];
+  if (next.dbPath !== current.dbPath) drift.push('MCP_DB_PATH');
+  // dbEncKey 留空时从 SETUP_KEY 派生，所以两者任一变化都改变实际加密密钥。
+  if ((next.dbEncKey || next.setupKey) !== (current.dbEncKey || current.setupKey)) drift.push('SETUP_KEY/MCP_DB_ENC_KEY');
+  if (next.jwtSecret !== current.jwtSecret) drift.push('MCP_JWT_SECRET');
+  if (next.internalSecret !== current.internalSecret) drift.push('MCP_INTERNAL_SECRET');
+  if (next.gateway.port !== current.gateway.port) drift.push('MCP_GATEWAY_PORT');
+  if (next.gateway.upstream !== current.gateway.upstream) drift.push('MCP_GATEWAY_UPSTREAM');
+  if (JSON.stringify(next.gateway.tls) !== JSON.stringify(current.gateway.tls)) drift.push('MCP_GATEWAY_TLS_CERT/MCP_GATEWAY_TLS_KEY');
+  return drift;
+}
+
+/**
+ * 部署配置漂移的有界重试上限。给运维留出还原 .env 或重启 dsh 的窗口；
+ * 超过上限后明确报告停机风险，绝不静默停止（原实现只打一行日志就 return）。
+ */
+export const GATEWAY_CONFIG_DRIFT_MAX_RETRIES = 5;
+/** 部署配置漂移的重试间隔（毫秒）。 */
+export const GATEWAY_CONFIG_DRIFT_RETRY_MS = 5_000;
+
+/** 漂移重试决策：界内继续有界重试，越界后转为已诊断停机，绝不用错配密钥/端口误启。 */
+export function gatewayDriftDecision(attempt: number): 'retry' | 'stopped' {
+  return attempt > GATEWAY_CONFIG_DRIFT_MAX_RETRIES ? 'stopped' : 'retry';
+}
+
 /** 探测网关是否已在监听（防止 dsh 重启/多开时重复拉起） */
 function gatewayAlreadyRunning(port: number): Promise<boolean> {
   return new Promise((resolve) => {
@@ -314,8 +480,9 @@ export async function waitForGatewayPortFree(
  * 无需任何额外启动命令。dsh 退出时（ctx.dispose）子进程随停；
  * 网关侧另有父进程看门狗兜底（宿主被强杀时自己退出）。
  */
-function startGateway(ctx: Context, cfg: PlatformConfig): void {
+function startGateway(ctx: Context, cfg: PlatformConfig, explicitUpstream: string): void {
   const cliPath = path.join(INSTALL_ROOT, 'dist', 'cli.js');
+  const gatewayEnvFile = envFilePath();
   const gatewayPort = cfg.gateway.port;
 
   ctx.effect(
@@ -330,13 +497,38 @@ function startGateway(ctx: Context, cfg: PlatformConfig): void {
       let child: ChildProcess | null = null;
 
       let retryTimer: NodeJS.Timeout | null = null;
+      let driftTimer: NodeJS.Timeout | null = null;
+      let driftRetries = 0;
+      let launching = false;
       const scheduleRetry = (): void => {
         if (disposed || retryTimer !== null) return;
         retryTimer = setTimeout(() => { retryTimer = null; launch(); }, 1000);
         retryTimer.unref();
       };
-      const launch = (): void => {
-        void waitForGatewayPortFree(gatewayPort).then((free) => {
+
+      // 配置漂移的有界重试：密钥/端口/上游地址不一致时绝不启动（避免误启），
+      // 但也不能只打一行日志就永远停下。超过上限后明确报告停机风险。
+      const handleConfigDrift = (drift: string[]): void => {
+        driftRetries += 1;
+        const detail = drift.join('、');
+        if (gatewayDriftDecision(driftRetries) === 'stopped') {
+          console.error(`[dsh-passwords] 密码门已停止：部署配置与插件快照持续不一致（${detail}）。为避免带着错配的密钥或端口启动，不再自动重试；请同步 .env 后重启 DeepSeek Harness`);
+          return;
+        }
+        console.error(`[dsh-passwords] 部署配置与插件快照不一致（${detail}）；密钥/端口不一致时拒绝启动，第 ${String(driftRetries)}/${String(GATEWAY_CONFIG_DRIFT_MAX_RETRIES)} 次将在 ${String(GATEWAY_CONFIG_DRIFT_RETRY_MS)}ms 后重试`);
+        if (disposed || driftTimer !== null) return;
+        driftTimer = setTimeout(() => {
+          driftTimer = null;
+          void launch();
+        }, GATEWAY_CONFIG_DRIFT_RETRY_MS);
+        driftTimer.unref();
+      };
+
+      const launch = async (): Promise<void> => {
+        if (disposed || launching || (child !== null && child.exitCode === null && child.signalCode === null)) return;
+        launching = true;
+        try {
+          const free = await waitForGatewayPortFree(gatewayPort);
           if (disposed) return;
           if (!free) { scheduleRetry(); return; }
           // 网关上游 = dsh 自己的 web 端口（webServer 服务在运行时可知；拿不到就退回默认 3080）。
@@ -348,7 +540,6 @@ function startGateway(ctx: Context, cfg: PlatformConfig): void {
           } catch {
             // 拿不到就用默认值
           }
-          const explicitUpstream = process.env.MCP_GATEWAY_UPSTREAM?.trim() ?? '';
           const upstreamRoot = explicitUpstream !== ''
             ? explicitUpstream
             : `http://127.0.0.1:${String(upstreamPort)}`;
@@ -358,10 +549,18 @@ function startGateway(ctx: Context, cfg: PlatformConfig): void {
             explicitUpstream !== ''
               ? [cliPath, 'serve-gateway']
               : [cliPath, 'serve-gateway', '--upstream', upstreamRoot];
+          const childEnv = deploymentGatewayEnv(gatewayEnvFile, process.env);
+          const nextCfg = loadConfig({ env: childEnv });
+          const drift = gatewayConfigDrift(cfg, nextCfg);
+          if (drift.length > 0) {
+            handleConfigDrift(drift);
+            return;
+          }
+          driftRetries = 0;
           const spawned = spawn(process.execPath, gatewayArgs, {
             cwd: INSTALL_ROOT,
             env: {
-              ...process.env,
+              ...childEnv,
               DSH_GATEWAY_PARENT_PID: String(process.pid),
               DSH_GATEWAY_BROWSER_AUTH_REQUIRED: upstreamBrowserAuthenticationRequired ? '1' : '0',
               DSH_PASSWORDS_ENV_FILE: envFilePath(),
@@ -418,16 +617,18 @@ function startGateway(ctx: Context, cfg: PlatformConfig): void {
               scheduleRetry();
             }
           });
-        }).catch(() => {
-          if (!disposed) console.error('[dsh-passwords] 密码门启动前检查失败');
-          scheduleRetry();
-        });
+        } catch (error) {
+          console.error('[dsh-passwords] 部署配置读取失败，请修复配置并重启 DeepSeek Harness:', error);
+        } finally {
+          launching = false;
+        }
       };
       launch();
 
       return () => {
         disposed = true;
         if (retryTimer !== null) clearTimeout(retryTimer);
+        if (driftTimer !== null) clearTimeout(driftTimer);
         if (child !== null && child.exitCode === null && child.signalCode === null) {
           child.kill('SIGTERM');
           const force = setTimeout(() => {
@@ -449,8 +650,13 @@ function startGateway(ctx: Context, cfg: PlatformConfig): void {
 
 export function apply(ctx: Context): void {
   let cfg: PlatformConfig;
+  let explicitUpstream: string;
   try {
-    cfg = loadConfig();
+    const installRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+    const envFile = process.env.DSH_PASSWORDS_ENV_FILE?.trim() || path.join(installRoot, '.env');
+    const gatewayEnv = deploymentGatewayEnv(envFile, process.env);
+    cfg = loadConfig({ env: gatewayEnv });
+    explicitUpstream = gatewayEnv.MCP_GATEWAY_UPSTREAM?.trim() ?? '';
   } catch (error) {
     // 配置损坏/缺失：记录日志而不是静默返回（否则 dsh 侧无任何提示，排查困难）
     console.error('[dsh-passwords] 加载配置失败，插件未激活:', error);
@@ -1276,5 +1482,8 @@ export function apply(ctx: Context): void {
   );
 
   // 自动拉起密码门（.env 未配置时跳过，避免在未安装的环境里误启）
-  if (configured) startGateway(ctx, cfg);
+  if (configured) {
+    startGateway(ctx, cfg, explicitUpstream);
+    startPluginManifestSync(ctx, cfg);
+  }
 }

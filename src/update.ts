@@ -12,11 +12,14 @@ import {
   createWriteStream,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
   writeFileSync,
   chmodSync,
+  closeSync,
+  openSync,
   statSync,
   unlinkSync,
 } from 'node:fs';
@@ -27,7 +30,7 @@ import { realpathSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import type { PlatformConfig } from './config.js';
-import { restartDshWebChecked } from './patch.js';
+import { restartDshWebChecked, resolveNpmCommand } from './patch.js';
 
 const INSTALL_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -42,6 +45,10 @@ export const UPDATE_DEFAULT_MAX_BPS = 1024 * 1024;
 const NPM_REGISTRY_HOSTS = new Set(['registry.npmjs.org']);
 /** npm 校验/安装超时 */
 const UPDATE_NPM_TIMEOUT_MS = 180 * 1000;
+/** 固定部署目录交换锁 TTL：进程被强杀超过该时长视为陈旧锁可接管，避免永久阻塞更新。 */
+const UPDATE_INSTALL_LOCK_TTL_MS = 60 * 60 * 1000;
+/** 交换锁临界区 gate 的接管 TTL：临界区只做同步判定，写者崩溃残留后不应永久阻塞更新。 */
+export const UPDATE_GATE_TTL_MS = 5 * 60 * 1000;
 /** 版本标签合法格式（拒绝任意字符串标签） */
 const RELEASE_TAG_RE = /^v?\d+\.\d+\.\d+$/;
 /** npm 包下载地址白名单。GitHub API 仅用于发现版本，不下载其 release asset。 */
@@ -171,11 +178,13 @@ export function detectRuntime(installRoot: string, env: NodeJS.ProcessEnv = proc
     /* best effort */
   }
   try {
-    const globalRoot = spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['root', '-g'], {
-      encoding: 'utf8',
-      timeout: 8000,
-      shell: false,
-    }).stdout.trim();
+    const npm = resolveNpmCommand(['root', '-g'], env);
+    // 必须把调用方传入的 env 交给子进程：npm_config_prefix 等安装前缀配置决定
+    // `npm root -g` 的输出，漏传会按宿主 process.env 误判运行环境。
+    const result = npm === null
+      ? null
+      : spawnSync(npm.command, npm.args, { encoding: 'utf8', timeout: 8000, shell: false, windowsHide: true, env });
+    const globalRoot = result !== null && result.status === 0 && typeof result.stdout === 'string' ? result.stdout.trim() : '';
     if (globalRoot !== '' && path.dirname(installRoot) === path.resolve(globalRoot)) return 'npm-global';
     if (resolveNpmPrefix(installRoot, globalRoot) !== null) return 'npm-prefix';
   } catch {
@@ -265,7 +274,7 @@ export interface UpdateEngineOps {
   /** Docker readiness 重试等待；测试可注入无等待实现。 */
   wait?(ms: number): Promise<void>;
   /** 重启 dsh 网页服务（systemd）；返回真实命令结果 */
-  restartWebService(service: string): Promise<{ ok: boolean; message: string }>;
+  restartWebService(service: string): Promise<{ ok: boolean; message: string; manual?: boolean }>;
   log(message: string): void;
 }
 
@@ -300,8 +309,12 @@ function runProcess(command: string, args: string[], env: NodeJS.ProcessEnv, cwd
   });
 }
 
+// Windows 的 npm.cmd 在 Node >=22 上无法 shell:false 直接 spawn（Issue #33），
+// 统一经 resolveNpmCommand 解析为 `node <npm-cli.js>`（详见 patch.ts）。
 function runNpm(args: string[], env: NodeJS.ProcessEnv, cwd?: string): Promise<{ ok: boolean; output: string }> {
-  return runProcess(process.platform === 'win32' ? 'npm.cmd' : 'npm', args, env, cwd);
+  const npm = resolveNpmCommand(args, env);
+  if (npm === null) return Promise.resolve({ ok: false, output: 'npm 调用参数不安全，已拒绝执行' });
+  return runProcess(npm.command, npm.args, env, cwd);
 }
 
 function testUpdateConfig(): { version: string; artifact: string } | null {
@@ -382,10 +395,22 @@ function parseStoredDate(value: string | null): number | null {
   return Number.isNaN(t) ? null : t;
 }
 
+/** PID 是否仍在运行（信号 0 探测）；EPERM 表示存在但无权限，按存活处理。 */
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
 /** 引擎构造可注入项（测试用）：installRoot/env 覆盖真实安装位置与环境 */
 export interface UpdateEngineInit {
   installRoot?: string;
   env?: NodeJS.ProcessEnv;
+  /** 测试可在非 Windows 平台覆盖目录替换策略；生产默认按当前平台选择。 */
+  inPlaceDeploymentSwap?: boolean;
   /** 测试替身：真实运行时仍必须确认 Docker socket 为 Unix socket。 */
   dockerSelfUpdateAvailable?: boolean;
 }
@@ -400,6 +425,7 @@ export class UpdateEngine {
   private readonly runtime: UpdateRuntime;
   private readonly env: NodeJS.ProcessEnv;
   private readonly dockerSelfUpdateAvailable: boolean;
+  private readonly inPlaceDeploymentSwap: boolean;
   private readonly stateDir: string;
   private lastActivityAt: number;
   private lastCheckedAt: number | null;
@@ -444,6 +470,7 @@ export class UpdateEngine {
       dockerSocketAvailable = false;
     }
     this.dockerSelfUpdateAvailable = init?.dockerSelfUpdateAvailable ?? dockerSocketAvailable;
+    this.inPlaceDeploymentSwap = init?.inPlaceDeploymentSwap ?? process.platform === 'win32';
     // Docker 也以当前容器内的 package.json 为准。持久化 marker 只表示已完成的
     // Compose 操作，不能替代对真实运行镜像版本的证明。
     this.version = readCurrentVersion(installRoot);
@@ -657,6 +684,9 @@ export class UpdateEngine {
   tick(): void {
     if (this.disposed) return;
     try {
+      // 安装已完成但尚未成功重启（等待手动重启或重启失败）时必须先完成重启：
+      // 期间禁止再次下载/安装/审计，否则会重复应用同一版本并重复记账。
+      if (this.restartPendingVersion !== null) return;
       const now = this.ops.now();
       const checked = this.lastCheckedAt ?? 0;
       if (
@@ -752,6 +782,8 @@ export class UpdateEngine {
 
   private async startDownload(pkg: NpmPackageInfo, mode: 'automatic' | 'manual'): Promise<void> {
     if (this.downloadRunning) return; // 单实例下载
+    // 已有安装完成、等待重启的版本：不得重复下载覆盖，避免重启前重复应用。
+    if (this.restartPendingVersion !== null) return;
     const previousVersion = this.pendingVersion;
     const previousIntegrity = this.pendingIntegrity;
     const previousMode = this.downloadMode;
@@ -827,7 +859,7 @@ export class UpdateEngine {
 
   /** 执行安装（环境受限）+ 重启 dsh 网页服务；返回 {ok, requiresManualRestart} */
   private async performInstall(): Promise<{ ok: boolean; requiresManualRestart: boolean }> {
-    if (this.installRunning) return { ok: false, requiresManualRestart: false };
+    if (this.installRunning || this.restartPendingVersion !== null) return { ok: false, requiresManualRestart: false };
     this.installRunning = true;
     try {
       return await this.performInstallInternal();
@@ -837,6 +869,8 @@ export class UpdateEngine {
   }
 
   private async performInstallInternal(): Promise<{ ok: boolean; requiresManualRestart: boolean }> {
+    // 双重保险：等待重启期间绝不重复安装或写入 update_applied 审计。
+    if (this.restartPendingVersion !== null) return { ok: false, requiresManualRestart: false };
     const version = this.pendingVersion ?? this.latestVersion ?? this.version;
     if (this.runtime === 'docker') return this.performDockerInstall(version);
     if (this.pendingVersion === null || !existsSync(this.artifactPath(this.pendingVersion))) {
@@ -898,12 +932,17 @@ export class UpdateEngine {
     this.restartPendingVersion = version;
     this.db.setSetting('update_restart_pending_version', version);
     if (this.config.patch.restartService === '') {
-      this.setError('新版本已安装，请手动重启 dsh-web 服务');
+      this.setError(this.manualRestartMessage());
       this.phase = 'error';
       return { ok: true, requiresManualRestart: true };
     }
     if (this.config.patch.restartService !== '') {
       const restart = await this.ops.restartWebService(this.config.patch.restartService);
+      if (restart.manual) {
+        this.setError(restart.message);
+        this.phase = 'error';
+        return { ok: true, requiresManualRestart: true };
+      }
       if (!restart.ok) {
         this.setError(`新版本已安装但 dsh-web 重启失败：${restart.message}`);
         this.phase = 'error';
@@ -914,6 +953,12 @@ export class UpdateEngine {
       return { ok: true, requiresManualRestart: false };
     }
     return { ok: true, requiresManualRestart: false };
+  }
+
+  private manualRestartMessage(): string {
+    return process.platform === 'win32'
+      ? '新版本已安装，请退出并重新启动 DeepSeek Harness'
+      : '新版本已安装，请手动重启 dsh-web 服务';
   }
 
   private persistDatabasePath(): boolean {
@@ -979,7 +1024,12 @@ export class UpdateEngine {
       }
       installEnv = { ...installEnv, npm_config_prefix: prefix };
     }
-    const root = await this.ops.runCommand(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['root', '-g'], this.installRoot, installEnv);
+    const npm = resolveNpmCommand(['root', '-g'], installEnv);
+    if (npm === null) {
+      this.setError('无法解析 npm 可执行入口（缺少 npm-cli.js），已停止安装');
+      return null;
+    }
+    const root = await this.ops.runCommand(npm.command, npm.args, this.installRoot, installEnv);
     if (!root.ok || root.message.trim() === '') {
       this.setError(`无法确定 npm 全局安装目录：${root.message}`);
       return null;
@@ -1010,10 +1060,29 @@ export class UpdateEngine {
    * 在固定部署目录同级完成临时安装，然后用目录交换替换运行文件。
    * 交换期间只移动程序目录；.env、data、setup-key 和环境中引用的 TLS 文件
    * 从旧目录移回新目录，更新产物和旧程序备份在成功后立即删除。
+   *
+   * Windows 上不能 rename 部署目录本身：进程 cwd、以及进程内已打开的 SQLite
+   * 句柄（部署目录内 data/platform.db）都会让 rename 抛 EBUSY/EPERM。因此 Windows
+   * 改为就地替换——旧程序目录项移入 backup、新程序目录项移入部署目录，保留项原地
+   * 不动，数据库文件全程不移动；其余平台保持原有整目录交换语义。
    */
   private async installIntoFixedDeployment(target: NpmInstallTarget, version: string): Promise<boolean> {
     const deploymentRoot = target.deploymentRoot;
     if (deploymentRoot === null) return false;
+    const releaseLock = this.acquireFixedDeploymentLock(deploymentRoot);
+    if (releaseLock === null) {
+      this.setError(`无法获得固定部署目录更新锁：可能有另一个更新正在进行，或锁文件不可用。请检查 ${path.join(path.dirname(deploymentRoot), `.${path.basename(deploymentRoot)}.update.lock`)} 及其 .gate 文件`);
+      return false;
+    }
+    const inPlace = this.inPlaceDeploymentSwap;
+    const dbRelative = path.relative(deploymentRoot, path.resolve(this.config.dbPath));
+    const dbWithinDeployment = dbRelative !== '' && dbRelative !== '..' && !dbRelative.startsWith(`..${path.sep}`) && !path.isAbsolute(dbRelative);
+    if (dbWithinDeployment && (process.platform === 'win32' ? dbRelative.split(path.sep)[0].toLowerCase() : dbRelative.split(path.sep)[0]) !== 'data') {
+      this.setError('数据库位于部署目录的非保留位置，拒绝更新以避免删除数据；请将 MCP_DB_PATH 移到 data 目录或部署目录外');
+      releaseLock();
+      return false;
+    }
+
     const parent = path.dirname(deploymentRoot);
     const base = path.basename(deploymentRoot);
     const suffix = randomBytes(8).toString('hex');
@@ -1023,10 +1092,21 @@ export class UpdateEngine {
     const failedRoot = path.join(parent, `.${base}.failed-${suffix}`);
     const artifact = this.artifactPath(version);
     let oldMoved = false;
-    let swapped = false;
+    let swappedInPlace = false;
     let preservedEntries: string[] = [];
+    let movedOut: string[] = [];
+    let movedIn: string[] = [];
+    let originalCwd: string | null = null;
 
     try {
+      const gitCheckout = existsSync(path.join(deploymentRoot, '.git'));
+      if (gitCheckout) {
+        const status = await this.ops.runCommand('git', ['status', '--porcelain', '--untracked-files=all'], deploymentRoot, target.env);
+        if (!status.ok || status.message.trim() !== '') {
+          this.setError('Git 工作区包含未提交文件或无法确认状态，拒绝自动更新以保护本地修改');
+          return false;
+        }
+      }
       mkdirSync(stagingRoot, { recursive: true });
       const stagingEnv: NodeJS.ProcessEnv = {
         ...target.env,
@@ -1066,11 +1146,34 @@ export class UpdateEngine {
         filter: (source) => path.resolve(source) !== path.resolve(stagedPackageRoot),
       });
       preservedEntries = this.preservedDeploymentEntries(deploymentRoot);
-      renameSync(deploymentRoot, backupRoot);
-      oldMoved = true;
-      renameSync(candidateRoot, deploymentRoot);
-      swapped = true;
-      this.movePreservedEntries(backupRoot, deploymentRoot, preservedEntries);
+      if (gitCheckout) {
+        preservedEntries.push('.git');
+        const incoming = new Set(readdirSync(candidateRoot).map((name) => process.platform === 'win32' ? name.toLowerCase() : name));
+        for (const name of readdirSync(deploymentRoot)) {
+          if (!incoming.has(process.platform === 'win32' ? name.toLowerCase() : name)) preservedEntries.push(name);
+        }
+      }
+      const keptTop = new Set(preservedEntries.map((entry) => {
+        const top = entry.split(/[\\/]/)[0];
+        return process.platform === 'win32' ? top.toLowerCase() : top;
+      }));
+      const conflict = readdirSync(candidateRoot).find((name) => keptTop.has(process.platform === 'win32' ? name.toLowerCase() : name));
+      if (conflict !== undefined) throw new Error(`新版本程序条目与保留数据目录冲突：${conflict}`);
+
+      // 离开部署目录子树后再做任何目录交换。Windows 需要它来规避 cwd 句柄，
+      // POSIX 也需要它，避免删除备份目录时把当前进程留在已删除的 cwd 中。
+      originalCwd = this.chdirOutOfDeployment(deploymentRoot, parent);
+      if (inPlace) {
+        const moved = this.swapDeploymentEntriesInPlace(deploymentRoot, candidateRoot, backupRoot, preservedEntries);
+        movedOut = moved.movedOut;
+        movedIn = moved.movedIn;
+        swappedInPlace = true;
+      } else {
+        renameSync(deploymentRoot, backupRoot);
+        oldMoved = true;
+        renameSync(candidateRoot, deploymentRoot);
+        this.movePreservedEntries(backupRoot, deploymentRoot, preservedEntries);
+      }
 
       const registration = await this.ops.runCommand(
         process.execPath,
@@ -1080,22 +1183,273 @@ export class UpdateEngine {
       );
       if (!registration.ok || !this.profileUses(deploymentRoot, target.env, version)) {
         this.setError(`新版本已放入部署目录但 dsh profile 切换失败：${registration.message || '未指向新目录'}`);
-        await this.rollbackFixedDeployment(deploymentRoot, backupRoot, failedRoot, preservedEntries, target.env);
-        swapped = false;
+        if (inPlace) {
+          if (swappedInPlace) {
+            this.restoreDeploymentEntries(deploymentRoot, backupRoot, movedOut, movedIn);
+            swappedInPlace = false;
+            movedOut = [];
+            movedIn = [];
+            const restored = await this.ops.runCommand(
+              process.execPath,
+              [path.join(deploymentRoot, 'scripts', 'register-plugin.mjs')],
+              deploymentRoot,
+              target.env,
+            );
+            if (!restored.ok) this.setError(`${this.lastError ?? '更新回滚'}；恢复旧 profile 失败：${restored.message}`);
+          }
+        } else {
+          await this.rollbackFixedDeployment(deploymentRoot, backupRoot, failedRoot, preservedEntries, target.env);
+          oldMoved = false;
+        }
         return false;
       }
-      // profile 已指向新目录且新包完整，旧程序目录不再保留，避免占用额外磁盘。
-      rmSync(backupRoot, { recursive: true, force: true });
+      // profile 已指向新目录且新包完整：先提交替换，之后备份/旧运行时清理失败
+      // 都不再回滚（否则会把已注册的新程序又换回去）。
+      oldMoved = false;
+      swappedInPlace = false;
+      try {
+        rmSync(backupRoot, { recursive: true, force: true });
+      } catch (error) {
+        this.ops.log(`update: 清理旧程序备份失败：${error instanceof Error ? error.message : String(error)}`);
+      }
       this.removeReplacedNpmRuntime(deploymentRoot);
       this.ops.log(`update: dsh-passwords@${version} 已替换固定部署目录 ${deploymentRoot}，用户数据已保留`);
       return true;
     } catch (error) {
       this.setError(`固定部署目录替换失败：${error instanceof Error ? error.message : String(error)}`);
-      if (oldMoved) await this.rollbackFixedDeployment(deploymentRoot, backupRoot, failedRoot, preservedEntries, target.env);
+      if (inPlace) {
+        if (swappedInPlace) this.restoreDeploymentEntries(deploymentRoot, backupRoot, movedOut, movedIn);
+      } else if (oldMoved) {
+        await this.rollbackFixedDeployment(deploymentRoot, backupRoot, failedRoot, preservedEntries, target.env);
+      }
       return false;
     } finally {
-      // 成功、临时安装失败、版本校验失败和 profile 失败都不留下 staging/cache。
-      rmSync(stagingRoot, { recursive: true, force: true });
+      if (originalCwd !== null) {
+        try {
+          process.chdir(originalCwd);
+        } catch {
+          /* 原 cwd 已不可用时保持安全目录，不掩盖真正的失败原因 */
+        }
+      }
+      // 临时目录清理失败不得把更新锁留在运行中的进程里。
+      try {
+        rmSync(stagingRoot, { recursive: true, force: true });
+      } catch (error) {
+        this.ops.log(`update: 清理临时目录失败 ${stagingRoot}：${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        releaseLock();
+      }
+    }
+  }
+
+  /**
+   * 同一固定部署目录只允许一个更新。锁文件位于部署目录同级，进程被强杀后
+   * 超过 TTL 的锁视为陈旧并可接管，避免永久阻塞后续更新。
+   */
+  private acquireFixedDeploymentLock(deploymentRoot: string): (() => void) | null {
+    const lockPath = path.join(path.dirname(deploymentRoot), `.${path.basename(deploymentRoot)}.update.lock`);
+    const gatePath = `${lockPath}.gate`;
+    const mine = JSON.stringify({ pid: process.pid, startedAt: this.ops.now(), token: randomBytes(8).toString('hex') });
+    const gateMine = JSON.stringify({ pid: process.pid, startedAt: this.ops.now(), token: randomBytes(8).toString('hex') });
+    // 所有更新者先抢占同一短临界区；陈旧锁判定、移除、新锁创建不可交错。
+    // 进程若在临界区内崩溃会残留 gate：PID 已不存活或超过 TTL 后允许安全接管，
+    // 绝不永久阻塞后续更新（Windows 上尤其重要）。
+    if (!this.acquireFixedDeploymentGate(gatePath, gateMine)) return null;
+    try {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          const fd = openSync(lockPath, 'wx');
+          try {
+            writeFileSync(fd, mine);
+          } finally {
+            closeSync(fd);
+          }
+          return () => {
+            try {
+              if (readFileSync(lockPath, 'utf8') === mine) rmSync(lockPath, { force: true });
+            } catch {
+              /* 锁已被其他更新接管或删除 */
+            }
+          };
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+            this.ops.log(`update: 无法创建更新锁 ${lockPath}：${error instanceof Error ? error.message : String(error)}`);
+            return null;
+          }
+          let stale = true;
+          try {
+            const info = JSON.parse(readFileSync(lockPath, 'utf8')) as { startedAt?: unknown };
+            stale = typeof info.startedAt !== 'number' || this.ops.now() - info.startedAt > UPDATE_INSTALL_LOCK_TTL_MS;
+          } catch {
+            stale = true;
+          }
+          if (!stale || attempt > 0) return null;
+          const stalePath = `${lockPath}.stale-${randomBytes(8).toString('hex')}`;
+          try {
+            renameSync(lockPath, stalePath);
+            rmSync(stalePath, { force: true });
+          } catch {
+            return null;
+          }
+        }
+      }
+      return null;
+    } finally {
+      try {
+        if (readFileSync(gatePath, 'utf8') === gateMine) rmSync(gatePath, { force: true });
+      } catch {
+        /* gate 已被其他更新接管或删除 */
+      }
+    }
+  }
+
+  /**
+   * 创建交换锁临界区 gate；已存在时仅在可判定为崩溃残留时接管。
+   * 写者进程已不存活可立即接管；PID 被复用或 gate 内容缺失（创建后未写入即崩溃）
+   * 时超过 TTL 后接管，保证任何残留都不会永久阻塞更新。
+   */
+  private acquireFixedDeploymentGate(gatePath: string, gateMine: string): boolean {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const fd = openSync(gatePath, 'wx');
+        try {
+          writeFileSync(fd, gateMine);
+        } finally {
+          closeSync(fd);
+        }
+        return true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+          this.ops.log(`update: 更新锁临界区不可用 ${gatePath}：${error instanceof Error ? error.message : String(error)}`);
+          return false;
+        }
+        if (attempt > 0 || !this.staleDeploymentGate(gatePath)) {
+          this.ops.log(`update: 更新锁临界区被占用 ${gatePath}（其他更新正在进行或残留 gate 未超过接管 TTL）`);
+          return false;
+        }
+        // 陈旧残留：先原子改名再删除，避免与并发接管者交错。
+        const stalePath = `${gatePath}.stale-${randomBytes(8).toString('hex')}`;
+        try {
+          renameSync(gatePath, stalePath);
+          rmSync(stalePath, { force: true });
+        } catch {
+          return false; // 另一个更新者已抢先接管
+        }
+      }
+    }
+    return false;
+  }
+
+  /** gate 可安全接管（写者已死或超过 TTL）时返回 true；不确定一律 fail-closed。 */
+  private staleDeploymentGate(gatePath: string): boolean {
+    let raw: string;
+    try {
+      raw = readFileSync(gatePath, 'utf8');
+    } catch {
+      return false; // 读不到内容：无法判定，按仍在持有处理
+    }
+    let pid: number | null = null;
+    let startedAt: number | null = null;
+    try {
+      const info = JSON.parse(raw) as { pid?: unknown; startedAt?: unknown };
+      if (typeof info.pid === 'number' && Number.isInteger(info.pid) && info.pid > 0) pid = info.pid;
+      if (typeof info.startedAt === 'number' && Number.isFinite(info.startedAt)) startedAt = info.startedAt;
+    } catch {
+      /* 创建后未写入内容即崩溃：只能靠文件时间兜底 */
+    }
+    if (pid !== null && !processAlive(pid)) return true;
+    let age: number;
+    if (startedAt !== null) {
+      age = Math.max(0, this.ops.now() - startedAt);
+    } else {
+      try {
+        age = Math.max(0, Date.now() - statSync(gatePath).mtimeMs);
+      } catch {
+        return false;
+      }
+    }
+    return age > UPDATE_GATE_TTL_MS;
+  }
+
+  /** cwd 在部署目录内时切到同级父目录，返回原 cwd 供 finally 恢复；不在其中返回 null。 */
+  private chdirOutOfDeployment(deploymentRoot: string, safeDir: string): string | null {
+    let current: string;
+    try {
+      current = process.cwd();
+    } catch {
+      return null;
+    }
+    const relative = path.relative(deploymentRoot, current);
+    const insideDeployment = relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+    if (!insideDeployment) return null;
+    process.chdir(safeDir);
+    return current;
+  }
+
+  /**
+   * Windows 就地替换：跳过保留项（含其父目录），把其余旧目录项移入 backup，
+   * 再把候选程序项移入部署目录。旧的 data/.env 从不移动，因此已打开的数据库
+   * 句柄不影响替换；任一 rename 失败即还原已移动项。
+   */
+  private swapDeploymentEntriesInPlace(
+    deploymentRoot: string,
+    candidateRoot: string,
+    backupRoot: string,
+    preservedEntries: string[],
+  ): { movedOut: string[]; movedIn: string[] } {
+    const keep = new Set<string>();
+    for (const entry of preservedEntries) {
+      const top = entry.split(/[\\/]/)[0];
+      if (top !== '' && top !== '.' && top !== '..') keep.add(process.platform === 'win32' ? top.toLowerCase() : top);
+    }
+    const candidateConflicts = readdirSync(candidateRoot).filter((name) => keep.has(process.platform === 'win32' ? name.toLowerCase() : name));
+    if (candidateConflicts.length > 0) {
+      throw new Error(`新版本程序条目与保留数据目录冲突：${candidateConflicts.join(', ')}`);
+    }
+    mkdirSync(backupRoot, { recursive: true });
+    const movedOut: string[] = [];
+    const movedIn: string[] = [];
+    try {
+      for (const name of readdirSync(deploymentRoot)) {
+        if (keep.has(process.platform === 'win32' ? name.toLowerCase() : name)) continue;
+        renameSync(path.join(deploymentRoot, name), path.join(backupRoot, name));
+        movedOut.push(name);
+      }
+      for (const name of readdirSync(candidateRoot)) {
+        if (keep.has(process.platform === 'win32' ? name.toLowerCase() : name)) continue;
+        renameSync(path.join(candidateRoot, name), path.join(deploymentRoot, name));
+        movedIn.push(name);
+      }
+    } catch (error) {
+      this.restoreDeploymentEntries(deploymentRoot, backupRoot, movedOut, movedIn);
+      throw error;
+    }
+    return { movedOut, movedIn };
+  }
+
+  /** 就地替换失败时移除已移入的新程序，并把 backup 中的旧程序移回原位。 */
+  private restoreDeploymentEntries(deploymentRoot: string, backupRoot: string, movedOut: string[], movedIn: string[]): void {
+    for (const name of movedIn) {
+      try {
+        rmSync(path.join(deploymentRoot, name), { recursive: true, force: true });
+      } catch (error) {
+        this.ops.log(`update: 回滚新程序项失败 ${name}：${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    for (const name of movedOut) {
+      const source = path.join(backupRoot, name);
+      if (!existsSync(source)) continue;
+      try {
+        renameSync(source, path.join(deploymentRoot, name));
+      } catch (error) {
+        this.ops.log(`update: 回滚旧程序项失败 ${name}：${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    try {
+      // 全部旧程序项已还原才删除 backup；否则保留供人工恢复。
+      if (readdirSync(backupRoot).length === 0) rmSync(backupRoot, { recursive: true, force: true });
+    } catch {
+      /* backup 已不存在的正常路径 */
     }
   }
 
@@ -1108,7 +1462,13 @@ export class UpdateEngine {
       const relative = path.relative(deploymentRoot, absolute);
       if (relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)) entries.push(relative);
     }
-    return [...new Set(entries)];
+    if (process.platform !== 'win32') return [...new Set(entries)];
+    const existing = readdirSync(deploymentRoot);
+    return [...new Set(entries.map((entry) => {
+      const top = entry.split(/[\\/]/)[0];
+      const actual = existing.find((name) => name.toLowerCase() === top.toLowerCase());
+      return actual === undefined ? entry : actual + entry.slice(top.length);
+    }))];
   }
 
   private movePreservedEntries(fromRoot: string, toRoot: string, entries: string[]): void {
@@ -1196,9 +1556,14 @@ export class UpdateEngine {
     // 新的安装请求，不能把已完成安装的恢复动作锁住。
     if (this.restartPendingVersion !== null) {
       if (this.runtime === 'docker') return { ok: false, code: 'INSTALL_IN_PROGRESS', message: 'Docker 更新正在恢复，请等待容器健康检查完成', phase: this.phase };
-      if (this.config.patch.restartService === '') return { ok: true, requiresManualRestart: true, message: '新版本已安装，请手动重启 dsh-web 服务', phase: 'error', pendingVersion: null };
+      if (this.config.patch.restartService === '') return { ok: true, requiresManualRestart: true, message: this.manualRestartMessage(), phase: 'error', pendingVersion: this.restartPendingVersion };
       this.phase = 'restarting';
       const restart = await this.ops.restartWebService(this.config.patch.restartService);
+      if (restart.manual) {
+        this.setError(restart.message);
+        this.phase = 'error';
+        return { ok: true, requiresManualRestart: true, message: restart.message, phase: this.phase, pendingVersion: this.restartPendingVersion };
+      }
       if (!restart.ok) {
         this.setError(`新版本已安装但 dsh-web 重启失败：${restart.message}`);
         this.phase = 'error';
@@ -1397,11 +1762,14 @@ export class UpdateEngine {
     const now = this.ops.now();
     const checked = this.lastCheckedAt ?? 0;
     const cmp = this.latestVersion !== null ? compareVersions(this.latestVersion, this.version) : null;
+    // 已安装、等待重启的版本不再属于「可更新」：避免状态页继续提示有新版本可装，
+    // 而实际只能重启。updateAvailable 必须与 restartPendingVersion 保持一致。
+    const restartPending = this.restartPendingVersion !== null;
     return {
       env: this.runtime,
       currentVersion: this.version,
       latestVersion: this.latestVersion,
-      updateAvailable: cmp !== null && cmp > 0,
+      updateAvailable: !restartPending && cmp !== null && cmp > 0,
       checking: this.checkRunning,
       phase: this.phase,
       downloadPercent: this.phase === 'downloading' || this.phase === 'ready' ? this.downloadPercent : null,

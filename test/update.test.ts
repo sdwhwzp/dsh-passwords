@@ -1,11 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { DatabaseSync } from 'node:sqlite';
 import type { PlatformConfig } from '../src/config.ts';
 import { isBackgroundUpdateRequest, systemdPurgeLaunchArgs } from '../src/gateway.ts';
+import { resolveNpmCommand, windowsNpmShimArgs } from '../src/patch.ts';
 import {
   compareVersions,
   detectRuntime,
@@ -17,6 +20,8 @@ import {
   type UpdateStore,
   UpdateEngine,
   UPDATE_DEFAULT_MAX_BPS,
+  UPDATE_CHECK_MS,
+  UPDATE_GATE_TTL_MS,
   UPDATE_IDLE_MS,
 } from '../src/update.ts';
 
@@ -24,7 +29,7 @@ function config(dbPath: string, restartService = 'dsh-web'): PlatformConfig {
   return {
     setupKey: 'test-setup-key', dbPath, dbEncKey: '', jwtSecret: 'test-jwt-secret', internalSecret: 'test-internal-secret',
     gateway: { host: '127.0.0.1', port: 9443, upstream: 'http://127.0.0.1:3080', tls: null, redirectPort: null, publicHost: '', domain: 'localhost', autoTls: false, acmeEmail: '', acmeStaging: false },
-    patch: { dshRoot: '', restartService }, endpointRules: [], pluginCompat: false,
+    patch: { dshRoot: '', restartService }, endpointRules: [],
   };
 }
 
@@ -35,6 +40,28 @@ function store(): UpdateStore & { values: Map<string, string> } {
 
 async function flushUpdates(count = 12): Promise<void> {
   for (let i = 0; i < count; i += 1) await new Promise((resolve) => setImmediate(resolve));
+}
+
+/** 固定部署交换锁路径（与 UpdateEngine 同口径：部署目录同级的隐藏文件）。 */
+function fixedDeploymentLockPath(root: string): string {
+  return path.join(path.dirname(root), `.${path.basename(root)}.update.lock`);
+}
+
+/** 部署目录同级的临时残留（staging/backup/failed/lock），用于断言异常清理。 */
+function deploymentSiblings(root: string): string[] {
+  const prefix = `.${path.basename(root)}.`;
+  return readdirSync(path.dirname(root)).filter((name) => name.startsWith(prefix));
+}
+
+/** 手动模式两阶段：下载 + 确认安装，与插件两次点击等价。 */
+async function runManualInstall(engine: UpdateEngine): Promise<void> {
+  await engine.checkNow();
+  const downloaded = await engine.applyNow();
+  assert.equal(downloaded.code, 'DOWNLOAD_STARTED');
+  await flushUpdates();
+  const installed = await engine.applyNow();
+  assert.equal(installed.code, 'INSTALL_STARTED');
+  await flushUpdates();
 }
 
 function release(version = '2.6.3'): unknown { return { tag_name: `v${version}` }; }
@@ -93,7 +120,7 @@ function setupDocker(root: string, autoEnabled: boolean, nowRef: { value: number
   return { engine, db, ops, calls, installAudits: () => installAudits, composeDir };
 }
 
-function setup(root: string, autoEnabled: boolean, nowRef: { value: number }, restartOk = true, restartService = 'dsh-web') {
+function setup(root: string, autoEnabled: boolean, nowRef: { value: number }, restartOk = true, restartService = 'dsh-web', extraEnv: NodeJS.ProcessEnv = {}, inPlaceDeploymentSwap = true) {
   writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'dsh-passwords', version: '2.6.2' }));
   writeFileSync(path.join(root, 'obsolete-runtime.js'), 'old program file\n');
   const envFile = path.join(root, '.env');
@@ -133,7 +160,7 @@ function setup(root: string, autoEnabled: boolean, nowRef: { value: number }, re
     },
     runCommand: async (command, args, _cwd, env) => {
       calls.push({ command, args });
-      if (args[0] === 'root' && args[1] === '-g') return { ok: true, message: globalRoot };
+      if (args.includes('root') && args.includes('-g')) return { ok: true, message: globalRoot };
       if (command === process.execPath && args[0]?.endsWith('register-plugin.mjs')) {
         const packageRoot = path.resolve(path.dirname(args[0]), '..');
         const profile = path.join(env?.DSH_HOME ?? dshHome, 'profiles', 'web');
@@ -149,7 +176,7 @@ function setup(root: string, autoEnabled: boolean, nowRef: { value: number }, re
   };
   const db = store();
   db.setSetting('auto_update_enabled', autoEnabled ? '1' : '0');
-  const engine = new UpdateEngine(config(path.join(root, 'platform.db'), restartService), db, ops, { installRoot: root, env: { DSH_PASSWORDS_RUNTIME: 'git', DSH_HOME: dshHome, DSH_PASSWORDS_ENV_FILE: envFile } });
+  const engine = new UpdateEngine(config(path.join(root, 'data', 'platform.db'), restartService), db, ops, { installRoot: root, env: { DSH_PASSWORDS_RUNTIME: 'git', DSH_HOME: dshHome, DSH_PASSWORDS_ENV_FILE: envFile, ...extraEnv }, inPlaceDeploymentSwap });
   return { engine, db, ops, calls, restarts: () => restarts, setRestartAllowed: (allowed: boolean) => { restartAllowed = allowed; } };
 }
 
@@ -184,7 +211,8 @@ test('Harness compiler links resolve the same native build declared by runtime p
       assert.ok(specifier.startsWith('file:'), `${name} needs the personal Harness checkout`);
       const linked = JSON.parse(readFileSync(new URL(`${specifier.slice(5)}/package.json`, new URL('../', import.meta.url)), 'utf8'));
       assert.equal(linked.name, name);
-      assert.equal(version, `^${linked.version}`, `${name} compiler and runtime versions agree`);
+      assert.equal(linked.version, "0.2.0-rc.2", `${name} compiler uses the candidate build`);
+      assert.equal(version, "^0.1.7-rc.2 || ^0.2.0-rc.1", `${name} runtime retains released compatibility`);
     }
   }
   assert.equal(pkg.peerDependenciesMeta?.['@deepseek-ai/dsh-principal-access']?.optional, true);
@@ -199,12 +227,75 @@ test('source archives without .git still use the npm update runtime', () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test('detectRuntime 把调用方 env 传入 npm 探测子进程', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'dshpw-runtime-env-'));
+  try {
+    const fakeNpm = path.join(dir, 'npm-cli.js');
+    // 子进程只回显调用方注入的 env：漏传 env 时会继承宿主 process.env，输出为空。
+    writeFileSync(fakeNpm, 'process.stdout.write(process.env.DSH_PW_RUNTIME_PROBE ?? "");\n');
+    const globalRoot = path.join(dir, 'global-root');
+    mkdirSync(globalRoot, { recursive: true });
+    const installRoot = path.join(globalRoot, 'dsh-passwords');
+    const env = { DSH_PASSWORDS_RUNTIME: '', npm_execpath: fakeNpm, DSH_PW_RUNTIME_PROBE: globalRoot };
+    assert.equal(detectRuntime(installRoot, env), 'npm-global', '探测子进程必须拿到调用方 env（npm --prefix 等配置随之生效）');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('container detection covers explicit runtime, data homes and standard container markers', () => {
   assert.equal(isContainerRuntime({ DSH_PASSWORDS_RUNTIME: 'docker' }, () => false), true);
   assert.equal(isContainerRuntime({ DSH_HOME: '/data/dsh' }, () => false), true);
   assert.equal(isContainerRuntime({}, (candidate) => candidate === '/.dockerenv'), true);
   assert.equal(isContainerRuntime({}, (candidate) => candidate === '/run/.containerenv'), true);
   assert.equal(isContainerRuntime({}, () => false), false);
+});
+
+test('Issue #33：npm 解析优先 node + npm-cli.js，Windows 上不再走无法 spawn 的 .cmd shim', () => {
+  const resolved = resolveNpmCommand(['root', '-g']);
+  assert.ok(resolved !== null, 'npm 调用方式应可解析');
+  if (resolved.command === process.execPath) {
+    assert.match(resolved.args[0] ?? '', /npm-cli\.js$/i, '应使用 npm-cli.js 入口');
+    assert.deepEqual(resolved.args.slice(1), ['root', '-g'], 'npm 子命令参数必须排在入口之后');
+  } else {
+    assert.notEqual(process.platform, 'win32', 'Windows 上不能回退到 shell:false 无法执行的 .cmd shim');
+    assert.equal(resolved.command, 'npm');
+  }
+  // 真实 Windows 路径上验证 node/npm-cli.js 或 cmd shim 都不会触发 .cmd EINVAL。
+  const version = resolveNpmCommand(['--version']);
+  assert.ok(version !== null);
+  if (process.platform === 'win32') {
+    const probe = spawnSync(version.command, version.args, { encoding: 'utf8', timeout: 30_000, shell: false, windowsHide: true });
+    assert.equal(probe.error, undefined);
+    assert.equal(probe.status, 0, `npm --version 应成功：${probe.stderr ?? ''}`);
+    assert.match(String(probe.stdout ?? '').trim(), /^\d+\.\d+\.\d+/, '应输出 npm 版本号');
+  }
+});
+
+test('Issue #33：npm_execpath 只采信 npm 自身入口，pnpm/yarn 或不存在时不误用', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'dshpw-npm-cli-'));
+  try {
+    const fakeNpm = path.join(dir, 'npm-cli.js');
+    writeFileSync(fakeNpm, 'console.log("ok");\n');
+    assert.deepEqual(resolveNpmCommand(['x'], { npm_execpath: fakeNpm }), { command: process.execPath, args: [fakeNpm, 'x'] });
+    const pnpmEntry = path.join(dir, 'pnpm.cjs');
+    writeFileSync(pnpmEntry, 'console.log("ok");\n');
+    const ignored = resolveNpmCommand(['x'], { npm_execpath: pnpmEntry });
+    assert.notEqual(ignored?.args[0], pnpmEntry, 'pnpm 的 execpath 不能用来执行 npm 子命令');
+    const missing = path.join(dir, 'npm-missing.js');
+    const absent = resolveNpmCommand(['x'], { npm_execpath: missing });
+    assert.notEqual(absent?.args[0], missing, '不存在的 npm_execpath 不能被采信');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Issue #33：Windows cmd 回退显式引用参数，含引号/换行时 fail-closed', () => {
+  // 外层引号交给 cmd /s 剥离，剥离后剩下标准命令串（与 scripts/install.mjs 同口径）。
+  assert.deepEqual(windowsNpmShimArgs(['install', '-g', 'C:\\a b\\dsh-passwords-2.7.5.tgz']), [
+    '/d', '/s', '/c', '""npm.cmd" "install" "-g" "C:\\a b\\dsh-passwords-2.7.5.tgz""',
+  ]);
+  assert.equal(windowsNpmShimArgs(['install', 'C:\\evil" & calc.exe']), null, '双引号参数必须拒绝');
+  assert.equal(windowsNpmShimArgs(['install', 'C:\\line\nbreak']), null, '换行参数必须拒绝');
+  assert.equal(windowsNpmShimArgs(['install', 'C:\\100%TEMP%\\package.tgz']), null, 'cmd 环境变量展开参数必须拒绝');
 });
 
 test('systemd purge runner waits for helper exec before reporting a successful launch', () => {
@@ -273,6 +364,266 @@ test('manual mode checks without download, then requires download and installati
 });
 
 
+test('Issue #33：部署目录内数据库句柄打开时固定部署替换仍成功（Windows 不得 rename 部署目录）', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'dshpw-update-'));
+  const dbFile = path.join(root, 'data', 'platform.db');
+  const now = { value: 1_000_000 };
+  const { engine, restarts } = setup(root, false, now);
+  // 用真实 node:sqlite 句柄覆盖报告中的 EPERM 前提。
+  rmSync(dbFile);
+  const sqlite = new DatabaseSync(dbFile);
+  sqlite.exec('CREATE TABLE probe (value TEXT); INSERT INTO probe VALUES (\'user database\');');
+  try {
+    await runManualInstall(engine);
+    assert.equal(restarts(), 1);
+    assert.equal(sqlite.prepare('SELECT value FROM probe').get()?.value, 'user database', '打开的数据库必须原地保留');
+    assert.equal(existsSync(path.join(root, 'obsolete-runtime.js')), false, '旧程序应被替换');
+    assert.equal((JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8')) as { version: string }).version, '2.6.3');
+    assert.deepEqual(deploymentSiblings(root), [], '不应留下 staging/backup/failed/lock 残留');
+  } finally {
+    sqlite.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Windows 数据目录大小写与配置不同仍原地保留', { skip: process.platform !== 'win32' }, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'dshpw-update-'));
+  try {
+    const now = { value: 1_000_000 };
+    const { engine, restarts } = setup(root, false, now);
+    const data = path.join(root, 'data');
+    const renamed = path.join(root, 'data-temp');
+    const actual = path.join(root, 'Data');
+    renameSync(data, renamed);
+    renameSync(renamed, actual);
+    await runManualInstall(engine);
+    assert.equal(restarts(), 1);
+    assert.equal(readFileSync(path.join(actual, 'platform.db'), 'utf8'), 'user database\n');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Issue #33：cwd 位于部署目录内时替换仍成功并恢复 cwd', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'dshpw-update-'));
+  const originalCwd = process.cwd();
+  try {
+    const now = { value: 1_000_000 };
+    const { engine, restarts } = setup(root, false, now);
+    process.chdir(root);
+    await runManualInstall(engine);
+    assert.equal(restarts(), 1);
+    assert.equal(existsSync(path.join(root, 'obsolete-runtime.js')), false);
+    assert.equal(path.resolve(process.cwd()), realpathSync(root), '更新应恢复更新前的工作目录');
+  } finally {
+    process.chdir(originalCwd);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Issue #33：固定部署交换锁拒绝并发更新且不修改部署', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'dshpw-update-'));
+  const lockPath = fixedDeploymentLockPath(root);
+  try {
+    const now = { value: 1_000_000 };
+    const { engine, restarts } = setup(root, false, now);
+    // 模拟另一个网关进程已持有交换锁。
+    writeFileSync(lockPath, JSON.stringify({ pid: 1, startedAt: now.value }));
+    await runManualInstall(engine);
+    assert.equal(restarts(), 0);
+    assert.match(engine.status().lastError ?? '', /占用|正在进行/);
+    assert.equal(existsSync(path.join(root, 'obsolete-runtime.js')), true, '被锁拒绝时旧程序必须原样保留');
+    assert.equal((JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8')) as { version: string }).version, '2.6.2');
+  } finally {
+    rmSync(lockPath, { force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Issue #33：陈旧交换锁可被接管，不永久阻塞更新', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'dshpw-update-'));
+  const lockPath = fixedDeploymentLockPath(root);
+  try {
+    const now = { value: 1_000_000 };
+    const { engine, restarts } = setup(root, false, now);
+    // 进程被强杀留下的旧锁：超过 TTL 后必须可接管。
+    writeFileSync(lockPath, JSON.stringify({ pid: 999999, startedAt: -1_000_000_000 }));
+    await runManualInstall(engine);
+    assert.equal(restarts(), 1);
+    assert.equal(existsSync(lockPath), false, '更新完成后必须释放锁');
+    assert.equal(existsSync(path.join(root, 'obsolete-runtime.js')), false);
+    assert.deepEqual(deploymentSiblings(root), []);
+  } finally {
+    rmSync(lockPath, { force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Issue #33：临界区内崩溃残留的 .gate（写者 PID 已不存在）可被安全接管', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'dshpw-update-'));
+  const lockPath = fixedDeploymentLockPath(root);
+  const gatePath = `${lockPath}.gate`;
+  try {
+    const now = { value: 1_000_000 };
+    const { engine, restarts } = setup(root, false, now);
+    // 临界区内进程被杀：gate 残留，且写者 PID 已不存在（必不存在的极端 PID）。
+    writeFileSync(gatePath, JSON.stringify({ pid: 2_147_483_647, startedAt: now.value, token: 'dead-gate' }));
+    await runManualInstall(engine);
+    assert.equal(restarts(), 1, '残留 gate 不得永久阻塞更新');
+    assert.equal(existsSync(gatePath), false, 'gate 必须在退出时清理');
+    assert.deepEqual(deploymentSiblings(root), [], '不得留下 gate 残留副本');
+  } finally {
+    rmSync(gatePath, { force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Issue #33：内容未写入即崩溃的空 .gate 超过 TTL 后也可接管', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'dshpw-update-'));
+  const lockPath = fixedDeploymentLockPath(root);
+  const gatePath = `${lockPath}.gate`;
+  try {
+    const now = { value: 1_000_000 };
+    const { engine, restarts } = setup(root, false, now);
+    // openSync('wx') 成功后、写入内容前进程被杀：文件为空且无时间戳，
+    // 只能按文件 mtime + TTL 判定陈旧并接管。
+    writeFileSync(gatePath, '');
+    const past = new Date(Date.now() - UPDATE_GATE_TTL_MS - 60_000);
+    utimesSync(gatePath, past, past);
+    await runManualInstall(engine);
+    assert.equal(restarts(), 1, '超过 TTL 的空 gate 必须可接管');
+    assert.deepEqual(deploymentSiblings(root), []);
+  } finally {
+    rmSync(gatePath, { force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Issue #33：存活写者持有的新鲜 .gate 仍 fail-closed 拒绝并发更新', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'dshpw-update-'));
+  const lockPath = fixedDeploymentLockPath(root);
+  const gatePath = `${lockPath}.gate`;
+  try {
+    const now = { value: 1_000_000 };
+    const { engine, restarts } = setup(root, false, now);
+    // 写者进程仍在运行且未超过 TTL：不得接管，必须拒绝本次更新。
+    writeFileSync(gatePath, JSON.stringify({ pid: process.pid, startedAt: now.value, token: 'live-gate' }));
+    await runManualInstall(engine);
+    assert.equal(restarts(), 0);
+    assert.equal(engine.status().phase, 'ready');
+    assert.match(engine.status().lastError ?? '', /正在进行|进行中/);
+    assert.equal(existsSync(path.join(root, 'obsolete-runtime.js')), true, '被 gate 拒绝时旧程序必须原样保留');
+  } finally {
+    rmSync(lockPath, { force: true });
+    rmSync(gatePath, { force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('POSIX 整目录替换仍保留数据库和配置并恢复 cwd', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'dshpw-update-'));
+  const cwd = process.cwd();
+  try {
+    const now = { value: 1_000_000 };
+    const { engine, restarts } = setup(root, false, now, true, 'dsh-web', {}, false);
+    mkdirSync(path.join(root, '.git'));
+    writeFileSync(path.join(root, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+    writeFileSync(path.join(root, 'notes.txt'), 'keep local checkout files\n');
+    process.chdir(root);
+    await runManualInstall(engine);
+    assert.equal(restarts(), 1);
+    assert.equal(process.cwd(), realpathSync(root));
+    assert.equal(readFileSync(path.join(root, 'data', 'platform.db'), 'utf8'), 'user database\n');
+    assert.equal(readFileSync(path.join(root, '.git', 'HEAD'), 'utf8'), 'ref: refs/heads/main\n');
+    assert.equal(readFileSync(path.join(root, 'notes.txt'), 'utf8'), 'keep local checkout files\n');
+    assert.deepEqual(deploymentSiblings(root), []);
+  } finally {
+    process.chdir(cwd);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Issue #33：Git checkout 可原位更新且保留仓库元数据，非保留数据库路径拒绝更新', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'dshpw-update-'));
+  try {
+    const now = { value: 1_000_000 };
+    const first = setup(root, false, now);
+    mkdirSync(path.join(root, '.git'));
+    writeFileSync(path.join(root, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+    await runManualInstall(first.engine);
+    assert.equal(first.restarts(), 1);
+    assert.equal(readFileSync(path.join(root, '.git', 'HEAD'), 'utf8'), 'ref: refs/heads/main\n');
+    assert.equal(readFileSync(path.join(root, 'obsolete-runtime.js'), 'utf8'), 'old program file\n');
+    assert.equal(readFileSync(path.join(root, 'data', 'platform.db'), 'utf8'), 'user database\n');
+    const second = setup(root, false, now);
+    const customDb = path.join(root, 'private', 'platform.db');
+    mkdirSync(path.dirname(customDb));
+    writeFileSync(customDb, 'must survive\n');
+    const guarded = new UpdateEngine(config(customDb), second.db, second.ops, {
+      installRoot: root,
+      env: { DSH_PASSWORDS_RUNTIME: 'git', DSH_HOME: path.join(root, 'dsh-home'), DSH_PASSWORDS_ENV_FILE: path.join(root, '.env') },
+      inPlaceDeploymentSwap: true,
+    });
+    await runManualInstall(guarded);
+    assert.match(guarded.status().lastError ?? '', /数据库位于部署目录的非保留位置/);
+    assert.equal(readFileSync(customDb, 'utf8'), 'must survive\n');
+    assert.equal(existsSync(path.join(root, 'obsolete-runtime.js')), true);
+    assert.equal(readFileSync(path.join(root, '.git', 'HEAD'), 'utf8'), 'ref: refs/heads/main\n');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Git checkout 有本地改动时拒绝自动更新', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'dshpw-update-'));
+  try {
+    const now = { value: 1_000_000 };
+    const { engine, ops, restarts } = setup(root, false, now);
+    mkdirSync(path.join(root, '.git'));
+    const runCommand = ops.runCommand;
+    ops.runCommand = async (command, args, cwd, env) =>
+      command === 'git' ? { ok: true, message: ' M src/update.ts' } : runCommand(command, args, cwd, env);
+    await runManualInstall(engine);
+    assert.equal(restarts(), 0);
+    assert.match(engine.status().lastError ?? '', /Git 工作区包含未提交文件/);
+    assert.equal(readFileSync(path.join(root, 'obsolete-runtime.js'), 'utf8'), 'old program file\n');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Issue #33：就地替换发现保留数据与新程序目录冲突时 fail-closed', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'dshpw-update-'));
+  try {
+    const now = { value: 1_000_000 };
+    const { engine, restarts } = setup(root, false, now, true, 'dsh-web', { MCP_GATEWAY_TLS_CERT: 'dist/cert.pem' });
+    await runManualInstall(engine);
+    assert.equal(restarts(), 0);
+    assert.match(engine.status().lastError ?? '', /保留数据目录冲突/);
+    assert.equal((JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8')) as { version: string }).version, '2.6.2');
+    assert.equal(existsSync(path.join(root, 'obsolete-runtime.js')), true);
+    assert.equal(readFileSync(path.join(root, 'data', 'platform.db'), 'utf8'), 'user database\n');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Issue #33：profile 注册失败时固定部署替换回滚旧程序并保留用户数据', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'dshpw-update-'));
+  try {
+    const now = { value: 1_000_000 };
+    const { engine, ops, restarts } = setup(root, false, now);
+    let registrations = 0;
+    ops.runCommand = async (command, args) => {
+      if (command === process.execPath && args[0]?.endsWith('register-plugin.mjs')) {
+        registrations += 1;
+        return { ok: false, message: 'register boom' };
+      }
+      return { ok: true, message: '' };
+    };
+    await runManualInstall(engine);
+    assert.equal(restarts(), 0);
+    assert.equal(registrations, 2, '回滚后应尝试重新注册旧 profile');
+    assert.match(engine.status().lastError ?? '', /profile/);
+    assert.equal((JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8')) as { version: string }).version, '2.6.2', '失败后必须回滚到旧程序');
+    assert.equal(existsSync(path.join(root, 'obsolete-runtime.js')), true, '旧程序文件应被移回');
+    assert.equal(readFileSync(path.join(root, 'data', 'platform.db'), 'utf8'), 'user database\n');
+    assert.deepEqual(deploymentSiblings(root), [], '回滚后不应留下 staging/backup/failed/lock');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('update status polling is background traffic, while user actions remain activity', () => {
   assert.equal(isBackgroundUpdateRequest('/api/dsh-passwords/update/status'), true);
   assert.equal(isBackgroundUpdateRequest('/gateway/internal/update'), true);
@@ -312,6 +663,11 @@ test('restart failure is reported and does not claim a successful update', async
     assert.match(engine.status().lastError ?? '', /重启失败/);
     assert.equal(engine.status().phase, 'error');
     assert.equal(engine.status().restartPendingVersion, '2.6.3');
+    // 已安装、等待重启的版本不再属于「有新版本可更新」：updateAvailable 必须与
+    // restartPendingVersion 一致，否则状态页会提示可再次安装而已完成安装的版本。
+    assert.equal(engine.status().currentVersion, '2.6.2');
+    assert.equal(engine.status().latestVersion, '2.6.3');
+    assert.equal(engine.status().updateAvailable, false);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -336,6 +692,56 @@ test('restart failure can be retried immediately and clears the pending restart 
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test('安装完成后进入重启待定期不得重复下载、安装或审计', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'dshpw-update-'));
+  try {
+    const now = { value: 1_000_000 };
+    const { engine, db, ops, restarts, setRestartAllowed } = setup(root, true, now, false);
+    let audits = 0;
+    const originalAudit = db.audit;
+    db.audit = (...args) => { audits += 1; originalAudit(...args); };
+    let downloads = 0;
+    const originalDownload = ops.download;
+    ops.download = async (...args) => { downloads += 1; return originalDownload(...args); };
+    let installs = 0;
+    const originalInstall = ops.runInstall;
+    ops.runInstall = async (...args) => { installs += 1; return originalInstall(...args); };
+
+    // 自动模式：包就绪后平台空闲满 1 小时触发一次自动安装，重启失败进入待重启。
+    await engine.checkNow({ downloadIfAllowed: true });
+    assert.equal(engine.status().phase, 'ready');
+    assert.equal(downloads, 1);
+    now.value += UPDATE_IDLE_MS;
+    engine.tick();
+    await flushUpdates();
+    assert.equal(engine.status().restartPendingVersion, '2.6.3');
+    assert.equal(installs, 1);
+    assert.equal(audits, 1);
+    assert.equal(restarts(), 1);
+
+    // 24h 后再次自动检查/推进：待重启期间必须完全跳过，不得重复下载/安装/审计/重启。
+    now.value += UPDATE_CHECK_MS + UPDATE_IDLE_MS;
+    await engine.checkNow({ downloadIfAllowed: true });
+    engine.tick();
+    await flushUpdates();
+    assert.equal(downloads, 1, '待重启期间不得重复下载');
+    assert.equal(installs, 1, '待重启期间不得重复安装');
+    assert.equal(audits, 1, '待重启期间不得重复写 update_applied 审计');
+    assert.equal(restarts(), 1, '待重启期间不得重复触发重启');
+    assert.equal(engine.status().pendingVersion, null);
+    assert.equal(engine.status().phase, 'error');
+    assert.equal(engine.status().restartPendingVersion, '2.6.3');
+    assert.equal(engine.status().updateAvailable, false);
+
+    // 重启恢复后仍可正常完成，且不需要再次安装。
+    setRestartAllowed(true);
+    const recovered = await engine.applyNow();
+    assert.equal(recovered.ok, true);
+    assert.equal(engine.status().restartPendingVersion, null);
+    assert.equal(installs, 1);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('restart pending state survives engine reconstruction and can be resumed', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'dshpw-update-'));
   try {
@@ -352,11 +758,42 @@ test('restart pending state survives engine reconstruction and can be resumed', 
     const second = setup(root, false, now, true);
     // setup's fresh store is replaced with the persisted settings to model a gateway restart.
     second.db.setSetting('update_restart_pending_version', '2.6.3');
-    const restored = new UpdateEngine(config(path.join(root, 'platform.db')), second.db, second.ops, { installRoot: root, env: { DSH_PASSWORDS_RUNTIME: 'git', DSH_HOME: path.join(root, 'dsh-home'), DSH_PASSWORDS_ENV_FILE: path.join(root, '.env') } });
+    const restored = new UpdateEngine(config(path.join(root, 'data', 'platform.db')), second.db, second.ops, { installRoot: root, env: { DSH_PASSWORDS_RUNTIME: 'git', DSH_HOME: path.join(root, 'dsh-home'), DSH_PASSWORDS_ENV_FILE: path.join(root, '.env') } });
     assert.equal(restored.status().restartPendingVersion, '2.6.3');
     const retried = await restored.applyNow();
     assert.equal(retried.ok, true);
     assert.equal(restored.status().restartPendingVersion, null);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('手动重启后的新版本进程清除待重启标记', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'dshpw-update-'));
+  try {
+    const now = { value: 1_000_000 };
+    const { engine, db, ops } = setup(root, false, now, true, '');
+    await runManualInstall(engine);
+    assert.equal(db.getSetting('update_restart_pending_version'), '2.6.3');
+    const restarted = new UpdateEngine(config(path.join(root, 'data', 'platform.db'), ''), db, ops, {
+      installRoot: root,
+      env: { DSH_PASSWORDS_RUNTIME: 'git', DSH_HOME: path.join(root, 'dsh-home'), DSH_PASSWORDS_ENV_FILE: path.join(root, '.env') },
+    });
+    assert.equal(restarted.status().restartPendingVersion, null);
+    assert.equal(db.getSetting('update_restart_pending_version'), '');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('服务重启器不支持当前平台时报告手动重启而不清理 pending', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'dshpw-update-'));
+  try {
+    const now = { value: 1_000_000 };
+    const { engine, db, ops } = setup(root, false, now);
+    ops.restartWebService = async () => ({ ok: false, manual: true, message: '请手动重启 DeepSeek Harness' });
+    await runManualInstall(engine);
+    assert.equal(engine.status().restartPendingVersion, '2.6.3');
+    assert.match(engine.status().lastError ?? '', /手动重启/);
+    const retry = await engine.applyNow();
+    assert.equal(retry.requiresManualRestart, true);
+    assert.equal(db.getSetting('update_restart_pending_version'), '2.6.3');
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -375,6 +812,7 @@ test('manual restart mode reports manual action without persisting a failed rest
     assert.equal(engine.status().phase, 'error');
     assert.equal(engine.status().restartPendingVersion, '2.6.3');
     assert.equal(db.getSetting('update_restart_pending_version'), '2.6.3');
+    assert.match(engine.status().lastError ?? '', process.platform === 'win32' ? /重新启动 DeepSeek Harness/ : /重启 dsh-web 服务/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

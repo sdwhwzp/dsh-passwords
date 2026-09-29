@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process';
 
 const projectRoot = path.resolve(import.meta.dirname, '..');
 const uninstallScript = path.join(projectRoot, 'scripts', 'uninstall.mjs');
+const registerScript = path.join(projectRoot, 'scripts', 'register-plugin.mjs');
 
 function commandEnvironment(binDir: string): NodeJS.ProcessEnv {
   const inheritedPath = process.env.Path ?? process.env.PATH ?? '';
@@ -56,6 +57,36 @@ test('uninstall restores manifest, lockfile, and node_modules when pnpm reconcil
       readFileSync(manifest, 'utf8').includes('dsh-passwords'),
       true,
     );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('register-plugin 经安全 cmd shim（非 shell:true）调用 pnpm 并传播退出码', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'dshpw-register-'));
+  const dshHome = path.join(root, 'dsh-home');
+  const profile = path.join(dshHome, 'profiles', 'web');
+  const bin = path.join(root, 'bin');
+  const marker = path.join(root, 'pnpm-argv.txt');
+  mkdirSync(bin, { recursive: true });
+  // 假 pnpm shim 记录收到的参数并以 0 退出，证明脚本确实经由 pnpm shim 调用。
+  // 若回退到 shell:true，Node 22+ 会在 stderr 打印 DEP0190 弃用警告。
+  if (process.platform === 'win32') {
+    writeFileSync(path.join(bin, 'pnpm.cmd'), `@echo off\r\necho %* > "${marker}"\r\nexit /b 0\r\n`);
+  } else {
+    writeFileSync(path.join(bin, 'pnpm'), `#!/bin/sh\necho "$@" > "${marker}"\nexit 0\n`, { mode: 0o755 });
+  }
+  try {
+    const result = spawnSync(process.execPath, [registerScript], {
+      env: { ...commandEnvironment(bin), DSH_HOME: dshHome },
+      encoding: 'utf8',
+    });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.doesNotMatch(result.stderr, /DEP0190/, '不得再以 shell:true 调用 pnpm');
+    assert.equal(readFileSync(marker, 'utf8').trim().replace(/"/g, ''), 'install');
+    const manifest = JSON.parse(readFileSync(path.join(profile, 'package.json'), 'utf8'));
+    assert.equal(manifest.dependencies['dsh-passwords'], `link:${projectRoot}`);
+    assert.ok(manifest.dsh.profile.bundles.includes('dsh-passwords'));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

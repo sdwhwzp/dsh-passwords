@@ -9,8 +9,8 @@ const read = (...parts: string[]) => readFileSync(path.join(projectRoot, ...part
 // Private development links and public installer defaults target the reviewed RC2 release.
 // Bump this constant together with package.json, the lockfile, the installers, Docker
 // defaults, and the public baseline docs.
-const PRIVATE_HARNESS = '0.2.0-rc.1';
-const DSH_PIN = '0.1.7-rc.2';
+const PRIVATE_HARNESS = '0.2.0-rc.2';
+const DSH_PIN = '0.2.0-rc.1';
 const PREVIOUS_ALPHA = '0.1.7-alpha.1';
 // Exact-match detector: the `(?!\d)` guard keeps a future alpha.10 / alpha.11
 // from being misread as the previous alpha.1.
@@ -20,6 +20,7 @@ const PREVIOUS_ALPHA_RE = new RegExp(`0\\.1\\.7-{1,2}alpha\\.1(?!\\d)`);
 
 type LockEntry = { version?: string; resolved?: string; [key: string]: unknown };
 type Lockfile = { lockfileVersion: number; packages: Record<string, LockEntry> };
+type ParsedVersion = { major: number; minor: number; patch: number; prerelease: string[] };
 
 const lockPackageName = (key: string) => key.split('node_modules/').pop() ?? '';
 const isDshPackage = (name: string) => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-');
@@ -35,7 +36,7 @@ test('development links and runtime peer ranges target the private Harness relea
     assert.equal(linked.version, PRIVATE_HARNESS);
   }
   for (const [name, spec] of Object.entries(pkg.peerDependencies)) {
-    if (isDshPackage(name)) assert.equal(spec, `^0.1.7-rc.2 || ^${PRIVATE_HARNESS}`, name);
+    if (isDshPackage(name)) assert.equal(spec, `^0.1.7-rc.2 || ^0.2.0-rc.1`, name);
   }
 });
 
@@ -105,17 +106,17 @@ test('shrinkwrap records every private Harness development link', () => {
 test('installers and bundled Docker default to the pinned release', () => {
   for (const file of ['install.sh', 'install.bat', 'scripts/install.mjs']) {
     const source = read(file);
-    assert.match(source, /@deepseek-ai\/dsh@0\.1\.7-rc\.2/, `${file} must install @deepseek-ai/dsh@${DSH_PIN}`);
+    assert.match(source, /@deepseek-ai\/dsh@0\.2\.0-rc\.1/, `${file} must install @deepseek-ai/dsh@${DSH_PIN}`);
     assert.doesNotMatch(source, /@deepseek-ai\/dsh@0\.1\.6-alpha\.2(?!\d)/, `${file} must not prescribe the previous alpha install command`);
   }
-  assert.match(read('docker', 'Dockerfile.bundled'), /ARG DSH_VERSION=0\.1\.7-rc\.2/);
-  assert.match(read('docker', 'docker-compose.yml'), /DSH_VERSION:-0\.1\.7-rc\.2/);
-  assert.match(read('docker', '.env.example'), /#DSH_VERSION=0\.1\.7-rc\.2/);
+  assert.match(read('docker', 'Dockerfile.bundled'), /ARG DSH_VERSION=0\.2\.0-rc\.1/);
+  assert.match(read('docker', 'docker-compose.yml'), /DSH_VERSION:-0\.2\.0-rc\.1/);
+  assert.match(read('docker', '.env.example'), /#DSH_VERSION=0\.2\.0-rc\.1/);
 });
 
 test('compatibility documentation identifies the private Harness requirement', () => {
   const matrix = read('docs', 'compatibility-matrix.md');
-  assert.match(matrix, /0\.1\.7-rc\.2/);
+  assert.ok(matrix.includes(PRIVATE_HARNESS));
   assert.match(matrix, /native principal/);
   assert.match(matrix, /candidate/i);
 });

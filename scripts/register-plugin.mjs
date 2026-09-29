@@ -27,6 +27,23 @@ import {
   resolveProfilePlugins,
 } from './profile-plugins.mjs';
 
+/**
+ * 运行 pnpm。Windows 上 pnpm 只是 `.cmd` shim，Node >=22（含 24）为修复
+ * CVE-2024-27980 已拒绝 shell:false 直接执行 .cmd/.bat，而 shell:true 又会触发
+ * DEP0190 且存在参数拼接注入面。因此用 cmd.exe 显式启动 shim：
+ * `cmd /d /s /c pnpm.cmd install`（不经 shell:true）。
+ * 注意不能给命令串再加一层引号：Node 会把内层引号转义成 \"，cmd /s 剥壳后
+ * 得到非法命令，因此这里只接受不含引号/百分号/空白的固定字面量参数，否则 fail-closed。
+ */
+function runPnpm(args, cwd) {
+  if (process.platform !== 'win32') return spawnSync('pnpm', args, { cwd, stdio: 'inherit' });
+  if (args.some((arg) => /["%\s]/.test(arg))) {
+    return { error: new Error('pnpm 参数不安全，已拒绝执行'), status: null };
+  }
+  const line = ['pnpm.cmd', ...args].join(' ');
+  return spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', line], { cwd, stdio: 'inherit' });
+}
+
 const installRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const pluginManifestPath = path.join(installRoot, 'scripts', 'profile-plugins.json');
 const dshHome = process.env.DSH_HOME?.trim() || path.join(homedir(), '.dsh');
@@ -107,11 +124,9 @@ for (const plugin of recorded.skipped) {
 for (const prepare of recorded.prepares) {
   const [command, ...args] = prepare.command;
   console.log(`[dsh-passwords] 构建本地插件工作区 ${prepare.name}: ${prepare.cwd}`);
-  const prepareResult = spawnSync(command, args, {
-    cwd: prepare.cwd,
-    stdio: 'inherit',
-    shell: process.platform === 'win32',
-  });
+  const prepareResult = command === 'pnpm'
+    ? runPnpm(args, prepare.cwd)
+    : spawnSync(command, args, { cwd: prepare.cwd, stdio: 'inherit' });
   if (prepareResult.error !== undefined) {
     console.error(`[dsh-passwords] 本地插件构建命令启动失败：${String(prepareResult.error)}`);
     process.exit(127);
@@ -119,13 +134,9 @@ for (const prepare of recorded.prepares) {
   if (prepareResult.status !== 0) process.exit(prepareResult.status ?? 1);
 }
 
-// 5) pnpm 物化 link（Windows 需经 shell 调 .cmd shim）
+// 5) Materialize the complete plugin manifest through the platform-safe pnpm launcher.
 console.log(`[dsh-passwords] profile: ${profileDir}`);
-const result = spawnSync('pnpm', ['install'], {
-  cwd: profileDir,
-  stdio: 'inherit',
-  shell: process.platform === 'win32',
-});
+const result = runPnpm(['install'], profileDir);
 if (result.error !== undefined) {
   console.error(`[dsh-passwords] 运行 pnpm 失败：${String(result.error)}（请先 npm install -g pnpm）`);
   process.exit(127);
@@ -139,11 +150,7 @@ const workspaceAfterInstall = readFileSync(workspacePath, 'utf8');
 const approvedWorkspace = mergeAllowBuilds(workspaceAfterInstall, recorded.allowBuilds);
 if (approvedWorkspace !== workspaceAfterInstall) {
   writeFileSync(workspacePath, approvedWorkspace);
-  const approvedResult = spawnSync('pnpm', ['install'], {
-    cwd: profileDir,
-    stdio: 'inherit',
-    shell: process.platform === 'win32',
-  });
+  const approvedResult = runPnpm(['install'], profileDir);
   if (approvedResult.error !== undefined) {
     console.error(`[dsh-passwords] 运行 pnpm 失败：${String(approvedResult.error)}（请先 npm install -g pnpm）`);
     process.exit(127);

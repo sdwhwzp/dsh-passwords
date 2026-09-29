@@ -125,8 +125,6 @@ export interface AdminRouteDeps {
 
   /** 端点登记表（热更新 let）：概览按当前快照回显。 */
   getEndpointRules: () => readonly string[];
-  /** 第三方插件兼容层是否开启（热更新 let）。 */
-  getPluginCompatEnabled: () => boolean;
   /** 最近一次官方 modelCatalog 原样快照（热更新 let）；未观测到时为 null。 */
   getHostModelCatalog: () => Record<string, unknown> | null;
   /** 受保护通道登记的 dsh-auth Cookie（热更新 let；目录删除联动唯一凭据来源）。 */
@@ -209,7 +207,6 @@ export function registerAdminRoutes(app: Application, deps: AdminRouteDeps): Adm
     verifyAdminPassword,
     systemdPurgeLaunchArgs,
     getEndpointRules,
-    getPluginCompatEnabled,
     getHostModelCatalog,
     getUpstreamAuthCookie,
     upstreamHost,
@@ -560,9 +557,7 @@ export function registerAdminRoutes(app: Application, deps: AdminRouteDeps): Adm
       me: { id: me.userId, username: me.username, role: me.role },
       // 端点登记表（运维可见性）：规则带 [owner:][ws:|http:] 前缀。
       endpoints: [...getEndpointRules()],
-      // 第三方插件兼容层是否开启（默认关闭）。
-      pluginCompat: getPluginCompatEnabled(),
-      // 最近一次官方 session/modelCatalog 快照；仅主用户 overview 可见。
+      // 最近一次官方 session/modelCatalog 原样快照；仅主用户 overview 可见。
       // 尚未观测到上游目录时返回 null，前端必须保持 fail-closed。
       modelCatalog: getHostModelCatalog(),
       users,
@@ -1738,7 +1733,15 @@ export function registerAdminRoutes(app: Application, deps: AdminRouteDeps): Adm
         banned,
         sandboxMode,
         disabledSessions,
-        ...(sessionAssignmentSubmitted ? { allowedSessionIds, sessionGrantsSeeded: true } : {}),
+        ...(sessionAssignmentSubmitted
+          ? { allowedSessionIds, sessionGrantsSeeded: true }
+          // 仅调整工作区（未提交会话授权）也是显式授权变更：旧数据迁移标记必须在
+          // 同一事务置位，否则新分配工作区里的既有会话会在子用户首次基线时被
+          // “旧用户迁移”一次性种入授权（Issue #19 迁移只适用于从未被重新保存过
+          // 的历史行）。已有 grant 全部保留，绝不被本分支清除。
+          : foldersChanged
+            ? { sessionGrantsSeeded: true }
+            : {}),
         // 基线 = 本请求开始时的集合。上面的 await（资源核验/沙盒注入）期间子用户
         // 可能已追加 grant，或另一管理员已切换 disabled session；数据层在事务内复读
         // 并拒绝用旧集合覆盖任何一类安全集合。

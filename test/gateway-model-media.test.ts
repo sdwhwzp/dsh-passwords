@@ -549,7 +549,6 @@ before(async () => {
     internalSecret: 'test-internal',
     patch: { dshRoot: '', restartService: '' },
     endpointRules: [],
-    pluginCompat: false,
   };
 
   gateway = createGatewayServer(config, new AuthService(config, db), db, { upstreamBrowserCookie: 'dsh-auth-test=trusted' });
@@ -899,6 +898,30 @@ test('session/page：窗口没有 model/selection 时不得把已知模型降级
     });
     assert.equal(prompt.status, 403, `分页窗口未见选择事件不得放宽为 Host 默认：${prompt.body}`);
     assert.equal(upstreamSaw('session.prompt'), false, '被拒绝的 prompt 不得转发到上游');
+  } finally {
+    historyPageRecords = [];
+    setPerms(restrictedId, { allowedModels: [modelId('openai', 'gpt-5')], allowChatMedia: true });
+  }
+});
+
+test('session/history：受限子用户的沙盒降级不被响应清洗短路', async () => {
+  // 守卫：history 响应必须先经过 clampSessionHistorySandbox 再清洗隐藏 Unicode。
+  // 若在前面插入更宽的 history/page 缓冲分支并提前 return，降级会变成死代码，
+  // 子用户打开共享的 full-access 会话时就会从历史里继承提权 preset。
+  setPerms(restrictedId, { allowedModels: null, allowChatMedia: true, sandboxMode: 'read-only' });
+  await seedRemoteBaseline(restrictedCookie);
+  historyPageRecords = [
+    { type: 'event', event: { type: 'permission/preset', seq: 3, data: { preset: 'danger-full-access' } } },
+    { type: 'event', event: { type: 'sandbox/mode', seq: 4, data: { mode: 'danger-full-access' } } },
+  ];
+  try {
+    const history = await req('POST', '/api/session/history', {
+      cookie: restrictedCookie,
+      body: rpcEnvelope('session/history', { sessionId: 'session-visible' }),
+    });
+    assert.equal(history.status, 200, history.body);
+    assert.equal(history.body.includes('danger-full-access'), false, '历史里的超授权 preset/mode 必须被降级');
+    assert.equal(history.body.includes('read-only'), true, `降级为子用户授权的 read-only：${history.body}`);
   } finally {
     historyPageRecords = [];
     setPerms(restrictedId, { allowedModels: [modelId('openai', 'gpt-5')], allowChatMedia: true });

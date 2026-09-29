@@ -316,6 +316,7 @@ export const zh = {
   permsWorkspaceCreate: '新建工作区权限',
   permsSsh: 'SSH 和终端使用',
 
+
   permsAgentPresets: 'Agent 模式',
   permsAgentPresetsUnrestricted: '不限制 Agent 模式',
   permsAgentPresetBroken: '不可用',
@@ -703,6 +704,7 @@ export const en: Record<keyof typeof zh, string> = {
   permsFolders: 'Workspaces and sessions',
   permsWorkspaceCreate: 'Workspace creation permission',
   permsSsh: 'SSH and terminal access',
+
 
   permsAgentPresets: 'Agent modes',
   permsAgentPresetsUnrestricted: 'Do not restrict agent modes',

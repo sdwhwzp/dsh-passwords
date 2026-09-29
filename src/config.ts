@@ -2,7 +2,7 @@
 // 否则相对模块位置解析项目根目录 .env。
 // 这样无论从哪个目录运行（systemd WorkingDirectory、npm start、
 // 任意目录下的 CLI）都读到同一份配置与同一把密钥。
-import { config as loadEnv } from 'dotenv';
+import { config as loadEnv, parse as parseEnv } from 'dotenv';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -17,12 +17,102 @@ const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 // dsh 进程里没有本项目的 .env（通过 DSH_PASSWORDS_ENV_FILE 显式指定网关 .env 路径）
 const explicitEnvFile = process.env.DSH_PASSWORDS_ENV_FILE?.trim();
 if (explicitEnvFile) {
-  loadEnv({ path: envFilePath(), quiet: true });
+  loadEnv({ path: explicitEnvFile, quiet: true });
+} else {
+  loadEnv({ path: path.join(moduleDir, '..', '.env'), quiet: true });
 }
-loadEnv({ path: path.join(moduleDir, '..', '.env'), quiet: true });
 
 function readEnv(name: string, fallback: string): string {
   return (process.env[name] ?? '').trim() || fallback;
+}
+
+// 插件拉起的网关子进程与插件初始快照共享部署文件：这些键必须以文件为准，
+// 不能被 dsh 常驻进程继承下来的陈旧值覆盖。IP/端口/上游 TLS 校验开关、设置文件锚点
+// 和 bindAll 补丁开关都直接影响认证面与网络暴露，遗漏会造成插件与网关撕裂。
+const MANAGED_ENV_KEYS = [
+  'SETUP_KEY', 'MCP_DB_PATH', 'MCP_DB_ENC_KEY', 'MCP_JWT_SECRET', 'MCP_INTERNAL_SECRET',
+  'MCP_DSH_ROOT', 'MCP_DSH_RESTART_SERVICE', 'MCP_DSH_AUTO_UPDATE', 'MCP_DSH_UPDATE_MAX_BPS',
+  'MCP_DSH_SETTINGS_FILE', 'MCP_DSH_PATCH_ALLOW_BIND_ALL',
+  'MCP_GATEWAY_PORT', 'MCP_GATEWAY_HOST', 'MCP_GATEWAY_UPSTREAM', 'MCP_GATEWAY_AUTO_TLS',
+  'MCP_GATEWAY_TLS_CERT', 'MCP_GATEWAY_TLS_KEY', 'MCP_GATEWAY_DOMAIN', 'MCP_GATEWAY_PUBLIC_HOST',
+  'MCP_GATEWAY_REDIRECT_PORT', 'MCP_GATEWAY_ACME_EMAIL', 'MCP_GATEWAY_ACME_STAGING',
+  'MCP_GATEWAY_UPSTREAM_TLS_VERIFY', 'MCP_GATEWAY_SSH_ENDPOINTS',
+  'DSH_PASSWORDS_DB_DRIVER',
+  'DSH_PASSWORDS_MYSQL_DATABASE',
+  'DSH_PASSWORDS_MYSQL_HOST',
+  'DSH_PASSWORDS_MYSQL_PORT',
+  'DSH_PASSWORDS_MYSQL_QUERY_TIMEOUT_MS',
+  'DSH_PASSWORDS_MYSQL_TLS',
+  'DSH_PASSWORDS_MYSQL_TLS_CA',
+  'DSH_PASSWORDS_MYSQL_USER',
+  'MCP_DESKTOP_DOWNLOADS_DIR',
+  'MCP_GATEWAY_HSTS_MAX_AGE',
+  'MCP_GATEWAY_PLUGIN_COMPAT',
+  'MCP_GATEWAY_SSH_WS_ENDPOINTS',
+  'MCP_GATEWAY_UPSTREAM_IDLE_TIMEOUT_MS',
+  'MCP_LOCAL_WORKSPACE_HOST',
+  'MCP_LOCAL_WORKSPACE_IGNORE_DIRS',
+  'MCP_LOCAL_WORKSPACE_MAX_ENTRIES',
+  'MCP_LOCAL_WORKSPACE_MAX_FILE_BYTES',
+  'MCP_LOCAL_WORKSPACE_PLACEHOLDER_ROOT',
+  'MCP_LOCAL_WORKSPACE_PORT',
+  'MCP_LOCAL_WORKSPACE_PUBLIC_URL',
+  'MCP_MANAGED_WORKSPACE_ROOT',
+  'MCP_MOBILE_ABSOLUTE_TTL_SECONDS',
+  'MCP_MOBILE_ACCESS_TTL_SECONDS',
+  'MCP_MOBILE_AUTH_ENABLED',
+  'MCP_MOBILE_IDLE_TTL_SECONDS',
+  'MCP_MOBILE_MAX_SESSIONS_PER_USER',
+  'MCP_TENANT_AGENT_SHELL',
+  'MCP_TENANT_AGENT_SHELL_MAX_TIMEOUT_MS',
+  'MCP_TENANT_AGENT_SHELL_OUTPUT_BYTES',
+  'MCP_TENANT_AGENT_SHELL_TIMEOUT_MS',
+  'MCP_TENANT_EDITOR',
+  'MCP_TENANT_SERVICE_LAUNCHER',
+  'MCP_TENANT_TASK_BOARD',
+  'MCP_TENANT_TASK_BOARD_DIR',
+  'MCP_TENANT_TASK_BOARD_GATEWAY',
+  'MCP_TENANT_TERMINAL_GRACE_MS',
+  'MCP_TENANT_TERMINAL_LAUNCHER',
+  'MCP_TENANT_TERMINAL_LIMIT',
+  'DSH_PASSWORDS_MYSQL_PASSWORD',
+  'TENANT_SSH_ENABLED',
+  'TENANT_SSH_TRUSTED_HOSTS',
+] as const;
+const managedFileKeys = new Map<string, Set<string>>();
+
+/** 原生插件与它拉起的子进程共享部署文件快照；Docker 和直接运行 CLI 保持环境变量优先。 */
+export function deploymentGatewayEnv(envFile: string, inherited: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env = { ...inherited };
+  if (env.DSH_PASSWORDS_RUNTIME?.trim().toLowerCase() === 'docker') return env;
+  const file = path.resolve(envFile);
+  if (!existsSync(file)) {
+    if (managedFileKeys.has(file)) throw new Error('部署环境文件已缺失，请恢复后重启 DeepSeek Harness');
+    return env;
+  }
+  const values = parseEnv(readFileSync(file));
+  let fileKeys = managedFileKeys.get(file);
+  if (fileKeys === undefined) {
+    fileKeys = new Set<string>();
+    managedFileKeys.set(file, fileKeys);
+  }
+  for (const name of MANAGED_ENV_KEYS) {
+    if (Object.hasOwn(values, name)) {
+      env[name] = values[name];
+      fileKeys.add(name);
+    } else if (fileKeys.has(name)) {
+      delete env[name];
+    }
+  }
+  return env;
+}
+
+if (explicitEnvFile && process.env.DSH_GATEWAY_PARENT_PID?.trim() && existsSync(explicitEnvFile) &&
+    process.env.DSH_PASSWORDS_RUNTIME?.trim().toLowerCase() !== 'docker') {
+  const values = parseEnv(readFileSync(explicitEnvFile));
+  for (const name of MANAGED_ENV_KEYS) {
+    if (Object.hasOwn(values, name)) process.env[name] = values[name];
+  }
 }
 
 /** Resolve a configured path against its deployment directory. */
@@ -121,25 +211,11 @@ export interface PlatformConfig {
     restartService: string;
   };
   /**
-   * 第三方端点登记表（一条变量管两条通道与两种能力：
-   * MCP_GATEWAY_SSH_ENDPOINTS）。
-   *
-   * 规则语法：`[owner:][ws:|http:]路径`（前缀可省略、顺序任意）。
-   *   - owner: 仅主用户（子用户两条通道一律 403）；
-   *   - 其余规则：子用户需勾选 allow_ssh（「已登记」+「已勾选」两把钥匙）；
-   *   - ws: / http: 限定通道；不写 = 两条通道都放行。
-   * 路径为精确匹配，或尾部 `/*` 只匹配其直接子路径。不做任何插件专属自动探测
-   * （网关是独立进程，看不到宿主注册了哪些路由）。已登记端点中 body 带 host
-   * 字段的 HTTP 写请求仍会做私网/回环 SSRF 判定。
+   * 第三方端点登记表：动态发现的 DSH 插件 Remote/API 面不需要逐条登记；
+   * 该表只保留无法由宿主运行时登记的传统 HTTP/WS 端点和 owner-only 面。
    */
   endpointRules: string[];
-  /**
-   * 第三方插件兼容层开关（MCP_GATEWAY_PLUGIN_COMPAT）。默认 off：
-   *   off —— 网关对第三方插件保持通用姿态：未登记的第三方路径（含根级插件
-   *          路由）对子用户一律 fail-closed；放行只走端点登记表。
-   *   on  —— 额外启用已知插件的细粒度适配（文件树白名单 / 上传下载门控 /
-   *          内容清洗；见 plugin-compat.ts）。仅在对这些插件有依赖时开启。
-   */
+  /** Legacy deployment flag retained for endpoint reload compatibility. */
   pluginCompat: boolean;
 }
 
@@ -159,20 +235,20 @@ function mergeEndpointRules(primary: string | undefined, legacy: string | undefi
   return [...new Set([...rules, ...legacyRules])];
 }
 
-function positiveIntegerEnv(name: string, fallback: number): number {
-  const value = Number(readEnv(name, String(fallback)));
+function positiveIntegerEnv(name: string, fallback: number, env: NodeJS.ProcessEnv = process.env): number {
+  const value = Number((env[name] ?? '').trim() || String(fallback));
   if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${name} must be a positive integer`);
   return value;
 }
 
 /** Validate bounded mobile lifetimes; active use never extends the absolute login age. */
-export function loadMobileAuthConfig(): NonNullable<PlatformConfig['mobileAuth']> {
-  const enabled = (process.env.MCP_MOBILE_AUTH_ENABLED ?? 'false').trim().toLowerCase();
+export function loadMobileAuthConfig(env: NodeJS.ProcessEnv = process.env): NonNullable<PlatformConfig['mobileAuth']> {
+  const enabled = (env.MCP_MOBILE_AUTH_ENABLED ?? 'false').trim().toLowerCase();
   if (enabled !== 'true' && enabled !== 'false') throw new Error('MCP_MOBILE_AUTH_ENABLED must be true or false');
-  const accessTtlSeconds = positiveIntegerEnv('MCP_MOBILE_ACCESS_TTL_SECONDS', 900);
-  const idleTtlSeconds = positiveIntegerEnv('MCP_MOBILE_IDLE_TTL_SECONDS', 2592000);
-  const absoluteTtlSeconds = positiveIntegerEnv('MCP_MOBILE_ABSOLUTE_TTL_SECONDS', 7776000);
-  const maxSessionsPerUser = positiveIntegerEnv('MCP_MOBILE_MAX_SESSIONS_PER_USER', 20);
+  const accessTtlSeconds = positiveIntegerEnv('MCP_MOBILE_ACCESS_TTL_SECONDS', 900, env);
+  const idleTtlSeconds = positiveIntegerEnv('MCP_MOBILE_IDLE_TTL_SECONDS', 2592000, env);
+  const absoluteTtlSeconds = positiveIntegerEnv('MCP_MOBILE_ABSOLUTE_TTL_SECONDS', 7776000, env);
+  const maxSessionsPerUser = positiveIntegerEnv('MCP_MOBILE_MAX_SESSIONS_PER_USER', 20, env);
   if (accessTtlSeconds > 3600 || accessTtlSeconds > idleTtlSeconds || idleTtlSeconds > absoluteTtlSeconds || absoluteTtlSeconds > 31536000 || maxSessionsPerUser > 100) {
     throw new Error('Mobile auth requires access <= 3600, access <= idle <= absolute <= 31536000 seconds and at most 100 devices');
   }
@@ -198,7 +274,9 @@ export function parseTenantSshTrustedHosts(value: string | undefined): string[] 
   return [...new Set(hosts)];
 }
 
-export function loadConfig(options: { requireSetupKey?: boolean } = {}): PlatformConfig {
+export function loadConfig(options: { requireSetupKey?: boolean; env?: NodeJS.ProcessEnv } = {}): PlatformConfig {
+  const env = options.env ?? process.env;
+  const readEnv = (name: string, fallback: string): string => (env[name] ?? '').trim() || fallback;
   // F-07：启动时收紧 .env 权限（POSIX 0600），防止同机其他用户/备份泄露密钥
   tightenEnvPerm(envFilePath());
   // Windows：手动创建/复制来的 .env 不经过安装器，这里启动时同样用 icacls 收紧
@@ -232,15 +310,15 @@ export function loadConfig(options: { requireSetupKey?: boolean } = {}): Platfor
   }
   const database: PlatformConfig['database'] = driverRaw === 'sqlite'
     ? { driver: 'sqlite', path: dbPath }
-    : loadMysqlConfig();
+    : loadMysqlConfig(env);
 
-  // MCP_DSH_RESTART_SERVICE 语义：未设置→默认 'dsh-web'；显式空值→不自动重启。
+  // MCP_DSH_RESTART_SERVICE：Windows 未设置时手动重启；其他平台默认 'dsh-web'；显式空值不自动重启。
   // （不能用 readEnv：它会把空值当未设置回退到默认，导致 Windows 上
   // 尝试 systemctl 报错。）
   const restartService =
-    process.env.MCP_DSH_RESTART_SERVICE !== undefined
-      ? process.env.MCP_DSH_RESTART_SERVICE.trim()
-      : 'dsh-web';
+    env.MCP_DSH_RESTART_SERVICE !== undefined
+      ? env.MCP_DSH_RESTART_SERVICE.trim()
+      : process.platform === 'win32' ? '' : 'dsh-web';
 
   // ── 自动 HTTPS（零配置 Let's Encrypt 证书） ────────────────────
   // 优先级：MCP_GATEWAY_DOMAIN（真实域名）> MCP_GATEWAY_PUBLIC_HOST
@@ -289,7 +367,7 @@ export function loadConfig(options: { requireSetupKey?: boolean } = {}): Platfor
   );
 
   // 第三方端点登记表（唯一来源；旧变量/旧开关已清理，不再兼容读取）。
-  const endpointRules = mergeEndpointRules(process.env[SSH_ENDPOINT_ENV], process.env[SSH_WS_ENDPOINT_LEGACY_ENV]);
+  const endpointRules = mergeEndpointRules(env[SSH_ENDPOINT_ENV], env[SSH_WS_ENDPOINT_LEGACY_ENV]);
   // 插件兼容层：默认关闭（通用 fail-closed 姿态）；仅显式 1/true/yes/on 打开。
   const pluginCompatRaw = readEnv('MCP_GATEWAY_PLUGIN_COMPAT', '').trim().toLowerCase();
   const pluginCompat = ['1', 'true', 'yes', 'on'].includes(pluginCompatRaw);
@@ -304,7 +382,7 @@ export function loadConfig(options: { requireSetupKey?: boolean } = {}): Platfor
       host: readEnv('MCP_GATEWAY_HOST', '0.0.0.0'),
       port: gatewayPort,
       upstream: readEnv('MCP_GATEWAY_UPSTREAM', 'http://127.0.0.1:3080'),
-      upstreamIdleTimeoutMs: parseUpstreamIdleTimeoutMs(process.env.MCP_GATEWAY_UPSTREAM_IDLE_TIMEOUT_MS),
+      upstreamIdleTimeoutMs: parseUpstreamIdleTimeoutMs(env.MCP_GATEWAY_UPSTREAM_IDLE_TIMEOUT_MS),
       tls: userCerts
         ? { cert: userTlsCert, key: userTlsKey }
         : autoTls
@@ -344,17 +422,17 @@ export function loadConfig(options: { requireSetupKey?: boolean } = {}): Platfor
       port: localWorkspacePort,
       publicUrl: readEnv('MCP_LOCAL_WORKSPACE_PUBLIC_URL', ''),
       placeholderRoot: localWorkspacePlaceholderRoot,
-      browserMaxEntries: positiveIntegerEnv('MCP_LOCAL_WORKSPACE_MAX_ENTRIES', 5000),
-      browserMaxFileBytes: positiveIntegerEnv('MCP_LOCAL_WORKSPACE_MAX_FILE_BYTES', 32 * 1024 * 1024),
+      browserMaxEntries: positiveIntegerEnv('MCP_LOCAL_WORKSPACE_MAX_ENTRIES', 5000, env),
+      browserMaxFileBytes: positiveIntegerEnv('MCP_LOCAL_WORKSPACE_MAX_FILE_BYTES', 32 * 1024 * 1024, env),
       browserIgnoreDirs: readEnv('MCP_LOCAL_WORKSPACE_IGNORE_DIRS', '.git,node_modules,Pods,vendor,dist,build,.cache,.venv').split(',').filter(Boolean),
     },
     managedWorkspaceRoot,
     tenantSsh: {
-      enabled: parseTenantSshEnabled(process.env.TENANT_SSH_ENABLED),
-      trustedHosts: parseTenantSshTrustedHosts(process.env.TENANT_SSH_TRUSTED_HOSTS),
+      enabled: parseTenantSshEnabled(env.TENANT_SSH_ENABLED),
+      trustedHosts: parseTenantSshTrustedHosts(env.TENANT_SSH_TRUSTED_HOSTS),
     },
     tenantEditor: { enabled: readEnv('MCP_TENANT_EDITOR', 'false') === 'true' },
-    mobileAuth: loadMobileAuthConfig(),
+    mobileAuth: loadMobileAuthConfig(env),
     tenantTaskBoard: {
       enabled: readEnv('MCP_TENANT_TASK_BOARD', 'false') === 'true',
       directory: resolveEnvRelativePath(readEnv('MCP_TENANT_TASK_BOARD_DIR', ''), envFilePath(), path.join(homedir(), '.dsh', 'tenant-task-boards')),
@@ -362,18 +440,18 @@ export function loadConfig(options: { requireSetupKey?: boolean } = {}): Platfor
     },
     tenantTerminal: {
       launcher: readEnv('MCP_TENANT_TERMINAL_LAUNCHER', ''),
-      maxPerUser: positiveIntegerEnv('MCP_TENANT_TERMINAL_LIMIT', 8),
-      reconnectGraceMs: positiveIntegerEnv('MCP_TENANT_TERMINAL_GRACE_MS', 30_000),
+      maxPerUser: positiveIntegerEnv('MCP_TENANT_TERMINAL_LIMIT', 8, env),
+      reconnectGraceMs: positiveIntegerEnv('MCP_TENANT_TERMINAL_GRACE_MS', 30_000, env),
     },
     tenantAgentShell: (() => {
       const value = readEnv('MCP_TENANT_AGENT_SHELL', 'false');
       if (value !== 'true' && value !== 'false') throw new Error('MCP_TENANT_AGENT_SHELL must be true or false');
-      const timeoutMs = positiveIntegerEnv('MCP_TENANT_AGENT_SHELL_TIMEOUT_MS', 120_000);
-      const maxTimeoutMs = positiveIntegerEnv('MCP_TENANT_AGENT_SHELL_MAX_TIMEOUT_MS', 600_000);
+      const timeoutMs = positiveIntegerEnv('MCP_TENANT_AGENT_SHELL_TIMEOUT_MS', 120_000, env);
+      const maxTimeoutMs = positiveIntegerEnv('MCP_TENANT_AGENT_SHELL_MAX_TIMEOUT_MS', 600_000, env);
       if (timeoutMs > maxTimeoutMs) throw new Error('MCP_TENANT_AGENT_SHELL_TIMEOUT_MS exceeds the maximum');
       const serviceLauncher = readEnv('MCP_TENANT_SERVICE_LAUNCHER', '');
       if (serviceLauncher && !path.isAbsolute(serviceLauncher)) throw new Error('MCP_TENANT_SERVICE_LAUNCHER must be absolute');
-      return { enabled: value === 'true', timeoutMs, maxTimeoutMs, maxOutputBytes: positiveIntegerEnv('MCP_TENANT_AGENT_SHELL_OUTPUT_BYTES', 256 * 1024), ...(serviceLauncher ? { serviceLauncher } : {}) };
+      return { enabled: value === 'true', timeoutMs, maxTimeoutMs, maxOutputBytes: positiveIntegerEnv('MCP_TENANT_AGENT_SHELL_OUTPUT_BYTES', 256 * 1024, env), ...(serviceLauncher ? { serviceLauncher } : {}) };
     })(),
     patch: {
       dshRoot: readEnv('MCP_DSH_ROOT', ''),
@@ -390,10 +468,11 @@ export function databaseTarget(config: PlatformConfig): string | MysqlConnection
   return config.database.driver === 'sqlite' ? config.database.path : config.database;
 }
 
-function loadMysqlConfig(): MysqlConnectionOptions {
+function loadMysqlConfig(env: NodeJS.ProcessEnv = process.env): MysqlConnectionOptions {
+  const readEnv = (name: string, fallback: string): string => (env[name] ?? '').trim() || fallback;
   const host = readEnv('DSH_PASSWORDS_MYSQL_HOST', '');
   const user = readEnv('DSH_PASSWORDS_MYSQL_USER', '');
-  const password = process.env.DSH_PASSWORDS_MYSQL_PASSWORD ?? '';
+  const password = env.DSH_PASSWORDS_MYSQL_PASSWORD ?? '';
   const database = readEnv('DSH_PASSWORDS_MYSQL_DATABASE', '');
   if (host === '' || user === '' || password === '' || database === '') {
     throw new Error('MySQL 模式必须配置 DSH_PASSWORDS_MYSQL_HOST、DSH_PASSWORDS_MYSQL_USER、DSH_PASSWORDS_MYSQL_PASSWORD、DSH_PASSWORDS_MYSQL_DATABASE');
@@ -467,7 +546,7 @@ export type EndpointRuntimeRead =
   | { ok: true; endpointRules: string[]; pluginCompat: boolean }
   | { ok: false; error: string };
 
-/**\n * 热更新读取：从部署环境文件解析端点运行态（登记表 + 兼容层开关）。\n *\n * 只读该文件；不修改 process.env，也不重复执行 loadConfig 的其它副作用\n * （权限收紧/密钥派生等）。返回：\n *   - null        文件不存在/不可读（保持现状，不报错）\n *   - {ok:false}  规则非法（调用方必须保留上次有效快照，并向支持者报错一次）\n *   - {ok:true}   解析成功，可直接应用\n *\n * 解析规则与 loadConfig 保持一致：dotenv 风味的引号/行尾注释剥离，再交给\n * parseEndpointAllowlist（非法输入 fail-closed 报错，不静默放宽）。\n */
+/**\n * 热更新读取：从部署环境文件解析端点运行态登记表。\n *\n * 只读该文件；不修改 process.env，也不重复执行 loadConfig 的其它副作用\n * （权限收紧/密钥派生等）。返回：\n *   - null        文件不存在/不可读（保持现状，不报错）\n *   - {ok:false}  规则非法（调用方必须保留上次有效快照，并向支持者报错一次）\n *   - {ok:true}   解析成功，可直接应用\n *\n * 解析规则与 loadConfig 保持一致：dotenv 风味的引号/行尾注释剥离，再交给\n * parseEndpointAllowlist（非法输入 fail-closed 报错，不静默放宽）。\n */
 export function readEndpointRuntimeConfig(envFile = envFilePath()): EndpointRuntimeRead | null {
   let raw: string;
   try {
