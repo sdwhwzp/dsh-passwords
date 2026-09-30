@@ -68,7 +68,7 @@ export class DshPasswordsPrincipalAccessProvider {
     private readonly db: Database,
   ) {}
 
-  /** Authorize requested resources from live headers or individual stored headers; recheck permissions on every call. */
+  /** Authorize live headers first, using targeted stored reads for one Session or one corpus read for a batch; recheck permissions on every call. */
   async resolve(
     principal: AuthenticatedPrincipal,
     subjects: PrincipalAccessSubjects,
@@ -98,6 +98,9 @@ export class DshPasswordsPrincipalAccessProvider {
     const persistence = services.get('sessionPersistence') as {
       stat(id: string, options?: { signal?: AbortSignal }): Promise<SessionRecord | undefined>;
     } | undefined;
+    const query = services.get('sessionQuery') as {
+      listSessions(signal?: AbortSignal): Promise<readonly SessionRecord[]>;
+    } | undefined;
     if (registry === undefined) return denied;
 
     const workspacePaths = new Map(registry.list().map((workspace) => [String(workspace.id), workspace.path]));
@@ -119,11 +122,22 @@ export class DshPasswordsPrincipalAccessProvider {
     const readableSessionIds = new Set<SessionId>();
     if (requestedSessions.length > 0) {
       const coldHeaders = new Map<string, SessionRecord['header'] | undefined>();
+      let batchLoaded = false;
       const headerFor = async (id: string): Promise<SessionRecord['header'] | undefined> => {
         const live = sessions?.get(id);
         if (live !== undefined) return live.header;
-        if (persistence === undefined) return undefined;
         if (coldHeaders.has(id)) return coldHeaders.get(id);
+        if (requestedSessions.length > 1) {
+          if (query === undefined) return undefined;
+          if (!batchLoaded) {
+            const records = await query.listSessions(signal);
+            signal?.throwIfAborted();
+            for (const record of records) coldHeaders.set(record.header.id, record.header);
+            batchLoaded = true;
+          }
+          return coldHeaders.get(id);
+        }
+        if (persistence === undefined) return undefined;
         const snapshot = await persistence.stat(id, { signal });
         signal?.throwIfAborted();
         const header = snapshot?.header;
