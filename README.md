@@ -97,7 +97,7 @@ MySQL 模式会在空闲超时、服务重启或短暂网络断开后自动替�
 
 可选移动 JSON 认证、设备会话撤销和 HTTP/WS bearer 接入见 [移动端集成说明](docs/mobile-rn-integration.md)。默认关闭，启用时要求网关自身 HTTPS 监听；手机长期登录和热更新需通过实际安装包验收。
 
-Android / iOS 原生 `dsh-mobile` 的多账号登录、账号切换及协议桥接见[原生移动端接入](docs/native-mobile.md)。账号请求与会话状态流均经过现有权限过滤，客户端不使用 WebView。 原生会话首次显示最近 4 条消息，向上滑动继续读取更早记录；初始窗口可通过 `MCP_MOBILE_INITIAL_HISTORY_MESSAGES` 配置。控制信息等待首份消息快照发出后再读取，避免并发重复加载冷会话日志。
+Android / iOS 原生 `dsh-mobile` 的多账号登录、账号切换及协议桥接见[原生移动端接入](docs/native-mobile.md)。账号请求与会话状态流均经过现有权限过滤，客户端不使用 WebView。 原生会话首次显示最近 4 条消息，向上滑动继续读取更早记录；初始窗口可通过 `MCP_MOBILE_INITIAL_HISTORY_MESSAGES` 配置。控制信息等待首份消息快照发出后再读取，避免并发重复加载冷会话日志。模型、权限、上下文、统计、任务与目标通过授权状态接口读取；同一连接内同时进行的同一会话读取合并一次，完成后不保留结果缓存。
 
 ## 界面截图
 

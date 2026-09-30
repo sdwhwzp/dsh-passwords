@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import type WebSocket from 'ws';
 import { createMobileRemoteCarrier, mobileRecord, type MobileRemoteTarget } from './mobile-remote-carrier.js';
 import { buildMobileWireEvent } from './mobile-wire-event.js';
+import { createMobileSessionControls } from './mobile-session-controls.js';
 
 type Frame = Record<string, unknown>;
 interface Follower {
@@ -60,6 +61,7 @@ export function attachMobileAccount(
 ) {
   const lifetime = new AbortController();
   const carrier = createMobileRemoteCarrier(target, token, lifetime.signal, parentOf, initialHistoryMessages);
+  const controls = createMobileSessionControls(request => carrier.invoke(request));
   const api = modules.adapter.createDshHostAdapter(carrier);
   const send = (frame: Frame) => {
     if (socket.readyState !== 1) return;
@@ -223,6 +225,8 @@ export function attachMobileAccount(
             historyFormatVersion: 4, canOpenPath: false, defaultProvider: selection.provider, defaultModel: selection.model });
           return;
         }
+        const control = controls.query(message);
+        if (control !== undefined) { send(await control); return; }
         if (message.type === 'permission-options') {
           // Native pickers need the public preset catalog, not the administrator's settings schema.
           const catalog = mobileRecord(await carrier.invoke({ namespace: 'permissionPresets', method: 'catalog', args: {} }));
@@ -230,7 +234,7 @@ export function attachMobileAccount(
           const frame: Frame = { kind: 'permission-options', namespace: null, options: catalog.options,
             defaultOptions: catalog.defaultOptions, defaultPreset: catalog.defaultPreset };
           if (sessionId) {
-            const projection = mobileRecord(await carrier.invoke({ namespace: 'session', method: 'projections', args: { request: { sessionId } } }));
+            const projection = await controls.projection(sessionId);
             const permissions = mobileRecord(projection.values).permissions;
             frame.sessionId = sessionId;
             frame.sessionPermissions = permissions == null ? null : { ...mobileRecord(permissions), options: catalog.options };

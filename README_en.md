@@ -6,7 +6,7 @@ Sidebar file and Git requests require session ownership and authorized paths; or
 
 Adds login, account management, and access controls to the DeepSeek Harness (dsh) web entry point. Use it when dsh is running on a server for a team or for customers.
 
-Native Android and iOS `dsh-mobile` account login, profile switching and authenticated protocol bridging are described in [Native mobile accounts](docs/native-mobile.md). Requests and state streams retain the gateway's per-account authorization. Native conversations initially show the latest four messages. Scroll upward for older history; configure the opening window with `MCP_MOBILE_INITIAL_HISTORY_MESSAGES`. Session controls read after the first message snapshot to avoid repeated concurrent cold-log loads.
+Native Android and iOS `dsh-mobile` account login, profile switching and authenticated protocol bridging are described in [Native mobile accounts](docs/native-mobile.md). Requests and state streams retain the gateway's per-account authorization. Native conversations initially show the latest four messages. Scroll upward for older history; configure the opening window with `MCP_MOBILE_INITIAL_HISTORY_MESSAGES`. Session controls read after the first message snapshot to avoid repeated concurrent cold-log loads. Models, permissions, context, statistics, tasks and goals use the authorized projection endpoint; overlapping reads for one Session share one request per connection, with no cache after completion.
 
 dsh's web UI is designed for local use by default. Once a server address is shared, anyone with the URL can enter and consume the same model quota. dsh-passwords sits in front of dsh: users sign in first, then workspace, session, sandbox, and usage limits are applied per account.
 

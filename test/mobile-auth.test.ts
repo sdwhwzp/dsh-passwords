@@ -400,6 +400,15 @@ test('native mobile profiles isolate account identity, session follow and logout
     assert.equal(rejected.requestType, 'permission-options');
     assert.equal(rejected.sessionId, 'other-session');
     assert.deepEqual(permissionReads, ['own-session']);
+    for (const type of ['models', 'session-stats', 'context-usage', 'tasks', 'goal']) {
+      client.send(JSON.stringify({ type, sessionId: 'own-session' }));
+      assert.equal((await next(type)).sessionId, 'own-session');
+      client.send(JSON.stringify({ type, sessionId: 'other-session' }));
+      const denied = await next('error');
+      assert.equal(denied.requestType, type);
+      assert.equal(denied.sessionId, 'other-session');
+    }
+    assert.deepEqual(permissionReads, Array(6).fill('own-session'));
     client.send(JSON.stringify({ type: 'subscribe', sessionId: 'own-session', assistantStream: true }));
     const opening = await next('session-snapshot');
     assert.equal(opening.sessionId, 'own-session');
