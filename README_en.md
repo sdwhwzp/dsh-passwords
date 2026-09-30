@@ -8,6 +8,8 @@ Adds login, account management, and access controls to the DeepSeek Harness (dsh
 
 Native Android and iOS `dsh-mobile` account login, profile switching and authenticated protocol bridging are described in [Native mobile accounts](docs/native-mobile.md). Requests and state streams retain the gateway's per-account authorization. Native conversations initially show the latest four messages. Scroll upward for older history; configure the opening window with `MCP_MOBILE_INITIAL_HISTORY_MESSAGES`. Session controls read after the first message snapshot to avoid repeated concurrent cold-log loads. Models, permissions, context, statistics, tasks and goals use the authorized projection endpoint; overlapping reads for one Session share one request per connection, with no cache after completion.
 
+Account gateways correlate admission receipts with durable user messages so supported clients can retain a send preview until that exact message reaches conversation history.
+
 dsh's web UI is designed for local use by default. Once a server address is shared, anyone with the URL can enter and consume the same model quota. dsh-passwords sits in front of dsh: users sign in first, then workspace, session, sandbox, and usage limits are applied per account.
 
 You do not need it for a local-only dsh setup. Install it when you need remote access, shared use, or managed subuser accounts.

@@ -69,7 +69,10 @@ export function buildMobileWireEvent(session: WireValue, event: WireValue) {
           type: 'user/message',
           text: textOf(d.content || []),
           source: d.source && d.source.kind,
-          ...(typeof d.id === 'string' && d.id ? { raw: { id: d.id } } : {}),
+          ...(typeof d.id === 'string' && d.id || typeof d.source?.rpcId === 'string' ? { raw: {
+            ...(typeof d.id === 'string' && d.id ? { id: d.id } : {}),
+            ...(typeof d.source?.rpcId === 'string' ? { rpcId: d.source.rpcId } : {}),
+          } } : {}),
           ...(images.length ? { images } : {}),
         },
       })

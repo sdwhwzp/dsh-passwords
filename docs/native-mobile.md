@@ -41,3 +41,6 @@ The native permission picker reads `permissionPresets/catalog` and the authorize
 Native history, pagination, and live subscriptions resolve subagent Session addresses from the Host roster, including the durable parent id. Every resolved read still passes the account gateway policy; a client-supplied parent cannot override the recorded relationship.
 
 原生历史读取、翻页与实时订阅会根据 Host 会话目录补齐子代理会话的持久父会话地址。补齐后的请求仍经过账号网关授权，客户端传入的父会话不能覆盖已记录的父子关系。
+### Message receipts
+
+Account connections advertise `message-receipts`. A native message may include a UUID `requestId`; admission preserves it in the Host prompt source and returns it in `sent`. The later `user/message` carries the same value as `event.raw.rpcId`. Without a client nonce, the gateway generates one. Clients can keep a submitted preview visible until the corresponding durable event arrives, without matching message text, adding a fake history event, or retrying the prompt. An acknowledgement confirms admission, not model completion. Existing account authorization and adapter admission serialization still apply.

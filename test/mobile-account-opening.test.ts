@@ -20,6 +20,8 @@ async function fixture(t: TestContext) {
   const reads: string[] = [];
   const projectionRequests: Array<{ sessionId: string; respond(value: unknown): void }> = [];
   server.on('request', async (request, response) => {
+    // A pending upgrade can reach the HTTP listener after WebSocket teardown.
+    if (request.method !== 'POST') { response.writeHead(405).end(); return; }
     let body = '';
     for await (const chunk of request) body += chunk;
     const frame = JSON.parse(body);
@@ -36,7 +38,9 @@ async function fixture(t: TestContext) {
       async handleQuery(_api, _host, _defaults, message) { reads.push(String(message.sessionId)); return { kind: message.type, sessionId: message.sessionId }; },
       async admitMessage() { return { kind: 'message' }; },
     },
-    adapter: { createDshHostAdapter: carrier => carrier },
+    adapter: { createDshHostAdapter: carrier => ({ sessions: {
+      prompt: payload => carrier.invoke({ namespace: 'session', method: 'prompt', args: { request: payload } }),
+    } }) },
     follower: { createSessionFollower(_api, handlers) {
       callbacks = handlers;
       return { async start(sessionId, subscriptionId) { current = { sessionId, subscriptionId }; }, stop() {} };

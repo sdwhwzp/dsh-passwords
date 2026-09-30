@@ -7,6 +7,7 @@ import type WebSocket from 'ws';
 import { createMobileRemoteCarrier, mobileRecord, type MobileRemoteTarget } from './mobile-remote-carrier.js';
 import { buildMobileWireEvent } from './mobile-wire-event.js';
 import { createMobileSessionControls } from './mobile-session-controls.js';
+import { admitMobileMessageWithReceipt, type MobileAdmissionApi } from './mobile-message-receipt.js';
 
 type Frame = Record<string, unknown>;
 interface Follower {
@@ -18,7 +19,7 @@ interface Protocol {
   admitMessage(api: unknown, message: Frame): Promise<Frame>;
 }
 interface Adapter {
-  createDshHostAdapter(carrier: ReturnType<typeof createMobileRemoteCarrier>): unknown;
+  createDshHostAdapter(carrier: ReturnType<typeof createMobileRemoteCarrier>): MobileAdmissionApi;
 }
 interface FollowerModule {
   createSessionFollower(api: unknown, callbacks: {
@@ -178,7 +179,7 @@ export function attachMobileAccount(
         home = String(mobileRecord(frame.host).home);
         send({ kind: 'hello', ...identity, protocol: 3, dshVersion: '0.1.7-rc.2', historyFormatVersion: 4, authenticated: true,
           capabilities: ['assistant-stream-v1', 'history-format-version', 'projection-baseline', 'images', 'session-create',
-            'session-agent-preset', 'commands', 'tasks', 'goals', 'session-cancel', 'queue-control', 'session-archive', 'session-rename'],
+            'session-agent-preset', 'commands', 'tasks', 'goals', 'session-cancel', 'queue-control', 'session-archive', 'session-rename', 'message-receipts'],
           port: target.port, clients: 1,
         });
         startStateStreams();
@@ -274,7 +275,7 @@ export function attachMobileAccount(
           send({ kind: approval ? 'approval-response' : 'question-response', rpcId, sessionId: owned.sessionId, approvalId: rpcId, accepted: true, outcome: message.outcome, action: message.type === 'question-cancel' ? 'cancel' : 'answer' });
           return;
         }
-        if (message.type === 'message') { send(await modules.protocol.admitMessage(api, message)); return; }
+        if (message.type === 'message') { send(await admitMobileMessageWithReceipt(api, message, modules.protocol.admitMessage)); return; }
         if (message.type === 'default-model') {
           const catalog = mobileRecord(await carrier.invoke({ namespace: 'session', method: 'modelCatalog', args: {} }));
           send({ kind: 'default-model', selection: catalog.default }); return;
