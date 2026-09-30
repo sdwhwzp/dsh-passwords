@@ -10,13 +10,15 @@ The native bridge supports Session V4 history, assistant streaming, images, comm
 
 The account bridge requests title-only Session list hints for native clients. The Host still applies account authorization and returns the same Session summaries; conversation subscriptions continue to carry complete history and projections.
 
-Native subscriptions initially load the latest four messages to limit cold Markdown layout on the phone. Set `MCP_MOBILE_INITIAL_HISTORY_MESSAGES` to an integer from 1 to 100 to change that window. Older-page requests retain the client's page size; `hasMore`, the durable cursor, projections and the atomic assistant-stream baseline remain unchanged. Scroll upward to read earlier messages.
+Native subscriptions initially load the latest four messages to bound the opening payload and Markdown layout on the phone. Set `MCP_MOBILE_INITIAL_HISTORY_MESSAGES` to an integer from 1 to 100 to change that window. Older-page requests retain the client's page size; `hasMore`, the durable cursor, projections and the atomic assistant-stream baseline remain unchanged. Scroll upward to read earlier messages.
+
+When opening a conversation, its model, preset, permission, context, statistics, task and goal reads wait until the first message snapshot is sent. This prevents those controls from repeatedly loading the same cold Session log. Other Sessions remain independent; cancellation or a failed opening releases pending reads, and a closed socket discards them. Every later read still passes account authorization.
 
 The protocol adapter is pinned to `Clarklevis1995/dsh-plugin-mobile-gateway` commit `d805c567d106cc9bd19e5c429fe7c689f3be9645`. Only its codec and authorized Remote adapter are loaded; its Cordis plugin is not activated. `src/mobile-wire-event.ts` retains the MIT notice for the upstream event projection. Upgrade this dependency together with the native clients and the bridge's account-isolation tests.
 
 ## Validation
 
-Run `npm run build` and `node --import tsx --test test/mobile-auth.test.ts test/gateway-tenant-remote-mux.test.ts test/gateway-remote-mux.test.ts`. The native regression covers distinct account IDs, filtered state baselines and deltas, own-session snapshots, rejection of another account's session, raw-directory denial, refresh identity and live logout. The Remote mux tests cover web cookies and mobile bearers. A real local Harness smoke also exercises native queries, empty-session creation, history, commands, subscription, rename and archive without calling a model.
+Run `npm run build` and `node --import tsx --test test/mobile-account-opening.test.ts test/mobile-auth.test.ts test/gateway-tenant-remote-mux.test.ts test/gateway-remote-mux.test.ts`. The native regression covers distinct account IDs, filtered state baselines and deltas, own-session snapshots, rejection of another account's session, raw-directory denial, refresh identity and live logout. The Remote mux tests cover web cookies and mobile bearers. A real local Harness smoke also exercises native queries, empty-session creation, history, commands, subscription, rename and archive without calling a model.
 
 ## 原生 Android 与 iOS 账号
 
@@ -28,7 +30,9 @@ Run `npm run build` and `node --import tsx --test test/mobile-auth.test.ts test/
 
 账号桥接为原生客户端请求仅含标题提示的会话列表。Host 仍执行账号鉴权并返回相同的会话摘要；对话订阅继续传输完整历史和投影。
 
-原生订阅首次读取最近 4 条消息，减少手机首次 Markdown 排版的工作量。可用 `MCP_MOBILE_INITIAL_HISTORY_MESSAGES` 设置 1 到 100 的整数。更早的页面仍使用客户端的分页大小，`hasMore`、持久游标、投影和原子的生成流基线保持原语义；向上滑动继续读取更早的消息。
+原生订阅首次读取最近 4 条消息，限制首屏数据量和 Markdown 排版的工作量。可用 `MCP_MOBILE_INITIAL_HISTORY_MESSAGES` 设置 1 到 100 的整数。更早的页面仍使用客户端的分页大小，`hasMore`、持久游标、投影和原子的生成流基线保持原语义；向上滑动继续读取更早的消息。
+
+打开会话时，模型、预设、权限、上下文、统计、任务和目标的读取会等待首份消息快照发出，避免同时重复加载同一份冷会话日志。其他会话的读取不受影响；取消订阅或首次读取失败会放行等待的读取，连接关闭则丢弃这些读取。后续每次读取仍执行账号授权。
 
 The native permission picker reads `permissionPresets/catalog` and the authorized Session projection. It does not request the administrator-only settings schema.
 

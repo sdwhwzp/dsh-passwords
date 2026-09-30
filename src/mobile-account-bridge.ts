@@ -36,6 +36,8 @@ const queries = new Set([
   'goal-resume', 'goal-clear',
 ]);
 
+const sessionControls = new Set(['models', 'permission-options', 'session-agent-preset', 'context-usage', 'session-stats', 'tasks', 'goal']);
+
 /** Load the pinned mobile codec without activating its host-wide Cordis plugin. */
 export async function loadMobileAccountProtocol() {
   const root = dirname(require.resolve('dsh-plugin-mobile-gateway/package.json'));
@@ -69,6 +71,12 @@ export function attachMobileAccount(
     message: error instanceof Error ? error.message : 'Account request failed',
     requestType: message?.type, requestId: message?.requestId, sessionId: message?.sessionId,
   });
+  let opening: { sessionId: string; subscriptionId: string; done: Promise<void>; release(): void } | undefined;
+  const releaseOpening = (context?: Frame) => {
+    if (context && context.subscriptionId !== opening?.subscriptionId) return;
+    opening?.release();
+    opening = undefined;
+  };
   const follow = modules.follower.createSessionFollower(api, {
     onFrame(frame, context) {
       if (frame.type === 'snapshot') {
@@ -76,15 +84,19 @@ export function attachMobileAccount(
         const events = (history.events as Frame[]).map(entry => entry.event);
         const first = events.length ? mobileRecord(events[0]).seq : null;
         send({ ...history, ...context, kind: 'session-snapshot', events, nextBeforeSeq: history.hasMore ? first : null, assistantStream: frame.assistantStream, replace: true });
+        releaseOpening(context);
       } else if (frame.type === 'event') send({ ...buildMobileWireEvent({ id: context.sessionId }, frame.event), ...context });
       else send({ kind: 'assistant-stream', ...context, frame: frame.frame });
     },
-    onError(error, context) { send({ kind: 'session-stream-reset', ...context, code: error.code ?? 'stream-interrupted', message: error.message }); },
+    onError(error, context) {
+      send({ kind: 'session-stream-reset', ...context, code: error.code ?? 'stream-interrupted', message: error.message });
+      releaseOpening(context);
+    },
   });
   const pending = new Map<string, { clientId: string; sessionId: string; event: string }>();
   let eventClientId: string | undefined;
   let home = '';
-  socket.once('close', () => { lifetime.abort(); follow.stop(); pending.clear(); });
+  socket.once('close', () => { lifetime.abort(); releaseOpening(); follow.stop(); pending.clear(); });
   socket.on('error', () => socket.terminate());
 
   const consume = async (namespace: string, method: string, receive: (frame: Frame) => void) => {
@@ -199,6 +211,10 @@ export function attachMobileAccount(
       const message = mobileRecord(JSON.parse(data.toString()));
       try {
         if (!eventClientId) throw new Error('Account connection is not ready');
+        // Concurrent cold follows each load and prepare the same durable log.
+        // Let the message follower populate the Host cache before control reads.
+        if (opening && opening.sessionId === message.sessionId && sessionControls.has(String(message.type))) await opening.done;
+        if (lifetime.signal.aborted) return;
         if (message.type === 'ping') { send({ kind: 'pong', at: Date.now() }); return; }
         if (message.type === 'host') {
           const catalog = mobileRecord(await carrier.invoke({ namespace: 'session', method: 'modelCatalog', args: {} }));
@@ -225,12 +241,19 @@ export function attachMobileAccount(
           if (typeof message.sessionId !== 'string' || !message.sessionId) throw new Error('A session is required');
           if (message.assistantStream !== true) throw new Error('Account connections require assistant streaming');
           const subscriptionId = randomUUID();
+          releaseOpening();
           follow.stop();
+          const gate = { sessionId: message.sessionId, subscriptionId, done: Promise.resolve(), release: () => {} };
+          gate.done = new Promise<void>(resolve => { gate.release = resolve; });
+          opening = gate;
           send({ kind: 'subscribed', sessionId: message.sessionId, subscriptionId, assistantStream: true });
-          void follow.start(message.sessionId, subscriptionId).catch(error => fail(error, message));
+          void follow.start(message.sessionId, subscriptionId).catch(error => {
+            fail(error, message);
+            releaseOpening({ subscriptionId });
+          });
           return;
         }
-        if (message.type === 'unsubscribe') { follow.stop(); send({ kind: 'subscribed', sessionId: null, assistantStream: false }); return; }
+        if (message.type === 'unsubscribe') { releaseOpening(); follow.stop(); send({ kind: 'subscribed', sessionId: null, assistantStream: false }); return; }
         if (message.type === 'question-answer' || message.type === 'question-cancel' || message.type === 'approval-response') {
           const rpcId = String(message.rpcId);
           const owned = pending.get(rpcId);
