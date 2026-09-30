@@ -25,7 +25,7 @@ export function mobileRecord(value: unknown): Record<string, unknown> {
 }
 
 /** One connection-scoped carrier; abort closes HTTP requests and streaming sockets together. */
-export function createMobileRemoteCarrier(target: MobileRemoteTarget, token: string, lifetime: AbortSignal, parentOf: (sessionId: string) => Promise<string | undefined>) {
+export function createMobileRemoteCarrier(target: MobileRemoteTarget, token: string, lifetime: AbortSignal, parentOf: (sessionId: string) => Promise<string | undefined>, initialHistoryMessages: number) {
   const pinned = new X509Certificate(target.certificate);
   const options = {
     hostname: target.hostname,
@@ -42,7 +42,13 @@ export function createMobileRemoteCarrier(target: MobileRemoteTarget, token: str
   const signalFor = (signal?: AbortSignal) => signal ? AbortSignal.any([signal, lifetime]) : lifetime;
   const resolveRequest = async (request: MobileRemoteRequest): Promise<MobileRemoteRequest> => {
     if (request.namespace !== 'session' || !['follow', 'page'].includes(request.method)) return request;
-    const args = mobileRecord(request.args.request);
+    let args = mobileRecord(request.args.request);
+    // The native viewport measures every row before revealing the latest
+    // message. Bound only its opening window; page reads keep their own limits.
+    if (request.method === 'follow' && args.assistantStream === true) {
+      args = { ...args, maxMessages: initialHistoryMessages };
+      request = { ...request, args: { ...request.args, request: args } };
+    }
     const address = mobileRecord(args.address);
     if (address.kind !== 'session' || typeof address.sessionId !== 'string') return request;
     // The native codec carries only a Session id. Durable parentage comes from

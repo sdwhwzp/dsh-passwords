@@ -10,6 +10,8 @@ The native bridge supports Session V4 history, assistant streaming, images, comm
 
 The account bridge requests title-only Session list hints for native clients. The Host still applies account authorization and returns the same Session summaries; conversation subscriptions continue to carry complete history and projections.
 
+Native subscriptions initially load the latest four messages to limit cold Markdown layout on the phone. Set `MCP_MOBILE_INITIAL_HISTORY_MESSAGES` to an integer from 1 to 100 to change that window. Older-page requests retain the client's page size; `hasMore`, the durable cursor, projections and the atomic assistant-stream baseline remain unchanged. Scroll upward to read earlier messages.
+
 The protocol adapter is pinned to `Clarklevis1995/dsh-plugin-mobile-gateway` commit `d805c567d106cc9bd19e5c429fe7c689f3be9645`. Only its codec and authorized Remote adapter are loaded; its Cordis plugin is not activated. `src/mobile-wire-event.ts` retains the MIT notice for the upstream event projection. Upgrade this dependency together with the native clients and the bridge's account-isolation tests.
 
 ## Validation
@@ -25,6 +27,8 @@ Run `npm run build` and `node --import tsx --test test/mobile-auth.test.ts test/
 所有请求和订阅仍经过现有网关的账号权限检查、签名 principal、工作区和会话访问检查、状态过滤及设备撤销。桥接不开放宿主机原始目录浏览、文件下载、全局默认模型修改和定时任务管理；有权限时可使用现有账号网页操作。原来的设备扫码配对模式独立保留。
 
 账号桥接为原生客户端请求仅含标题提示的会话列表。Host 仍执行账号鉴权并返回相同的会话摘要；对话订阅继续传输完整历史和投影。
+
+原生订阅首次读取最近 4 条消息，减少手机首次 Markdown 排版的工作量。可用 `MCP_MOBILE_INITIAL_HISTORY_MESSAGES` 设置 1 到 100 的整数。更早的页面仍使用客户端的分页大小，`hasMore`、持久游标、投影和原子的生成流基线保持原语义；向上滑动继续读取更早的消息。
 
 The native permission picker reads `permissionPresets/catalog` and the authorized Session projection. It does not request the administrator-only settings schema.
 

@@ -62,6 +62,7 @@ const MANAGED_ENV_KEYS = [
   'MCP_MOBILE_ACCESS_TTL_SECONDS',
   'MCP_MOBILE_AUTH_ENABLED',
   'MCP_MOBILE_IDLE_TTL_SECONDS',
+  'MCP_MOBILE_INITIAL_HISTORY_MESSAGES',
   'MCP_MOBILE_MAX_SESSIONS_PER_USER',
   'MCP_TENANT_AGENT_SHELL',
   'MCP_TENANT_AGENT_SHELL_MAX_TIMEOUT_MS',
@@ -129,6 +130,8 @@ export interface PlatformConfig {
     idleTtlSeconds: number;
     absoluteTtlSeconds: number;
     maxSessionsPerUser: number;
+    /** Latest message window for native subscriptions; earlier messages remain pageable. */
+    initialHistoryMessages: number;
   };
   /** Operator-owned immutable installer directory; empty disables public downloads. */
   desktopDownloadsDirectory?: string;
@@ -249,10 +252,12 @@ export function loadMobileAuthConfig(env: NodeJS.ProcessEnv = process.env): NonN
   const idleTtlSeconds = positiveIntegerEnv('MCP_MOBILE_IDLE_TTL_SECONDS', 2592000, env);
   const absoluteTtlSeconds = positiveIntegerEnv('MCP_MOBILE_ABSOLUTE_TTL_SECONDS', 7776000, env);
   const maxSessionsPerUser = positiveIntegerEnv('MCP_MOBILE_MAX_SESSIONS_PER_USER', 20, env);
+  const initialHistoryMessages = positiveIntegerEnv('MCP_MOBILE_INITIAL_HISTORY_MESSAGES', 4, env);
+  if (initialHistoryMessages > 100) throw new Error('MCP_MOBILE_INITIAL_HISTORY_MESSAGES must be between 1 and 100');
   if (accessTtlSeconds > 3600 || accessTtlSeconds > idleTtlSeconds || idleTtlSeconds > absoluteTtlSeconds || absoluteTtlSeconds > 31536000 || maxSessionsPerUser > 100) {
     throw new Error('Mobile auth requires access <= 3600, access <= idle <= absolute <= 31536000 seconds and at most 100 devices');
   }
-  return { enabled: enabled === 'true', accessTtlSeconds, idleTtlSeconds, absoluteTtlSeconds, maxSessionsPerUser };
+  return { enabled: enabled === 'true', accessTtlSeconds, idleTtlSeconds, absoluteTtlSeconds, maxSessionsPerUser, initialHistoryMessages };
 }
 
 /** Parse the deployment opt-in for principal-scoped SSH; reject misspelled values. */

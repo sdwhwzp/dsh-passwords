@@ -11184,7 +11184,7 @@ export function createGatewayServer(
           attachMobileAccount(client, target, accountToken, identity, modules, async sessionId => {
             await ensureSessionAccessSnapshot(sessionId);
             return sessionParentById.get(sessionId);
-          });
+          }, config.mobileAuth!.initialHistoryMessages);
         });
       }).catch(() => { if (!socket.destroyed) rejectUpgrade(socket, 503); });
       return;

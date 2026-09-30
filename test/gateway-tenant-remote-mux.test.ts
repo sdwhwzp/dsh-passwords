@@ -107,7 +107,7 @@ async function setup(mobile = false) {
       acmeEmail: '', acmeStaging: false,
     },
     jwtSecret: 'jwt-secret', internalSecret: 'internal-secret',
-    mobileAuth: { enabled: true, accessTtlSeconds: 900, idleTtlSeconds: 2592000, absoluteTtlSeconds: 7776000, maxSessionsPerUser: 20 },
+    mobileAuth: { enabled: true, accessTtlSeconds: 900, idleTtlSeconds: 2592000, absoluteTtlSeconds: 7776000, maxSessionsPerUser: 20, initialHistoryMessages: 4 },
     localWorkspace: { host: '127.0.0.1', port: 0, publicUrl: '', placeholderRoot: path.join(temporary, 'local') },
     managedWorkspaceRoot: path.join(temporary, 'managed'),
     patch: { dshRoot: '', restartService: '' },

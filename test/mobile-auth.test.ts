@@ -30,7 +30,7 @@ async function fixture(t: TestContext) {
     setupKey: 'test-setup', dbPath, dbEncKey: 'test-enc', jwtSecret: 'mobile-test-jwt', internalSecret: 'mobile-test-internal',
     gateway: { host: '127.0.0.1', port: 0, upstream: 'http://127.0.0.1:1', tls: null, redirectPort: null, publicHost: '', domain: '', autoTls: false, acmeEmail: '', acmeStaging: false },
     patch: { dshRoot: '', restartService: '' },
-    mobileAuth: { enabled: true, accessTtlSeconds: 900, idleTtlSeconds: 2592000, absoluteTtlSeconds: 7776000, maxSessionsPerUser: 2 },
+    mobileAuth: { enabled: true, accessTtlSeconds: 900, idleTtlSeconds: 2592000, absoluteTtlSeconds: 7776000, maxSessionsPerUser: 2, initialHistoryMessages: 4 },
   } as PlatformConfig;
   let now = Date.now();
   const revoked: string[] = [];
@@ -138,6 +138,14 @@ test('configuration rejects unbounded and misspelled mobile policies and restore
   assert.throws(() => loadMobileAuthConfig(), /Mobile auth requires/);
 });
 
+test('native opening window is configurable and rejects unbounded limits', () => {
+  assert.equal(loadMobileAuthConfig({}).initialHistoryMessages, 4);
+  assert.equal(loadMobileAuthConfig({ MCP_MOBILE_INITIAL_HISTORY_MESSAGES: '12' }).initialHistoryMessages, 12);
+  for (const value of ['0', '-1', '1.5', '101', 'many']) {
+    assert.throws(() => loadMobileAuthConfig({ MCP_MOBILE_INITIAL_HISTORY_MESSAGES: value }), /MCP_MOBILE_INITIAL_HISTORY_MESSAGES/);
+  }
+});
+
 test('HTTPS JSON login, bearer HTTP/WS identity, cross-account rejection and live socket logout', async t => {
   const f = await fixture(t);
   let forwardedHeaders: http.IncomingHttpHeaders = {};
@@ -230,9 +238,14 @@ test('native mobile profiles isolate account identity, session follow and logout
   f.db.claimSessionOwner('own-child', f.other.id);
   f.db.claimSessionOwner('other-child', f.user.id);
   const followed: string[] = [];
+  const openingMessageLimits: unknown[] = [];
   const listRequests: Array<Record<string, unknown>> = [];
   const permissionReads: string[] = [];
   const pages: Array<Record<string, unknown>> = [];
+  const historyRecords = Array.from({ length: 12 }, (_, seq) => ({ type: 'event',
+    event: { type: 'assistant/message', seq, time: 100 + seq,
+      data: { message: { content: [{ type: 'text', text: `message-${seq}` }] } } },
+  }));
   const permissionOption = { name: 'workspace-write', label: 'Workspace', description: '', selected: true };
   const answers: Array<Record<string, any>> = []; // Capture plugin-extensible Remote event JSON from the fixture.
   upstream = http.createServer((req, res) => {
@@ -260,7 +273,9 @@ test('native mobile profiles isolate account identity, session follow and logout
       req.on('end', () => {
         const request = JSON.parse(data);
         pages.push(request.payload.args.request);
-        res.end(JSON.stringify({ type: 'server-response', rpcId: request.rpcId, result: { ok: true, value: { records: [], hasMore: false } } }));
+        const page = request.payload.args.request;
+        const records = historyRecords.filter(record => record.event.seq < page.beforeSeq).slice(-page.maxMessages);
+        res.end(JSON.stringify({ type: 'server-response', rpcId: request.rpcId, result: { ok: true, value: { records, hasMore: records[0]?.event.seq > 0 } } }));
       });
     } else if (req.url === '/api/permissionPresets/catalog' || req.url === '/api/session/projections') {
       let data = '';
@@ -314,12 +329,14 @@ test('native mobile profiles isolate account identity, session follow and logout
       const address = frame.payload.args.request.address;
       const sessionId = address.kind === 'subagent' ? address.childSessionId : address.sessionId;
       followed.push(sessionId);
+      if (frame.payload.args.request.assistantStream === true) openingMessageLimits.push(frame.payload.args.request.maxMessages);
       if (sessionId === 'own-child' && (address.kind !== 'subagent' || address.parentSessionId !== 'own-session')) {
         ws.send(JSON.stringify({ type: 'error', streamId: frame.streamId, error: { code: 'session/agent-busy', message: 'subagent Sessions require their durable parent address' } }));
         return;
       }
-      send({ type: 'snapshot', header: { id: sessionId, ...(sessionId === 'own-child' ? { origin: 'subagent', parentSession: 'own-session' } : {}), version: 4 }, cursor: -1, records: [], hasMore: false,
-        projections: { asOfSeq: -1, values: {} }, assistantStream: { revision: 0 } });
+      const records = historyRecords.slice(-Number(frame.payload.args.request.maxMessages ?? 12));
+      send({ type: 'snapshot', header: { id: sessionId, ...(sessionId === 'own-child' ? { origin: 'subagent', parentSession: 'own-session' } : {}), version: 4 }, cursor: 11, records, hasMore: records[0]?.event.seq > 0,
+        projections: { asOfSeq: 11, values: {} }, assistantStream: { revision: 0 } });
     }
   }));
   upstream.listen(0, '127.0.0.1'); await once(upstream, 'listening');
@@ -384,14 +401,24 @@ test('native mobile profiles isolate account identity, session follow and logout
     assert.equal(rejected.sessionId, 'other-session');
     assert.deepEqual(permissionReads, ['own-session']);
     client.send(JSON.stringify({ type: 'subscribe', sessionId: 'own-session', assistantStream: true }));
-    assert.equal((await next('session-snapshot')).sessionId, 'own-session');
+    const opening = await next('session-snapshot');
+    assert.equal(opening.sessionId, 'own-session');
+    assert.deepEqual((opening.events as Array<Record<string, unknown>>).map(event => event.seq), [8, 9, 10, 11]);
+    assert.equal(opening.cursor, 11);
+    assert.equal(opening.hasMore, true);
+    assert.equal(opening.nextBeforeSeq, 8);
+    assert.deepEqual(opening.assistantStream, { revision: 0 });
+    assert.deepEqual(openingMessageLimits, [4]);
     client.send(JSON.stringify({ type: 'history', sessionId: 'own-child' }));
     assert.equal((await next('history')).sessionId, 'own-child');
-    client.send(JSON.stringify({ type: 'history', sessionId: 'own-child', beforeSeq: 0, maxMessages: 7, historyFormatVersion: 4 }));
-    assert.equal((await next('history')).sessionId, 'own-child');
-    assert.deepEqual(pages, [{ address: { kind: 'subagent', parentSessionId: 'own-session', childSessionId: 'own-child', mode: 'unknown' }, throughSeq: -1, beforeSeq: 0, maxMessages: 7 }]);
+    client.send(JSON.stringify({ type: 'history', sessionId: 'own-child', beforeSeq: 8, maxMessages: 7, historyFormatVersion: 4 }));
+    const older = await next('history');
+    assert.equal(older.sessionId, 'own-child');
+    assert.deepEqual((older.events as Array<Record<string, unknown>>).map(event => event.seq), [1, 2, 3, 4, 5, 6, 7]);
+    assert.deepEqual(pages, [{ address: { kind: 'subagent', parentSessionId: 'own-session', childSessionId: 'own-child', mode: 'unknown' }, throughSeq: 11, beforeSeq: 8, maxMessages: 7 }]);
     client.send(JSON.stringify({ type: 'subscribe', sessionId: 'own-child', assistantStream: true }));
     assert.equal((await next('session-snapshot')).sessionId, 'own-child');
+    assert.deepEqual(openingMessageLimits, [4, 4]);
     client.send(JSON.stringify({ type: 'subscribe', sessionId: 'other-session', assistantStream: true }));
     await next('session-stream-reset');
     client.send(JSON.stringify({ type: 'subscribe', sessionId: 'other-child', parentSessionId: 'own-session', assistantStream: true }));
