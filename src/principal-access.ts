@@ -68,7 +68,7 @@ export class DshPasswordsPrincipalAccessProvider {
     private readonly db: Database,
   ) {}
 
-  /** Authorize requested resources from live headers or a request-local corpus read; recheck permissions on every call. */
+  /** Authorize requested resources from live headers or individual stored headers; recheck permissions on every call. */
   async resolve(
     principal: AuthenticatedPrincipal,
     subjects: PrincipalAccessSubjects,
@@ -95,8 +95,8 @@ export class DshPasswordsPrincipalAccessProvider {
     const services = this.ctx.root as unknown as HostServices;
     const registry = services.get('workspaceRegistry') as { list(): readonly WorkspaceRecord[] } | undefined;
     const sessions = services.get('sessions') as { get(id: string): SessionRecord | undefined } | undefined;
-    const query = services.get('sessionQuery') as {
-      listSessions(signal?: AbortSignal): Promise<readonly SessionRecord[]>;
+    const persistence = services.get('sessionPersistence') as {
+      stat(id: string, options?: { signal?: AbortSignal }): Promise<SessionRecord | undefined>;
     } | undefined;
     if (registry === undefined) return denied;
 
@@ -118,17 +118,17 @@ export class DshPasswordsPrincipalAccessProvider {
 
     const readableSessionIds = new Set<SessionId>();
     if (requestedSessions.length > 0) {
-      let coldHeaders: Map<string, SessionRecord['header']> | undefined;
+      const coldHeaders = new Map<string, SessionRecord['header'] | undefined>();
       const headerFor = async (id: string): Promise<SessionRecord['header'] | undefined> => {
         const live = sessions?.get(id);
         if (live !== undefined) return live.header;
-        if (query === undefined) return undefined;
-        if (coldHeaders === undefined) {
-          const records = await query.listSessions(signal);
-          signal?.throwIfAborted();
-          coldHeaders = new Map(records.map((record) => [String(record.header.id), record.header]));
-        }
-        return coldHeaders.get(id);
+        if (persistence === undefined) return undefined;
+        if (coldHeaders.has(id)) return coldHeaders.get(id);
+        const snapshot = await persistence.stat(id, { signal });
+        signal?.throwIfAborted();
+        const header = snapshot?.header;
+        coldHeaders.set(id, header);
+        return header;
       };
       const disabled = new Set(permissions.disabled_sessions);
       for (const sessionId of requestedSessions) {

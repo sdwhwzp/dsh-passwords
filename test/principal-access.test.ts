@@ -8,6 +8,111 @@ import { Database } from '../src/db.js';
 import { createFieldCrypto } from '../src/encrypt.js';
 import { DshPasswordsPrincipalAccessProvider } from '../src/principal-access.js';
 
+function hostContext(services: Map<string, unknown>): Context {
+  return { root: { get: (name: string) => services.get(name) } } as unknown as Context;
+}
+
+test('cold session access reads only current target metadata and observes deletion and directory changes', async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), 'dshpw-cold-access-'));
+  const ownRoot = path.join(temporary, 'own');
+  const outsideRoot = path.join(temporary, 'outside');
+  const linkedRoot = path.join(temporary, 'linked');
+  await mkdir(ownRoot);
+  await mkdir(outsideRoot);
+  await symlink(ownRoot, linkedRoot);
+  const db = new Database(path.join(temporary, 'platform.db'), createFieldCrypto('enc', 'setup'));
+  try {
+    db.init();
+    const alice = db.createUser('alice', 'hash', 'user');
+    db.setPermissions(alice.id, {
+      allowedFolders: [ownRoot], hourlyTokenLimit: null, dailyMinutesLimit: null,
+      allowUpload: true, allowGitDownload: false, banned: false,
+    });
+    db.claimSessionOwner('cold', alice.id);
+    const records = new Map([
+      ['cold', { header: { id: 'cold', cwd: ownRoot } }],
+    ]);
+    const statIds: string[] = [];
+    let catalogReads = 0;
+    const services = new Map<string, unknown>([
+      ['workspaceRegistry', { list: () => [] }],
+      ['sessionPersistence', { stat: async (id: string) => {
+        statIds.push(id);
+        return records.get(id);
+      } }],
+      ['sessionQuery', { listSessions: async () => {
+        catalogReads += 1;
+        return [...records.values()];
+      } }],
+    ]);
+    const provider = new DshPasswordsPrincipalAccessProvider(hostContext(services), db);
+    const principal = { source: 'dsh-passwords', id: String(alice.id), username: alice.username, role: 'user' } as const;
+    const resolve = () => provider.resolve(principal, { sessionIds: ['cold'] });
+    for (let read = 0; read < 3; read += 1) {
+      assert.deepEqual([...(await resolve()).readableSessionIds], ['cold']);
+    }
+    assert.deepEqual(statIds, ['cold', 'cold', 'cold']);
+    assert.equal(catalogReads, 0);
+
+    records.delete('cold');
+    assert.equal((await resolve()).readableSessionIds.size, 0);
+    records.set('cold', { header: { id: 'cold', cwd: outsideRoot } });
+    assert.equal((await resolve()).readableSessionIds.size, 0);
+    records.set('cold', { header: { id: 'cold', cwd: linkedRoot } });
+    assert.deepEqual([...(await resolve()).readableSessionIds], ['cold']);
+    await rm(linkedRoot);
+    await symlink(outsideRoot, linkedRoot);
+    assert.equal((await resolve()).readableSessionIds.size, 0);
+    records.set('cold', { header: { id: 'cold', cwd: ownRoot } });
+    db.markSessionGrantsSeeded(alice.id);
+    assert.deepEqual([...(await resolve()).readableSessionIds], ['cold']);
+    db.deleteUserSessionGrants(alice.id, ['cold']);
+    assert.equal((await resolve()).readableSessionIds.size, 0);
+    assert.equal(catalogReads, 0);
+  } finally {
+    db.close();
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test('cold session access does not authorize failed, cancelled, or unavailable metadata reads', async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), 'dshpw-cold-access-failure-'));
+  const db = new Database(path.join(temporary, 'platform.db'), createFieldCrypto('enc', 'setup'));
+  try {
+    db.init();
+    const alice = db.createUser('alice', 'hash', 'user');
+    db.setPermissions(alice.id, {
+      allowedFolders: [temporary], hourlyTokenLimit: null, dailyMinutesLimit: null,
+      allowUpload: true, allowGitDownload: false, banned: false,
+    });
+    db.claimSessionOwner('cold', alice.id);
+    const services = new Map<string, unknown>([
+      ['workspaceRegistry', { list: () => [] }],
+      ['sessionPersistence', { stat: async () => { throw new Error('corrupt stored header'); } }],
+      ['sessionQuery', { listSessions: async () => {
+        throw new Error('unrelated corpus read');
+      } }],
+    ]);
+    const provider = new DshPasswordsPrincipalAccessProvider(hostContext(services), db);
+    const principal = { source: 'dsh-passwords', id: String(alice.id), username: alice.username, role: 'user' } as const;
+    await assert.rejects(provider.resolve(principal, { sessionIds: ['cold'] }), /corrupt stored header/);
+
+    const controller = new AbortController();
+    services.set('sessionPersistence', { stat: async (id: string, options?: { signal?: AbortSignal }) => {
+      assert.equal(id, 'cold');
+      assert.equal(options?.signal, controller.signal);
+      controller.abort(new Error('metadata read cancelled'));
+      return { header: { id, cwd: temporary } };
+    } });
+    await assert.rejects(provider.resolve(principal, { sessionIds: ['cold'] }, controller.signal), /metadata read cancelled/);
+    services.delete('sessionPersistence');
+    assert.equal((await provider.resolve(principal, { sessionIds: ['cold'] })).readableSessionIds.size, 0);
+  } finally {
+    db.close();
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test('live session updates authorize without scanning the corpus and still observe revocation', async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), 'dshpw-live-access-'));
   const db = new Database(path.join(temporary, 'platform.db'), createFieldCrypto('enc', 'setup'));
@@ -28,34 +133,34 @@ test('live session updates authorize without scanning the corpus and still obser
       ['child', { header: { id: 'child', cwd: temporary, origin: 'subagent', parentSession: 'live' } }],
       ['foreign', { header: { id: 'foreign', cwd: temporary } }],
     ]);
-    let catalogReads = 0;
+    let metadataReads = 0;
     const services = new Map<string, unknown>([
       ['workspaceRegistry', { list: () => [] }],
       ['sessions', { get: (id: string) => records.get(id) }],
-      ['sessionQuery', { listSessions: async () => {
-        catalogReads += 1;
-        return [...records.values(), { header: { id: 'cold', cwd: temporary } }];
+      ['sessionPersistence', { stat: async (id: string) => {
+        metadataReads += 1;
+        return id === 'cold' ? { header: { id, cwd: temporary } } : records.get(id);
       } }],
     ]);
-    const ctx = { root: { get: (name: string) => services.get(name) } } as unknown as Context;
+    const ctx = hostContext(services);
     const provider = new DshPasswordsPrincipalAccessProvider(ctx, db);
     const principal = { source: 'dsh-passwords', id: String(alice.id), username: alice.username, role: 'user' } as const;
     const live = await provider.resolve(principal, { sessionIds: ['live', 'child', 'foreign'] });
     assert.deepEqual([...live.readableSessionIds], ['live', 'child']);
-    assert.equal(catalogReads, 0);
+    assert.equal(metadataReads, 0);
 
     const mixed = await provider.resolve(principal, { sessionIds: ['live', 'cold', 'missing'] });
     assert.deepEqual([...mixed.readableSessionIds], ['live', 'cold']);
-    assert.equal(catalogReads, 1);
+    assert.equal(metadataReads, 2);
     db.setPermissions(alice.id, { ...permissions, disabledSessions: ['live'] });
     assert.equal((await provider.resolve(principal, { sessionIds: ['live', 'child'] })).readableSessionIds.size, 0);
-    assert.equal(catalogReads, 1);
+    assert.equal(metadataReads, 2);
     db.setPermissions(alice.id, { ...permissions, banned: true });
     assert.equal((await provider.resolve(principal, { sessionIds: ['live'] })).readableSessionIds.size, 0);
     db.setPermissions(alice.id, { ...permissions, allowedFolders: ['__deny__'] });
     assert.equal((await provider.resolve(principal, { sessionIds: ['live'] })).readableSessionIds.size, 0);
     db.setPermissions(alice.id, { ...permissions, disabledSessions: [] });
-    services.delete('sessionQuery');
+    services.delete('sessionPersistence');
     assert.deepEqual([...(await provider.resolve(principal, { sessionIds: ['live', 'cold'] })).readableSessionIds], ['live']);
     const aborted = AbortSignal.abort(new Error('access cancelled'));
     await assert.rejects(provider.resolve(principal, { sessionIds: ['live'] }, aborted), /access cancelled/);
@@ -149,8 +254,8 @@ test('principal access returns only the account-owned resources inside allowed f
           { id: 'workspace-escape', path: path.join(ownRoot, 'escape') },
         ],
       }],
-      ['sessionQuery', {
-        listSessions: async () => [
+      ['sessionPersistence', {
+        stat: async (sessionId: string) => [
           { header: { id: 'owned', cwd: ownRoot } },
           { header: { id: 'disabled', cwd: ownRoot } },
           { header: { id: 'outside', cwd: otherRoot } },
@@ -171,10 +276,10 @@ test('principal access returns only the account-owned resources inside allowed f
             ['cycle-a', 'cycle-b', ownRoot, 'subagent'],
             ['cycle-b', 'cycle-a', ownRoot, 'subagent'],
           ].map(([id, parentSession, cwd, origin]) => ({ header: { id, parentSession, cwd, origin } })),
-        ],
+        ].find((record) => record.header.id === sessionId),
       }],
     ]);
-    const ctx = { root: { get: (name: string) => services.get(name) } } as unknown as Context;
+    const ctx = hostContext(services);
     const provider = new DshPasswordsPrincipalAccessProvider(ctx, db);
     const principal = {
       source: 'dsh-passwords', id: String(customer.id), username: customer.username, role: 'user',

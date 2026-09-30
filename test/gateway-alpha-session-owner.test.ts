@@ -143,10 +143,13 @@ test('Alpha.4 session/page adopts only complete oldest-prefix ownership evidence
   });
   const services = new Map<string, unknown>([
     ['workspaceRegistry', { list: () => [{ id: 'customer-workspace', path: sessionCwd }] }],
-    ['sessionQuery', {
-      listSessions: async () => sessionSummaries.map((summary) => ({
-        header: { id: summary.sessionId, cwd: summary.cwd },
-      })),
+    ['sessionPersistence', {
+      stat: async (sessionId: string) => {
+        const summary = sessionSummaries.find((item) => item.sessionId === sessionId);
+        return summary === undefined ? undefined : {
+          header: { id: summary.sessionId, cwd: summary.cwd },
+        };
+      },
     }],
   ]);
   const principalAccess = new DshPasswordsPrincipalAccessProvider({
