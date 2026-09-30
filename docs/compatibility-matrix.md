@@ -1,6 +1,6 @@
 # Fork compatibility and deployment
 
-This fork integrates `slywalker2006/dsh-passwords` commit `9ca1a31` (v2.7.6) on `dev`. Its candidate version is `2.7.6-dsh.20260929.1`; the owned push repository is `git@github.com:sdwhwzp/dsh-passwords.git`.
+This fork integrates `slywalker2006/dsh-passwords` commit `9ca1a31` (v2.7.6) on `dev`. Its candidate version is `2.7.6-dsh.20260930.1`; the owned push repository is `git@github.com:sdwhwzp/dsh-passwords.git`.
 
 ## Runtime requirements
 

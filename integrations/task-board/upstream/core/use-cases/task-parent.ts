@@ -49,8 +49,9 @@ export function applySetParent(
   if (task.archivedAt !== undefined) return { tasks, applied: false, error: 'archived task is read-only' }
   // A task with an open execution may be a participant of a running cascade.
   // Moving it would break that group's parent walk and leave the parent card
-  // in the running column forever, so the link is frozen until it settles.
-  if (task.status === 'running' || task.executions.some(execution => execution.endedAt === undefined)) {
+  // in the running column forever, so the link is frozen until it settles. The
+  // lock is the open execution: a card parked in 'running' by hand links freely.
+  if (task.executions.some(execution => execution.endedAt === undefined)) {
     return { tasks, applied: false, error: 'running task cannot be re-parented' }
   }
   const check = checkParentLink(tasks, id, parentId, normalizeSubtaskDepth(maxSubtaskDepth))

@@ -43,11 +43,13 @@ export function hasContentPatch(patch: TaskUpdatePatch): boolean {
 
 /**
  * Whether a task's content may still be edited: the task must be on-board
- * (not archived) and must never have started executing. Fail-closed: a
- * running, settled, or cancelled-before-launch task keeps its content fixed.
+ * (not archived) and must never have started executing. Fail-closed: a task
+ * with any execution record — running, settled, or cancelled before launch —
+ * keeps its content fixed. The run, not the column, is the trigger: a card
+ * parked in 'running' by hand has nothing recorded yet and stays editable.
  */
 export function canEditTaskContent(task: TaskRecord): boolean {
-  return task.archivedAt === undefined && task.status !== 'running' && task.executions.length === 0
+  return task.archivedAt === undefined && task.executions.length === 0
 }
 
 /** Keep an unknown permission string from entering the ledger. */

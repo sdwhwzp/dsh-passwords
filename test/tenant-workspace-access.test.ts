@@ -111,7 +111,7 @@ test('task-board HTTP state and mutations are isolated by signed principal and p
       headers: { origin, 'content-type': 'application/json', ...signedPrincipalHeaders({ userId: user.id, username: user.username, role: 'user' }, 'secret') },
       ...(action ? { body: JSON.stringify({ requestId: crypto.randomUUID(), action }) } : {}),
     });
-    assert.equal(response.status, expectedStatus, response.status === expectedStatus ? undefined : await response.text()); return await response.json() as { tasks: Array<{ id: string; title: string; workspaceId?: string; reuseSession?: boolean; goalRun?: boolean; tags?: Array<{ name: string }> }> };
+    assert.equal(response.status, expectedStatus, response.status === expectedStatus ? undefined : await response.text()); return await response.json() as { tasks: Array<{ id: string; title: string; status: string; executions: object[]; workspaceId?: string; reuseSession?: boolean; goalRun?: boolean; tags?: Array<{ name: string }> }> };
   };
   try {
     registerTenantTaskBoard(ctx as never, db as never, config as never);
@@ -119,10 +119,18 @@ test('task-board HTTP state and mutations are isolated by signed principal and p
     assert.deepEqual((await call('3')).tasks, []);
     await call('3', { kind: 'delete', taskId: 'shared-id' }, 400);
     await call('3', { kind: 'update', taskId: 'shared-id', patch: { goalRun: false } }, 400);
+    for (const status of ['running', 'done', 'failed', 'backlog', 'todo']) {
+      await call('3', { kind: 'move', taskId: 'shared-id', status }, 400);
+      const moved = (await call('2', { kind: 'move', taskId: 'shared-id', status })).tasks[0];
+      assert.equal(moved.status, status);
+      assert.deepEqual(moved.executions, []);
+    }
+    assert.deepEqual(executionCalls.filter(call => call.method !== 'session/list'), []);
     assert.equal((await call('2')).tasks[0].title, 'owner-2');
     const submitted = new Promise<void>((resolve, reject) => { const timer = setTimeout(() => reject(new Error('task goal was not submitted')), 3000); goalReached = () => { clearTimeout(timer); resolve(); }; });
     await call('2', { kind: 'run', taskId: 'shared-id' });
     await submitted;
+    await call('2', { kind: 'move', taskId: 'shared-id', status: 'done' }, 400);
     const mutations = executionCalls.filter(call => call.method !== 'session/list');
     assert.deepEqual(mutations.map(call => call.method), ['session/create', 'session/rename', 'commands/execute', 'session/prompt', 'commands/execute']);
     assert.deepEqual(mutations[4].args, { agentId: 'execution-owned', line: '/goal only mine', submittedAttachments: [] });
@@ -130,6 +138,7 @@ test('task-board HTTP state and mutations are isolated by signed principal and p
     for (const call of mutations) { const token = call.cookie!.slice('dsh_gateway_token='.length); assert.equal((jwt.verify(token, 'jwt-secret') as { sub: string }).sub, '2'); }
     assert.deepEqual(mutations[0].args, { request: { workspaceId: 'ws-owned' } });
     await call('2', { kind: 'create', id: 'other-project', input: { title: 'owner-2 backend', description: '', prompt: 'second project', workspaceId: 'ws-backend', goalRun: false } });
+    await call('2', { kind: 'move', taskId: 'other-project', status: 'running' });
     const httpBrowser = await fetch(origin + '/api/task-board/state', { headers: signedPrincipalHeaders({ userId: 2, username: 'first', role: 'user' }, 'secret') });
     assert.equal(httpBrowser.status, 200);
     await httpBrowser.body?.cancel();
@@ -142,6 +151,9 @@ test('task-board HTTP state and mutations are isolated by signed principal and p
     assert.equal(restored.find(task => task.id === 'shared-id')?.reuseSession, true);
     assert.equal(restored.find(task => task.id === 'shared-id')?.goalRun, undefined);
     assert.equal(restored.find(task => task.id === 'other-project')?.goalRun, false);
+    assert.equal(restored.find(task => task.id === 'other-project')?.status, 'running');
+    assert.deepEqual(restored.find(task => task.id === 'other-project')?.executions, []);
+    await call('2', { kind: 'move', taskId: 'other-project', status: 'done' });
     assert.deepEqual(restored.find(task => task.id === 'shared-id')?.tags, [{ name: 'frontend' }]);
     assert.deepEqual(restored.map(task => task.workspaceId).sort(), ['ws-backend', 'ws-owned']);
     assert.deepEqual((await call('3')).tasks, []);

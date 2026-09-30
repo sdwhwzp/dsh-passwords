@@ -1,6 +1,6 @@
 # Task board Host engine
 
-Pinned from [sdwhwzp/dsh-web](https://github.com/sdwhwzp/dsh-web) commit `17d50f756e5a57485a669e3aa1ab0f1a7a5c6668`, package `@linxin666/dsh-client-ui-task-board` version `0.4.4-dsh.20260929.1` (Apache-2.0). [source.json](source.json) records the 24 files in the Host service, ledger, routes and parser dependency closure with their Git blob hashes. Files under `upstream/` are unchanged copies of that commit.
+Pinned from [sdwhwzp/dsh-web](https://github.com/sdwhwzp/dsh-web) commit `52bfc3f5ca250ce7ce20feee84ec264f1791c3b9`, package `@linxin666/dsh-client-ui-task-board` version `0.4.4-dsh.20260930.1` (Apache-2.0). [source.json](source.json) records the 24 files in the Host service, ledger, routes and parser dependency closure with their Git blob hashes. Files under `upstream/` are unchanged copies of that commit.
 
 The tenant adapter authenticates requests, isolates ledgers by account and sends every execution RPC through the passwords gateway. Parent-child links, workspace IDs, tags and session-reuse preferences survive ledger reloads; the matching dsh-web client uses those workspace IDs for project partitions. Parent links can reference only tasks in the same account ledger; absent parents and cycles are rejected. Workspace creation and session reuse retain the gateway's account permissions and session ownership checks.
 
@@ -17,3 +17,5 @@ Each account arms one deadline timer for its earliest cron occurrence through th
 Goal runs default to enabled, including existing tasks without `goalRun`. An explicit `false` persists in the schema 4 ledger and runs one plain turn. Both the goal command and its completion projection pass through the current account gateway; an active goal keeps its task running, a blocked goal fails it, and an authorization refusal never settles the task from an unreadable projection. The execution prompt is submitted before the goal command, so an unsupported or refused goal command retains that single turn.
 
 The `settle` action closes the current account’s open card executions as cancelled; it does not stop the underlying sessions or issue session-control RPCs. Other accounts’ tasks remain inaccessible. Team and cascade recovery folds recorded outcomes on startup and polling, and repeated unreadable history becomes a visible failure. Scheduled prompts and goal commands carry the trigger timestamp and rule time zone.
+
+Manual column changes cover backlog, todo, running, done and failed without creating an execution or starting a session. Only an open execution prevents a column change; a manually marked running card remains movable after reload. Account ownership checks apply to every move.

@@ -409,8 +409,20 @@ export const COLUMNS: readonly { status: TaskStatus; label: string }[] = [
   { status: 'failed', label: '已失败' },
 ]
 
-/** Statuses a user may move a card to manually (execution states are owned by the runner). */
-export const MANUAL_STATUSES: readonly TaskStatus[] = ['backlog', 'todo']
+/**
+ * Statuses a card may be moved to by hand: every column. The board UI and the
+ * agent tool surface share this one list, so no column can be manual on one
+ * surface and locked on the other.
+ *
+ * The column is a board statement, not a claim about a run. A hand-written
+ * `done`/`failed` declares that the work finished (or failed) outside a
+ * Host-run execution — human hands, an external system — and a hand-written
+ * `running` says the work is under way without a tracked session. None of them
+ * creates an {@link ExecutionRecord}, which is what keeps a declaration
+ * distinguishable from a recorded outcome in the card's execution history; the
+ * next settled run overwrites the column with the real one.
+ */
+export const MANUAL_STATUSES: readonly TaskStatus[] = ['backlog', 'todo', 'running', 'done', 'failed']
 
 /** Statuses the runner may move a card to from 'running'. */
 export const RUNNER_SETTLE_STATUSES: readonly TaskStatus[] = ['done', 'failed']
@@ -425,9 +437,35 @@ export function isTaskStatus(value: unknown): value is TaskStatus {
   return typeof value === 'string' && (ALL_STATUSES as readonly string[]).includes(value)
 }
 
-/** Whether a manual move target is allowed from the given status. */
+/**
+ * Whether the manual move `from` -> `to` is a legal *column* change: any
+ * column, and never the one the card already shows.
+ *
+ * Whether the card may be moved at all is a separate question. The lock an
+ * executing card carries belongs to its open execution, never to the column
+ * text, so it is {@link canMoveTask} — not this predicate — that expresses it.
+ */
 export function canMoveManually(from: TaskStatus, to: TaskStatus): boolean {
-  return from !== 'running' && (MANUAL_STATUSES as readonly TaskStatus[]).includes(to)
+  return from !== to && (MANUAL_STATUSES as readonly TaskStatus[]).includes(to)
+}
+
+/**
+ * Whether the board may move `task` to `to` by hand: the card is on-board,
+ * holds no open execution, and the target is a legal column change. The ledger,
+ * the detail view's status buttons and the board's drop handler all decide
+ * through this one predicate, so no two surfaces can disagree about a card.
+ */
+export function canMoveTask(task: TaskRecord, to: TaskStatus): boolean {
+  return task.archivedAt === undefined && !hasOpenExecution(task) && canMoveManually(task.status, to)
+}
+
+/**
+ * Whether the task still has an execution the runner has not settled. This —
+ * not the `running` column — is what "the runner owns this card" means: a card
+ * parked in `running` by hand has no session and stays fully movable.
+ */
+export function hasOpenExecution(task: TaskRecord): boolean {
+  return task.executions.some(execution => execution.endedAt === undefined)
 }
 
 /** Normalize one optional execution-target string: trim; blank collapses to undefined. */

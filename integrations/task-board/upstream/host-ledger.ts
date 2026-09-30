@@ -6,7 +6,7 @@ import { dshHome } from './dsh-home.ts'
 import { parseTaskPrincipals, principalKey, type TaskBoardPrincipal } from './host-accounts.ts'
 import { isValidCron, isValidTimeZone, nextRunAtMs, resolveHostTimeZone } from './core/schedule.ts'
 import { isTaskRecord, parseLedger } from './core/store.ts'
-import { canMoveManually, retainRecentExecutions, settleExecution, startExecution, withStatus, type ExecutionOutcome, type ExecutionRecord, type TaskRecord } from './core/tasks.ts'
+import { canMoveManually, hasOpenExecution, retainRecentExecutions, settleExecution, startExecution, withStatus, type ExecutionOutcome, type ExecutionRecord, type TaskRecord } from './core/tasks.ts'
 import {
   DEFAULT_SUBTASK_DEPTH,
   cascadeTargets,
@@ -130,10 +130,6 @@ function scheduleZone(schedule: { timeZone?: string }): string {
 
 function cloneTasks(tasks: readonly TaskRecord[]): TaskRecord[] {
   return JSON.parse(JSON.stringify(tasks)) as TaskRecord[]
-}
-
-function hasOpenExecution(task: TaskRecord): boolean {
-  return task.executions.some(execution => execution.endedAt === undefined)
 }
 
 /**
@@ -664,7 +660,7 @@ export class HostTaskLedger {
       rollForward()
       return []
     }
-    if (task.status === 'running' || hasOpenExecution(task)) {
+    if (hasOpenExecution(task)) {
       rollForward()
       return []
     }
@@ -830,7 +826,7 @@ export class HostTaskLedger {
       case 'delete': {
         const task = this.document.tasks.find(task => task.id === action.taskId)
         if (task === undefined) throw new Error('task not found')
-        if (task.status === 'running' || hasOpenExecution(task)) throw new Error('running task cannot be deleted')
+        if (hasOpenExecution(task)) throw new Error('running task cannot be deleted')
         // Subtasks keep their link: deleting the parent would leave dangling
         // children, so the user detaches or deletes them explicitly first.
         if (this.document.tasks.some(item => item.parentId === action.taskId)) {
@@ -849,7 +845,10 @@ export class HostTaskLedger {
         const task = this.document.tasks.find(item => item.id === action.taskId)
         if (task === undefined) throw new Error('task not found')
         if (task.archivedAt !== undefined) throw new Error('archived task is read-only')
-        if (task.status === 'running' || hasOpenExecution(task)) throw new Error('running task cannot be moved')
+        // The lock belongs to an open execution, not to the column: a card
+        // parked in 'running' by hand has no session and stays movable, while
+        // a card the runner is executing cannot be moved out from under it.
+        if (hasOpenExecution(task)) throw new Error('running task cannot be moved')
         if (!canMoveManually(task.status, action.status)) throw new Error('invalid manual status')
         this.document.tasks = this.document.tasks.map(item => item.id === action.taskId ? withStatus(item, action.status, now) : item)
         break
@@ -917,7 +916,7 @@ export class HostTaskLedger {
       case 'run': {
         const task = this.document.tasks.find(item => item.id === action.taskId)
         if (task?.archivedAt !== undefined) throw new Error('archived task is read-only')
-        if (task === undefined || task.status === 'running' || hasOpenExecution(task)) throw new Error('task is already running or missing')
+        if (task === undefined || hasOpenExecution(task)) throw new Error('task is already running or missing')
         // The confirmation gate judges the RESOLVED binding: a subtask that
         // inherits an elevated permission from its parent is exactly as
         // unconfirmed as the parent would be without its own stamp.
@@ -983,14 +982,13 @@ export class HostTaskLedger {
     return cascadeTargets(this.document.tasks, rootId, this.maxSubtaskDepth)
       .map(participant => resolveExecutionTargets(participant, this.document.tasks, this.maxSubtaskDepth))
       .filter(participant => participant.archivedAt === undefined
-        && participant.status !== 'running'
         && !hasOpenExecution(participant))
   }
 
   /** Whether a task or any of its subtasks still has an open execution. */
   private subtreeHasOpenExecution(id: string): boolean {
     return cascadeTargets(this.document.tasks, id, this.maxSubtaskDepth)
-      .some(task => task.status === 'running' || hasOpenExecution(task))
+      .some(task => hasOpenExecution(task))
   }
 
   /**
@@ -1020,7 +1018,7 @@ export class HostTaskLedger {
     const runs: OpenedRun[] = []
     for (const task of participants) {
       if (task.archivedAt !== undefined) continue
-      if (task.status === 'running' || hasOpenExecution(task)) continue
+      if (hasOpenExecution(task)) continue
       const base = rerun && task.id === root.id ? withStatus(task, 'todo', now) : task
       const opened = startExecution(base, now, crypto.randomUUID(), initiator, groupId)
       started.set(task.id, opened.task)
@@ -1192,7 +1190,6 @@ export class HostTaskLedger {
     let changed = false
     const interrupted: Array<{ taskId: string; runGroupId: string | undefined }> = []
     this.document.tasks = this.document.tasks.map(task => {
-      if (task.status !== 'running') return task
       const execution = task.executions.at(-1)
       if (execution === undefined || execution.endedAt !== undefined || execution.sessionId !== undefined) return task
       changed = true
