@@ -251,6 +251,13 @@ export function attachMobileAccount(
           const catalog = mobileRecord(await carrier.invoke({ namespace: 'session', method: 'modelCatalog', args: {} }));
           send({ kind: 'default-model', selection: catalog.default }); return;
         }
+        if (message.type === 'sessions') {
+          const list = mobileRecord(await carrier.invoke({
+            namespace: 'session', method: 'list', args: { _request: { projections: 'title' } },
+          }));
+          if (!Array.isArray(list.items)) throw new Error('Invalid Session list');
+          send({ kind: 'sessions', ...list }); return;
+        }
         if (typeof message.type !== 'string' || !queries.has(message.type)) throw new Error('This operation is not available in account mode');
         send(await modules.protocol.handleQuery(api, api, null, message));
       } catch (error) { fail(error, message); }

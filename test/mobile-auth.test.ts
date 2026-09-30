@@ -230,6 +230,7 @@ test('native mobile profiles isolate account identity, session follow and logout
   f.db.claimSessionOwner('own-child', f.other.id);
   f.db.claimSessionOwner('other-child', f.user.id);
   const followed: string[] = [];
+  const listRequests: Array<Record<string, unknown>> = [];
   const permissionReads: string[] = [];
   const pages: Array<Record<string, unknown>> = [];
   const permissionOption = { name: 'workspace-write', label: 'Workspace', description: '', selected: true };
@@ -245,8 +246,9 @@ test('native mobile profiles isolate account identity, session follow and logout
       req.on('data', chunk => { data += chunk; });
       req.on('end', () => {
         const request = JSON.parse(data);
+        listRequests.push(request.payload.args._request);
         res.end(JSON.stringify({ type: 'server-response', rpcId: request.rpcId, result: { ok: true, value: { items: [
-          { sessionId: 'own-session', cwd: '/managed/bob', running: false, blank: true, updatedAt: 1, agentAvailable: false },
+          { sessionId: 'own-session', cwd: '/managed/bob', running: false, blank: true, updatedAt: 1, agentAvailable: false, projections: { kind: 'cached', asOfSeq: 2, values: { title: 'Own title' } } },
           { sessionId: 'own-child', parentSessionId: 'own-session', origin: 'subagent', cwd: '/managed/bob', running: false, blank: true, updatedAt: 1, agentAvailable: false },
           { sessionId: 'other-child', parentSessionId: 'other-session', origin: 'subagent', cwd: '/managed/alice', running: false, blank: true, updatedAt: 1, agentAvailable: false },
           { sessionId: 'other-session', cwd: '/managed/alice', running: false, blank: true, updatedAt: 1, agentAvailable: false },
@@ -364,6 +366,12 @@ test('native mobile profiles isolate account identity, session follow and logout
     assert.equal(answers[0].outcome.error.name, 'Error');
     client.send(JSON.stringify({ type: 'host' }));
     assert.equal((await next('host')).home, '/managed/bob');
+    client.send(JSON.stringify({ type: 'sessions' }));
+    const sessions = await next('sessions');
+    assert.deepEqual((sessions.items as Array<Record<string, unknown>>).map(item => item.sessionId), ['own-session', 'own-child']);
+    assert.deepEqual((sessions.items as Array<Record<string, unknown>>)[0].projections,
+      { kind: 'cached', asOfSeq: 2, values: { title: 'Own title' } });
+    assert.deepEqual(listRequests.at(-1), { projections: 'title' });
     client.send(JSON.stringify({ type: 'permission-options' }));
     assert.deepEqual((await next('permission-options')).options, [permissionOption]);
     client.send(JSON.stringify({ type: 'permission-options', sessionId: 'own-session' }));
