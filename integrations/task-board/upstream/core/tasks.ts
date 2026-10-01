@@ -5,8 +5,9 @@
  * unit-testable in isolation.
  */
 import type { FreezeSnapshot } from './freeze-snapshot.ts'
+import type { ExecutionVerification } from './verification.ts'
 import type { TaskHandover, TaskHandoverInput } from './handover.ts'
-import { normalizeIntegrations, type TaskIntegrations } from './github/types.ts'
+import { normalizeTaskIntegrations, type TaskBoardExtensionPayload } from './extension.ts'
 
 /** Task lifecycle status, one per kanban column. */
 export type TaskStatus = 'backlog' | 'todo' | 'running' | 'done' | 'failed'
@@ -56,6 +57,14 @@ export interface ExecutionRecord {
   ownResult?: ExecutionOutcome
   /** Human failure text that arrived with {@link ownResult}. */
   ownError?: string
+  /**
+   * Goal acceptance state of this execution (task-board goal verification).
+   * Fixed when the execution starts and never rewritten from later settings:
+   * the contract is frozen here, the attempts accrue here, and the settlement
+   * rule reads the pass record here. Absent on an execution that started
+   * before the feature existed, which keeps it on the historical verdict.
+   */
+  verification?: ExecutionVerification
 }
 
 /**
@@ -328,10 +337,19 @@ export interface TaskRecord {
    */
   archivedAt?: number
   /**
-   * External integrations metadata (e.g. GitHub issue/PR sync);
-   * optional and additive so existing tasks require no ledger migration.
+   * Opaque external-provider metadata, keyed by extension id; optional and
+   * additive so existing tasks require no ledger migration. The board stores
+   * and forwards it without interpreting the keys — each provider owns the
+   * shape and validation of its own entry.
    */
-  integrations?: TaskIntegrations
+  integrations?: Record<string, TaskBoardExtensionPayload>
+  /**
+   * Whether the card is held off the board: it exists in the ledger (and its
+   * execution history is intact) but no column ever renders it. Providers
+   * create hidden cards for work they materialize but do not want displayed;
+   * absent means on-board.
+   */
+  hidden?: boolean
 }
 
 /**
@@ -365,7 +383,7 @@ export interface NewTaskInput {
    * inherits the parent's unset execution targets.
    */
   parentId?: string
-  /** Workspace the execution must run in; empty/absent = the recent workspace. */
+  /** Workspace the execution must run in; empty/absent = the creating session's workspace for a root task, else the recent workspace at execution time. */
   workspaceId?: string
   /** Agent preset the execution session must be composed from; empty/absent = deployment default. */
   mode?: string
@@ -404,8 +422,12 @@ export interface NewTaskInput {
    * ahead of the execution prompt; a bare name changes nothing at run time.
    */
   tags?: TaskTag[]
-  /** Optional external integrations metadata. */
-  integrations?: TaskIntegrations
+  /** Opaque external-provider metadata keyed by extension id. */
+  integrations?: Record<string, TaskBoardExtensionPayload>
+  /** Column the created card opens in; absent means the board default (todo). */
+  status?: TaskStatus
+  /** Create the card off-board (held in the ledger, never rendered). */
+  hidden?: boolean
 }
 
 /** The five kanban columns, in display order. */
@@ -503,14 +525,14 @@ export function freezeOf(
 /** Create a task from user input. */
 export function createTask(input: NewTaskInput, now: number, id: string): TaskRecord {
   const tags = normalizeTags(input.tags)
-  const integrations = normalizeIntegrations(input.integrations)
+  const integrations = normalizeTaskIntegrations(input.integrations)
   return {
     id,
     title: input.title.trim(),
     description: input.description.trim(),
     prompt: input.prompt.trim(),
     parentId: normalizeTargetId(input.parentId),
-    status: 'todo',
+    status: input.status ?? 'todo',
     createdAt: now,
     updatedAt: now,
     executions: [],
@@ -528,6 +550,7 @@ export function createTask(input: NewTaskInput, now: number, id: string): TaskRe
     ...(input.handover === undefined ? {} : { handover: { ...input.handover, bundledAt: now } }),
     ...(tags === undefined ? {} : { tags }),
     ...(integrations === undefined ? {} : { integrations }),
+    ...(input.hidden === true ? { hidden: true } : {}),
   }
 }
 

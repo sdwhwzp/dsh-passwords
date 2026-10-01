@@ -312,5 +312,19 @@ export function makeTaskBoardRoutes(
       }
     },
   }
-  return [state, action, events, parse]
+  const verification: WebRoute = {
+    kind: 'exact',
+    path: `${TASK_BOARD_API_PREFIX}/verification`,
+    handler: async (req, res): Promise<void> => {
+      if (req.method !== 'GET') return writeJson(res, 405, { ok: false, error: 'method-not-allowed' }, { 'cache-control': 'no-store' })
+      const authorization = await guard(req, res)
+      if (authorization === undefined) return
+      try {
+        writeJson(res, 200, await service.verificationOptions(authorization.principal), { 'cache-control': 'no-store' })
+      } catch (error) {
+        writeJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) }, { 'cache-control': 'no-store' })
+      }
+    },
+  }
+  return [state, action, events, parse, verification]
 }

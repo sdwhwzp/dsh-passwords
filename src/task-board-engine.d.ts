@@ -1,12 +1,17 @@
 /** Runtime-only vendored engine, built from the pinned source under integrations/task-board. */
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver';
+import type { PreToolDecision } from '@deepseek-ai/dsh-tools';
+import type { Workspace } from '@deepseek-ai/dsh-workspace/types';
 import type { LlmRuntime } from '@deepseek-ai/dsh-llm';
 export interface BoardGatewayRequest { namespace: string; method: string; args: Record<string, unknown>; signal?: AbortSignal }
 export interface BoardGateway {
   invoke(request: BoardGatewayRequest): Promise<unknown>;
   stream(request: BoardGatewayRequest): Promise<AsyncIterable<unknown>>;
 }
-export class HostTaskLedger { constructor(directory: string) }
+export class HostTaskLedger {
+  constructor(directory: string);
+  findOpenExecutionBySession(id: string): object | undefined;
+}
 /** Host-owned timer handles are cancelled when an account board is disposed. */
 export interface HostTimerFace {
   timeout(callback: () => void, delay: number): () => void;
@@ -16,6 +21,9 @@ export class TaskBoardHostService {
   constructor(gateway: BoardGateway, options: {
     ledger: HostTaskLedger;
     timers?: HostTimerFace;
+    workspaceRegistry?: { list(): readonly Workspace[] };
+    verificationSettings?: () => BoardVerificationSettings;
+    verificationCatalog?: () => Promise<BoardModelCatalog | undefined>;
     commandDispatcher: { execute(sessionId: string, line: string, signal: AbortSignal): Promise<unknown> };
   });
   start(): void;
@@ -33,3 +41,21 @@ export function makeTaskBoardRoutes(service: TaskBoardHostService, access?: {
 }, options?: {
   parseTask?: (request: BoardParseRequest, signal: AbortSignal) => Promise<BoardParseDraft>;
 }): WebRoute[];
+/** Per-execution settings read from the administrator-owned task-board form. */
+export interface BoardVerificationSettings { enabled: boolean; model: string; reasoningEffort: string }
+export interface BoardModelCatalog {
+  default?: { provider: string; model: string; reasoningEffort?: string };
+  groups: Array<{ id: string; name?: string; models: Array<{ id: string; name?: string }> }>;
+}
+export interface BoardGoalFace {
+  get(agent: unknown): { id: string; revision: number; objective: string } | undefined;
+  block(agent: unknown, ref: { id: string; revision: number }, reason: { code: string; message: string }): unknown;
+}
+export interface BoardGateExecution { name: string; arguments: unknown; agent?: unknown; signal: AbortSignal }
+export function normalizeCatalog(value: unknown): BoardModelCatalog | undefined;
+export function createGoalVerificationGate(options: {
+  ledger: HostTaskLedger;
+  llm: () => Pick<LlmRuntime, 'stream'>;
+  goals: () => BoardGoalFace | undefined;
+  logger: { warn(message: string, ...rest: unknown[]): void };
+}): (exec: BoardGateExecution) => Promise<PreToolDecision | undefined>;

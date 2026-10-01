@@ -48,8 +48,8 @@ const SECTION_NAMES: Record<SectionKey, string> = {
 /**
  * Sensitive patterns, each matched globally over every field body:
  * PEM private key blocks (whole block collapses to one marker), Bearer
- * credentials, OpenAI sk-, GitHub ghp_, GitLab glpat-, Slack xox* tokens,
- * and AWS access key ids.
+ * credentials, OpenAI sk-, `ghp_`-shaped provider tokens, GitLab glpat-,
+ * Slack xox* tokens, and AWS access key ids.
  */
 const SENSITIVE_PATTERNS: RegExp[] = [
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,

@@ -9,7 +9,8 @@ import jwt from 'jsonwebtoken';
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm';
 import { registerTenantTaskBoard } from '../dist/tenant-task-board.js';
 import { signedPrincipalHeaders } from '../src/principal.js';
-import type { HostTimerFace } from '../src/task-board-engine.js';
+import type { PreToolDecision } from '@deepseek-ai/dsh-tools';
+import type { BoardGateExecution, HostTimerFace } from '../src/task-board-engine.js';
 
 async function listen(t: TestContext, handler: RequestListener): Promise<string> {
   const server = http.createServer(handler);
@@ -31,6 +32,10 @@ async function fixture(t: TestContext, timer?: HostTimerFace, seed?: (directory:
   const users = new Map([2, 3].map(id => [id, { id, username: `user${id}`, role: 'user', credential_version: 0 }]));
   const state = {
     banned: false,
+    accessRevoked: false,
+    sessionOwner: undefined as number | undefined,
+    settings: undefined as Record<string, unknown> | undefined,
+    workspaces: undefined as Array<{ id: string; updatedAt: string; sessionIds: string[]; path: string }> | undefined,
     hourly_token_limit: null as number | null,
     daily_minutes_limit: null as number | null,
     monthly_budget_micros: null as number | null,
@@ -72,11 +77,20 @@ async function fixture(t: TestContext, timer?: HostTimerFace, seed?: (directory:
     res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: { ok: true, value } }));
   });
+  const hooks = new Map<string, (exec: BoardGateExecution, next: () => undefined) => Promise<PreToolDecision | undefined>>();
   const routes = new Map<string, RequestListener>();
   const ctx = {
+    on(name: string, fn: (exec: BoardGateExecution, next: () => undefined) => Promise<PreToolDecision | undefined>) { hooks.set(name, fn); const dispose = () => { hooks.delete(name); }; disposers.push(dispose); return dispose; },
     webServer: { register(route: { path: string; handler: RequestListener }) { routes.set(route.path, route.handler); return () => routes.delete(route.path); } },
     effect(register: () => () => void) { disposers.push(register()); },
     get(name: string) {
+      if (name === 'settings') return { describe: () => state.settings === undefined ? [] : [{ ns: 'web-ui-task-board', value: state.settings }] };
+      if (name === 'workspaceRegistry') return state.workspaces === undefined ? undefined : { list: () => state.workspaces };
+      if (name === 'principalAccess') return { resolve: async (principal: { id: string }, subjects: { sessionIds?: string[]; workspaceIds?: string[] }) => ({
+        readableSessionIds: new Set(state.accessRevoked ? [] : (subjects.sessionIds ?? []).filter(id => id.startsWith(`scheduled-${principal.id}-`) || id === `author-${principal.id}`)),
+        readableWorkspaceIds: new Set(state.accessRevoked ? [] : (subjects.workspaceIds ?? []).filter(id => id === `workspace-${principal.id}`)),
+      }) };
+      if (name === 'goals') return { get: () => ({ id: 'goal', revision: 1, objective: 'Deliver a tested implementation' }), block: () => {} };
       if (name === 'timer') return timer;
       if (name === 'llm') return { stream(options: GenerateOptions) { calls.push(options); return state.stream(options); } };
       if (name === 'spendAccounting') return {
@@ -88,6 +102,7 @@ async function fixture(t: TestContext, timer?: HostTimerFace, seed?: (directory:
     },
   };
   const db = {
+    getSessionOwner: (id: string) => state.sessionOwner ?? Number(id.split('-')[1]),
     getUserById: (id: number) => users.get(id),
     getPermissions: () => state,
     getUsage: () => state.usage,
@@ -111,7 +126,7 @@ async function fixture(t: TestContext, timer?: HostTimerFace, seed?: (directory:
     for (const dispose of disposers.splice(0).reverse()) dispose();
     register();
   };
-  return { state, users, calls, catalogCalls, taskCalls, billed, spend, parse, origin, headers, reload, directory };
+  return { hooks, state, users, calls, catalogCalls, taskCalls, billed, spend, parse, origin, headers, reload, directory };
 }
 
 /** Advance only board deadlines; HTTP sockets and gateway deadlines keep real timers. */
@@ -307,7 +322,7 @@ test('tenant goal opt-out persists in schema 4 and rejects invalid or foreign-ac
   await action(3, { kind: 'update', taskId: 'plain-turn', patch: { goalRun: true } }, 400);
   await action(2, { kind: 'update', taskId: 'plain-turn', patch: { goalRun: 0 } }, 400);
   const disk = JSON.parse(await readFile(path.join(f.directory, 'u2', 'ledger-v2.json'), 'utf8'));
-  assert.equal(disk.schemaVersion, 4);
+  assert.equal(disk.schemaVersion, 5);
   assert.equal(disk.tasks.find((task: { id: string }) => task.id === 'plain-turn').goalRun, false);
   assert.equal('goalRun' in disk.tasks.find((task: { id: string }) => task.id === 'default-goal'), false);
   f.reload();
@@ -385,7 +400,7 @@ for (const creation of ['create', 'import'] as const) {
         const response = await fetch(f.origin + '/api/task-board/state', { headers: f.headers(id) });
         const board = await response.json();
         assert.deepEqual(board.tasks.map((task: { id: string }) => task.id), [`task-${id}`]);
-        if (board.tasks[0].executions[0]?.sessionId) {
+        if (board.tasks[0].executions[0]?.sessionId && f.taskCalls.some(call => call.id === id && call.method === 'commands/execute')) {
           assert.match(board.tasks[0].executions[0].sessionId, new RegExp(`^scheduled-${id}-`));
           break;
         }
@@ -500,12 +515,12 @@ test('schema 3 tenant ledgers migrate to schema 4 without losing task history or
     const response = await fetch(f.origin + '/api/task-board/state', { headers: f.headers(id) });
     const board = await response.json();
     assert.equal(response.status, 200);
-    assert.equal(board.schemaVersion, 4);
+    assert.equal(board.schemaVersion, 5);
     const tasks = structuredClone(expected.get(id)!) as Array<{ schedule?: { timeZone?: string } }>;
     tasks[0].schedule!.timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
     assert.deepEqual(board.tasks, tasks);
     const disk = JSON.parse(await readFile(path.join(f.directory, `u${id}`, 'ledger-v2.json'), 'utf8'));
-    assert.equal(disk.schemaVersion, 4);
+    assert.equal(disk.schemaVersion, 5);
     assert.deepEqual(disk.tasks, tasks);
     assert.equal(disk.scheduler.ledgerId, `ledger-${id}`);
     assert.deepEqual(disk.scheduler.importedSources, [`import-${id}`]);
@@ -555,7 +570,7 @@ test('tenant schedule zones persist independently and trigger with only the owne
   for (;;) {
     const response = await fetch(f.origin + '/api/task-board/state', { headers: f.headers(3) });
     const board = await response.json();
-    if (board.tasks[0].executions[0]?.sessionId) break;
+    if (board.tasks[0].executions[0]?.sessionId && f.taskCalls.some(call => call.id === 3 && call.method === 'commands/execute')) break;
     assert.ok(performance.now() < deadline, 'zoned schedule did not finish gateway admission');
   }
   assert.ok(f.taskCalls.every(call => call.id === 3));
@@ -582,7 +597,7 @@ test('settle cancels only the signed account ledger and cannot control another a
     for (;;) {
       const response = await fetch(f.origin + '/api/task-board/state', { headers: f.headers(id) });
       const board = await response.json();
-      if (board.tasks[0].executions[0]?.sessionId) {
+      if (board.tasks[0].executions[0]?.sessionId && f.taskCalls.some(call => call.id === id && call.method === 'commands/execute')) {
         assert.match(board.tasks[0].executions[0].sessionId, new RegExp(`^scheduled-${id}-`));
         break;
       }
@@ -623,15 +638,15 @@ test('tenant boards refuse shared GitHub operations while retaining private card
     });
     assert.equal(created.status, 200);
     for (const action of [
-      { kind: 'github-refresh' },
-      { kind: 'github-create-pr', taskId: 'private-card', headBranch: 'dev' },
-      { kind: 'github-link-pr', taskId: 'private-card', pullRequestNumber: 1 },
+      { kind: 'extension-action', extensionId: 'github', action: 'refresh' },
+      { kind: 'extension-action', extensionId: 'github', action: 'create-pr', taskId: 'private-card', payload: { headBranch: 'dev' } },
+      { kind: 'extension-action', extensionId: 'github', action: 'link-pr', taskId: 'private-card', payload: { pullRequestNumber: 1 } },
     ]) {
       const result = await fetch(f.origin + '/api/task-board/action', {
         method: 'POST', headers: f.headers(id), body: JSON.stringify({ requestId: randomUUID(), action }),
       });
       assert.equal(result.status, 400);
-      assert.match((await result.json()).error, /GitHub integration is not configured/);
+      assert.match((await result.json()).error, /unknown-extension/);
     }
   }
   f.reload();
@@ -640,4 +655,101 @@ test('tenant boards refuse shared GitHub operations while retaining private card
     assert.equal(board.github, undefined);
     assert.deepEqual(board.tasks.map((task: { title: string }) => task.title), [`Private ${id}`]);
   }
+});
+
+/** Creates a goal execution through the account's real HTTP route. */
+async function goalExecution(f: Awaited<ReturnType<typeof fixture>>, id: number) {
+  f.state.settings = { goalVerification: true, goalVerificationModel: `test/model-${id}` };
+  for (const action of [
+    { kind: 'create', id: `goal-${id}`, input: { title: 'Goal', description: '', prompt: 'Deliver a tested implementation', goalRun: true } },
+    { kind: 'run', taskId: `goal-${id}` },
+  ]) {
+    const response = await fetch(f.origin + '/api/task-board/action', { method: 'POST', headers: f.headers(id), body: JSON.stringify({ requestId: randomUUID(), action }) });
+    assert.equal(response.status, 200, await response.text());
+  }
+  const deadline = performance.now() + 3000;
+  for (;;) {
+    const board = await (await fetch(f.origin + '/api/task-board/state', { headers: f.headers(id) })).json();
+    const execution = board.tasks[0].executions[0];
+    if (execution?.verification?.applicability === 'enforced') return execution.sessionId as string;
+    assert.ok(performance.now() < deadline, JSON.stringify(board));
+  }
+}
+function completion(id: string): BoardGateExecution {
+  return { name: 'update_goal', arguments: { action: 'complete' }, signal: new AbortController().signal,
+    agent: { id, session: { id, snapshotEvents: () => [] } } };
+}
+function passingJudge(options: GenerateOptions): AsyncIterable<StreamChunk> {
+  const content = options.messages[0].content;
+  const text = content.map(item => item.type === 'text' ? item.text : '').join('');
+  const a = text.slice(text.indexOf('<<<TRAJECTORY_A'), text.indexOf('<<<END_TRAJECTORY_A'));
+  const workInA = !a.includes('(No useful work or verification was performed.)');
+  return (async function* () {
+    yield { type: 'text-delta', index: 0, text: workInA ? '<score_A> A </score_A><score_B> T </score_B>' : '<score_A> T </score_A><score_B> A </score_B>' };
+    yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 5 } };
+    yield { type: 'finish', reason: { kind: 'stop' } };
+  })();
+}
+
+test('goal acceptance uses the owning account catalog and billing, persists verdicts and does not rejudge after reload', async t => {
+  const f = await fixture(t, boardTimers().timer);
+  const id = await goalExecution(f, 2);
+  f.state.stream = passingJudge;
+  const gate = () => f.hooks.get('tools/pre-execute')!;
+  assert.deepEqual(await gate()(completion(id), () => undefined), { kind: 'allow' });
+  assert.ok(f.calls.length > 1);
+  assert.equal(f.spend.length, f.calls.length);
+  assert.ok(f.spend.every(row => row.principal.id === '2' && row.call.model === 'model-2' && String(row.call.sessionId).startsWith('task-board-verification:')));
+  const count = f.calls.length;
+  f.reload();
+  assert.deepEqual(await gate()(completion(id), () => undefined), { kind: 'allow' });
+  assert.equal(f.calls.length, count);
+  const other = await (await fetch(f.origin + '/api/task-board/state', { headers: f.headers(3) })).json();
+  assert.deepEqual(other.tasks, []);
+});
+
+test('completion refuses a foreign session owner and revoked session access before reading evidence', async t => {
+  const f = await fixture(t, boardTimers().timer);
+  const id = await goalExecution(f, 2);
+  f.state.sessionOwner = 3;
+  assert.equal((await f.hooks.get('tools/pre-execute')!(completion(id), () => undefined))?.kind, 'deny');
+  f.state.sessionOwner = 2;
+  f.state.accessRevoked = true;
+  assert.equal((await f.hooks.get('tools/pre-execute')!(completion(id), () => undefined))?.kind, 'deny');
+  assert.equal(f.calls.length, 0);
+});
+
+test('verification rechecks hidden routes and quotas before judge calls and records anomalies instead of passes', async t => {
+  for (const failure of ['catalog', 'quota']) await t.test(failure, async t => {
+    const f = await fixture(t, boardTimers().timer);
+    const id = await goalExecution(f, 2);
+    if (failure === 'catalog') f.state.catalog = () => ({ groups: [] });
+    else f.state.budgetExhausted = true;
+    assert.equal((await f.hooks.get('tools/pre-execute')!(completion(id), () => undefined))?.kind, 'deny');
+    assert.equal(f.calls.length, 0);
+    const board = await (await fetch(f.origin + '/api/task-board/state', { headers: f.headers(2) })).json();
+    assert.equal(board.tasks[0].executions[0].verification.attempts[0].stage, 'exception');
+  });
+});
+
+test('workspace inheritance and tag changes stay within each signed account ledger', async t => {
+  const f = await fixture(t, boardTimers().timer);
+  f.state.workspaces = [2, 3].map(id => ({ id: `workspace-${id}`, path: `/account/${id}`, updatedAt: `2026-10-0${id}T00:00:00Z`, sessionIds: [`author-${id}`] }));
+  for (const id of [2, 3]) {
+    const response = await fetch(f.origin + '/api/task-board/action', { method: 'POST', headers: f.headers(id), body: JSON.stringify({ requestId: randomUUID(), initiator: `author-${id}`, action: {
+      kind: 'create', id: 'card', input: { title: 'Mine', description: '', prompt: '', tags: [{ name: 'old', promptPrefix: '' }] },
+    } }) });
+    assert.equal(response.status, 200, await response.clone().text());
+    assert.equal((await response.json()).tasks[0].workspaceId, `workspace-${id}`);
+  }
+  const rename = await fetch(f.origin + '/api/task-board/action', { method: 'POST', headers: f.headers(2), body: JSON.stringify({ requestId: randomUUID(), action: { kind: 'rename-tag', from: 'old', to: 'new' } }) });
+  assert.equal(rename.status, 200, await rename.clone().text());
+  const mine = await rename.json();
+  assert.equal(mine.tasks[0].tags[0].name, 'new');
+  const other = await (await fetch(f.origin + '/api/task-board/state', { headers: f.headers(3) })).json();
+  assert.equal(other.tasks[0].tags[0].name, 'old');
+  f.state.settings = { goalVerification: false };
+  const options = await (await fetch(f.origin + '/api/task-board/verification', { headers: f.headers(2) })).json();
+  assert.equal(options.settings.enabled, false);
+  assert.deepEqual(options.catalog.groups.map((group: { models: Array<{ id: string }> }) => group.models.map(model => model.id)), [['model-2']]);
 });

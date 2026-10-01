@@ -84,6 +84,7 @@ test('task-board HTTP state and mutations are isolated by signed principal and p
   const disposers: Function[] = [];
   const db = { getUserById: (id: number) => users.get(String(id)), getPermissions: () => ({ banned: false }) };
   const ctx = {
+    on() { return () => {}; },
     get() { return undefined; },
     webServer: { register(route: { path: string; handler: Function }) { routes.set(route.path, route.handler); return () => routes.delete(route.path); } },
     effect(register: Function) { disposers.push(register()); },
@@ -132,11 +133,11 @@ test('task-board HTTP state and mutations are isolated by signed principal and p
     await submitted;
     await call('2', { kind: 'move', taskId: 'shared-id', status: 'done' }, 400);
     const mutations = executionCalls.filter(call => call.method !== 'session/list');
-    assert.deepEqual(mutations.map(call => call.method), ['session/create', 'session/rename', 'commands/execute', 'session/prompt', 'commands/execute']);
-    assert.deepEqual(mutations[4].args, { agentId: 'execution-owned', line: '/goal only mine', submittedAttachments: [] });
+    assert.deepEqual(mutations.map(call => call.method), ['session/modelCatalog', 'session/create', 'session/rename', 'commands/execute', 'session/prompt', 'commands/execute']);
+    assert.deepEqual(mutations[5].args, { agentId: 'execution-owned', line: '/goal only mine', submittedAttachments: [] });
     const jwt = (await import('jsonwebtoken')).default;
     for (const call of mutations) { const token = call.cookie!.slice('dsh_gateway_token='.length); assert.equal((jwt.verify(token, 'jwt-secret') as { sub: string }).sub, '2'); }
-    assert.deepEqual(mutations[0].args, { request: { workspaceId: 'ws-owned' } });
+    assert.deepEqual(mutations[1].args, { request: { workspaceId: 'ws-owned' } });
     await call('2', { kind: 'create', id: 'other-project', input: { title: 'owner-2 backend', description: '', prompt: 'second project', workspaceId: 'ws-backend', goalRun: false } });
     await call('2', { kind: 'move', taskId: 'other-project', status: 'running' });
     const httpBrowser = await fetch(origin + '/api/task-board/state', { headers: signedPrincipalHeaders({ userId: 2, username: 'first', role: 'user' }, 'secret') });

@@ -1,19 +1,33 @@
 import type { TaskUpdatePatch } from './core/use-cases/task-update.ts'
-import { isTaskPermission, isTaskStatus, isTaskTagList, type NewTaskInput, type TaskPermission, type TaskRecord, type TaskStatus } from './core/tasks.ts'
+import { TAG_NAME_MAX_LENGTH, isTaskPermission, isTaskStatus, isTaskTagList, type NewTaskInput, type TaskPermission, type TaskRecord, type TaskStatus } from './core/tasks.ts'
 import { parseLedger } from './core/store.ts'
 import { isValidTimeZone } from './core/schedule.ts'
 import { sanitizeFreezeSnapshot, type FreezeSnapshot } from './core/freeze-snapshot.ts'
 import { sanitizeHandover, type TaskHandoverInput } from './core/handover.ts'
-import { normalizeIntegrations } from './core/github/types.ts'
+import { isTaskBoardExtensionPayload, normalizeTaskIntegrations, type TaskBoardExtensionPayload } from './core/extension.ts'
+import { normalizeVerification, type ModelCatalogView, type VerificationContract, type VerificationSettings } from './core/verification.ts'
 
 /** Freeze payload carried by create/update actions after the gate (redacted in place). */
 type FreezePayload = FreezeSnapshot & { redacted?: boolean; frozenBy?: string }
 
-export const TASK_BOARD_SCHEMA_VERSION = 4 as const
-/** Ledger documents written before v4; loaded once and migrated on startup. */
-export const TASK_BOARD_LEGACY_SCHEMA_VERSION = 3 as const
-/** Ledger documents written before v3; migrated through the v3 normalization too. */
-export const TASK_BOARD_OLDER_SCHEMA_VERSION = 2 as const
+export const TASK_BOARD_SCHEMA_VERSION = 5 as const
+/** Ledger documents written before v5; loaded once and migrated on startup. */
+export const TASK_BOARD_LEGACY_SCHEMA_VERSION = 4 as const
+/** Ledger documents written before v4; migrated through the v4 normalization too. */
+export const TASK_BOARD_OLDER_SCHEMA_VERSION = 3 as const
+/** Ledger documents written before v3; migrated through every later normalization too. */
+export const TASK_BOARD_OLDEST_SCHEMA_VERSION = 2 as const
+/**
+ * Every older generation the loader migrates in place. v5 only ADDS the
+ * per-execution acceptance block, so the migration is the normalization pass
+ * that re-validates each row; a document from any listed generation upgrades
+ * losslessly.
+ */
+export const TASK_BOARD_MIGRATABLE_SCHEMA_VERSIONS: readonly number[] = [
+  TASK_BOARD_LEGACY_SCHEMA_VERSION,
+  TASK_BOARD_OLDER_SCHEMA_VERSION,
+  TASK_BOARD_OLDEST_SCHEMA_VERSION,
+]
 export const TASK_BOARD_API_PREFIX = '/api/task-board'
 
 export type PowerPhase = 'disabled' | 'idle' | 'acquiring' | 'active' | 'error' | 'unsupported'
@@ -54,18 +68,25 @@ export interface TaskBoardSnapshot {
    * into team execution (Team Lead session plus one teammate per subtask).
    */
   teamRunAvailable?: boolean
-  /** Non-sensitive GitHub integration status and configured repositories. */
-  github?: {
-    enabled: boolean
-    repositories: Array<{
-      owner: string
-      repository: string
-      inclusionLabel: string
-      prCreationEnabled: boolean
-      hasCredential: boolean
-    }>
-    hasCredential: boolean
-  }
+  /**
+   * Read-only summaries published by running extensions, keyed by extension id.
+   * The board forwards them verbatim; it never interprets their shape.
+   */
+  extensions?: Record<string, unknown>
+}
+
+/**
+ * Body of `GET {TASK_BOARD_API_PREFIX}/verification`: the acceptance settings the
+ * card edits, the contract they resolve to right now, and the host model catalog
+ * the model and reasoning choices come from. Served through the same loopback /
+ * authenticated-proxy guard as the rest of the board API, and it carries no
+ * credential material — model routes and level ids only.
+ */
+export interface TaskBoardVerificationOptions {
+  settings: VerificationSettings
+  /** The RESOLVED contract, so the card can show what the next execution freezes. */
+  contract: VerificationContract
+  catalog: ModelCatalogView
 }
 
 /** SSE event frame: revision/scheduler/power only, never the task list. */
@@ -123,9 +144,10 @@ export type TaskBoardAction =
   | { kind: 'rerun'; taskId: string }
   | { kind: 'confirm-permission'; taskId: string }
   | { kind: 'set-parent'; taskId: string; parentId: string | null }
-  | { kind: 'github-refresh'; taskId?: string; owner?: string; repository?: string }
-  | { kind: 'github-create-pr'; taskId: string; headBranch: string; baseBranch?: string; title?: string; body?: string; draft?: boolean }
-  | { kind: 'github-link-pr'; taskId: string; pullRequestNumber: number }
+  /** Ledger-wide label management; see core/use-cases/task-tag.ts. */
+  | { kind: 'rename-tag'; from: string; to: string }
+  | { kind: 'delete-tag'; name: string }
+  | { kind: 'extension-action'; extensionId: string; action: string; taskId?: string; payload?: TaskBoardExtensionPayload }
 
 export interface TaskBoardActionEnvelope {
   requestId: string
@@ -170,7 +192,7 @@ function validImportedKnownFields(value: Record<string, unknown>): boolean {
   // must carry a well-formed list or none at all, so a hand-edited export
   // cannot smuggle a malformed tag past the gate.
   if (value.tags !== undefined && !isTaskTagList(value.tags)) return false
-  if (value.integrations !== undefined && normalizeIntegrations(value.integrations) === undefined) return false
+  if (value.integrations !== undefined && normalizeTaskIntegrations(value.integrations) === undefined) return false
   if (value.schedule !== undefined) {
     const schedule = record(value.schedule)
     if (schedule === undefined || typeof schedule.enabled !== 'boolean' || typeof schedule.cron !== 'string') return false
@@ -189,6 +211,10 @@ function validImportedKnownFields(value: Record<string, unknown>): boolean {
       if (execution.initiatedBy !== undefined && typeof execution.initiatedBy !== 'string') return false
       if (execution.frozenBy !== undefined && typeof execution.frozenBy !== 'string') return false
       if (execution.frozenAt !== undefined && typeof execution.frozenAt !== 'number') return false
+      // A well-formed acceptance block may be imported for inspection, but the
+      // import path DROPS it (see importedTask): a fabricated pass record must
+      // never let an imported execution settle as verified.
+      if (execution.verification !== undefined && normalizeVerification(execution.verification) === undefined) return false
     }
   }
   return true
@@ -217,6 +243,8 @@ function importedTask(value: unknown): TaskRecord | undefined {
       ...(execution.initiatedBy === undefined ? {} : { initiatedBy: execution.initiatedBy }),
       ...(execution.frozenAt === undefined ? {} : { frozenAt: execution.frozenAt }),
       ...(execution.frozenBy === undefined ? {} : { frozenBy: execution.frozenBy }),
+      // 安全门（对抗场景 d）：验收报告是 Host 的判定，不接受 import 携带——
+      // 一条伪造的通过记录会让导入的执行被当成已验收。
     })),
     ...(task.schedule === undefined ? {} : {
       schedule: {
@@ -282,7 +310,7 @@ function createInput(value: unknown): value is NewTaskInput {
   if (input.goalRun !== undefined && typeof input.goalRun !== 'boolean') return false
   if (input.permission !== undefined && !isTaskPermission(input.permission)) return false
   if (input.tags !== undefined && !isTaskTagList(input.tags)) return false
-  if (input.integrations !== undefined && normalizeIntegrations(input.integrations) === undefined) return false
+  if (input.integrations !== undefined && normalizeTaskIntegrations(input.integrations) === undefined) return false
   if (input.freeze !== undefined && freezePayload(input.freeze) === undefined) return false
   if (input.handover !== undefined && handoverPayload(input.handover) === undefined) return false
   if (input.schedule !== undefined) {
@@ -314,6 +342,15 @@ function updatePatch(value: unknown): boolean {
   if (patch.freeze !== undefined && patch.freeze !== null && freezePayload(patch.freeze) === undefined) return false
   // Same convention for the handover bundle.
   return patch.handover === undefined || patch.handover === null || handoverPayload(patch.handover) !== undefined
+}
+
+/**
+ * A label name on the wire: a non-empty trimmed string within the tag cap. The
+ * trim/merge/duplicate rules belong to the use case; this gate only keeps a
+ * malformed name off the ledger.
+ */
+function isTagName(value: unknown): value is string {
+  return typeof value === 'string' && value.trim() !== '' && value.trim().length <= TAG_NAME_MAX_LENGTH
 }
 
 function schedulePatch(value: unknown): boolean {
@@ -387,6 +424,16 @@ function parseEnvelopeAction(value: unknown): TaskBoardActionEnvelope | undefine
       if (parentId !== null && (typeof parentId !== 'string' || parentId.trim() === '')) return undefined
       return { requestId: envelope.requestId, action: { kind: 'set-parent', taskId, parentId } }
     }
+    case 'rename-tag': {
+      if (!exactKeys(action, ['kind', 'from', 'to'])) return undefined
+      if (!isTagName(action.from) || !isTagName(action.to)) return undefined
+      return { requestId: envelope.requestId, action: { kind: 'rename-tag', from: action.from, to: action.to } }
+    }
+    case 'delete-tag': {
+      if (!exactKeys(action, ['kind', 'name'])) return undefined
+      if (!isTagName(action.name)) return undefined
+      return { requestId: envelope.requestId, action: { kind: 'delete-tag', name: action.name } }
+    }
     case 'set-schedule':
       if (!exactKeys(action, ['kind', 'taskId', 'patch'])) return undefined
       return taskId !== undefined && schedulePatch(action.patch)
@@ -397,26 +444,24 @@ function parseEnvelopeAction(value: unknown): TaskBoardActionEnvelope | undefine
       return taskId !== undefined && isTaskStatus(action.status)
         ? { requestId: envelope.requestId, action: action as unknown as Extract<TaskBoardAction, { kind: 'move' }> }
         : undefined
-    case 'github-refresh': {
-      if (!exactKeys(action, ['kind', 'taskId', 'owner', 'repository'])) return undefined
-      if (action.taskId !== undefined && typeof action.taskId !== 'string') return undefined
-      if (action.owner !== undefined && typeof action.owner !== 'string') return undefined
-      if (action.repository !== undefined && typeof action.repository !== 'string') return undefined
-      return { requestId: envelope.requestId, action: action as TaskBoardAction }
-    }
-    case 'github-create-pr': {
-      if (!exactKeys(action, ['kind', 'taskId', 'headBranch', 'baseBranch', 'title', 'body', 'draft'])) return undefined
-      if (taskId === undefined || typeof action.headBranch !== 'string' || action.headBranch.trim() === '') return undefined
-      if (action.baseBranch !== undefined && typeof action.baseBranch !== 'string') return undefined
-      if (action.title !== undefined && typeof action.title !== 'string') return undefined
-      if (action.body !== undefined && typeof action.body !== 'string') return undefined
-      if (action.draft !== undefined && typeof action.draft !== 'boolean') return undefined
-      return { requestId: envelope.requestId, action: action as TaskBoardAction }
-    }
-    case 'github-link-pr': {
-      if (!exactKeys(action, ['kind', 'taskId', 'pullRequestNumber'])) return undefined
-      if (taskId === undefined || typeof action.pullRequestNumber !== 'number' || !Number.isInteger(action.pullRequestNumber) || action.pullRequestNumber <= 0) return undefined
-      return { requestId: envelope.requestId, action: action as TaskBoardAction }
+    case 'extension-action': {
+      // Structural gate only: whether the id names a registered, enabled
+      // extension is decided by the host registry, which owns that state.
+      if (!exactKeys(action, ['kind', 'extensionId', 'action', 'taskId', 'payload'])) return undefined
+      if (typeof action.extensionId !== 'string' || action.extensionId.trim() === '' || action.extensionId.length > 128) return undefined
+      if (typeof action.action !== 'string' || action.action.trim() === '' || action.action.length > 128) return undefined
+      if (action.taskId !== undefined && (typeof action.taskId !== 'string' || action.taskId === '')) return undefined
+      if (action.payload !== undefined && !isTaskBoardExtensionPayload(action.payload)) return undefined
+      return {
+        requestId: envelope.requestId,
+        action: {
+          kind: 'extension-action',
+          extensionId: action.extensionId,
+          action: action.action,
+          ...(action.taskId === undefined ? {} : { taskId: action.taskId }),
+          ...(action.payload === undefined ? {} : { payload: action.payload }),
+        },
+      }
     }
     case 'confirm-permission':
     case 'delete':

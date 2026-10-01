@@ -4,9 +4,13 @@ import type { CommandResult } from '@deepseek-ai/dsh-commands/types'
 import type { Workspace } from '@deepseek-ai/dsh-workspace/types'
 import type { TaskBoardPrincipal } from './host-accounts.ts'
 import { teammateName } from './core/subtask.ts'
+import { mostRecentWorkspaceId } from './core/workspace-target.ts'
 import type { TaskPermission, TaskRecord } from './core/tasks.ts'
 
-/** Host services needed to validate a task's workspace before creating a session. */
+/**
+ * Host services needed to validate a task's workspace before creating a
+ * session, and to resolve the workspace an unpinned card runs in.
+ */
 export interface TaskBoardWorkspaceRegistry {
   list(): readonly Workspace[]
 }
@@ -310,6 +314,8 @@ function nonCompletedTurnEnd(data: unknown): string | undefined {
  */
 function invokeWireArgs(namespace: string, method: string, request: Record<string, unknown>): Record<string, unknown> {
   if (namespace === 'agentPresets' && method === 'list') return {}
+  // session/modelCatalog declares zero parameters, so its args must be {}.
+  if (namespace === 'session' && method === 'modelCatalog') return {}
   if (namespace === 'session' && method === 'list') return { _request: request }
   return { request }
 }
@@ -345,6 +351,18 @@ export class HostExecutionRunner {
   }
 
   /**
+   * The workspace an unpinned run lands in: the deployment's most recently used
+   * one. Undefined when the deployment serves no workspace registry or has
+   * registered none yet; the launch then keeps the "let the Host decide" shape,
+   * which is the only remaining path to the Host's own working directory.
+   * @returns the workspace id to create the session in, when one is known.
+   */
+  private recentWorkspaceId(): string | undefined {
+    if (this.workspaceRegistry === undefined) return undefined
+    return mostRecentWorkspaceId(this.workspaceRegistry.list())
+  }
+
+  /**
    * Launch one execution. Without `options.reuseSessionId` a fresh session is
    * created, renamed, pinned, and prompted (the historical contract). With it,
    * the run continues in that existing session (issue #1419): the conversation
@@ -354,12 +372,16 @@ export class HostExecutionRunner {
    * @param options - optional session to continue in and its Host-verified account.
    * @returns the session id the execution runs in.
    */
-  async launch(task: TaskRecord, options: { reuseSessionId?: string; principal?: TaskBoardPrincipal; promptContext?: PromptContext } = {}): Promise<string> {
+  async launch(task: TaskRecord, options: { reuseSessionId?: string; principal?: TaskBoardPrincipal; promptContext?: PromptContext; onSession?: (sessionId: string) => void; onGoalArmed?: (armed: boolean) => void } = {}): Promise<string> {
     const principal = options.principal
     this.assertPrincipal?.(principal)
     // A handover bundle overrides the legacy pin fields: the bundle is the
-    // authoritative execution triplet for a continuation card (issue #5).
-    const workspaceId = task.handover?.workspaceId ?? task.workspaceId
+    // authoritative execution triplet for a continuation card (issue #5). A
+    // card that pins nothing is resolved to the deployment's most recently used
+    // workspace instead of being left to `session.create`, whose own fallback is
+    // the Host process working directory (the desktop app's profile directory) —
+    // never the project the user was in when the card was written.
+    const workspaceId = task.handover?.workspaceId ?? task.workspaceId ?? this.recentWorkspaceId()
     const mode = task.handover?.mode ?? task.mode
     const permission = task.handover?.permission ?? task.permission
 
@@ -387,8 +409,12 @@ export class HostExecutionRunner {
         // whose session was composed from a different preset now fails closed
         // instead of silently running under the wrong composition, matching
         // the fresh branch's `agentPreset` assertion (issue #1708).
+        // Report the session before anything is queued into it, so the board
+        // can bind the execution first and a completion claim can never arrive
+        // at the gate without its binding.
+        options.onSession?.(reused)
         await this.assertReusedPreset(reused, mode, principal)
-        await this.pinAndPrompt(reused, task, permission, principal, options.promptContext)
+        await this.pinAndPrompt(reused, task, permission, principal, options.promptContext, options.onGoalArmed)
       } catch (error) {
         throw new SessionLaunchError(reused, error)
       }
@@ -399,9 +425,10 @@ export class HostExecutionRunner {
       ...(mode === undefined ? {} : { agentPreset: mode }),
     }, principal) as { sessionId: ExecutionSessionId }
     const sessionId = created.sessionId
+    options.onSession?.(sessionId)
     try {
       await this.invoke('session', 'rename', { sessionId, title: task.title }, principal)
-      await this.pinAndPrompt(sessionId, task, permission, principal, options.promptContext)
+      await this.pinAndPrompt(sessionId, task, permission, principal, options.promptContext, options.onGoalArmed)
     } catch (error) {
       throw new SessionLaunchError(sessionId, error)
     }
@@ -447,6 +474,7 @@ export class HostExecutionRunner {
     permission: TaskPermission | undefined,
     principal?: TaskBoardPrincipal,
     context: PromptContext = {},
+    onGoalArmed?: (armed: boolean) => void,
   ): Promise<void> {
     if (permission !== undefined) {
       if (this.commands === undefined) throw new Error('permission command dispatcher is unavailable')
@@ -476,7 +504,25 @@ export class HostExecutionRunner {
       mode: 'queue' as const,
       content: [{ type: 'text' as const, text: promptText(task, context) }],
     }, principal)
-    await this.armGoal(sessionId, task, context, principal)
+    const armed = await this.armGoal(sessionId, task, context, principal)
+    onGoalArmed?.(armed)
+  }
+
+  /**
+   * Read the host's model catalog: the default route an unconfigured session
+   * starts at, and each provider's models with the reasoning metadata its
+   * adapter exposes. The acceptance settings card and the frozen contract both
+   * resolve against it, so "inherit host" means the host's own configuration
+   * rather than a session's or a card's pinned model.
+   * @returns the raw catalog value, or undefined when this cohort serves none.
+   */
+  async modelCatalog(principal?: TaskBoardPrincipal): Promise<unknown> {
+    try {
+      return await this.invoke('session', 'modelCatalog', {}, principal)
+    } catch (error) {
+      console.warn('[dsh-task-board] session/modelCatalog failed; the acceptance settings fall back to the configured route', error)
+      return undefined
+    }
   }
 
   /**
@@ -492,11 +538,11 @@ export class HostExecutionRunner {
    * plain turn: the task was asked to run, and a missing goal mode must not
    * lose the work.
    */
-  private async armGoal(sessionId: ExecutionSessionId, task: TaskRecord, context: PromptContext, principal?: TaskBoardPrincipal): Promise<void> {
-    if (task.goalRun === false) return
+  private async armGoal(sessionId: ExecutionSessionId, task: TaskRecord, context: PromptContext, principal?: TaskBoardPrincipal): Promise<boolean> {
+    if (task.goalRun === false) return false
     if (this.commands === undefined) {
       console.warn('[dsh-task-board] no command dispatcher is available; task ' + task.id + ' runs without /goal')
-      return
+      return false
     }
     this.assertPrincipal?.(principal)
     try {
@@ -507,13 +553,16 @@ export class HostExecutionRunner {
       )
       if (command === undefined) {
         console.warn('[dsh-task-board] /goal was not acknowledged for session ' + sessionId + '; the run continues as a plain turn')
-        return
+        return false
       }
       if (command.kind !== 'success') {
         console.warn('[dsh-task-board] /goal was refused for session ' + sessionId + ': ' + (command.text ?? 'no reason reported') + '; the run continues as a plain turn')
+        return false
       }
+      return true
     } catch (error) {
       console.warn('[dsh-task-board] could not arm /goal on session ' + sessionId + '; the run continues as a plain turn', error)
+      return false
     }
   }
 

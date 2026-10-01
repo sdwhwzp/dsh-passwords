@@ -1,6 +1,6 @@
 # Task board Host engine
 
-Pinned from [sdwhwzp/dsh-web](https://github.com/sdwhwzp/dsh-web) commit `2cad05a6bd4799deb6927467dc344ff0468dcc50`, package `@linxin666/dsh-client-ui-task-board` version `0.4.4-dsh.20261001.1` (Apache-2.0). [source.json](source.json) records the 28 files in the Host service, ledger, routes and parser dependency closure with their Git blob hashes. Files under `upstream/` are unchanged copies of that commit.
+Pinned from [sdwhwzp/dsh-web](https://github.com/sdwhwzp/dsh-web) commit `4bcb448ce699a04fd2f1b9ac99c5b9d19c26a83e`, package `@linxin666/dsh-client-ui-task-board` version `0.4.4-dsh.20261001.2` (Apache-2.0). [source.json](source.json) records the 32 files in the Host service, ledger, routes, parser and acceptance gate dependency closure with their Git blob hashes. Files under `upstream/` are unchanged copies of that commit.
 
 The tenant adapter authenticates requests, isolates ledgers by account and sends every execution RPC through the passwords gateway. Parent-child links, workspace IDs, tags and session-reuse preferences survive ledger reloads; the matching dsh-web client uses those workspace IDs for project partitions. Parent links can reference only tasks in the same account ledger; absent parents and cycles are rejected. Workspace creation and session reuse retain the gateway's account permissions and session ownership checks.
 
@@ -20,4 +20,6 @@ The `settle` action closes the current account’s open card executions as cance
 
 Manual column changes cover backlog, todo, running, done and failed without creating an execution or starting a session. Only an open execution prevents a column change; a manually marked running card remains movable after reload. Account ownership checks apply to every move.
 
-Per-account Hosts receive no shared GitHub client or repository configuration. GitHub synchronization and pull-request actions therefore fail as not configured, while the shared action protocol and existing private cards remain readable.
+Per-account Hosts receive no shared GitHub client or repository configuration. GitHub synchronization and pull-request actions therefore fail as unknown extensions, while the shared action protocol and existing private cards remain readable.
+
+The account adapter reads acceptance fields from the live `web-ui-task-board` / `task-board` settings descriptor. A programmatic mount without that form leaves acceptance disabled. Each judge model call repeats catalog, account and quota admission and records usage under `task-board-verification:<uuid>`. The pre-execution gate verifies both the durable session owner and principal access before reading the execution evidence; persisted verdicts survive reload. Workspace candidates and their creator-session IDs are filtered by principal access before card creation and execution.

@@ -6,11 +6,12 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import WebSocket from 'ws';
+import type { Workspace } from '@deepseek-ai/dsh-workspace/types';
 import type { LlmRuntime, TokenUsage } from '@deepseek-ai/dsh-llm';
 import type { Database } from './db.js';
 import type { PlatformConfig } from './config.js';
 import { verifyPrincipalHeaders, type AuthenticatedPrincipal } from './principal.js';
-import { TaskBoardHostService, HostTaskLedger, makeTaskBoardRoutes, parseTaskDraft, splitModelRoute, TaskParseError, type BoardGatewayRequest, type BoardParseRequest, type HostTimerFace } from './task-board-engine.js';
+import { TaskBoardHostService, HostTaskLedger, makeTaskBoardRoutes, parseTaskDraft, splitModelRoute, TaskParseError, createGoalVerificationGate, normalizeCatalog, type BoardGoalFace, type BoardVerificationSettings, type BoardGateExecution, type BoardGatewayRequest, type BoardParseRequest, type HostTimerFace } from './task-board-engine.js';
 import { customerModelAllowed } from './model-policy.js';
 import { todayLocal } from './permissions.js';
 import { dailyTimeQuotaError, hourlyTokenQuotaError, monthlySpendQuotaError, spendCheckUnavailableError } from './quota-notice.js';
@@ -94,7 +95,7 @@ export function registerTenantTaskBoard(ctx: Context, db: Database, config: Plat
   const directory = settings.directory;
   const timer = ctx.get('timer') as HostTimerFace | undefined;
   mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const boards = new Map<string, { principal: AuthenticatedPrincipal; service: TaskBoardHostService; routes: ReturnType<typeof makeTaskBoardRoutes> }>();
+  const boards = new Map<string, { principal: AuthenticatedPrincipal; service: TaskBoardHostService; routes: ReturnType<typeof makeTaskBoardRoutes>; refreshWorkspaces: () => Promise<void>; ledger: HostTaskLedger; gate: ReturnType<typeof createGoalVerificationGate> }>();
   const validate = (principal: AuthenticatedPrincipal) => {
     if (principal.source !== 'dsh-passwords' || !/^[1-9][0-9]*$/.test(principal.id)) throw Object.assign(new Error('invalid task owner'), { code: 'PRINCIPAL_ACCESS_DENIED' });
     const user = db.getUserById(Number(principal.id));
@@ -125,6 +126,21 @@ export function registerTenantTaskBoard(ctx: Context, db: Database, config: Plat
     const status = accounting.budgetStatus(principal, permissions.monthly_budget_micros);
     if (status.exhausted) throw monthlySpendQuotaError(status.usedMicros, permissions.monthly_budget_micros ?? 0);
   };
+  /** The aggregate shell owns the same live fields as the task-board settings card. */
+  const verificationSettings = (): BoardVerificationSettings => {
+    const face = ctx.get('settings') as { describe(options: { redactSecrets: boolean }): Array<{ ns: string; value: unknown }> } | undefined;
+    const entry = face?.describe({ redactSecrets: true }).find(row => ['web-ui-task-board', 'task-board'].includes(row.ns));
+    if (entry === undefined) return { enabled: false, model: '', reasoningEffort: '' };
+    if (entry.value === null || typeof entry.value !== 'object') throw new Error('task-board settings must be a mapping');
+    const row = entry.value as Record<string, unknown>;
+    const legacy = row.config;
+    const fields = legacy !== null && typeof legacy === 'object' ? { ...legacy, ...row } : row;
+    const enabled = fields.goalVerification ?? true;
+    const model = fields.goalVerificationModel ?? '';
+    const reasoningEffort = fields.goalVerificationReasoningEffort ?? '';
+    if (typeof enabled !== 'boolean' || typeof model !== 'string' || typeof reasoningEffort !== 'string') throw new Error('invalid task-board acceptance settings');
+    return { enabled, model, reasoningEffort };
+  };
   const boardFor = (principal: AuthenticatedPrincipal) => {
     validate(principal);
     const key = principal.id;
@@ -139,8 +155,77 @@ export function registerTenantTaskBoard(ctx: Context, db: Database, config: Plat
       const user = validate(principal);
       return jwt.sign({ sub: String(user.id), username: user.username, cv: user.credential_version }, config.jwtSecret, { algorithm: 'HS256', expiresIn: 60, jwtid: randomUUID() });
     });
+    const registry = ctx.get('workspaceRegistry');
+    let workspaces: readonly Workspace[] = [];
+    const refreshWorkspaces = async (): Promise<void> => {
+      validate(principal);
+      workspaces = [];
+      const access = ctx.get('principalAccess');
+      if (registry === undefined || access === undefined) return;
+      const listed = registry.list();
+      const permitted = await access.resolve(principal, {
+        workspaceIds: listed.map(row => row.id), sessionIds: listed.flatMap(row => [...row.sessionIds]),
+      });
+      validate(principal);
+      workspaces = listed.filter(row => permitted.readableWorkspaceIds.has(row.id)).map(row => ({
+        ...row, sessionIds: row.sessionIds.filter(id => permitted.readableSessionIds.has(id)),
+      }));
+    };
+    /** Every model call rechecks catalog visibility, account status and quotas, including retries. */
+    const scopedModel = (purpose: 'parse' | 'verification'): Pick<LlmRuntime, 'stream'> => ({ async *stream(options) {
+      validate(principal);
+      options.signal?.throwIfAborted();
+      const { provider, model } = options;
+      if (!provider || !model || (principal.role !== 'admin' && !customerModelAllowed(provider, model))) {
+        throw new TaskParseError('no-model', 'the selected model is unavailable for this account');
+      }
+      const catalog = await gateway.invoke({ namespace: 'session', method: 'modelCatalog', args: {}, signal: options.signal });
+      if (!catalogAllows(catalog, provider, model)) throw new TaskParseError('no-model', 'the selected model is unavailable for this account');
+      await admitParse(principal);
+      validate(principal);
+      options.signal?.throwIfAborted();
+      const accounting = ctx.get('spendAccounting');
+      if (accounting === undefined || typeof accounting.recordUsage !== 'function') throw spendCheckUnavailableError();
+      const llm = ctx.get('llm');
+      if (llm === undefined) throw new TaskParseError('no-model', 'task model service is unavailable');
+      const usageId = `task-board-${purpose}:${randomUUID()}`;
+      const startedAt = Date.now();
+      let usage: TokenUsage | undefined;
+      try {
+        for await (const chunk of llm.stream(options)) {
+          if (chunk.type === 'usage') usage = chunk.usage;
+          validate(principal);
+          options.signal?.throwIfAborted();
+          if (chunk.type === 'finish' && (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted')) {
+            throw new TaskParseError(chunk.reason.kind === 'aborted' ? 'timeout' : 'model-error', chunk.reason.failure.message);
+          }
+          yield chunk;
+        }
+        options.signal?.throwIfAborted();
+      } finally {
+        if (usage !== undefined) {
+          const tokens = usage.totalTokens ?? usage.inputTokens + usage.outputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0);
+          db.addTokens(Number(principal.id), todayLocal(), tokens, new Date().toISOString());
+          await accounting.recordUsage(principal, {
+            sessionId: usageId, turn: 0, step: 0, provider, model,
+            inputTokens: usage.inputTokens, outputTokens: usage.outputTokens,
+            cacheReadTokens: usage.cacheReadTokens ?? 0, cacheWriteTokens: usage.cacheWriteTokens ?? 0,
+            reasoningTokens: usage.reasoningTokens ?? 0, time: startedAt,
+          });
+        }
+      }
+    } });
+    const ledger = new HostTaskLedger(ledgerPath);
     const service = new TaskBoardHostService(gateway, {
-      ledger: new HostTaskLedger(ledgerPath),
+      ledger,
+      workspaceRegistry: registry === undefined ? undefined : { list: () => { validate(principal); return workspaces; } },
+      verificationSettings,
+      verificationCatalog: async () => {
+        await refreshWorkspaces();
+        const value = await gateway.invoke({ namespace: 'session', method: 'modelCatalog', args: {} });
+        validate(principal);
+        return normalizeCatalog(value);
+      },
       timers: timer === undefined ? undefined : {
         timeout: (callback, delay) => timer.timeout(callback, delay),
         interval: (callback, delay) => timer.interval(callback, delay),
@@ -150,53 +235,15 @@ export function registerTenantTaskBoard(ctx: Context, db: Database, config: Plat
     const parseTask = async (request: BoardParseRequest, signal: AbortSignal) => {
       signal.throwIfAborted();
       validate(principal);
-      const route = splitModelRoute(request.model);
-      if (route === undefined || (principal.role !== 'admin' && !customerModelAllowed(route.provider, route.model))) {
-        throw new TaskParseError('no-model', 'the selected model is unavailable for this account');
-      }
-      const catalog = await gateway.invoke({ namespace: 'session', method: 'modelCatalog', args: {}, signal });
-      if (!catalogAllows(catalog, route.provider, route.model)) {
-        throw new TaskParseError('no-model', 'the selected model is unavailable for this account');
-      }
-      await admitParse(principal);
-      signal.throwIfAborted();
-      const accounting = ctx.get('spendAccounting');
-      if (accounting === undefined || typeof accounting.recordUsage !== 'function') throw spendCheckUnavailableError();
-      const llm = ctx.get('llm');
-      if (llm === undefined) throw new TaskParseError('no-model', 'task parsing model service is unavailable');
-      const usageId = `task-board-parse:${randomUUID()}`;
-      const startedAt = Date.now();
-      let usage: TokenUsage | undefined;
-      const scopedLlm: Pick<LlmRuntime, 'stream'> = { async *stream(options) {
-        validate(principal);
-        options.signal?.throwIfAborted();
-        try {
-          for await (const chunk of llm.stream(options)) {
-            if (chunk.type === 'usage') usage = chunk.usage;
-            validate(principal);
-            options.signal?.throwIfAborted();
-            if (chunk.type === 'finish' && (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted')) {
-              throw new TaskParseError(chunk.reason.kind === 'aborted' ? 'timeout' : 'model-error', chunk.reason.failure.message);
-            }
-            yield chunk;
-          }
-          options.signal?.throwIfAborted();
-        } finally {
-          if (usage !== undefined) {
-            const tokens = usage.totalTokens ?? usage.inputTokens + usage.outputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0);
-            db.addTokens(Number(principal.id), todayLocal(), tokens, new Date().toISOString());
-            await accounting.recordUsage(principal, {
-              sessionId: usageId, turn: 0, step: 0, provider: route.provider, model: route.model,
-              inputTokens: usage.inputTokens, outputTokens: usage.outputTokens,
-              cacheReadTokens: usage.cacheReadTokens ?? 0, cacheWriteTokens: usage.cacheWriteTokens ?? 0,
-              reasoningTokens: usage.reasoningTokens ?? 0, time: startedAt,
-            });
-          }
-        }
-      } };
-      return parseTaskDraft(scopedLlm, request, signal);
+      if (splitModelRoute(request.model) === undefined) throw new TaskParseError('no-model', 'the selected model is unavailable for this account');
+      return parseTaskDraft(scopedModel('parse'), request, signal);
     };
-    const board = { principal, service, routes: makeTaskBoardRoutes(service, { assertPrincipal: () => { validate(principal); } }, { parseTask }) };
+    const gate = createGoalVerificationGate({
+      ledger, llm: () => scopedModel('verification'),
+      goals: () => ctx.get('goals') as BoardGoalFace | undefined,
+      logger: { warn: (message, ...rest) => console.warn(message, ...rest) },
+    });
+    const board = { principal, service, ledger, gate, refreshWorkspaces, routes: makeTaskBoardRoutes(service, { assertPrincipal: () => { validate(principal); } }, { parseTask }) };
     boards.set(key, board);
     service.start();
     return board;
@@ -209,13 +256,15 @@ export function registerTenantTaskBoard(ctx: Context, db: Database, config: Plat
       boardFor(principal);
     } catch { console.warn('[dsh-passwords] task board owner unavailable:', entry.name); }
   }
-  for (const suffix of ['state', 'action', 'events', 'parse']) {
+  for (const suffix of ['state', 'action', 'events', 'parse', 'verification']) {
     const pathname = `/api/task-board/${suffix}`;
     ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: pathname, handler: async (req, res) => {
       try {
         const principal = verifyPrincipalHeaders((req as IncomingMessage).headers, config.internalSecret);
         if (!principal) throw new Error('task owner required');
-        const route = boardFor(principal).routes.find(route => route.path === pathname)!;
+        const board = boardFor(principal);
+        if (suffix === 'action') await board.refreshWorkspaces();
+        const route = board.routes.find(route => route.path === pathname)!;
         // A verified gateway principal supplies authority when HTTP browsers omit Origin on GET.
         if (req.headers.origin === undefined) req.headers.origin = `http://${req.headers.host}`;
         await route.handler(req, res);
@@ -224,5 +273,21 @@ export function registerTenantTaskBoard(ctx: Context, db: Database, config: Plat
       }
     } }), `dsh-passwords: tenant task board ${suffix}`);
   }
+  ctx.on('tools/pre-execute', async (exec, next) => {
+    if (exec.name !== 'update_goal' || exec.agent === undefined) return next();
+    const sessionId = exec.agent.session.id;
+    const board = [...boards.values()].find(item => item.ledger.findOpenExecutionBySession(sessionId) !== undefined);
+    if (board === undefined) return next();
+    validate(board.principal);
+    if (db.getSessionOwner(sessionId) !== Number(board.principal.id)) {
+      return { kind: 'deny', reason: 'task execution owner mismatch' };
+    }
+    const access = ctx.get('principalAccess');
+    const permitted = await access?.resolve(board.principal, { sessionIds: [sessionId] }, exec.signal);
+    validate(board.principal);
+    if (!permitted?.readableSessionIds.has(sessionId)) return { kind: 'deny', reason: 'task session access denied' };
+    const decision = await board.gate(exec satisfies BoardGateExecution);
+    return decision ?? next();
+  });
   ctx.effect(() => () => { for (const board of boards.values()) board.service.dispose(); }, 'dsh-passwords: tenant task board cleanup');
 }

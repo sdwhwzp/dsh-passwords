@@ -4,12 +4,13 @@ import { reusableSessionId } from './core/session-reuse.ts'
 import { HostTaskLedger, type OpenedRun, type OpenExecutionReference } from './host-ledger.ts'
 import { HostExecutionRunner, SessionLaunchError, promptText, type SessionCommandDispatcher, type SessionSummary, type TaskBoardWorkspaceRegistry } from './host-runner.ts'
 import { teammateName } from './core/subtask.ts'
+import { workspaceOwningSession } from './core/workspace-target.ts'
 import { PowerInhibitor } from './power-inhibitor.ts'
 import { TASK_BOARD_SCHEMA_VERSION, type TaskBoardAction, type TaskBoardEventPayload, type TaskBoardSnapshot } from './protocol.ts'
-import { GitHubSyncService } from './host/github/service.ts'
-import { GitHubApiClient } from './host/github/client.ts'
-import type { GitHubRepoConfig } from './core/github/types.ts'
-import type { ExecutionOutcome } from './core/tasks.ts'
+import { TaskBoardExtensionRegistry } from './host/extension-registry.ts'
+import type { TaskBoardExtension } from './core/extension.ts'
+import type { ExecutionOutcome, TaskStatus } from './core/tasks.ts'
+import { passedAttempt, resolveContract, verificationRequired, type ExecutionVerification, type ModelCatalogView, type VerificationContract, type VerificationSettings } from './core/verification.ts'
 import type { TaskPermission } from './core/handover.ts'
 import { principalKey, type TaskBoardAccounts, type TaskBoardPrincipal } from './host-accounts.ts'
 
@@ -136,20 +137,20 @@ export class TaskBoardHostService {
    */
   private readonly unreadablePolls = new Map<string, number>()
   private preventIdleSleep = false
+  private readonly verificationSettings: () => VerificationSettings
+  private readonly verificationCatalog: (principal?: TaskBoardPrincipal) => Promise<ModelCatalogView | undefined>
   private readonly team: TaskBoardTeamDispatcher | undefined
   private readonly timers: HostTimerFace
   private lastPowerJson = ''
   private readonly now: () => number
-  private githubService?: GitHubSyncService
-
-  /** Host-wide GitHub credentials are available only without account providers. */
-  get github(): GitHubSyncService | undefined {
-    if (this.accounts?.required()) {
-      this.githubService?.stop()
-      return undefined
-    }
-    return this.githubService
-  }
+  /** The deployment's workspaces, consulted to resolve a card that pins none. */
+  private readonly workspaceRegistry: TaskBoardWorkspaceRegistry | undefined
+  /**
+   * External provider extensions. The board owns task lifecycle and execution;
+   * a provider observes them through the registry's capability face and never
+   * reaches into the ledger itself.
+   */
+  readonly extensions: TaskBoardExtensionRegistry
 
   constructor(gateway: TypertGateway, options: {
     ledger?: HostTaskLedger
@@ -166,9 +167,14 @@ export class TaskBoardHostService {
     maxSubtaskDepth?: number
     team?: TaskBoardTeamDispatcher
     timers?: HostTimerFace
-    github?: GitHubSyncService
-    githubClient?: GitHubApiClient
-    githubRepositories?: GitHubRepoConfig[]
+    /**
+     * Live acceptance settings (volatile config reads). Absent keeps goal
+     * acceptance OFF for every execution this service opens, which is what a
+     * programmatic mount without the settings domain gets.
+     */
+    verificationSettings?: () => VerificationSettings
+    /** The host model catalog the acceptance contract resolves its route from. */
+    verificationCatalog?: (principal?: TaskBoardPrincipal) => Promise<ModelCatalogView | undefined>
   } = {}) {
     this.ledger = options.ledger ?? new HostTaskLedger(undefined, undefined, {
       sessionDefaultPermission: options.sessionDefaultPermission,
@@ -176,22 +182,21 @@ export class TaskBoardHostService {
     })
     this.accounts = options.accounts
     this.runner = new HostExecutionRunner(gateway, options.commandDispatcher, options.workspaceRegistry, undefined, principal => this.accounts?.assert(principal))
+    this.workspaceRegistry = options.workspaceRegistry
     this.team = options.team
     this.timers = options.timers ?? PROCESS_TIMERS
     this.power = options.power ?? new PowerInhibitor()
     this.now = options.now ?? Date.now
-    if (options.github !== undefined) {
-      this.githubService = options.github
-    } else if (options.githubRepositories !== undefined || options.githubClient !== undefined) {
-      this.githubService = new GitHubSyncService({
-        ledger: this.ledger,
-        assertAccess: () => this.accounts?.assert(undefined),
-        client: options.githubClient,
-        repositories: options.githubRepositories,
-        timers: this.timers,
-        now: this.now,
-      })
-    }
+    this.verificationSettings = options.verificationSettings ?? (() => ({ enabled: false, model: '', reasoningEffort: '' }))
+    this.verificationCatalog = options.verificationCatalog ?? (async () => undefined)
+    this.extensions = new TaskBoardExtensionRegistry({
+      ledger: this.ledger,
+      canAccess: () => !this.accounts?.required(),
+      // Capability writes go through the board's own action path, so every
+      // board gate (content freeze, running lock, permission gate) still holds.
+      apply: (action, initiator) => this.applyBoardAction(crypto.randomUUID(), action, initiator),
+      now: this.now,
+    })
     installStreamErrorGuards()
     this.ledger.subscribe(() => {
       this.syncPowerReasons()
@@ -218,7 +223,6 @@ export class TaskBoardHostService {
     // schedule the Board should have served while running is then armed
     // normally by the timer below.
     this.recoverSchedule()
-    this.github?.start()
   }
 
   setConfiguration(active: boolean, preventIdleSleep: boolean): void {
@@ -234,12 +238,13 @@ export class TaskBoardHostService {
       })
     }
     this.power.setEnabled(active && preventIdleSleep)
+    // Providers follow the board's master switch: the registry stops their
+    // provider-side work and hides their seats without clearing any data.
+    this.extensions.setEnabled(active)
     if (resumed) {
       this.schedulePoll()
       this.recoverSchedule()
-      this.github?.start()
     } else if (!active) {
-      this.github?.stop()
       // A disabled board holds no timer: its schedules must not fire while the
       // master switch is off.
       this.clearScheduleTimer()
@@ -249,6 +254,7 @@ export class TaskBoardHostService {
 
   snapshot(): TaskBoardSnapshot {
     const state = this.ledger.state()
+    const published = this.extensions.published()
     return {
       schemaVersion: TASK_BOARD_SCHEMA_VERSION,
       revision: state.revision,
@@ -258,7 +264,39 @@ export class TaskBoardHostService {
       sessionDefaultPermission: this.ledger.sessionDefaultPermission,
       maxSubtaskDepth: this.ledger.maxSubtaskDepth,
       teamRunAvailable: this.team !== undefined,
-      ...(this.github === undefined ? {} : { github: this.github.snapshotSummary() }),
+      ...(Object.keys(published).length === 0 ? {} : { extensions: published }),
+    }
+  }
+
+  /**
+   * Admit one external provider. Idempotent by extension id; the returned
+   * disposer releases it (its stored data stays).
+   */
+  registerExtension(extension: TaskBoardExtension): () => void {
+    return this.extensions.registerExtension(extension)
+  }
+
+  /**
+   * The acceptance configuration the settings card displays: the live settings,
+   * the contract they resolve to, and the host catalog the choices come from.
+   *
+   * The card shows the RESOLVED route, not the raw configuration, so "inherit
+   * host" reads as the concrete model and reasoning level the next execution
+   * will actually freeze, including any recorded effort fallback.
+   * @returns the resolved acceptance options.
+   */
+  async verificationOptions(principal?: TaskBoardPrincipal): Promise<{
+    settings: VerificationSettings
+    contract: VerificationContract
+    catalog: ModelCatalogView
+  }> {
+    this.accounts?.assert(principal)
+    const settings = this.verificationSettings()
+    const catalog = await this.verificationCatalog(principal)
+    return {
+      settings,
+      contract: resolveContract(settings, catalog),
+      catalog: catalog ?? { groups: [] },
     }
   }
 
@@ -279,21 +317,56 @@ export class TaskBoardHostService {
     this.observerPrincipal = principal
   }
 
-  apply(requestId: string, action: Extract<TaskBoardAction, { kind: 'github-refresh' | 'github-create-pr' | 'github-link-pr' }>, initiator?: string, principal?: TaskBoardPrincipal): Promise<TaskBoardSnapshot>
-  apply(requestId: string, action: Exclude<TaskBoardAction, { kind: 'github-refresh' | 'github-create-pr' | 'github-link-pr' }>, initiator?: string, principal?: TaskBoardPrincipal): TaskBoardSnapshot
+  /**
+   * Give a root card created without a workspace pin the workspace its creator
+   * is in.
+   *
+   * An agent's `task_board_create` arrives with the calling session, and the
+   * GUI submits the session the main view shows, so the card lands where the
+   * work was asked for instead of where the Host process happens to run. A card
+   * that names a workspace keeps it, and a subtask keeps inheriting its lineage
+   * (the runner walks the ancestor chain for that).
+   *
+   * The initiator is client-asserted, so it only chooses among workspaces the
+   * deployment already knows: it can neither register one nor reach outside the
+   * list the user sees.
+   * @param action - the action about to be applied.
+   * @param initiator - the session that issued the action, when one was asserted.
+   * @returns the action, with an inherited workspace on a root creation.
+   */
+  private withInheritedWorkspace(action: TaskBoardAction, initiator?: string): TaskBoardAction {
+    if (action.kind !== 'create' || initiator === undefined || initiator === '') return action
+    const input = action.input
+    // A subtask inherits its lineage instead, and an explicit pin is the user's.
+    if ((input.parentId ?? '').trim() !== '') return action
+    if ((input.workspaceId ?? '').trim() !== '') return action
+    const workspaceId = workspaceOwningSession(this.workspaceRegistry?.list() ?? [], initiator)
+    if (workspaceId === undefined) return action
+    return { ...action, input: { ...input, workspaceId } }
+  }
+
+  apply(requestId: string, action: Extract<TaskBoardAction, { kind: 'extension-action' }>, initiator?: string, principal?: TaskBoardPrincipal): Promise<TaskBoardSnapshot>
+  apply(requestId: string, action: Exclude<TaskBoardAction, { kind: 'extension-action' }>, initiator?: string, principal?: TaskBoardPrincipal): TaskBoardSnapshot
   apply(requestId: string, action: TaskBoardAction, initiator?: string, principal?: TaskBoardPrincipal): TaskBoardSnapshot | Promise<TaskBoardSnapshot>
   apply(requestId: string, action: TaskBoardAction, initiator?: string, principal?: TaskBoardPrincipal): TaskBoardSnapshot | Promise<TaskBoardSnapshot> {
     if (!this.active) throw new Error('task board is disabled')
     this.accounts?.assert(principal)
-    if (action.kind === 'github-refresh') {
-      return this.handleGitHubRefresh(action)
+    // Provider actions never touch the ledger directly: the registry routes the
+    // action to the owning extension, whose own capability calls come back
+    // through applyBoardAction and every board gate below.
+    if (action.kind === 'extension-action') {
+      return this.handleExtensionAction(action)
     }
-    if (action.kind === 'github-create-pr') {
-      return this.handleGitHubCreatePr(action)
-    }
-    if (action.kind === 'github-link-pr') {
-      return this.handleGitHubLinkPr(action)
-    }
+    return this.applyBoardAction(requestId, action, initiator, principal)
+  }
+
+  /**
+   * Apply one board-owned action with every gate intact. Provider capability
+   * calls and the same-origin wire both land here, so the two surfaces can
+   * never disagree about a card.
+   */
+  private applyBoardAction(requestId: string, action: Exclude<TaskBoardAction, { kind: 'extension-action' }>, initiator?: string, principal?: TaskBoardPrincipal): TaskBoardSnapshot {
+    const before = this.statusMap()
     // Fail closed before the ledger opens anything: a card opted into team
     // execution cannot run in a deployment that serves no Agent Teams service,
     // and silently degrading it to a plain cascade would misreport the work.
@@ -301,17 +374,14 @@ export class TaskBoardHostService {
       const task = this.ledger.state().tasks.find(item => item.id === action.taskId)
       if (task?.teamRun === true) throw new Error('Agent Teams is unavailable in this deployment')
     }
-    const result = this.ledger.applyRequest(requestId, action, initiator, principal)
+    const result = this.ledger.applyRequest(requestId, this.withInheritedWorkspace(action, initiator), initiator, principal)
     if (result.runs !== undefined) this.dispatchRuns(result.runs)
     // A committed schedule write (create / update / toggle / delete) moves the
     // nearest trigger; re-arm on schedule writes so a newly enabled schedule fires
     // at its own instant without waiting for the previous target to elapse.
     if (SCHEDULE_WRITE_ACTIONS.has(action.kind)) this.refreshSchedule()
-    if (action.kind === 'move') {
-      void this.github?.writeBackTaskStatus(action.taskId, action.status).catch(() => {})
-    } else if (action.kind === 'run' || action.kind === 'rerun') {
-      void this.github?.writeBackTaskStatus(action.taskId, 'running').catch(() => {})
-    }
+    this.emitStatusChanges(before, initiator)
+    if (action.kind === 'delete') this.extensions.emitTaskDeleted({ taskId: action.taskId })
     return {
       schemaVersion: TASK_BOARD_SCHEMA_VERSION,
       revision: result.state.revision,
@@ -321,9 +391,39 @@ export class TaskBoardHostService {
     }
   }
 
+  /** Route one provider action and answer the resulting board snapshot. */
+  private async handleExtensionAction(action: Extract<TaskBoardAction, { kind: 'extension-action' }>): Promise<TaskBoardSnapshot> {
+    await this.extensions.handleAction({
+      extensionId: action.extensionId,
+      action: action.action,
+      ...(action.taskId === undefined ? {} : { taskId: action.taskId }),
+      ...(action.payload === undefined ? {} : { payload: action.payload }),
+    })
+    return this.snapshot()
+  }
+
+  /** Current task id -> status map, for change detection around a mutation. */
+  private statusMap(): Map<string, TaskStatus> {
+    return new Map(this.ledger.allTasks().map(task => [task.id, task.status]))
+  }
+
+  /** Emit a status change for every task whose column moved, isolated per callback. */
+  private emitStatusChanges(before: Map<string, TaskStatus>, initiator?: string): void {
+    for (const task of this.ledger.allTasks()) {
+      const previous = before.get(task.id)
+      if (previous === undefined || previous === task.status) continue
+      this.extensions.emitStatusChanged({
+        taskId: task.id,
+        status: task.status,
+        previous,
+        ...(initiator === undefined || initiator === '' ? {} : { initiator }),
+      })
+    }
+  }
+
   dispose(): void {
     this.disposed = true
-    this.githubService?.dispose()
+    this.extensions.dispose()
     this.clearScheduleTimer()
     this.pollTimer?.()
     this.pollTimer = undefined
@@ -354,12 +454,34 @@ export class TaskBoardHostService {
         ...(team ? { team: true } : {}),
         ...(schedule === undefined ? {} : { schedule }),
       }
+      // Freeze this execution's acceptance contract BEFORE the session is
+      // prompted: a settings change made while the run is in flight must not
+      // retrofit the rule that will judge it.
+      const contract = resolveContract(this.verificationSettings(), await this.verificationCatalog(opened.principal))
+      const initial: ExecutionVerification = {
+        contract,
+        attempts: [],
+        applicability: team ? 'team-member' : contract.enabled ? 'goal-unavailable' : 'disabled',
+      }
+      this.ledger.setVerification(opened.task.id, opened.execution.id, initial)
+      let attached: string | undefined
       const sessionId = await this.runner.launch(opened.task, {
         ...(opened.principal === undefined ? {} : { principal: opened.principal }),
         ...(reuseSessionId === undefined ? {} : { reuseSessionId }),
         ...(promptContext === undefined ? {} : { promptContext }),
+        // Bind the session to the execution before the prompt is queued, so the
+        // completion gate can never observe the agent without its binding.
+        onSession: (id) => {
+          attached = id
+          this.ledger.attachSession(opened.task.id, opened.execution.id, id)
+        },
+        onGoalArmed: (armed) => {
+          this.setApplicability(opened.task.id, opened.execution.id, team
+            ? 'team-member'
+            : !contract.enabled ? 'disabled' : armed ? 'enforced' : 'goal-unavailable')
+        },
       })
-      this.ledger.attachSession(opened.task.id, opened.execution.id, sessionId)
+      if (attached === undefined) this.ledger.attachSession(opened.task.id, opened.execution.id, sessionId)
       if (team) for (const teammate of others) this.scheduleTeammate(teammate, sessionId)
     } catch (error) {
       if (error instanceof SessionLaunchError) {
@@ -430,7 +552,9 @@ export class TaskBoardHostService {
     // Fold whatever the board can already decide before spending inspection
     // RPCs: a team run whose Lead recorded its verdict, and any lineage whose
     // members are all settled. Idempotent, so an already folded board is free.
+    const foldedBefore = this.statusMap()
     this.ledger.finalizeReadyRuns()
+    this.emitStatusChanges(foldedBefore)
     // Read after the RPC so executions attached while it was in flight are
     // included in this pass, matching the former full-state snapshot timing.
     const runtime = this.ledger.runtimeView()
@@ -455,6 +579,16 @@ export class TaskBoardHostService {
   ): Promise<void> {
     for (const execution of executions) {
       if (execution.sessionId === undefined) continue
+      const record = this.ledger.getTask(execution.taskId)?.executions.find(entry => entry.id === execution.executionId)
+      const verification = record?.verification
+      // A cycle the gate already closed is decided here, without another
+      // inspection: the goal may still be active (or un-blockable) exactly
+      // because the acceptance failed, and the card must not stay in the
+      // running column waiting for a verdict that is already recorded.
+      if (verification?.failedReason !== undefined) {
+        this.settleAndNotify(execution.taskId, execution.executionId, 'failed', verification.failedReason)
+        continue
+      }
       try {
         // A team member's turn is read even while the roster calls its session
         // running: a durable teammate never goes idle for good.
@@ -467,6 +601,19 @@ export class TaskBoardHostService {
           continue
         }
         this.unreadablePolls.delete(execution.executionId)
+        // Forced acceptance: the old fallback paths — a completed turn, a
+        // paused goal, an unreadable projection, a manual settle — must never
+        // be mistaken for a verified success. Only a matching pass record
+        // settles this execution as succeeded.
+        if (result.outcome === 'succeeded' && verificationRequired(verification) && passedAttempt(verification) === undefined) {
+          this.settleAndNotify(
+            execution.taskId,
+            execution.executionId,
+            'failed',
+            'goal 验收：本次执行没有匹配的验收通过记录（验收未运行、未通过或报告来自其他执行），按未验收判失败。',
+          )
+          continue
+        }
         this.settleAndNotify(execution.taskId, execution.executionId, result.outcome, 'error' in result ? result.error : undefined)
       } catch {
         // A transient inspection failure never settles a running execution.
@@ -484,45 +631,25 @@ export class TaskBoardHostService {
    * each streak is logged, so the Host log names the session.
    */
   private settleAndNotify(taskId: string, executionId: string, outcome: ExecutionOutcome, error?: string): void {
+    const before = this.ledger.getTask(taskId)
+    if (before?.executions.find(entry => entry.id === executionId)?.endedAt !== undefined) {
+      // Already settled: the ledger would no-op, and re-emitting would report
+      // the same settlement twice.
+      this.ledger.settle(taskId, executionId, outcome, error)
+      return
+    }
+    const previousStatus = before?.status
     this.ledger.settle(taskId, executionId, outcome, error)
     const task = this.ledger.getTask(taskId)
-    const execution = task?.executions.find(e => e.id === executionId)
-    if (task !== undefined && execution !== undefined && this.github !== undefined) {
-      void this.github.handleExecutionSettled(taskId, execution).catch(() => {})
+    if (task !== undefined && previousStatus !== undefined && previousStatus !== task.status) {
+      this.extensions.emitStatusChanged({ taskId, status: task.status, previous: previousStatus })
     }
-  }
-
-  private async handleGitHubRefresh(action: Extract<TaskBoardAction, { kind: 'github-refresh' }>): Promise<TaskBoardSnapshot> {
-    if (this.github === undefined) throw new Error('GitHub integration is not configured')
-    if (action.taskId !== undefined) {
-      const res = await this.github.syncTask(action.taskId)
-      if (!res.ok && res.error) throw new Error(res.error)
-    } else if (action.owner !== undefined && action.repository !== undefined) {
-      const res = await this.github.syncRepository(action.owner, action.repository)
-      if (res.errors.length > 0) throw new Error(res.errors.join('; '))
-    } else {
-      const res = await this.github.syncAll()
-      if (res.errors.length > 0) throw new Error(res.errors.join('; '))
-    }
-    return this.snapshot()
-  }
-
-  private async handleGitHubCreatePr(action: Extract<TaskBoardAction, { kind: 'github-create-pr' }>): Promise<TaskBoardSnapshot> {
-    if (this.github === undefined) throw new Error('GitHub integration is not configured')
-    await this.github.createPullRequest(action.taskId, {
-      headBranch: action.headBranch,
-      baseBranch: action.baseBranch,
-      title: action.title,
-      body: action.body,
-      draft: action.draft,
+    this.extensions.emitExecutionSettled({
+      taskId,
+      executionId,
+      outcome,
+      ...(error === undefined ? {} : { error }),
     })
-    return this.snapshot()
-  }
-
-  private async handleGitHubLinkPr(action: Extract<TaskBoardAction, { kind: 'github-link-pr' }>): Promise<TaskBoardSnapshot> {
-    if (this.github === undefined) throw new Error('GitHub integration is not configured')
-    await this.github.linkPullRequest(action.taskId, action.pullRequestNumber)
-    return this.snapshot()
   }
 
   private noteUnreadableInspection(execution: OpenExecutionReference, reason: string | undefined): void {
@@ -602,6 +729,7 @@ export class TaskBoardHostService {
       this.recoverSchedule()
       return
     }
+    const before = this.statusMap()
     for (const schedule of this.ledger.dueSchedules(now)) {
       const next = nextRunAtMs(schedule.cron, schedule.nextRunAt, schedule.timeZone)
       this.dispatchRuns(
@@ -609,6 +737,7 @@ export class TaskBoardHostService {
         { triggeredAt: now, timeZone: schedule.timeZone, cron: schedule.cron },
       )
     }
+    this.emitStatusChanges(before)
     // The launched run (or the rolled-forward target) moved every due schedule,
     // so the next nearest target has to be recomputed from the ledger.
     this.armSchedule()
@@ -633,6 +762,16 @@ export class TaskBoardHostService {
     for (const run of others) {
       if (run.dispatch !== 'teammate') this.scheduleLaunch(run, [], schedule)
     }
+  }
+
+  /**
+   * Move one execution's applicability without touching its frozen contract or
+   * its recorded attempts (used when the run's goal form becomes known).
+   */
+  private setApplicability(taskId: string, executionId: string, applicability: ExecutionVerification['applicability']): void {
+    const verification = this.ledger.getTask(taskId)?.executions.find(entry => entry.id === executionId)?.verification
+    if (verification === undefined || verification.applicability === applicability) return
+    this.ledger.setVerification(taskId, executionId, { ...verification, applicability })
   }
 
   private scheduleLaunch(opened: OpenedRun, others: readonly OpenedRun[] = [], schedule?: ScheduledRunContext): void {

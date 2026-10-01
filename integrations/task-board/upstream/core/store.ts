@@ -15,7 +15,8 @@ import { isExecutionOutcome } from './subtask.ts'
 import type { TaskHandover } from './handover.ts'
 import { sanitizeFreezeSnapshot } from './freeze-snapshot.ts'
 import { sanitizeHandover } from './handover.ts'
-import { normalizeIntegrations } from './github/types.ts'
+import { normalizeTaskIntegrations } from './extension.ts'
+import { normalizeVerification } from './verification.ts'
 
 /** Persistence seam for the task ledger. */
 export interface TaskStore {
@@ -69,6 +70,7 @@ function isTaskRecordShape(value: unknown): value is Omit<TaskRecord, 'status'> 
   if (record.mode !== undefined && typeof record.mode !== 'string') return false
   if (record.permission !== undefined && typeof record.permission !== 'string') return false
   if (record.integrations !== undefined && (typeof record.integrations !== 'object' || record.integrations === null || Array.isArray(record.integrations))) return false
+  if (record.hidden !== undefined && typeof record.hidden !== 'boolean') return false
   if (record.reuseSession !== undefined && typeof record.reuseSession !== 'boolean') return false
   if (record.goalRun !== undefined && typeof record.goalRun !== 'boolean') return false
   if (!Array.isArray(record.executions)) return false
@@ -84,6 +86,9 @@ function isTaskRecordShape(value: unknown): value is Omit<TaskRecord, 'status'> 
     if (entry.initiatedBy !== undefined && typeof entry.initiatedBy !== 'string') return false
     if (entry.frozenBy !== undefined && typeof entry.frozenBy !== 'string') return false
     if (entry.frozenAt !== undefined && typeof entry.frozenAt !== 'number') return false
+    // The acceptance block is repaired like every other optional field: an
+    // unusable one is dropped, which can only make the board MORE strict.
+    if (entry.verification !== undefined && normalizeVerification(entry.verification) === undefined) return false
   }
   return true
 }
@@ -201,6 +206,9 @@ export function parseLedger(raw: string | null): TaskRecord[] {
       runGroupId: normalizeTargetId(execution.runGroupId),
       ownResult: isExecutionOutcome(execution.ownResult) ? execution.ownResult : undefined,
       ownError: typeof execution.ownError === 'string' ? execution.ownError : undefined,
+      // A malformed acceptance block is dropped rather than dropping the
+      // execution record: the board then treats that run as unverified.
+      verification: normalizeVerification(execution.verification),
     }))
     // Execution targets are normalized like the schedule: blank strings
     // clear the pin and unknown permission strings from a future version
@@ -220,7 +228,8 @@ export function parseLedger(raw: string | null): TaskRecord[] {
     // dropping the task row.
     task.tags = normalizeTags(row.tags)
     task.permissionConfirmedAt = typeof row.permissionConfirmedAt === 'number' && Number.isFinite(row.permissionConfirmedAt) ? row.permissionConfirmedAt : undefined
-    task.integrations = normalizeIntegrations(row.integrations)
+    task.integrations = normalizeTaskIntegrations(row.integrations)
+    task.hidden = row.hidden === true ? true : undefined
     tasks.push(task)
   }
   return tasks
