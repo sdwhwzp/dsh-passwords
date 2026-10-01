@@ -611,3 +611,33 @@ test('settle cancels only the signed account ledger and cannot control another a
     assert.match(board.tasks[0].executions[0].sessionId, new RegExp(`^scheduled-${id}-`));
   }
 });
+
+
+test('tenant boards refuse shared GitHub operations while retaining private cards', async t => {
+  const f = await fixture(t);
+  for (const id of [2, 3]) {
+    const created = await fetch(f.origin + '/api/task-board/action', {
+      method: 'POST', headers: f.headers(id), body: JSON.stringify({ requestId: randomUUID(), action: {
+        kind: 'create', id: 'private-card', input: { title: `Private ${id}`, description: '', prompt: '' },
+      } }),
+    });
+    assert.equal(created.status, 200);
+    for (const action of [
+      { kind: 'github-refresh' },
+      { kind: 'github-create-pr', taskId: 'private-card', headBranch: 'dev' },
+      { kind: 'github-link-pr', taskId: 'private-card', pullRequestNumber: 1 },
+    ]) {
+      const result = await fetch(f.origin + '/api/task-board/action', {
+        method: 'POST', headers: f.headers(id), body: JSON.stringify({ requestId: randomUUID(), action }),
+      });
+      assert.equal(result.status, 400);
+      assert.match((await result.json()).error, /GitHub integration is not configured/);
+    }
+  }
+  f.reload();
+  for (const id of [2, 3]) {
+    const board = await (await fetch(f.origin + '/api/task-board/state', { headers: f.headers(id) })).json();
+    assert.equal(board.github, undefined);
+    assert.deepEqual(board.tasks.map((task: { title: string }) => task.title), [`Private ${id}`]);
+  }
+});

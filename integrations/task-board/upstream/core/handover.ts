@@ -40,7 +40,11 @@ export const HANDOVER_MAX_TOTAL_BYTES = 8 * 1024
 /** Per target-id (workspace/preset) byte cap. */
 export const HANDOVER_MAX_TARGET_BYTES = 256
 
-/** The board's notion of the deployment session-default permission (fail-safe default). */
+/**
+ * Fail-safe baseline for the confirmation gate: what it falls back to when the
+ * deployment pins no baseline of its own and the Host's default permission
+ * preset cannot be read. Every elevation above it stays gated.
+ */
 export const DEFAULT_SESSION_PERMISSION: TaskPermission = 'read-only'
 
 /** Permission elevation rank (higher = more authority). */
@@ -103,6 +107,17 @@ export function effectivePermission(task: Pick<TaskRecord, 'permission' | 'hando
 export function exceedsSessionDefault(permission: TaskPermission | undefined, sessionDefault: TaskPermission): boolean {
   if (permission === undefined) return false
   return (PERMISSION_RANK.get(permission) ?? -1) > (PERMISSION_RANK.get(sessionDefault) ?? -1)
+}
+
+/**
+ * Whether a session running at `holder` already carries `permission`: the
+ * permission is absent, or its rank does not exceed the holder's. A teammate
+ * inherits the Lead session's permission and cannot be narrowed below it, so a
+ * subtask's own pin is carried by a team run exactly when this holds, and a pin
+ * it does not carry would be silently dropped instead.
+ */
+export function permissionCarriedBy(holder: TaskPermission, permission: TaskPermission | undefined): boolean {
+  return !exceedsSessionDefault(permission, holder)
 }
 
 /**

@@ -6,6 +6,7 @@
  */
 import type { FreezeSnapshot } from './freeze-snapshot.ts'
 import type { TaskHandover, TaskHandoverInput } from './handover.ts'
+import { normalizeIntegrations, type TaskIntegrations } from './github/types.ts'
 
 /** Task lifecycle status, one per kanban column. */
 export type TaskStatus = 'backlog' | 'todo' | 'running' | 'done' | 'failed'
@@ -326,6 +327,11 @@ export interface TaskRecord {
    * absent means on-board.
    */
   archivedAt?: number
+  /**
+   * External integrations metadata (e.g. GitHub issue/PR sync);
+   * optional and additive so existing tasks require no ledger migration.
+   */
+  integrations?: TaskIntegrations
 }
 
 /**
@@ -398,6 +404,8 @@ export interface NewTaskInput {
    * ahead of the execution prompt; a bare name changes nothing at run time.
    */
   tags?: TaskTag[]
+  /** Optional external integrations metadata. */
+  integrations?: TaskIntegrations
 }
 
 /** The five kanban columns, in display order. */
@@ -495,6 +503,7 @@ export function freezeOf(
 /** Create a task from user input. */
 export function createTask(input: NewTaskInput, now: number, id: string): TaskRecord {
   const tags = normalizeTags(input.tags)
+  const integrations = normalizeIntegrations(input.integrations)
   return {
     id,
     title: input.title.trim(),
@@ -518,6 +527,7 @@ export function createTask(input: NewTaskInput, now: number, id: string): TaskRe
     ...(input.freeze === undefined ? {} : { freeze: freezeOf(input.freeze, now) }),
     ...(input.handover === undefined ? {} : { handover: { ...input.handover, bundledAt: now } }),
     ...(tags === undefined ? {} : { tags }),
+    ...(integrations === undefined ? {} : { integrations }),
   }
 }
 

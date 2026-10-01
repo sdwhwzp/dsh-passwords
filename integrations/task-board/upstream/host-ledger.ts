@@ -23,7 +23,8 @@ import { applySetSchedule, applyScheduleNextRun } from './core/use-cases/task-sc
 import { applySetParent } from './core/use-cases/task-parent.ts'
 import { applyUpdateTask, canEditTaskContent, hasContentPatch } from './core/use-cases/task-update.ts'
 import { TASK_BOARD_LEGACY_SCHEMA_VERSION, TASK_BOARD_OLDER_SCHEMA_VERSION, TASK_BOARD_SCHEMA_VERSION, type TaskBoardAction, type TaskBoardSchedulerSnapshot } from './protocol.ts'
-import { DEFAULT_SESSION_PERMISSION, requiresPermissionConfirmation, type TaskPermission } from './core/handover.ts'
+import { DEFAULT_SESSION_PERMISSION, effectivePermission, permissionCarriedBy, requiresPermissionConfirmation, type TaskPermission } from './core/handover.ts'
+import type { GitHubTaskMetadata } from './core/github/types.ts'
 
 interface PersistedScheduler extends TaskBoardSchedulerSnapshot {
   importedSources?: string[]
@@ -60,7 +61,7 @@ function bindingRefusalMessage(
   surface: 'run' | 'schedule',
 ): string {
   if (refusal.kind === 'subtask-pin') {
-    return `team run cannot honor the permission binding of subtask "${refusal.title}": a teammate runs inside the Lead session; clear that card's permission or run the tree without Agent Team`
+    return `team run cannot honor the permission binding of subtask "${refusal.title}": a teammate runs inside the Lead session and inherits its permission, which that pin exceeds; clear the card's permission or run the tree without Agent Team`
   }
   if (surface === 'schedule') return `task "${refusal.title}" has an unconfirmed above-default permission`
   if (refusal.kind === 'root') {
@@ -417,8 +418,18 @@ export class HostTaskLedger {
   /** Small sidecar for the 30 s scheduler heartbeat (lastTickAt only). */
   readonly schedulerFile: string
 
-  /** Session-default permission the confirmation gate compares against. */
-  readonly sessionDefaultPermission: TaskPermission
+  /** Resolves the baseline the confirmation gate compares a binding against. */
+  private readonly sessionDefault: () => TaskPermission
+
+  /**
+   * Session-default permission the confirmation gate compares against. Read
+   * through the resolver on every use, so a baseline that follows the Host's
+   * own default preset tracks a Settings change made while the board runs.
+   */
+  get sessionDefaultPermission(): TaskPermission {
+    return this.sessionDefault()
+  }
+
   /**
    * Deployment subtask depth limit (1..3): the lineage gate every write obeys.
    * The settings card edits it live, so {@link setMaxSubtaskDepth} mutates it
@@ -426,8 +437,10 @@ export class HostTaskLedger {
    */
   private depthLimit: number
 
-  constructor(dir: string = join(dshHome(), 'task-board'), private readonly now: () => number = Date.now, options: { sessionDefaultPermission?: TaskPermission; maxSubtaskDepth?: number } = {}) {
-    this.sessionDefaultPermission = options.sessionDefaultPermission ?? DEFAULT_SESSION_PERMISSION
+  constructor(dir: string = join(dshHome(), 'task-board'), private readonly now: () => number = Date.now, options: { sessionDefaultPermission?: TaskPermission | (() => TaskPermission); maxSubtaskDepth?: number } = {}) {
+    // Resolved before the load/repair passes below: they can evaluate the gate.
+    const baseline = options.sessionDefaultPermission
+    this.sessionDefault = typeof baseline === 'function' ? baseline : () => baseline ?? DEFAULT_SESSION_PERMISSION
     this.depthLimit = normalizeSubtaskDepth(options.maxSubtaskDepth ?? DEFAULT_SUBTASK_DEPTH)
     mkdirSync(dir, { recursive: true })
     this.file = join(dir, 'ledger-v2.json')
@@ -752,6 +765,61 @@ export class HostTaskLedger {
     this.commit()
   }
 
+  allTasks(): readonly TaskRecord[] {
+    return this.document.tasks
+  }
+
+  getTask(id: string): TaskRecord | undefined {
+    return this.document.tasks.find(item => item.id === id)
+  }
+
+  findTaskByGitHubIdentity(owner: string, repository: string, issueNumber: number): TaskRecord | undefined {
+    const o = owner.toLowerCase()
+    const r = repository.toLowerCase()
+    return this.document.tasks.find(task => {
+      const gh = task.integrations?.github
+      return gh !== undefined
+        && gh.owner.toLowerCase() === o
+        && gh.repository.toLowerCase() === r
+        && gh.issueNumber === issueNumber
+    })
+  }
+
+  updateTaskIntegrations(taskId: string, patch: Partial<GitHubTaskMetadata>): TaskRecord | undefined {
+    const now = this.now()
+    let updated: TaskRecord | undefined
+    this.document.tasks = this.document.tasks.map(item => {
+      if (item.id !== taskId) return item
+      const existingGh = item.integrations?.github
+      if (existingGh === undefined) return item
+      const mergedGh: GitHubTaskMetadata = {
+        ...existingGh,
+        ...patch,
+      }
+      updated = {
+        ...item,
+        updatedAt: now,
+        integrations: {
+          ...item.integrations,
+          github: mergedGh,
+        },
+      }
+      return updated
+    })
+    if (updated !== undefined) this.commit()
+    return updated
+  }
+
+  saveTaskRecord(task: TaskRecord): void {
+    const exists = this.document.tasks.some(item => item.id === task.id)
+    if (exists) {
+      this.document.tasks = this.document.tasks.map(item => item.id === task.id ? task : item)
+    } else {
+      this.document.tasks = [...this.document.tasks, task]
+    }
+    this.commit()
+  }
+
   private apply(action: TaskBoardAction, initiator?: string, principal?: TaskBoardPrincipal): { state: LedgerState; runs?: OpenedRun[] } {
     const now = this.now()
     const taskId = action.kind === 'import' ? undefined : action.kind === 'create' ? action.id : action.taskId
@@ -944,10 +1012,12 @@ export class HostTaskLedger {
    *
    * A plain cascade launches one session per participant, so every participant
    * carries its own resolved binding and each one gates the run. A team run
-   * launches only the Lead session: the Lead's binding gates it, while a
-   * subtask's OWN above-default pin cannot be applied to a teammate and is
-   * refused instead of being silently dropped (an inherited binding is the
-   * Lead's own and stays allowed once the Lead is confirmed).
+   * launches only the Lead session: the Lead's binding gates it, and a
+   * teammate inherits that session's permission, so a subtask's OWN pin is
+   * refused exactly when the Lead session does not already carry it — the
+   * teammate could never be given that authority, and dropping the pin
+   * silently would misreport the work (an inherited binding is the Lead's own
+   * and stays allowed once the Lead is confirmed).
    * @param root - the task being run.
    * @returns the first refusal, or undefined when the run may start.
    */
@@ -958,12 +1028,17 @@ export class HostTaskLedger {
       if (lead !== undefined && requiresPermissionConfirmation(lead, this.sessionDefaultPermission)) {
         return { kind: 'root', title: lead.title }
       }
-      // The raw record carries the subtask's OWN binding: the resolved
-      // participant above already folded the inherited one into its permission.
+      // The Lead session runs at the Lead's own binding, or at the deployment
+      // default when it pins none; a teammate inherits that permission and
+      // cannot be narrowed below it, so it carries a subtask pin when it is
+      // already at least as wide. The raw record carries the subtask's OWN
+      // binding: the resolved participant above already folded an inherited one
+      // into its permission.
+      const leadPermission = effectivePermission(lead ?? root) ?? this.sessionDefaultPermission
       const pinned = participants.find(participant => {
         if (participant.id === root.id) return false
         const raw = this.document.tasks.find(task => task.id === participant.id)
-        return raw !== undefined && requiresPermissionConfirmation(raw, this.sessionDefaultPermission)
+        return raw !== undefined && !permissionCarriedBy(leadPermission, effectivePermission(raw))
       })
       return pinned === undefined ? undefined : { kind: 'subtask-pin', title: pinned.title }
     }

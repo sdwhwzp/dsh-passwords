@@ -6,6 +6,10 @@ import { HostExecutionRunner, SessionLaunchError, promptText, type SessionComman
 import { teammateName } from './core/subtask.ts'
 import { PowerInhibitor } from './power-inhibitor.ts'
 import { TASK_BOARD_SCHEMA_VERSION, type TaskBoardAction, type TaskBoardEventPayload, type TaskBoardSnapshot } from './protocol.ts'
+import { GitHubSyncService } from './host/github/service.ts'
+import { GitHubApiClient } from './host/github/client.ts'
+import type { GitHubRepoConfig } from './core/github/types.ts'
+import type { ExecutionOutcome } from './core/tasks.ts'
 import type { TaskPermission } from './core/handover.ts'
 import { principalKey, type TaskBoardAccounts, type TaskBoardPrincipal } from './host-accounts.ts'
 
@@ -136,6 +140,16 @@ export class TaskBoardHostService {
   private readonly timers: HostTimerFace
   private lastPowerJson = ''
   private readonly now: () => number
+  private githubService?: GitHubSyncService
+
+  /** Host-wide GitHub credentials are available only without account providers. */
+  get github(): GitHubSyncService | undefined {
+    if (this.accounts?.required()) {
+      this.githubService?.stop()
+      return undefined
+    }
+    return this.githubService
+  }
 
   constructor(gateway: TypertGateway, options: {
     ledger?: HostTaskLedger
@@ -143,11 +157,18 @@ export class TaskBoardHostService {
     now?: () => number
     commandDispatcher?: SessionCommandDispatcher
     workspaceRegistry?: TaskBoardWorkspaceRegistry
-    sessionDefaultPermission?: TaskPermission
+    /**
+     * Permission baseline of the confirmation gate: a fixed value, or a live
+     * resolver the board re-reads so a Host Settings change needs no remount.
+     */
+    sessionDefaultPermission?: TaskPermission | (() => TaskPermission)
     accounts?: TaskBoardAccounts
     maxSubtaskDepth?: number
     team?: TaskBoardTeamDispatcher
     timers?: HostTimerFace
+    github?: GitHubSyncService
+    githubClient?: GitHubApiClient
+    githubRepositories?: GitHubRepoConfig[]
   } = {}) {
     this.ledger = options.ledger ?? new HostTaskLedger(undefined, undefined, {
       sessionDefaultPermission: options.sessionDefaultPermission,
@@ -159,6 +180,18 @@ export class TaskBoardHostService {
     this.timers = options.timers ?? PROCESS_TIMERS
     this.power = options.power ?? new PowerInhibitor()
     this.now = options.now ?? Date.now
+    if (options.github !== undefined) {
+      this.githubService = options.github
+    } else if (options.githubRepositories !== undefined || options.githubClient !== undefined) {
+      this.githubService = new GitHubSyncService({
+        ledger: this.ledger,
+        assertAccess: () => this.accounts?.assert(undefined),
+        client: options.githubClient,
+        repositories: options.githubRepositories,
+        timers: this.timers,
+        now: this.now,
+      })
+    }
     installStreamErrorGuards()
     this.ledger.subscribe(() => {
       this.syncPowerReasons()
@@ -185,6 +218,7 @@ export class TaskBoardHostService {
     // schedule the Board should have served while running is then armed
     // normally by the timer below.
     this.recoverSchedule()
+    this.github?.start()
   }
 
   setConfiguration(active: boolean, preventIdleSleep: boolean): void {
@@ -203,7 +237,9 @@ export class TaskBoardHostService {
     if (resumed) {
       this.schedulePoll()
       this.recoverSchedule()
+      this.github?.start()
     } else if (!active) {
+      this.github?.stop()
       // A disabled board holds no timer: its schedules must not fire while the
       // master switch is off.
       this.clearScheduleTimer()
@@ -222,6 +258,7 @@ export class TaskBoardHostService {
       sessionDefaultPermission: this.ledger.sessionDefaultPermission,
       maxSubtaskDepth: this.ledger.maxSubtaskDepth,
       teamRunAvailable: this.team !== undefined,
+      ...(this.github === undefined ? {} : { github: this.github.snapshotSummary() }),
     }
   }
 
@@ -242,9 +279,21 @@ export class TaskBoardHostService {
     this.observerPrincipal = principal
   }
 
-  apply(requestId: string, action: TaskBoardAction, initiator?: string, principal?: TaskBoardPrincipal): TaskBoardSnapshot {
+  apply(requestId: string, action: Extract<TaskBoardAction, { kind: 'github-refresh' | 'github-create-pr' | 'github-link-pr' }>, initiator?: string, principal?: TaskBoardPrincipal): Promise<TaskBoardSnapshot>
+  apply(requestId: string, action: Exclude<TaskBoardAction, { kind: 'github-refresh' | 'github-create-pr' | 'github-link-pr' }>, initiator?: string, principal?: TaskBoardPrincipal): TaskBoardSnapshot
+  apply(requestId: string, action: TaskBoardAction, initiator?: string, principal?: TaskBoardPrincipal): TaskBoardSnapshot | Promise<TaskBoardSnapshot>
+  apply(requestId: string, action: TaskBoardAction, initiator?: string, principal?: TaskBoardPrincipal): TaskBoardSnapshot | Promise<TaskBoardSnapshot> {
     if (!this.active) throw new Error('task board is disabled')
     this.accounts?.assert(principal)
+    if (action.kind === 'github-refresh') {
+      return this.handleGitHubRefresh(action)
+    }
+    if (action.kind === 'github-create-pr') {
+      return this.handleGitHubCreatePr(action)
+    }
+    if (action.kind === 'github-link-pr') {
+      return this.handleGitHubLinkPr(action)
+    }
     // Fail closed before the ledger opens anything: a card opted into team
     // execution cannot run in a deployment that serves no Agent Teams service,
     // and silently degrading it to a plain cascade would misreport the work.
@@ -258,6 +307,11 @@ export class TaskBoardHostService {
     // nearest trigger; re-arm on schedule writes so a newly enabled schedule fires
     // at its own instant without waiting for the previous target to elapse.
     if (SCHEDULE_WRITE_ACTIONS.has(action.kind)) this.refreshSchedule()
+    if (action.kind === 'move') {
+      void this.github?.writeBackTaskStatus(action.taskId, action.status).catch(() => {})
+    } else if (action.kind === 'run' || action.kind === 'rerun') {
+      void this.github?.writeBackTaskStatus(action.taskId, 'running').catch(() => {})
+    }
     return {
       schemaVersion: TASK_BOARD_SCHEMA_VERSION,
       revision: result.state.revision,
@@ -269,6 +323,7 @@ export class TaskBoardHostService {
 
   dispose(): void {
     this.disposed = true
+    this.githubService?.dispose()
     this.clearScheduleTimer()
     this.pollTimer?.()
     this.pollTimer = undefined
@@ -310,7 +365,7 @@ export class TaskBoardHostService {
       if (error instanceof SessionLaunchError) {
         this.ledger.attachSession(opened.task.id, opened.execution.id, error.sessionId)
       }
-      this.ledger.settle(opened.task.id, opened.execution.id, 'failed', error instanceof Error ? error.message : String(error))
+      this.settleAndNotify(opened.task.id, opened.execution.id, 'failed', error instanceof Error ? error.message : String(error))
     }
   }
 
@@ -330,7 +385,7 @@ export class TaskBoardHostService {
   private async spawnTeammate(opened: OpenedRun, leadSessionId: string): Promise<void> {
     const team = this.team
     if (team === undefined) {
-      this.ledger.settle(opened.task.id, opened.execution.id, 'failed', 'Agent Teams is unavailable in this deployment')
+      this.settleAndNotify(opened.task.id, opened.execution.id, 'failed', 'Agent Teams is unavailable in this deployment')
       return
     }
     try {
@@ -342,12 +397,12 @@ export class TaskBoardHostService {
         prompt: promptText(opened.task),
       })
       if (member.sessionId === undefined || member.sessionId === '') {
-        this.ledger.settle(opened.task.id, opened.execution.id, 'failed', member.error ?? 'teammate provisioning failed')
+        this.settleAndNotify(opened.task.id, opened.execution.id, 'failed', member.error ?? 'teammate provisioning failed')
         return
       }
       this.ledger.attachSession(opened.task.id, opened.execution.id, member.sessionId)
     } catch (error) {
-      this.ledger.settle(opened.task.id, opened.execution.id, 'failed', error instanceof Error ? error.message : String(error))
+      this.settleAndNotify(opened.task.id, opened.execution.id, 'failed', error instanceof Error ? error.message : String(error))
     }
   }
 
@@ -412,7 +467,7 @@ export class TaskBoardHostService {
           continue
         }
         this.unreadablePolls.delete(execution.executionId)
-        this.ledger.settle(execution.taskId, execution.executionId, result.outcome, 'error' in result ? result.error : undefined)
+        this.settleAndNotify(execution.taskId, execution.executionId, result.outcome, 'error' in result ? result.error : undefined)
       } catch {
         // A transient inspection failure never settles a running execution.
       }
@@ -428,6 +483,48 @@ export class TaskBoardHostService {
    * ancestor of it — in the running column with no way out. The first poll of
    * each streak is logged, so the Host log names the session.
    */
+  private settleAndNotify(taskId: string, executionId: string, outcome: ExecutionOutcome, error?: string): void {
+    this.ledger.settle(taskId, executionId, outcome, error)
+    const task = this.ledger.getTask(taskId)
+    const execution = task?.executions.find(e => e.id === executionId)
+    if (task !== undefined && execution !== undefined && this.github !== undefined) {
+      void this.github.handleExecutionSettled(taskId, execution).catch(() => {})
+    }
+  }
+
+  private async handleGitHubRefresh(action: Extract<TaskBoardAction, { kind: 'github-refresh' }>): Promise<TaskBoardSnapshot> {
+    if (this.github === undefined) throw new Error('GitHub integration is not configured')
+    if (action.taskId !== undefined) {
+      const res = await this.github.syncTask(action.taskId)
+      if (!res.ok && res.error) throw new Error(res.error)
+    } else if (action.owner !== undefined && action.repository !== undefined) {
+      const res = await this.github.syncRepository(action.owner, action.repository)
+      if (res.errors.length > 0) throw new Error(res.errors.join('; '))
+    } else {
+      const res = await this.github.syncAll()
+      if (res.errors.length > 0) throw new Error(res.errors.join('; '))
+    }
+    return this.snapshot()
+  }
+
+  private async handleGitHubCreatePr(action: Extract<TaskBoardAction, { kind: 'github-create-pr' }>): Promise<TaskBoardSnapshot> {
+    if (this.github === undefined) throw new Error('GitHub integration is not configured')
+    await this.github.createPullRequest(action.taskId, {
+      headBranch: action.headBranch,
+      baseBranch: action.baseBranch,
+      title: action.title,
+      body: action.body,
+      draft: action.draft,
+    })
+    return this.snapshot()
+  }
+
+  private async handleGitHubLinkPr(action: Extract<TaskBoardAction, { kind: 'github-link-pr' }>): Promise<TaskBoardSnapshot> {
+    if (this.github === undefined) throw new Error('GitHub integration is not configured')
+    await this.github.linkPullRequest(action.taskId, action.pullRequestNumber)
+    return this.snapshot()
+  }
+
   private noteUnreadableInspection(execution: OpenExecutionReference, reason: string | undefined): void {
     const polls = (this.unreadablePolls.get(execution.executionId) ?? 0) + 1
     this.unreadablePolls.set(execution.executionId, polls)
@@ -438,7 +535,7 @@ export class TaskBoardHostService {
     }
     if (polls < UNREADABLE_SETTLE_POLLS) return
     this.unreadablePolls.delete(execution.executionId)
-    this.ledger.settle(
+    this.settleAndNotify(
       execution.taskId,
       execution.executionId,
       'failed',

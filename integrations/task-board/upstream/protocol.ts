@@ -4,6 +4,7 @@ import { parseLedger } from './core/store.ts'
 import { isValidTimeZone } from './core/schedule.ts'
 import { sanitizeFreezeSnapshot, type FreezeSnapshot } from './core/freeze-snapshot.ts'
 import { sanitizeHandover, type TaskHandoverInput } from './core/handover.ts'
+import { normalizeIntegrations } from './core/github/types.ts'
 
 /** Freeze payload carried by create/update actions after the gate (redacted in place). */
 type FreezePayload = FreezeSnapshot & { redacted?: boolean; frozenBy?: string }
@@ -53,6 +54,18 @@ export interface TaskBoardSnapshot {
    * into team execution (Team Lead session plus one teammate per subtask).
    */
   teamRunAvailable?: boolean
+  /** Non-sensitive GitHub integration status and configured repositories. */
+  github?: {
+    enabled: boolean
+    repositories: Array<{
+      owner: string
+      repository: string
+      inclusionLabel: string
+      prCreationEnabled: boolean
+      hasCredential: boolean
+    }>
+    hasCredential: boolean
+  }
 }
 
 /** SSE event frame: revision/scheduler/power only, never the task list. */
@@ -110,6 +123,9 @@ export type TaskBoardAction =
   | { kind: 'rerun'; taskId: string }
   | { kind: 'confirm-permission'; taskId: string }
   | { kind: 'set-parent'; taskId: string; parentId: string | null }
+  | { kind: 'github-refresh'; taskId?: string; owner?: string; repository?: string }
+  | { kind: 'github-create-pr'; taskId: string; headBranch: string; baseBranch?: string; title?: string; body?: string; draft?: boolean }
+  | { kind: 'github-link-pr'; taskId: string; pullRequestNumber: number }
 
 export interface TaskBoardActionEnvelope {
   requestId: string
@@ -154,6 +170,7 @@ function validImportedKnownFields(value: Record<string, unknown>): boolean {
   // must carry a well-formed list or none at all, so a hand-edited export
   // cannot smuggle a malformed tag past the gate.
   if (value.tags !== undefined && !isTaskTagList(value.tags)) return false
+  if (value.integrations !== undefined && normalizeIntegrations(value.integrations) === undefined) return false
   if (value.schedule !== undefined) {
     const schedule = record(value.schedule)
     if (schedule === undefined || typeof schedule.enabled !== 'boolean' || typeof schedule.cron !== 'string') return false
@@ -222,6 +239,7 @@ function importedTask(value: unknown): TaskRecord | undefined {
     ...(task.freeze === undefined ? {} : { freeze: task.freeze }),
     ...(task.handover === undefined ? {} : { handover: task.handover }),
     ...(task.tags === undefined ? {} : { tags: task.tags }),
+    ...(task.integrations === undefined ? {} : { integrations: task.integrations }),
     // 安全门（对抗场景 b）：import 不是人工确认动作，确认戳一律剥除——
     // 高于会话默认权限的绑定经 import 进入后必须重新武装 confirm-permission 门。
   }
@@ -255,7 +273,7 @@ function handoverPayload(value: unknown): TaskHandoverInput | undefined {
 
 function createInput(value: unknown): value is NewTaskInput {
   const input = record(value)
-  if (input === undefined || !exactKeys(input, ['title', 'description', 'prompt', 'parentId', 'workspaceId', 'mode', 'permission', 'schedule', 'freeze', 'handover', 'model', 'reuseSession', 'teamRun', 'goalRun', 'tags'])) return false
+  if (input === undefined || !exactKeys(input, ['title', 'description', 'prompt', 'parentId', 'workspaceId', 'mode', 'permission', 'schedule', 'freeze', 'handover', 'model', 'reuseSession', 'teamRun', 'goalRun', 'tags', 'integrations'])) return false
   if (input.parentId !== undefined && (typeof input.parentId !== 'string' || input.parentId.trim() === '')) return false
   if (typeof input.title !== 'string' || typeof input.description !== 'string' || typeof input.prompt !== 'string') return false
   if (!optionalString(input.workspaceId) || !optionalString(input.mode) || !optionalString(input.model)) return false
@@ -264,6 +282,7 @@ function createInput(value: unknown): value is NewTaskInput {
   if (input.goalRun !== undefined && typeof input.goalRun !== 'boolean') return false
   if (input.permission !== undefined && !isTaskPermission(input.permission)) return false
   if (input.tags !== undefined && !isTaskTagList(input.tags)) return false
+  if (input.integrations !== undefined && normalizeIntegrations(input.integrations) === undefined) return false
   if (input.freeze !== undefined && freezePayload(input.freeze) === undefined) return false
   if (input.handover !== undefined && handoverPayload(input.handover) === undefined) return false
   if (input.schedule !== undefined) {
@@ -378,6 +397,27 @@ function parseEnvelopeAction(value: unknown): TaskBoardActionEnvelope | undefine
       return taskId !== undefined && isTaskStatus(action.status)
         ? { requestId: envelope.requestId, action: action as unknown as Extract<TaskBoardAction, { kind: 'move' }> }
         : undefined
+    case 'github-refresh': {
+      if (!exactKeys(action, ['kind', 'taskId', 'owner', 'repository'])) return undefined
+      if (action.taskId !== undefined && typeof action.taskId !== 'string') return undefined
+      if (action.owner !== undefined && typeof action.owner !== 'string') return undefined
+      if (action.repository !== undefined && typeof action.repository !== 'string') return undefined
+      return { requestId: envelope.requestId, action: action as TaskBoardAction }
+    }
+    case 'github-create-pr': {
+      if (!exactKeys(action, ['kind', 'taskId', 'headBranch', 'baseBranch', 'title', 'body', 'draft'])) return undefined
+      if (taskId === undefined || typeof action.headBranch !== 'string' || action.headBranch.trim() === '') return undefined
+      if (action.baseBranch !== undefined && typeof action.baseBranch !== 'string') return undefined
+      if (action.title !== undefined && typeof action.title !== 'string') return undefined
+      if (action.body !== undefined && typeof action.body !== 'string') return undefined
+      if (action.draft !== undefined && typeof action.draft !== 'boolean') return undefined
+      return { requestId: envelope.requestId, action: action as TaskBoardAction }
+    }
+    case 'github-link-pr': {
+      if (!exactKeys(action, ['kind', 'taskId', 'pullRequestNumber'])) return undefined
+      if (taskId === undefined || typeof action.pullRequestNumber !== 'number' || !Number.isInteger(action.pullRequestNumber) || action.pullRequestNumber <= 0) return undefined
+      return { requestId: envelope.requestId, action: action as TaskBoardAction }
+    }
     case 'confirm-permission':
     case 'delete':
     case 'archive':

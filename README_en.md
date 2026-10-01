@@ -609,3 +609,5 @@ Session ownership validation accepts legacy projections and current `cached`/`se
 This fork accepts Harness `0.2.0-rc.2` in addition to its existing runtime peer ranges. Deploy all Harness peers from one runtime release; account authorization, settings persistence, and browser/desktop behavior remain owned by the existing integrations.
 
 Manual task-board column changes support backlog, todo, running, done and failed. They do not launch a session or create an execution record. Cards with an open execution cannot be moved; each account can move only its own cards.
+
+Per-account boards do not inherit Host GitHub credentials or repositories. GitHub refresh and PR actions return a not-configured error; existing private cards remain available.
