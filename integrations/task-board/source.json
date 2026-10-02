@@ -1,9 +1,9 @@
 {
   "repository": "https://github.com/sdwhwzp/dsh-web",
   "branch": "dev",
-  "commit": "4bcb448ce699a04fd2f1b9ac99c5b9d19c26a83e",
+  "commit": "36a110632c66228a7783a70b25dfb2747c2a581b",
   "package": "@linxin666/dsh-client-ui-task-board",
-  "version": "0.4.4-dsh.20261001.2",
+  "version": "0.4.4-dsh.20261002.1",
   "files": {
     "core/extension.ts": "5914d0316fe6ecac4fab3e2d09b32874a199c659",
     "core/freeze-snapshot.ts": "7bd4eb458172e320c98adb7767dba91050e58321",
@@ -29,7 +29,7 @@
     "host-routes.ts": "9f76ceb2668919754d9c94b5a320176793ae5553",
     "host-runner.ts": "7bac31b1c8c209abd4720f0c2533827e4b9fe3c7",
     "host-service.ts": "39e6710bba59450215c960e23dfdc20902ed5f88",
-    "host/extension-registry.ts": "573be385c0bcf5ec71e24d5aa654fa3781fa6a14",
+    "host/extension-registry.ts": "8ea2c68763218d04266c1ec994a824a28d83a946",
     "host/verification-gate.ts": "57c269eb3cff32b1a421dd2b8d72674478248085",
     "host/verification-runner.ts": "fc200dde62f0e28c0590060f472e3cb917d92fdb",
     "host/workspace-evidence.ts": "5d51fd9ae9c1b635f26cd4df4d5ce65063f23b44",

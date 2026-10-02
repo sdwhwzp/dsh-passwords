@@ -94,6 +94,22 @@ const DEFAULT_LOGGER: TaskBoardExtensionLogger = {
   },
 }
 
+/**
+ * Whether a tool registration was refused because the deployment's fiber is
+ * already unloading, rather than because the registry rejected the definition.
+ * cordis reports that refusal as `INACTIVE_EFFECT` on the thrown error, and it
+ * is the expected answer to any registration a shutdown path makes too late: the
+ * teardown releases those tools moments later, so a refusal reports nothing.
+ * Detected by the documented error code, which keeps the board free of any
+ * runtime dependency on the host framework.
+ *
+ * @param error - the refusal the tool registry raised.
+ * @returns true when the host context is already disposing.
+ */
+function isInactiveContext(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'INACTIVE_EFFECT'
+}
+
 function emptySubscriptions(): Record<keyof TaskBoardEventFace, Set<RegistryEventCallback>> {
   return {
     onStatusChanged: new Set(),
@@ -334,8 +350,12 @@ export class TaskBoardExtensionRegistry {
           return await tool.definition.execute(args, execution)
         } })
       } catch (error) {
-        this.logger.error(`[dsh-task-board] extension "${entry.extension.id}" tool "${tool.definition.name}" registration failed`, error)
         tool.dispose = undefined
+        // A refusal from a host that is already unloading is the expected answer
+        // to a registration the teardown made too late, not a fault of the tool
+        // definition; only a real refusal of the definition is reported.
+        if (isInactiveContext(error)) return
+        this.logger.error(`[dsh-task-board] extension "${entry.extension.id}" tool "${tool.definition.name}" registration failed`, error)
       }
     }
   }

@@ -1,6 +1,6 @@
 # Task board Host engine
 
-Pinned from [sdwhwzp/dsh-web](https://github.com/sdwhwzp/dsh-web) commit `4bcb448ce699a04fd2f1b9ac99c5b9d19c26a83e`, package `@linxin666/dsh-client-ui-task-board` version `0.4.4-dsh.20261001.2` (Apache-2.0). [source.json](source.json) records the 32 files in the Host service, ledger, routes, parser and acceptance gate dependency closure with their Git blob hashes. Files under `upstream/` are unchanged copies of that commit.
+Pinned from [sdwhwzp/dsh-web](https://github.com/sdwhwzp/dsh-web) commit `36a110632c66228a7783a70b25dfb2747c2a581b`, package `@linxin666/dsh-client-ui-task-board` version `0.4.4-dsh.20261002.1` (Apache-2.0). [source.json](source.json) records the 32 files in the Host service, ledger, routes, parser and acceptance gate dependency closure with their Git blob hashes. Files under `upstream/` are unchanged copies of that commit.
 
 The tenant adapter authenticates requests, isolates ledgers by account and sends every execution RPC through the passwords gateway. Parent-child links, workspace IDs, tags and session-reuse preferences survive ledger reloads; the matching dsh-web client uses those workspace IDs for project partitions. Parent links can reference only tasks in the same account ledger; absent parents and cycles are rejected. Workspace creation and session reuse retain the gateway's account permissions and session ownership checks.
 
@@ -10,7 +10,7 @@ The parser requires `spendAccounting.recordUsage`, records the last usage counte
 
 Synchronizing dsh-web task-board changes also requires refreshing this Host dependency closure and its source manifest before packaging dsh-passwords; both provide the same browser action protocol.
 
-Rebuild with `node scripts/build-task-board.mjs` after compiling `src/tenant-task-board.ts`. Run `node --import tsx --test test/tenant-task-board-parse.test.ts test/tenant-workspace-access.test.ts` for account isolation, project persistence, model admission, quotas, usage recording, provider failures and cancellation.
+Rebuild with `node scripts/build-task-board.mjs` after compiling `src/tenant-task-board.ts`. Run `node --import tsx --test test/tenant-task-board-parse.test.ts test/tenant-workspace-access.test.ts test/task-board-engine-lifecycle.test.ts` for account isolation, project persistence, model admission, quotas, usage recording, provider failures and cancellation.
 
 Each account arms one deadline timer for its earliest cron occurrence through the Host timer service when available. Creating or importing an enabled schedule arms it immediately; rescheduling, archiving, deletion and disposal cancel obsolete timers. Startup and resume skip missed occurrences. Ledger schema 2/3 migrates to schema 4 in the same per-account storage locations. Schedules without a zone receive the Host time zone; explicit IANA zones persist and determine future cron occurrences. Migration retains task records, execution history, workspace and parent links, imported-source records and account bindings. Invalid legacy task rows leave the original file intact and refuse loading.
 
@@ -23,3 +23,5 @@ Manual column changes cover backlog, todo, running, done and failed without crea
 Per-account Hosts receive no shared GitHub client or repository configuration. GitHub synchronization and pull-request actions therefore fail as unknown extensions, while the shared action protocol and existing private cards remain readable.
 
 The account adapter reads acceptance fields from the live `web-ui-task-board` / `task-board` settings descriptor. A programmatic mount without that form leaves acceptance disabled. Each judge model call repeats catalog, account and quota admission and records usage under `task-board-verification:<uuid>`. The pre-execution gate verifies both the durable session owner and principal access before reading the execution evidence; persisted verdicts survive reload. Workspace candidates and their creator-session IDs are filtered by principal access before card creation and execution.
+
+The bundled Host stops its current registration pass when the framework rejects a late tool registration with `INACTIVE_EFFECT` during unload. Other registration failures remain visible, and disposal releases registered tools and extension handles.
