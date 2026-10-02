@@ -2,7 +2,7 @@
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver';
 import type { PreToolDecision } from '@deepseek-ai/dsh-tools';
 import type { Workspace } from '@deepseek-ai/dsh-workspace/types';
-import type { LlmRuntime } from '@deepseek-ai/dsh-llm';
+import type { GenerateOptions, LlmRuntime, StreamChunk } from '@deepseek-ai/dsh-llm';
 export interface BoardGatewayRequest { namespace: string; method: string; args: Record<string, unknown>; signal?: AbortSignal }
 export interface BoardGateway {
   invoke(request: BoardGatewayRequest): Promise<unknown>;
@@ -36,6 +36,18 @@ export class TaskParseError extends Error {
 }
 export function splitModelRoute(qualified: string | undefined): { provider: string; model: string } | undefined;
 export function parseTaskDraft(llm: Pick<LlmRuntime, 'stream'>, request: BoardParseRequest, signal?: AbortSignal): Promise<BoardParseDraft>;
+/**
+ * Opens the Host model stream inside the tenant admission and usage wrapper.
+ * @param llm Host runtime whose prepared dispatch owns provider registration.
+ * @param config Resolved route and sampling controls.
+ * @param request Messages, system prompt and caller cancellation.
+ * @returns Model chunks including the registered Host stream listeners.
+ */
+export function openOneShotStream(
+  llm: LlmRuntime,
+  config: Pick<GenerateOptions, 'provider' | 'model' | 'reasoningEffort' | 'temperature' | 'maxTokens'>,
+  request: Pick<GenerateOptions, 'messages' | 'signal' | 'system'>,
+): Promise<AsyncIterable<StreamChunk>>;
 export function makeTaskBoardRoutes(service: TaskBoardHostService, access?: {
   assertPrincipal?: () => void;
 }, options?: {

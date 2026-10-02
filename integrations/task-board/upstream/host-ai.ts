@@ -9,7 +9,8 @@
  * stripped, the first JSON object wins, and an unusable reply falls back to
  * the user's own words instead of an empty form.
  */
-import { createUserMessage, type GenerateOptions, type LlmRuntime } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, type LlmRuntime } from '@deepseek-ai/dsh-llm'
+import { openOneShotStream } from './host/llm-dispatch.ts'
 import type { TaskBoardParseDraft, TaskBoardParseRequest } from './protocol.ts'
 
 /** How long one parse may take before the Host gives up on the model. */
@@ -128,15 +129,20 @@ export async function parseTaskDraft(
   const abortFromCaller = (): void => { timeout.abort() }
   signal?.addEventListener('abort', abortFromCaller, { once: true })
   try {
-    const options: GenerateOptions = {
-      provider: route.provider,
-      model: route.model,
-      system: SYSTEM_PROMPT,
-      messages: [createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } })],
-      signal: timeout.signal,
-    }
+    // Same registration-bound dispatch as the acceptance judge: the public
+    // `llm.stream()` is a mutable instance property a third-party provider
+    // plugin may replace with its `llm/stream` listener signature.
+    const stream = await openOneShotStream(
+      llm,
+      { provider: route.provider, model: route.model },
+      {
+        system: SYSTEM_PROMPT,
+        messages: [createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } })],
+        signal: timeout.signal,
+      },
+    )
     let reply = ''
-    for await (const chunk of llm.stream(options)) {
+    for await (const chunk of stream) {
       if (chunk.type === 'text-delta') reply += chunk.text
       if (chunk.type === 'finish' && (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted')) {
         throw new TaskParseError(chunk.reason.kind === 'aborted' ? 'timeout' : 'model-error', chunk.reason.failure.message)

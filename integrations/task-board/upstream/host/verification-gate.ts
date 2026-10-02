@@ -27,6 +27,7 @@ import {
   MAX_QUALITY_ATTEMPTS,
   exceptionAttempts,
   hasExceptionBudget,
+  finalFailureReason,
   hasQualityBudget,
   passedAttempt,
   qualityAttempts,
@@ -251,14 +252,7 @@ export function createGoalVerificationGate(deps: GoalVerificationGateDeps): (exe
     }
     const used = qualityAttempts(spend).length
     if (used >= MAX_QUALITY_ATTEMPTS) {
-      const failing = attempt.criteria.filter(criterion => !criterion.passed).map(criterion => criterion.name + ' ' + (criterion.score * 100).toFixed(1) + '%').join('、')
-      return finalize(
-        task.id,
-        execution.id,
-        spend,
-        'goal 验收第 ' + used + ' 次仍未通过（总分 ' + (attempt.score * 100).toFixed(1) + '%，阈值 ' + (verification.contract.threshold * 100).toFixed(0) + '%；未达标判据：' + (failing === '' ? '总分或基线比较未通过' : failing) + '），本次 execution 判失败。',
-        agent,
-      )
+      return finalize(task.id, execution.id, spend, finalFailureReason(attempt, used, verification.contract.threshold), agent)
     }
     write(task.id, execution.id, spend)
     return deny(bounded(qualityFeedback(attempt, MAX_QUALITY_ATTEMPTS - used)), 'TASK_BOARD_VERIFICATION_FAILED', attempt.findings.join('\n'))

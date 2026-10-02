@@ -6,7 +6,8 @@ import os from 'node:os';
 import path from 'node:path';
 import http, { type RequestListener } from 'node:http';
 import jwt from 'jsonwebtoken';
-import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm';
+import { Context } from '@deepseek-ai/cordis';
+import LlmRuntime, { LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm';
 import { registerTenantTaskBoard } from '../dist/tenant-task-board.js';
 import { signedPrincipalHeaders } from '../src/principal.js';
 import type { PreToolDecision } from '@deepseek-ai/dsh-tools';
@@ -44,6 +45,7 @@ async function fixture(t: TestContext, timer?: HostTimerFace, seed?: (directory:
     usage: null as null | { active_seconds: number; hourly_window_start: string; hourly_tokens: number },
     catalog: (id: number): unknown => ({ groups: [{ id: 'test', models: [{ id: `model-${id}` }] }], failures: [] }),
     reconcile: async () => {},
+    runtime: undefined as LlmRuntime | undefined,
     stream: async function* (_options: GenerateOptions): AsyncIterable<StreamChunk> {
       yield { type: 'text-delta', index: 0, text: '{"title":"Parsed task","description":"Details","prompt":"Execute it"}' };
       yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 3 } };
@@ -92,7 +94,7 @@ async function fixture(t: TestContext, timer?: HostTimerFace, seed?: (directory:
       }) };
       if (name === 'goals') return { get: () => ({ id: 'goal', revision: 1, objective: 'Deliver a tested implementation' }), block: () => {} };
       if (name === 'timer') return timer;
-      if (name === 'llm') return { stream(options: GenerateOptions) { calls.push(options); return state.stream(options); } };
+      if (name === 'llm') return state.runtime ?? { stream(options: GenerateOptions) { calls.push(options); return state.stream(options); } };
       if (name === 'spendAccounting') return {
         reconcile: () => state.reconcile(),
         budgetStatus: () => ({ exhausted: state.budgetExhausted, usedMicros: 100 }),
@@ -127,6 +129,26 @@ async function fixture(t: TestContext, timer?: HostTimerFace, seed?: (directory:
     register();
   };
   return { hooks, state, users, calls, catalogCalls, taskCalls, billed, spend, parse, origin, headers, reload, directory };
+}
+
+/** Uses the installed Host runtime while making its mutable convenience method unusable. */
+async function preparedRuntime(t: TestContext, f: Awaited<ReturnType<typeof fixture>>) {
+  const ctx = new Context();
+  const fork = ctx.plugin(LlmRuntime);
+  t.after(() => fork.dispose());
+  await fork;
+  class Adapter extends LlmAdapter {
+    stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+      f.calls.push(options);
+      return f.state.stream(options);
+    }
+  }
+  t.after(ctx.llm.registerAdapter(['test'], new Adapter()));
+  let intercepted = 0;
+  t.after(ctx.on('llm/stream', async function* (_options, next) { intercepted += 1; yield* next(); }));
+  ctx.llm.stream = () => { throw new Error('public llm.stream was replaced by a provider plugin'); };
+  f.state.runtime = ctx.llm;
+  return { intercepted: () => intercepted };
 }
 
 /** Advance only board deadlines; HTTP sockets and gateway deadlines keep real timers. */
@@ -191,6 +213,24 @@ test('missing, hidden and customer-denied model routes never call an ambient mod
   await malformed.body?.cancel();
   assert.equal(f.calls.length, 0);
   assert.deepEqual(f.billed, []);
+});
+
+test('task parsing uses prepared Host dispatch while preserving account admission and usage', async t => {
+  const f = await fixture(t);
+  const runtime = await preparedRuntime(t, f);
+  const response = await f.parse(2, { text: 'Private account task', model: 'test/model-2' });
+  assert.equal(response.status, 200, await response.clone().text());
+  assert.equal((await response.json()).draft.title, 'Parsed task');
+  assert.equal(runtime.intercepted(), 1);
+  assert.equal(f.calls[0].messages[0].source?.kind, 'user');
+  assert.equal(f.calls[0].model, 'model-2');
+  assert.deepEqual(f.billed, [{ id: 2, tokens: 18 }]);
+  assert.equal(f.spend[0].principal.id, '2');
+  const denied = await f.parse(3, { text: 'Other account', model: 'test/model-2' });
+  assert.equal(denied.status, 503);
+  await denied.body?.cancel();
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.spend.length, 1);
 });
 
 test('revocation during model discovery or budget admission prevents model execution', async t => {
@@ -706,6 +746,18 @@ test('goal acceptance uses the owning account catalog and billing, persists verd
   assert.equal(f.calls.length, count);
   const other = await (await fetch(f.origin + '/api/task-board/state', { headers: f.headers(3) })).json();
   assert.deepEqual(other.tasks, []);
+});
+
+test('goal acceptance uses prepared Host dispatch and bills only its owning account', async t => {
+  const f = await fixture(t, boardTimers().timer);
+  const runtime = await preparedRuntime(t, f);
+  const id = await goalExecution(f, 2);
+  f.state.stream = passingJudge;
+  assert.deepEqual(await f.hooks.get('tools/pre-execute')!(completion(id), () => undefined), { kind: 'allow' });
+  assert.ok(f.calls.length > 1);
+  assert.equal(runtime.intercepted(), f.calls.length);
+  assert.equal(f.spend.length, f.calls.length);
+  assert.ok(f.spend.every(row => row.principal.id === '2' && row.call.model === 'model-2' && String(row.call.sessionId).startsWith('task-board-verification:')));
 });
 
 test('completion refuses a foreign session owner and revoked session access before reading evidence', async t => {

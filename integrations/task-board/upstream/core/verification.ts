@@ -648,6 +648,35 @@ export function qualityFeedback(attempt: VerificationAttempt, remaining: number)
   return lines.join('\n')
 }
 
+/**
+ * The reason one exhausted acceptance cycle records as the execution's final
+ * failure. Unlike {@link qualityFeedback} — which the fixing agent reads while
+ * budget remains — this reason is also persisted on the ledger, echoed on every
+ * later completion attempt and shown on the card, so it carries the full
+ * picture: the scores, the baseline comparison, every failing criterion and the
+ * judge's locatable findings, so a later agent (or the user) can act on WHAT to
+ * improve, not only on how badly the attempt scored.
+ * @param attempt - the failed quality attempt that spent the last budget.
+ * @param used - quality attempts spent by the cycle.
+ * @param threshold - the contract threshold the work was judged against.
+ * @returns the model- and user-facing failure reason.
+ */
+export function finalFailureReason(attempt: VerificationAttempt, used: number, threshold: number): string {
+  const failed = attempt.criteria.filter(criterion => !criterion.passed)
+  const lines = [
+    'goal 验收第 ' + used + ' 次仍未通过（总分 ' + percent(attempt.score) + '，阈值 ' + percent(threshold) + '，空工作基线 ' + percent(attempt.baseline) +
+      '；未达标判据：' + (failed.length === 0 ? '总分或基线比较未通过' : failed.map(criterion => criterion.name + ' ' + percent(criterion.score)).join('、')) +
+      '），本次 execution 判失败。',
+  ]
+  if (attempt.findings.length > 0) {
+    lines.push('验收报告记录的可定位问题：')
+    for (const finding of attempt.findings) lines.push('- ' + finding)
+  } else {
+    lines.push('本次验收没有记录可定位的问题；请对照任务要求与验收面板中的判据得分核对证据中的真实输出。')
+  }
+  return lines.join('\n')
+}
+
 /** `0.42` style percentage. */
 export function percent(value: number): string {
   return (value * 100).toFixed(1) + '%'

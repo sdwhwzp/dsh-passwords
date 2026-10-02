@@ -11,7 +11,7 @@ import type { LlmRuntime, TokenUsage } from '@deepseek-ai/dsh-llm';
 import type { Database } from './db.js';
 import type { PlatformConfig } from './config.js';
 import { verifyPrincipalHeaders, type AuthenticatedPrincipal } from './principal.js';
-import { TaskBoardHostService, HostTaskLedger, makeTaskBoardRoutes, parseTaskDraft, splitModelRoute, TaskParseError, createGoalVerificationGate, normalizeCatalog, type BoardGoalFace, type BoardVerificationSettings, type BoardGateExecution, type BoardGatewayRequest, type BoardParseRequest, type HostTimerFace } from './task-board-engine.js';
+import { TaskBoardHostService, HostTaskLedger, makeTaskBoardRoutes, parseTaskDraft, openOneShotStream, splitModelRoute, TaskParseError, createGoalVerificationGate, normalizeCatalog, type BoardGoalFace, type BoardVerificationSettings, type BoardGateExecution, type BoardGatewayRequest, type BoardParseRequest, type HostTimerFace } from './task-board-engine.js';
 import { customerModelAllowed } from './model-policy.js';
 import { todayLocal } from './permissions.js';
 import { dailyTimeQuotaError, hourlyTokenQuotaError, monthlySpendQuotaError, spendCheckUnavailableError } from './quota-notice.js';
@@ -192,7 +192,7 @@ export function registerTenantTaskBoard(ctx: Context, db: Database, config: Plat
       const startedAt = Date.now();
       let usage: TokenUsage | undefined;
       try {
-        for await (const chunk of llm.stream(options)) {
+        for await (const chunk of await openOneShotStream(llm, options, options)) {
           if (chunk.type === 'usage') usage = chunk.usage;
           validate(principal);
           options.signal?.throwIfAborted();

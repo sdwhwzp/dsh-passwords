@@ -8,6 +8,7 @@
  * the installed dsh-llm-verifier 0.8.4 default final acceptance.
  */
 import { createUserMessage, type LlmRuntime } from '@deepseek-ai/dsh-llm'
+import { openOneShotStream } from './llm-dispatch.ts'
 import { createHash } from 'node:crypto'
 import {
   CODING_CRITERIA,
@@ -297,19 +298,30 @@ async function judgeOnce(
     const forward = (): void => { timeout.abort(signal.reason) }
     signal.addEventListener('abort', forward, { once: true })
     try {
-      const options = {
-        provider: route.provider,
-        model: route.model,
-        ...(route.reasoningEffort === undefined ? {} : { reasoningEffort: route.reasoningEffort }),
-        messages: [createUserMessage({ content: [{ type: 'text' as const, text: prompt }], source: { kind: 'user' as const } })],
-        temperature: VERIFICATION_TEMPERATURE,
-        maxTokens: VERIFICATION_MAX_TOKENS,
-        signal: timeout.signal,
-      }
+      // The judge dispatches through the registration-bound prepared call, the
+      // same path the official agent loop uses: the public `stream()` is a
+      // mutable instance property a third-party plugin may replace, and a
+      // replacement with the `llm/stream` listener signature broke every
+      // acceptance with "next(...) is not a function or its return value is not
+      // async iterable".
+      const stream = await openOneShotStream(
+        llm,
+        {
+          provider: route.provider,
+          model: route.model,
+          ...(route.reasoningEffort === undefined ? {} : { reasoningEffort: route.reasoningEffort }),
+          temperature: VERIFICATION_TEMPERATURE,
+          maxTokens: VERIFICATION_MAX_TOKENS,
+        },
+        {
+          messages: [createUserMessage({ content: [{ type: 'text' as const, text: prompt }], source: { kind: 'user' as const } })],
+          signal: timeout.signal,
+        },
+      )
       let text = ''
       usage.calls += 1
       let finishReason: string | undefined
-      for await (const chunk of llm.stream(options as Parameters<LlmRuntime['stream']>[0])) {
+      for await (const chunk of stream) {
         const row = chunk as unknown as Record<string, unknown>
         if (row.type === 'text-delta' && typeof row.text === 'string') text += row.text
         else if (row.type === 'usage') {
