@@ -1183,20 +1183,84 @@ export function createAssignableInventoryLoader(ttlMs: number): (
   let cached: { at: number; workspaces: AssignableWorkspace[] } | null = null;
   let pending: Promise<AssignableWorkspace[]> | null = null;
 
+  /** Publish one enumeration to the cache; concurrent callers share the same attempt. */
+  const startRefresh = (
+    reg: AssignableWorkspaceRegistry,
+    sessions: AssignableSessions | undefined,
+    sessionTitle: AssignableSessionTitles | undefined,
+    sessionQuery: AssignableSessionQuery | undefined,
+  ): Promise<AssignableWorkspace[]> => {
+    if (pending !== null) return pending;
+    const attempt = listAssignableWorkspaces(reg, sessions, sessionTitle, sessionQuery).then((workspaces) => {
+      cached = { at: Date.now(), workspaces };
+      return workspaces;
+    });
+    pending = attempt;
+    const release = (): void => {
+      if (pending === attempt) pending = null;
+    };
+    attempt.then(release, release);
+    return attempt;
+  };
+
   return async (reg, sessions, sessionTitle, sessionQuery) => {
     if (ttlMs <= 0) return listAssignableWorkspaces(reg, sessions, sessionTitle, sessionQuery);
     if (cached !== null && Date.now() - cached.at < ttlMs) return cached.workspaces;
-    if (pending !== null) return pending;
 
-    pending = listAssignableWorkspaces(reg, sessions, sessionTitle, sessionQuery);
-    try {
-      const workspaces = await pending;
-      cached = { at: Date.now(), workspaces };
-      return workspaces;
-    } finally {
-      pending = null;
+    // Stale but present: answer from the snapshot immediately and revalidate in the
+    // background. A cold enumeration costs 40-90s on a large corpus, and while a caller
+    // waits on one the owner's permissions page renders as an empty list — so expiry must
+    // never be paid for by the request that happens to arrive after it. The next caller
+    // picks up the refreshed snapshot; a failed revalidation keeps the old one.
+    if (cached !== null) {
+      void startRefresh(reg, sessions, sessionTitle, sessionQuery).catch((error) => {
+        // Keep serving the stale snapshot — but say so. Without this line a persistently
+        // failing revalidation would age the cache forever with nothing in the logs.
+        console.warn('[dsh-passwords] inventory revalidation failed:', String(error));
+      });
+      return cached.workspaces;
     }
+
+    // Cold: there is nothing to answer with yet, so this caller waits for the first pass.
+    return startRefresh(reg, sessions, sessionTitle, sessionQuery);
   };
+}
+
+export type InventoryWarmupTarget = {
+  reg: AssignableWorkspaceRegistry;
+  sessions: AssignableSessions | undefined;
+  sessionTitle: AssignableSessionTitles | undefined;
+  sessionQuery: AssignableSessionQuery | undefined;
+};
+
+/**
+ * One warmup pass, split out from the scheduler so the behaviour can be tested directly.
+ * A missing registry and a failed enumeration are both logged no-ops that never throw: the
+ * fallback is simply that the first request pays the cold pass, exactly as before this change.
+ * Resolves true only when the cache was actually populated.
+ */
+export async function runInventoryWarmup(
+  load: (
+    reg: AssignableWorkspaceRegistry,
+    sessions: AssignableSessions | undefined,
+    sessionTitle: AssignableSessionTitles | undefined,
+    sessionQuery: AssignableSessionQuery | undefined,
+  ) => Promise<AssignableWorkspace[]>,
+  resolveTarget: () => InventoryWarmupTarget | null,
+): Promise<boolean> {
+  const target = resolveTarget();
+  if (target === null) {
+    console.warn('[dsh-passwords] inventory warmup skipped: workspace registry unavailable');
+    return false;
+  }
+  try {
+    const workspaces = await load(target.reg, target.sessions, target.sessionTitle, target.sessionQuery);
+    console.log(`[dsh-passwords] inventory warmup ok: ${String(workspaces.length)} workspaces`);
+    return true;
+  } catch (error) {
+    console.warn('[dsh-passwords] inventory warmup failed:', String(error));
+    return false;
+  }
 }
 
 export function apply(ctx: Context): void {
@@ -1763,6 +1827,46 @@ export function apply(ctx: Context): void {
       },
     },
   ];
+
+  // Startup warmup: fill the inventory cache shortly after boot so the first admin who
+  // opens the permissions page is not the one paying for a cold 40-90s enumeration
+  // (typically right after an upgrade or restart). Only when caching is enabled, so
+  // deployments without MCP_DSH_PASSWORDS_INVENTORY_TTL_MS are unaffected. Bound to
+  // ctx.effect so the timer is cleared if the plugin is unloaded or re-applied.
+  if (inventoryTtlMs > 0) {
+    ctx.effect(() => {
+      let warmedUp = false;
+      const resolveWarmupTarget = (): InventoryWarmupTarget | null => {
+        try {
+          const registry = ctx.get('workspaceRegistry') as unknown as AssignableWorkspaceRegistry | undefined;
+          if (registry === undefined || registry === null) return null;
+          return {
+            reg: registry,
+            sessions: ctx.get('sessions') as unknown as AssignableSessions | undefined,
+            sessionTitle: ctx.get('sessionTitle') as unknown as AssignableSessionTitles | undefined,
+            sessionQuery: ctx.get('sessionQuery') as unknown as AssignableSessionQuery | undefined,
+          };
+        } catch (error) {
+          console.warn('[dsh-passwords] inventory warmup target unavailable:', String(error));
+          return null;
+        }
+      };
+      // 8 s covers the normal case; the 60 s pass covers a slow boot where the workspace
+      // registry is not registered yet. Once one of them populated the cache the other is a
+      // no-op, so a successful warmup costs exactly one enumeration.
+      const timers = [8_000, 60_000].map((delayMs) => {
+        const timer = setTimeout(() => {
+          if (warmedUp) return;
+          void runInventoryWarmup(loadAssignableInventory, resolveWarmupTarget).then((ok) => {
+            if (ok) warmedUp = true;
+          });
+        }, delayMs);
+        timer.unref();
+        return timer;
+      });
+      return () => timers.forEach((timer) => clearTimeout(timer));
+    }, 'dsh-passwords: inventory warmup');
+  }
 
   ctx.effect(
     () => {

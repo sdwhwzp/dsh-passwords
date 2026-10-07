@@ -4,6 +4,7 @@ import {
   createAssignableInventoryLoader,
   isPermanentGatewayExitCode,
   listAssignableWorkspaces,
+  runInventoryWarmup,
 } from '../src/plugin.js';
 
 test('gateway permanent exit codes do not accept signal strings', () => {
@@ -280,13 +281,72 @@ test('Issue #39: inventory TTL is opt-in, scoped per loader, and coalesces concu
     assert.equal(otherReads, 1, 'separate plugin instances do not share cached data');
 
     now += 101;
-    const expired = loader(reg, { get: () => undefined }, undefined, {
+    // readTitle fires when an enumeration *starts*, so a background refresh can increment
+    // `reads` before it has published its result. Poll the published snapshot instead —
+    // that is the observable we actually care about. The loop terminates as soon as the
+    // revalidated snapshot is served, because after it lands the frozen mock clock sees a
+    // cache that is fresh again (so no further pass is ever started).
+    const revalidateQuery = {
       readTitle: async () => { reads += 1; return { title: 'expired' }; },
       readSurface: query.readSurface,
+    };
+    const stale = await loader(reg, { get: () => undefined }, undefined, revalidateQuery);
+    const titleOf = (workspaces: readonly { sessions: readonly { title: string }[] }[]): string | undefined =>
+      workspaces.flatMap((workspace) => workspace.sessions)[0]?.title;
+    const staleTitle = titleOf(stale);
+    assert.equal(staleTitle, 'cached title', 'expired entries are served stale instead of blocking on a recompute');
+
+    let revalidatedTitle = staleTitle;
+    for (let attempt = 0; attempt < 200 && revalidatedTitle !== 'expired'; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      revalidatedTitle = titleOf(await loader(reg, { get: () => undefined }, undefined, revalidateQuery));
+    }
+    assert.equal(reads, 2, 'expired entries are revalidated with a single background pass');
+    assert.equal(revalidatedTitle, 'expired', 'the background refresh publishes its result');
+
+    const warmAgain = await loader(reg, { get: () => undefined }, undefined, {
+      readTitle: async () => { reads += 1; return { title: 'unused' }; },
+      readSurface: query.readSurface,
     });
-    await expired;
-    assert.equal(reads, 2, 'expired entries are recomputed');
+    assert.equal(reads, 2, 'callers after revalidation use the refreshed snapshot');
+    assert.equal(titleOf(warmAgain), 'expired');
   } finally {
     Date.now = originalNow;
+  }
+});
+
+test('Issue #39: warmup populates the cache, and a missing registry or a failed pass only logs', async () => {
+  const warnings: string[] = [];
+  const logs: string[] = [];
+  const originalWarn = console.warn;
+  const originalLog = console.log;
+  console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(' ')); };
+  console.log = (...args: unknown[]) => { logs.push(args.map(String).join(' ')); };
+  try {
+    let loads = 0;
+    const load = async (): Promise<never[]> => { loads += 1; return []; };
+
+    const noRegistry = await runInventoryWarmup(load, () => null);
+    assert.equal(noRegistry, false, 'a missing registry is not a warmup');
+    assert.equal(loads, 0, 'a missing registry never reaches the loader');
+    assert.match(warnings.join('\n'), /workspace registry unavailable/);
+
+    const target = {
+      reg: { list: async () => [] } as never,
+      sessions: undefined,
+      sessionTitle: undefined,
+      sessionQuery: undefined,
+    };
+    const ok = await runInventoryWarmup(async () => { loads += 1; return [{ path: '/w' } as never]; }, () => target);
+    assert.equal(ok, true, 'a completed pass reports success');
+    assert.equal(loads, 1, 'exactly one enumeration per successful warmup');
+    assert.match(logs.join('\n'), /inventory warmup ok: 1 workspaces/);
+
+    const failed = await runInventoryWarmup(async () => { throw new Error('corpus unreadable'); }, () => target);
+    assert.equal(failed, false, 'a failing pass never rejects the warmup caller');
+    assert.match(warnings.join('\n'), /inventory warmup failed: Error: corpus unreadable/);
+  } finally {
+    console.warn = originalWarn;
+    console.log = originalLog;
   }
 });
