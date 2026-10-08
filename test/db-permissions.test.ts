@@ -3,9 +3,33 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import os from 'node:os';
 import path from 'node:path';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { Database, PermissionStateConflictError, SessionGrantsConflictError } from '../src/db.js';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { Database, pathWithinDeletedTree, PermissionStateConflictError, SessionGrantsConflictError } from '../src/db.js';
 import { createFieldCrypto } from '../src/encrypt.js';
+
+test('pathWithinDeletedTree：多层不存在子路径仍遵循文件系统大小写语义', () => {
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-case-path-'));
+  const owner = path.join(tempDir, 'Owned');
+  const caseAlias = path.join(tempDir, 'owned');
+  mkdirSync(owner);
+  try {
+    let caseInsensitiveVolume = false;
+    try {
+      caseInsensitiveVolume = realpathSync(caseAlias).toLowerCase() === realpathSync(owner).toLowerCase();
+    } catch {
+      caseInsensitiveVolume = false;
+    }
+
+    const candidate = path.join(caseAlias, 'missing', 'deep', 'secret.txt');
+    assert.equal(
+      pathWithinDeletedTree(candidate, owner),
+      caseInsensitiveVolume,
+      'canonicalization must resolve the nearest existing ancestor before restoring missing path segments',
+    );
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
 
 test('会话归属原子持久化、不可转移且拒绝非法 ID', () => {
   const tempDir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-session-grants-'));
@@ -565,6 +589,323 @@ test('seedUserSessionGrants：缺权限行时 fail-closed 整体 no-op，不补�
     // 反复调用保持同一 no-op，不累积状态
     assert.equal(db.seedUserSessionGrants(user.id, ['s-visible', 's-later']), false);
     assert.deepEqual(db.listUserSessionGrants(user.id), []);
+  } finally {
+    try { db.close(); } catch { /* 已关闭 */ }
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * addAllowedFolder 是 workspace/create 成功回调里的读-改-写：旧实现先
+ * getPermissions() 读整行，再 setPermissions() 把 hourly/daily 限额、allow_*、
+ * banned、sandbox_mode、disabled_sessions 用读到的旧值整体回写。调用方在读取
+ * 与写入之间会 await 上游，这段时间里并发收紧的安全字段会被旧快照静默回滚。
+ * 修复后只改 allowed_folders 一列，其余字段完全不动。
+ */
+test('addAllowedFolder：原子窄更新只改白名单，保留并发改写的安全字段', () => {
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-add-folder-race-'));
+  const dbPath = path.join(tempDir, 'add-folder-race.db');
+  const db = new Database(dbPath, createFieldCrypto('test-key', 'test-key'));
+  try {
+    db.init();
+    const user = db.createUser('add-folder-race-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+    const base = {
+      allowedFolders: ['/workspaces/a'], hourlyTokenLimit: 100, dailyMinutesLimit: 60,
+      allowUpload: true, allowGitDownload: true, allowWorkspaceCreate: true, allowSsh: true,
+      allowedAgentPresets: ['preset-a'], allowedModels: ['provider/model-a'], allowChatMedia: true,
+      banned: false, sandboxMode: 'workspace-write', disabledSessions: ['sess-a'],
+    } as const;
+    db.setPermissions(user.id, { ...base, allowedFolders: [...base.allowedFolders] });
+
+    // 读取旧快照 … 随后并发收紧安全字段（模拟 await 期间的另一次权限保存）。
+    const stale = db.getPermissions(user.id)!;
+    db.setPermissions(user.id, {
+      ...base, allowedFolders: [...base.allowedFolders],
+      allowUpload: false, allowGitDownload: false, banned: true,
+      sandboxMode: 'read-only', disabledSessions: ['sess-b'], allowChatMedia: false,
+    });
+
+    // 把读到的旧快照固定在 getPermissions 上：窄更新不得依赖也不得回放它。
+    const realGetPermissions = db.getPermissions.bind(db);
+    (db as unknown as { getPermissions: typeof realGetPermissions }).getPermissions = () => stale;
+    try {
+      db.addAllowedFolder(user.id, '/workspaces/b');
+    } finally {
+      (db as unknown as { getPermissions: typeof realGetPermissions }).getPermissions = realGetPermissions;
+    }
+
+    const after = db.getPermissions(user.id)!;
+    assert.deepEqual(after.allowed_folders, ['/workspaces/a', '/workspaces/b']);
+    assert.equal(after.allow_upload, false, '并发收紧的 allow_upload 不得被旧快照回滚');
+    assert.equal(after.allow_git_download, false, '并发收紧的 allow_git_download 不得被回滚');
+    assert.equal(after.banned, true, '并发封禁不得被回滚');
+    assert.equal(after.sandbox_mode, 'read-only', '并发收紧的沙盒不得被回滚');
+    assert.deepEqual(after.disabled_sessions, ['sess-b'], '并发改写的中断会话集合不得被回滚');
+    assert.equal(after.allow_chat_media, false, '并发关闭的聊天媒体不得被回滚');
+    assert.equal(after.hourly_token_limit, 100);
+    assert.equal(after.daily_minutes_limit, 60);
+    assert.deepEqual(after.allowed_agent_presets, ['preset-a']);
+    assert.deepEqual(after.allowed_models, ['provider/model-a']);
+    assert.equal(after.allow_workspace_create, true);
+  } finally {
+    try { db.close(); } catch { /* 已关闭 */ }
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('addAllowedFolder：去重、__deny__ 替换、不限目录与缺权限行 no-op', () => {
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-add-folder-semantics-'));
+  const dbPath = path.join(tempDir, 'add-folder-semantics.db');
+  const db = new Database(dbPath, createFieldCrypto('test-key', 'test-key'));
+  try {
+    db.init();
+    const perms = (folders: string[]) => ({
+      allowedFolders: folders, hourlyTokenLimit: null, dailyMinutesLimit: null,
+      allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: true,
+      banned: false, sandboxMode: null as string | null, disabledSessions: [] as string[],
+    });
+
+    // 去重（含 .. 规范形态）
+    const dedupe = db.createUser('add-folder-dedupe', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+    db.setPermissions(dedupe.id, perms(['/workspaces/a']));
+    db.addAllowedFolder(dedupe.id, '/workspaces/a');
+    db.addAllowedFolder(dedupe.id, '/workspaces/a/../a');
+    assert.deepEqual(db.getPermissions(dedupe.id)?.allowed_folders, ['/workspaces/a']);
+    db.addAllowedFolder(dedupe.id, '/workspaces/b');
+    db.addAllowedFolder(dedupe.id, '/workspaces/b');
+    assert.deepEqual(db.getPermissions(dedupe.id)?.allowed_folders, ['/workspaces/a', '/workspaces/b']);
+
+    // __deny__（尚无预分配根）登记后以新目录替换哨兵
+    const denied = db.createUser('add-folder-deny', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+    db.setPermissions(denied.id, perms(['__deny__']));
+    db.addAllowedFolder(denied.id, '/workspaces/c');
+    assert.deepEqual(db.getPermissions(denied.id)?.allowed_folders, ['/workspaces/c']);
+
+    // 空白名单 = 不限目录：登记不得收窄
+    const unrestricted = db.createUser('add-folder-unrestricted', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+    db.setPermissions(unrestricted.id, perms([]));
+    db.addAllowedFolder(unrestricted.id, '/workspaces/d');
+    assert.deepEqual(db.getPermissions(unrestricted.id)?.allowed_folders, []);
+
+    // 缺权限行 = 默认拒绝全部：不得隐式补行
+    const noRow = db.createUser('add-folder-norow', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+    db.addAllowedFolder(noRow.id, '/workspaces/e');
+    assert.equal(db.getPermissions(noRow.id), null, '缺权限行必须保持 no-op（不补行、不放宽）');
+  } finally {
+    try { db.close(); } catch { /* 已关闭 */ }
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+const OWNED_WS_HASH = '$2a$10$dummyhashdummyhashdummyhashdu';
+
+const ownedWsPerms = (folders: string[]) => ({
+  allowedFolders: folders, hourlyTokenLimit: null, dailyMinutesLimit: null,
+  allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: true,
+  banned: false, sandboxMode: null as string | null, disabledSessions: [] as string[],
+});
+
+/**
+ * workspace/delete 成功回调的 DB 收口：只回收该用户「自建工作区」对应的精确白名单
+ * 条目（自建自动授予与归属行成对出现），管理员分配的父目录/其它目录不得被误删，
+ * 同工作区的会话授权一并清理，且绝不波及其它用户。
+ */
+test('removeUserOwnedWorkspace：清理自建归属/白名单/授权，保留管理员分配与其它用户', () => {
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-rm-owned-ws-'));
+  const db = new Database(path.join(tempDir, 'rm-owned-ws.db'), createFieldCrypto('test-key', 'test-key'));
+  try {
+    db.init();
+    const user = db.createUser('owned-ws-user', OWNED_WS_HASH, 'user');
+    db.setPermissions(user.id, ownedWsPerms(['/srv/admin-root', '/srv/other']));
+    // 自建工作区：归属行 + addAllowedFolder 自动并入精确路径。
+    db.addUserWorkspace(user.id, '/srv/admin-root/proj');
+    db.addAllowedFolder(user.id, '/srv/admin-root/proj');
+    db.addUserSessionGrant(user.id, 'sess-proj');
+    db.addUserSessionGrant(user.id, 'sess-keep');
+
+    const other = db.createUser('owned-ws-other', OWNED_WS_HASH, 'user');
+    db.setPermissions(other.id, ownedWsPerms(['/srv/admin-root/proj']));
+    db.addUserWorkspace(other.id, '/srv/admin-root/proj');
+    db.addUserSessionGrant(other.id, 'sess-proj');
+
+    const result = db.removeUserOwnedWorkspace(user.id, '/srv/admin-root/proj', ['sess-proj']);
+    assert.deepEqual(result, { removedWorkspace: true, removedFolder: true, removedGrants: 1 });
+    assert.deepEqual(db.getPermissions(user.id)?.allowed_folders, ['/srv/admin-root', '/srv/other'],
+      '只回收精确相等的自建条目，管理员分配的父目录/其它目录必须保留');
+    assert.equal(db.listUserWorkspacePaths(user.id).includes('/srv/admin-root/proj'), false, '归属行应被清理');
+    assert.deepEqual(db.listUserSessionGrants(user.id), ['sess-keep'], '只清理明确归属该工作区的授权');
+
+    // 其它用户同路径的归属/白名单/授权不得受影响（清理严格按 user_id 隔离）。
+    assert.equal(db.listUserWorkspacePaths(other.id).includes('/srv/admin-root/proj'), true);
+    assert.deepEqual(db.getPermissions(other.id)?.allowed_folders, ['/srv/admin-root/proj']);
+    assert.deepEqual(db.listUserSessionGrants(other.id), ['sess-proj']);
+  } finally {
+    try { db.close(); } catch { /* 已关闭 */ }
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('removeUserOwnedWorkspace：删空回落 __deny__；无匹配/不限/哨兵/缺行均 no-op', () => {
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-rm-owned-ws-edge-'));
+  const db = new Database(path.join(tempDir, 'rm-owned-ws-edge.db'), createFieldCrypto('test-key', 'test-key'));
+  try {
+    db.init();
+
+    // 唯一自建条目被删空：必须回落 __deny__，绝不能留空数组（空 = 不限目录 fail-open）。
+    const denyStart = db.createUser('owned-ws-deny-start', OWNED_WS_HASH, 'user');
+    db.setPermissions(denyStart.id, ownedWsPerms(['__deny__']));
+    db.addUserWorkspace(denyStart.id, '/ws/only');
+    db.addAllowedFolder(denyStart.id, '/ws/only');
+    assert.equal(db.removeUserOwnedWorkspace(denyStart.id, '/ws/only').removedFolder, true);
+    assert.deepEqual(db.getPermissions(denyStart.id)?.allowed_folders, ['__deny__'], '删空必须回落 __deny__');
+
+    // 管理员只分配父目录、无精确自建条目：不匹配任何白名单项，白名单不动。
+    const parentOnly = db.createUser('owned-ws-parent-only', OWNED_WS_HASH, 'user');
+    db.setPermissions(parentOnly.id, ownedWsPerms(['/srv/parent']));
+    db.addUserWorkspace(parentOnly.id, '/srv/parent/x');
+    assert.equal(db.removeUserOwnedWorkspace(parentOnly.id, '/srv/parent/x').removedFolder, false);
+    assert.deepEqual(db.getPermissions(parentOnly.id)?.allowed_folders, ['/srv/parent'], '管理员分配不得被误删');
+
+    // 空白名单 = 不限目录：登记是 no-op，删除也不得把它收窄成白名单。
+    const unrestricted = db.createUser('owned-ws-unrestricted', OWNED_WS_HASH, 'user');
+    db.setPermissions(unrestricted.id, ownedWsPerms([]));
+    db.addUserWorkspace(unrestricted.id, '/ws/u');
+    assert.equal(db.removeUserOwnedWorkspace(unrestricted.id, '/ws/u').removedFolder, false);
+    assert.deepEqual(db.getPermissions(unrestricted.id)?.allowed_folders, []);
+
+    // __deny__ 哨兵本身不是可回收项。
+    const sentinel = db.createUser('owned-ws-sentinel', OWNED_WS_HASH, 'user');
+    db.setPermissions(sentinel.id, ownedWsPerms(['__deny__']));
+    db.addUserWorkspace(sentinel.id, '/ws/s');
+    assert.equal(db.removeUserOwnedWorkspace(sentinel.id, '/ws/s').removedFolder, false);
+    assert.deepEqual(db.getPermissions(sentinel.id)?.allowed_folders, ['__deny__']);
+
+    // 缺权限行：不补行、不抛错（归属行仍按需清理）。
+    const noRow = db.createUser('owned-ws-norow', OWNED_WS_HASH, 'user');
+    db.addUserWorkspace(noRow.id, '/ws/n');
+    const noRowResult = db.removeUserOwnedWorkspace(noRow.id, '/ws/n');
+    assert.equal(noRowResult.removedWorkspace, true);
+    assert.equal(noRowResult.removedFolder, false);
+    assert.equal(db.getPermissions(noRow.id), null, '缺权限行必须保持 no-op（不补行）');
+  } finally {
+    try { db.close(); } catch { /* 已关闭 */ }
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * 来源区分：同一路径既可能是管理员显式分配，也可能是子用户自建自动授予。
+ * addAllowedFolder 只在本次真正新增/替换哨兵时写来源标记；若该目录本来就在白名单里
+ * （管理员已分配），走「已包含」no-op 不写标记——删除自建工作区时保留管理员分配。
+ */
+test('removeUserOwnedWorkspace：管理员先分配的同路径条目不被自建登记标记，删除保留', () => {
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-rm-owned-ws-admin-'));
+  const db = new Database(path.join(tempDir, 'rm-owned-ws-admin.db'), createFieldCrypto('test-key', 'test-key'));
+  try {
+    db.init();
+    const user = db.createUser('owned-ws-admin-exact', OWNED_WS_HASH, 'user');
+    db.setPermissions(user.id, ownedWsPerms(['/srv/exact']));
+    // 用户把管理员已分配的目录登记为工作区：addAllowedFolder 是 no-op，不写标记。
+    db.addUserWorkspace(user.id, '/srv/exact');
+    db.addAllowedFolder(user.id, '/srv/exact');
+    assert.deepEqual(db.getPermissions(user.id)?.allowed_folders, ['/srv/exact'],
+      '已分配路径不得因自建登记而重复');
+
+    const result = db.removeUserOwnedWorkspace(user.id, '/srv/exact');
+    assert.equal(result.removedWorkspace, true);
+    assert.equal(result.removedFolder, false, '管理员分配的同路径白名单不得因自建登记被回收');
+    assert.deepEqual(db.getPermissions(user.id)?.allowed_folders, ['/srv/exact'], '管理员分配必须保留');
+
+    // 对照：纯自建（addAllowedFolder 实际新增）会被标记，删除时回收。
+    db.addUserWorkspace(user.id, '/srv/self');
+    db.addAllowedFolder(user.id, '/srv/self');
+    assert.equal(db.removeUserOwnedWorkspace(user.id, '/srv/self').removedFolder, true);
+    assert.deepEqual(db.getPermissions(user.id)?.allowed_folders, ['/srv/exact'], '自建条目被回收，管理员分配保留');
+  } finally {
+    try { db.close(); } catch { /* 已关闭 */ }
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * 存量升级兼容（fail-closed）：user_auto_granted_folders 随本版本新增，升级前已存在的
+ * 自建条目没有来源标记。此时无法可靠区分「自建自动授予」与「管理员显式授权」，删除会
+ * 误伤后者的风险不可接受，因此**保留条目**（removedFolder=false）——但这意味着本次不能
+ * 宣称已完全回收，残留条目需管理员在权限面板手动清理。
+ *
+ * 回归意义：若哪天为了“完整回收”而改成无标记也删，本用例会立刻失败，从而阻止一次会
+ * 误删管理员显式授权的破坏性变更。
+ */
+test('removeUserOwnedWorkspace：升级前无来源标记的自建条目一律保留（fail-closed，不误删管理员授权）', () => {
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-rm-owned-ws-stock-'));
+  const db = new Database(path.join(tempDir, 'rm-owned-ws-stock.db'), createFieldCrypto('test-key', 'test-key'));
+  try {
+    db.init();
+    const user = db.createUser('owned-ws-stock', OWNED_WS_HASH, 'user');
+    // 模拟升级前状态：白名单里已有该自建路径、归属行也在，但没有来源标记
+    // （不调用 addAllowedFolder，即不会写入 user_auto_granted_folders）。
+    db.setPermissions(user.id, ownedWsPerms(['/srv/admin-a', '/srv/legacy-self']));
+    db.addUserWorkspace(user.id, '/srv/legacy-self');
+
+    const result = db.removeUserOwnedWorkspace(user.id, '/srv/legacy-self', ['sess-legacy']);
+    assert.equal(result.removedWorkspace, true, '归属行仍按精确路径清理');
+    assert.equal(result.removedFolder, false, '无标记无法区分来源：不得回收白名单条目');
+    assert.deepEqual(
+      db.getPermissions(user.id)?.allowed_folders,
+      ['/srv/admin-a', '/srv/legacy-self'],
+      '无标记条目必须原样保留，绝不误删管理员显式授权',
+    );
+  } finally {
+    try { db.close(); } catch { /* 已关闭 */ }
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * 先自建自动标记，后管理员重新显式分配同路径，再 workspace/delete 的行为锁定。
+ *
+ * 策略（显式 fail-closed，非静默）：来源标记只表示“该条起源于自建”，一旦存在就按自建
+ * 回收（拒绝访问）。不能因为有管理员重新保存过就反向放行一条可能过期的标记；管理员需在
+ * 删除后重新分配。测试同时验证：回收后管理员重新分配是持久的——再次删除时因标记已清、
+ * 且路径本就在（管理员）白名单里而保留，不会二次被回收。
+ */
+test('removeUserOwnedWorkspace：自建后管理员重分配同路径仍 fail-closed 回收；其后重分配持久', () => {
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-rm-owned-ws-reassign-'));
+  const db = new Database(path.join(tempDir, 'rm-owned-ws-reassign.db'), createFieldCrypto('test-key', 'test-key'));
+  try {
+    db.init();
+    const user = db.createUser('owned-ws-reassign', OWNED_WS_HASH, 'user');
+
+    // 1) 自建：__deny__ 起点 → addAllowedFolder 实际新增，写入来源标记。
+    db.setPermissions(user.id, ownedWsPerms(['__deny__']));
+    db.addUserWorkspace(user.id, '/srv/reproj');
+    db.addAllowedFolder(user.id, '/srv/reproj');
+    assert.deepEqual(db.getPermissions(user.id)?.allowed_folders, ['/srv/reproj']);
+
+    // 2) 管理员重新显式分配同路径（并新增 /srv/other）。标记不经 setPermissions，仍在。
+    db.setPermissions(user.id, ownedWsPerms(['/srv/reproj', '/srv/other']));
+    assert.deepEqual(db.getPermissions(user.id)?.allowed_folders, ['/srv/reproj', '/srv/other']);
+
+    // 3) workspace/delete：有标记 → 精确回收该自建条目（fail-closed：拒绝访问）。
+    const reclaimed = db.removeUserOwnedWorkspace(user.id, '/srv/reproj');
+    assert.equal(reclaimed.removedFolder, true, '标记仍在：按自建来源精确回收，策略为显式 fail-closed');
+    assert.deepEqual(
+      db.getPermissions(user.id)?.allowed_folders,
+      ['/srv/other'],
+      '只回收该精确条目，管理员新增的 /srv/other 不受影响',
+    );
+
+    // 4) 管理员在删除后重新分配同路径 → 标记已清，重登记不再写标记 → 后续删除保留。
+    db.setPermissions(user.id, ownedWsPerms(['/srv/other', '/srv/reproj']));
+    db.addUserWorkspace(user.id, '/srv/reproj');
+    db.addAllowedFolder(user.id, '/srv/reproj');
+    const retained = db.removeUserOwnedWorkspace(user.id, '/srv/reproj');
+    assert.equal(retained.removedFolder, false, '重分配后无标记：不再被视为自建条目回收');
+    assert.deepEqual(
+      db.getPermissions(user.id)?.allowed_folders,
+      ['/srv/other', '/srv/reproj'],
+      '管理员重新分配必须持久保留',
+    );
   } finally {
     try { db.close(); } catch { /* 已关闭 */ }
     rmSync(tempDir, { recursive: true, force: true });

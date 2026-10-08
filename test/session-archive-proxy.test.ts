@@ -27,6 +27,8 @@ let archiveIds: string[] | undefined;
 let malformedWorkspace = false;
 let extraSessionIds: string[] = [];
 let showLegacyWorkspace = false;
+/** DSH 0.2.1-alpha.1+ 已退役点号 /api/workspace.list：模拟上游对该 RPC 返回不可解析的 404。 */
+let legacyWorkspaceRpcAbsent = false;
 let workspaceResponsePlan: Array<{ archived: string[]; delayMs: number; gate?: Promise<void> }> = [];
 
 const sessionListBody = () => {
@@ -118,6 +120,12 @@ before(async () => {
 
   upstream = http.createServer((req, res) => {
     let body: unknown;
+    if (req.url?.startsWith('/api/workspace.list') && legacyWorkspaceRpcAbsent) {
+      // alpha1+ 上游没有这个 RPC：返回非 JSON 的 404，网关子用户分支必须 fail-closed。
+      res.writeHead(404, { 'content-type': 'text/plain' });
+      res.end('404 Not Found');
+      return;
+    }
     if (req.url?.startsWith('/api/workspace.list') && malformedWorkspace) {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end('{malformed');
@@ -192,38 +200,26 @@ test('Issue #16: session.list obtains a trusted workspace snapshot before filter
   assert.equal(response.status, 200);
 });
 
-test.skip('obsolete grant seeding: immutable session owners replace first-list grants', async () => {
+// DSH 0.2.1-alpha.1+ 已退役点号 /api/workspace.list（工作区基线改走 Remote mux
+// workspace/follow）。历史子用户不得再靠该路由的首次成功响应自动种子化可见会话：
+// 路由不存在时网关必须 fail-closed（502），且绝不写入任何会话授权。
+test('Issue #19: alpha1+ 退役 workspace.list 后历史子用户不再被种子化授权', async () => {
   const legacy = db.createUser('legacy-seed', '$2a$10$dummyhashdummyhashdummyhashdu');
   db.setPermissions(legacy.id, {
     allowedFolders: [legacyWorkspaceDir], hourlyTokenLimit: null, dailyMinutesLimit: null,
     allowUpload: true, allowGitDownload: true, allowWorkspaceCreate: false,
     banned: false, sandboxMode: null,
   });
-  assert.equal(db.isSessionGrantsSeeded(legacy.id), false, '旧用户初始未初始化');
-  const legacyCookie = `dsh_gateway_token=${jwt.sign({ sub: String(legacy.id), username: legacy.username, cv: 0 }, 'test-secret', { expiresIn: '12h' })}`;
-  archiveIds = [];
-  showLegacyWorkspace = true;
+  assert.equal(db.isSessionGrantsSeeded(legacy.id), false, '历史用户尚未初始化显式授权');
+  const legacyCookie = tokenFor(legacy, 'test-secret');
+  legacyWorkspaceRpcAbsent = true;
   try {
     const workspace = await request('POST', '/api/workspace.list', legacyCookie);
-    assert.equal(workspace.status, 200);
-    const workspaceJson = workspace.json as { result: { value: { items: Array<{ sessionIds: string[] }> } } };
-    assert.deepEqual(
-      workspaceJson.result.value.items[0].sessionIds,
-      ['s-legacy'],
-      '旧用户既有会话应被种子化保留',
-    );
-    assert.equal(db.isSessionGrantsSeeded(legacy.id), true);
-    assert.deepEqual(db.listUserSessionGrants(legacy.id), ['s-legacy']);
-
-    const list = await request('POST', '/api/session.list', legacyCookie);
-    assert.equal(list.status, 200);
-    const ids = (list.json as { result: { value: Array<{ sessionId: string }> } }).result.value.map((item) => item.sessionId);
-    assert.deepEqual(ids, ['s-legacy']);
-
-    const history = await request('POST', '/api/session.history', legacyCookie, JSON.stringify({ sessionId: 's-legacy' }));
-    assert.equal(history.status, 200, '种子化后的既有会话应可正常读取');
+    assert.equal(workspace.status, 502, '退役 RPC 不可用时网关必须 fail-closed，不得回放未过滤清单');
+    assert.equal(db.isSessionGrantsSeeded(legacy.id), false, '失败路由不得置位迁移标记');
+    assert.deepEqual(db.listUserSessionGrants(legacy.id), [], '退役的种子化不得产生任何会话授权');
   } finally {
-    showLegacyWorkspace = false;
+    legacyWorkspaceRpcAbsent = false;
   }
 });
 

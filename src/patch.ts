@@ -101,7 +101,7 @@ function nativeHarnessAvailable(dshRoot: string): boolean {
   if (!existsSync(packageFile)) return false;
   try {
     const metadata = JSON.parse(readFileSync(packageFile, 'utf8')) as DshPackageMetadata;
-    return typeof metadata.version === 'string' && /^(?:0\.1\.(?:2|3|5|6|7)|0\.2\.0)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u.test(metadata.version);
+    return typeof metadata.version === 'string' && /^(?:0\.1\.(?:2|3|5|6|7)|0\.2\.[01])(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u.test(metadata.version);
   } catch {
     return false;
   }
@@ -163,7 +163,7 @@ export function resolveNpmCommand(args: string[], env: NodeJS.ProcessEnv = proce
   return { command: env.ComSpec?.trim() || 'cmd.exe', args: shimArgs };
 }
 
-/** The native Harness exposes Settings and model selection without bundle rewriting. */
+/** Native Settings/model selection and the authenticatedUrl-to-Cookie exchange need no bundle rewriting. */
 export function patchStatus(
   dshRoot: string,
 ): { settingsHostMode: boolean; whitelist: boolean; workspaceSearch: boolean; connectionCookieBridge: 'native' | 'missing' } {

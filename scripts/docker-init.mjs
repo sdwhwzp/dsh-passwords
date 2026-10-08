@@ -54,22 +54,31 @@ export function initializeDocker({
   const dbPath = nonEmpty(env.MCP_DB_PATH, path.join(stateDir, 'platform.db'));
   const upstream = nonEmpty(env.MCP_GATEWAY_UPSTREAM, 'http://127.0.0.1:3080');
   const setupKeyFile = path.join(stateDir, 'setup-key.txt');
+  // 用户通过 -e SETUP_KEY=... 传入的初始密钥优先，绝不能让它与卷内 .env 里
+  // 生成的随机值分叉：Docker 运行时环境变量优先，去掉该 env 重启后就会锁死。
+  const providedSetupKey = nonEmpty(env.SETUP_KEY, '');
 
   mkdirSync(stateDir, { recursive: true });
   mkdirSync(path.dirname(dbPath), { recursive: true });
 
   let firstInitialization = false;
   let setupKey = '';
+  let setupKeyFromEnv = false;
   if (existsSync(envFile)) {
     secureFile(envFile);
     setupKey = envValue(readFileSync(envFile, 'utf8'), 'SETUP_KEY');
     if (setupKey === '') {
       // A volume can contain a partially written .env after an interrupted
       // first boot. Keep all existing state and add only the missing key.
-      setupKey = randomBytes(24).toString('hex');
+      if (providedSetupKey !== '') {
+        setupKey = providedSetupKey;
+        setupKeyFromEnv = true;
+      } else {
+        setupKey = randomBytes(24).toString('hex');
+      }
       appendMissingEnv(envFile, { SETUP_KEY: setupKey });
       firstInitialization = true;
-      log(`[dsh-passwords] ${envFile} had no usable SETUP_KEY; generated one without replacing existing configuration`);
+      log(`[dsh-passwords] ${envFile} had no usable SETUP_KEY; ${setupKeyFromEnv ? 'adopted SETUP_KEY from the container environment' : 'generated one'} without replacing existing configuration`);
     }
     appendMissingEnv(envFile, {
       MCP_DB_ENC_KEY: randomBytes(32).toString('hex'),
@@ -83,7 +92,12 @@ export function initializeDocker({
     });
   } else {
     firstInitialization = true;
-    setupKey = randomBytes(24).toString('hex');
+    if (providedSetupKey !== '') {
+      setupKey = providedSetupKey;
+      setupKeyFromEnv = true;
+    } else {
+      setupKey = randomBytes(24).toString('hex');
+    }
     const dbEncKey = randomBytes(32).toString('hex');
     writeFileSync(
       envFile,
@@ -102,10 +116,12 @@ export function initializeDocker({
       { encoding: 'utf8', mode: 0o600 },
     );
     secureFile(envFile);
-    log(`[dsh-passwords] created persistent configuration: ${envFile}`);
+    log(`[dsh-passwords] created persistent configuration: ${envFile}${setupKeyFromEnv ? ' (SETUP_KEY taken from the container environment)' : ''}`);
   }
 
-  if (firstInitialization && !existsSync(setupKeyFile)) {
+  // 由环境变量提供的密钥用户已经知道，不再落一份明文 setup-key.txt；
+  // 随机生成时才写，供用户 docker exec 读取。
+  if (firstInitialization && !setupKeyFromEnv && !existsSync(setupKeyFile)) {
     writeFileSync(setupKeyFile, `${setupKey}\n`, { encoding: 'utf8', mode: 0o600 });
     secureFile(setupKeyFile);
     log(`[dsh-passwords] first-time setup key written to ${setupKeyFile}`);

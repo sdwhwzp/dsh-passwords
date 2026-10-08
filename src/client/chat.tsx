@@ -23,13 +23,13 @@ export interface ChatMessage {
 }
 
 /** 服务端媒体类型（与网关 media_assets.media_kind 一致） */
-export type ChatMediaKind = 'sticker' | 'image' | 'video';
+type ChatMediaKind = 'sticker' | 'image' | 'video';
 
 /**
  * 消息附件投影。字段全部按白名单读取：服务端可能返回额外内部字段，
  * 但渲染层只使用下列值，且不把任何服务端字符串当 HTML 使用。
  */
-export interface ChatMedia {
+interface ChatMedia {
   id: string;
   kind: ChatMediaKind;
   /** 由服务端确定，仅用于缩略图尺寸提示，不参与拼接 URL */
@@ -112,7 +112,7 @@ const mediaFileKey = (file: File): string => `${file.name}:${file.size}:${file.l
  * 由浏览器提供的 MIME 判定草稿类型；空/不支持的类型返回 null。
  * 仅接受与服务端一致的白名单（排除 SVG 等 image/* 下的危险格式）。
  */
-export function mediaKindOf(file: { type: string }): ChatMediaKind | null {
+function mediaKindOf(file: { type: string }): ChatMediaKind | null {
   // 去掉 charset 等参数："image/png;charset=utf-8" 也应识别为 image/png
   const mime = (file.type || '').split(';')[0].trim().toLowerCase();
   return MEDIA_MIME_KIND[mime] ?? null;
@@ -123,7 +123,7 @@ export function mediaKindOf(file: { type: string }): ChatMediaKind | null {
  * 只接受已知 kind 与字符串 id；其余条目直接丢弃（不渲染未知结构，
  * 也不把服务端字段拼进 URL 或 HTML）。
  */
-export function readMessageMedia(raw: unknown): ChatMedia[] | undefined {
+function readMessageMedia(raw: unknown): ChatMedia[] | undefined {
   if (!Array.isArray(raw)) return undefined;
   const media: ChatMedia[] = [];
   for (const item of raw) {
@@ -151,7 +151,7 @@ export function readMessageMedia(raw: unknown): ChatMedia[] | undefined {
 
 /** 媒体访问路径：不透明 ID 经 encodeURIComponent 后拼入服务端约定路由。
  *  服务端每次按消息可见性重新鉴权，这里不发永久公开 URL。 */
-export function mediaSrc(media: Pick<ChatMedia, 'id'>): string {
+function mediaSrc(media: Pick<ChatMedia, 'id'>): string {
   return `/gateway/api/message-media/${encodeURIComponent(media.id)}`;
 }
 

@@ -188,16 +188,54 @@ function stripBuildMetadata(version: string): string {
 const SEMVER_VERSION_RE = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
 /**
- * Known DSH release lines. This is an identity boundary, not a claim that every build
- * received profile-level acceptance: it prevents an unreviewed future wire/bundle
- * shape (for example 0.3.x, 0.2.1, or 0.1.8) from receiving source patches or a public
- * listener. The 0.2.0 patch is spelled out exactly so that a later 0.2.x patch (0.2.1)
- * is rejected even though it shares the 0.2 minor, while the 0.2.0 prereleases
- * (for example `0.2.0-rc.1`) are still accepted. Every accepted identity is subject to
- * the same settings-host-mode and authenticated Cookie-bridge gate below; no historical
- * prerelease is silently exempted.
+ * Supported DSH runtime window: the single patch line `>=0.2.1-alpha.1 <0.2.2-0`.
+ *
+ * `0.2.1-alpha.1` is the reviewed pin (the npm `alpha` dist-tag and the only DSH
+ * tree the lockfile resolves). Later `0.2.1` prereleases (alpha.2, beta, rc) and the
+ * stable `0.2.1` release are the same wire/bundle contract and stay inside the patch
+ * line. This is an identity boundary, not a claim that every build received
+ * profile-level acceptance: the retired 0.1.x and 0.2.0 lines, the pre-pin
+ * `0.2.1-alpha.0`, and every 0.2.2+/0.3 identity must not receive source patches or a
+ * public listener. Every accepted identity is still subject to the settings-host-mode
+ * and authenticated Cookie-bridge gate below; no prerelease is silently exempted.
  */
-const DSH_SUPPORTED_RUNTIME_RE = /^(?:0\.1\.(?:2|3|5|6|7)|0\.2\.0)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+const DSH_SUPPORTED_CORE = '0.2.1';
+const DSH_SUPPORTED_PRERELEASE_FLOOR = ['alpha', '1'] as const;
+
+/**
+ * SemVer 2.0.0 prerelease precedence: numeric identifiers rank below alphanumeric
+ * ones, and a shorter identifier list ranks below a longer list that extends it.
+ * Only ASCII `[0-9A-Za-z-]` identifiers reach here: SEMVER_VERSION_RE already
+ * rejected any other shape, so the identifier charset needs no runtime check.
+ */
+function comparePrerelease(a: readonly string[], b: readonly string[]): number {
+  const length = Math.max(a.length, b.length);
+  for (let i = 0; i < length; i += 1) {
+    const x = a[i];
+    const y = b[i];
+    if (x === undefined) return -1;
+    if (y === undefined) return 1;
+    const xNumeric = /^\d+$/.test(x);
+    const yNumeric = /^\d+$/.test(y);
+    if (xNumeric && yNumeric) {
+      if (Number(x) !== Number(y)) return Number(x) - Number(y);
+    } else if (xNumeric) {
+      return -1;
+    } else if (yNumeric) {
+      return 1;
+    } else if (x !== y) {
+      return x < y ? -1 : 1;
+    }
+  }
+  return 0;
+}
+
+/** Split a build-metadata-free identity into its core and prerelease identifiers. */
+function splitDshRuntime(version: string): { core: string; prerelease: string[] } {
+  const dash = version.indexOf('-');
+  if (dash === -1) return { core: version, prerelease: [] };
+  return { core: version.slice(0, dash), prerelease: version.slice(dash + 1).split('.') };
+}
 
 /** Read one trustworthy SemVer identity from the installed DSH manifest, or null. */
 function readDshVersion(dshRoot: string): string | null {
@@ -210,9 +248,12 @@ function readDshVersion(dshRoot: string): string | null {
   }
 }
 
-/** A valid DSH manifest must also identify one of the explicitly supported minor lines. */
+/** A valid DSH manifest must also identify a release inside the supported patch line. */
 function isSupportedDshRuntime(version: string | null): version is string {
-  return version !== null && DSH_SUPPORTED_RUNTIME_RE.test(stripBuildMetadata(version));
+  if (version === null) return false;
+  const { core, prerelease } = splitDshRuntime(stripBuildMetadata(version));
+  if (core !== DSH_SUPPORTED_CORE) return false;
+  return prerelease.length === 0 || comparePrerelease(prerelease, DSH_SUPPORTED_PRERELEASE_FLOOR) >= 0;
 }
 
 /** 补丁管理命令：node dist/cli.js patch [status]（补丁强制启用；无参数=立即重载） */
@@ -248,7 +289,7 @@ function runPatch(argv: string[]): void {
   if (action === undefined || action === 'on' || action === 'reload') {
     const dshVersion = readDshVersion(root);
     if (!isSupportedDshRuntime(dshVersion)) {
-      console.error(`[dsh-passwords] Unsupported or invalid DSH version ${dshVersion ?? '(missing/corrupt)'}; refusing to patch (supported minor lines: 0.1.2, 0.1.3, 0.1.5, 0.1.6, 0.1.7, 0.2.0)`);
+      console.error(`[dsh-passwords] Unsupported or invalid DSH version ${dshVersion ?? '(missing/corrupt)'}; refusing to patch (supported runtime: >=0.2.1-alpha.1 <0.2.2-0)`);
       process.exit(EXIT_DSH_VERSION_UNSUPPORTED);
     }
     const result = applyRemotePatch(root);
@@ -355,7 +396,7 @@ async function boot() {
   // bridge regex”被静默放行：它可能拥有不同的 bundle / Remote wire contract。
   const dshVersion = readDshVersion(root);
   if (!isSupportedDshRuntime(dshVersion)) {
-    console.error(`[dsh-passwords] Unsupported or invalid DSH version ${dshVersion ?? '(missing/corrupt)'}; refusing to patch or start the public gateway (supported minor lines: 0.1.2, 0.1.3, 0.1.5, 0.1.6, 0.1.7, 0.2.0)`);
+    console.error(`[dsh-passwords] Unsupported or invalid DSH version ${dshVersion ?? '(missing/corrupt)'}; refusing to patch or start the public gateway (supported runtime: >=0.2.1-alpha.1 <0.2.2-0)`);
     process.exit(EXIT_DSH_VERSION_UNSUPPORTED);
   }
   try {
@@ -381,6 +422,7 @@ async function boot() {
     }
   } catch (error) {
     console.error(`[dsh-passwords] ${tr('cli.patchSyncFailed')}:`, error);
+    process.exit(EXIT_ALPHA3_SETTINGS_UNAVAILABLE);
   }
 
   if (config.database.driver === 'sqlite') backupSqliteBeforeMigration(config.database.path);
@@ -470,6 +512,7 @@ async function boot() {
   const tlsOn = config.gateway.tls !== null;
   const gateway = createGatewayServer(config, auth, db, {
     upstreamBrowserCookie: () => upstreamBrowserCookie,
+    setUpstreamBrowserCookie: (cookie) => { upstreamBrowserCookie = cookie; },
     upstreamRemoteTransport: upstreamBrowserAuthenticationRequired,
   });
   let browserAuthRefreshTimer: NodeJS.Timeout | null = null;

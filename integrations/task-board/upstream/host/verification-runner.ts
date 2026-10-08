@@ -7,9 +7,10 @@
  * thresholds, budgets, caps) comes from `../core/verification.ts`, which mirrors
  * the installed dsh-llm-verifier 0.8.4 default final acceptance.
  */
-import { createUserMessage, type LlmRuntime } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, type FinishReason, type LlmRuntime } from '@deepseek-ai/dsh-llm'
 import { openOneShotStream } from './llm-dispatch.ts'
 import { createHash } from 'node:crypto'
+import { DEFAULT_VERIFICATION_BUDGET_MS } from '../core/verification-budget.ts'
 import {
   CODING_CRITERIA,
   EMPTY_WORK_BASELINE,
@@ -41,9 +42,15 @@ export const VERIFICATION_MAX_FINDING_CHARS = 400
 /** Findings kept per judge answer and per acceptance. */
 export const VERIFICATION_MAX_FINDINGS_PER_CALL = 3
 export const VERIFICATION_MAX_FINDINGS = 6
-/** One judge request's ceiling and its retry budget. */
-export const VERIFICATION_CALL_TIMEOUT_MS = 120_000
-export const VERIFICATION_MAX_TOKENS = 4_096
+/**
+ * Default ceiling of ONE judge request. The effective ceiling is a row setting
+ * (`goalVerificationCallTimeoutSeconds`), read live by the gate, because 120s was
+ * tight for a reasoning model reading an 80,000 character trace with a 16,384
+ * token output cap: every timeout it produced was charged as an acceptance
+ * anomaly against a budget that then failed the card.
+ */
+export const VERIFICATION_CALL_TIMEOUT_MS = 150_000
+export const VERIFICATION_MAX_TOKENS = 16_384
 export const VERIFICATION_TEMPERATURE = 0.2
 export const VERIFICATION_REQUEST_ATTEMPTS = 3
 
@@ -54,7 +61,25 @@ export const VERIFICATION_REDACT_PATTERNS: readonly string[] = [
 ]
 
 /** Why one acceptance could not produce a verdict. */
-export type VerificationErrorKind = 'route-unavailable' | 'timeout' | 'auth' | 'parse' | 'request' | 'aborted'
+export type VerificationErrorKind = 'route-unavailable' | 'timeout' | 'auth' | 'parse' | 'request' | 'aborted' | 'budget'
+
+/**
+ * The time one acceptance attempt may still spend.
+ *
+ * `deadline` is the instant the whole attempt runs out; `callTimeoutMs` is the
+ * ceiling of a single judge call. The pair is what ties the retry budget to the
+ * acceptance budget: a call is not started unless its own ceiling still fits
+ * inside what is left, because starting one the outer budget will abort anyway
+ * only burns wall time and turns a slow machine into an anomaly.
+ */
+export interface AcceptanceBudget {
+  /** Absolute instant (ms epoch) the acceptance attempt runs out at. */
+  deadline: number
+  /** Ceiling of one judge call in milliseconds. */
+  callTimeoutMs: number
+  /** Clock the caller runs on, injected so tests drive it deterministically. */
+  now: () => number
+}
 
 /** An acceptance anomaly: never a quality verdict, always recorded as one. */
 export class VerificationError extends Error {
@@ -282,19 +307,34 @@ function renderFinding(finding: RawFinding): string {
   return locator + ' ' + finding.body + action
 }
 
-/** One judge request's outcome. */
+/**
+ * One judge request's outcome.
+ *
+ * Every attempt is admitted against the acceptance budget first: a call whose
+ * own ceiling no longer fits in the time left is refused before it is opened,
+ * so a slow route cannot spend the whole acceptance budget on calls the outer
+ * abort is going to kill anyway.
+ */
 async function judgeOnce(
   llm: LlmRuntime,
   route: VerificationRoute,
   prompt: string,
   signal: AbortSignal,
+  budget: AcceptanceBudget,
 ): Promise<{ text: string; usage: VerificationUsage }> {
   const usage = emptyUsage()
   let lastError: unknown
+  /** The outer abort is the acceptance budget running out, not a cancellation. */
+  const stopped = (): VerificationError => budget.now() >= budget.deadline
+    ? new VerificationError('budget', 'the acceptance budget ran out before the judge answered', usage)
+    : new VerificationError('aborted', 'the acceptance was cancelled', usage)
   for (let attempt = 0; attempt < VERIFICATION_REQUEST_ATTEMPTS; attempt++) {
-    if (signal.aborted) throw new VerificationError('aborted', 'the acceptance was cancelled before the judge answer', usage)
+    if (signal.aborted) throw stopped()
+    if (budget.deadline - budget.now() <= budget.callTimeoutMs) {
+      throw new VerificationError('budget', 'the acceptance budget cannot fit another judge call', usage)
+    }
     const timeout = new AbortController()
-    const timer = setTimeout(() => { timeout.abort(new Error('task-board verification: the judge request timed out')) }, VERIFICATION_CALL_TIMEOUT_MS)
+    const timer = setTimeout(() => { timeout.abort(new Error('task-board verification: the judge request timed out')) }, budget.callTimeoutMs)
     const forward = (): void => { timeout.abort(signal.reason) }
     signal.addEventListener('abort', forward, { once: true })
     try {
@@ -320,7 +360,7 @@ async function judgeOnce(
       )
       let text = ''
       usage.calls += 1
-      let finishReason: string | undefined
+      let finishReason: FinishReason | undefined
       for await (const chunk of stream) {
         const row = chunk as unknown as Record<string, unknown>
         if (row.type === 'text-delta' && typeof row.text === 'string') text += row.text
@@ -329,32 +369,42 @@ async function judgeOnce(
           usage.inputTokens += typeof reported.inputTokens === 'number' ? reported.inputTokens : 0
           usage.outputTokens += typeof reported.outputTokens === 'number' ? reported.outputTokens : 0
           usage.reasoningTokens += typeof reported.reasoningTokens === 'number' ? reported.reasoningTokens : 0
-        } else if (chunk.type === 'finish') {
-          finishReason = chunk.reason.kind
-          if (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted') {
-            throw new VerificationError(chunk.reason.kind === 'aborted' ? 'aborted' : 'request', chunk.reason.failure.message, usage)
-          }
+        } else if (row.type === 'finish') {
+          finishReason = chunk.type === 'finish' ? chunk.reason : undefined
         }
       }
-      if (finishReason === 'max-tokens') {
-        throw new VerificationError('parse', 'the judge answer hit the output ceiling and carries no usable verdict', usage)
+      if (signal.aborted) throw stopped()
+      if (timeout.signal.aborted) throw new VerificationError('timeout', 'the judge request timed out', usage)
+      if (finishReason?.kind === 'error' || finishReason?.kind === 'aborted') {
+        const failure = finishReason.failure
+        const message = redact([failure.code, failure.status, failure.message].filter(value => value !== undefined).join(': '), VERIFICATION_REDACT_PATTERNS).slice(0, 2_000)
+        const kind = finishReason.kind === 'aborted' ? 'aborted'
+          : failure.status === 401 || failure.status === 403 ? 'auth' : 'request'
+        throw new VerificationError(kind, message, usage)
       }
-      if (text.trim() === '') throw new VerificationError('parse', 'the judge returned an empty answer', usage)
+      if (finishReason?.kind === 'max-tokens') {
+        throw new VerificationError('parse', 'the judge answer hit the output ceiling (' + VERIFICATION_MAX_TOKENS + ' tokens) and carries no usable verdict', usage)
+      }
+      if (text.trim() === '') {
+        throw new VerificationError('parse', 'the judge returned an empty answer', usage)
+      }
+      try {
+        extractScore(text, 'score_A')
+        extractScore(text, 'score_B')
+      } catch {
+        throw new VerificationError('parse', 'the judge answer did not contain valid score_A and score_B A-T scores', usage)
+      }
       return { text, usage }
     } catch (error) {
       lastError = error
-      if (error instanceof VerificationError && (error.kind === 'parse' || error.kind === 'aborted')) {
-        if (error.kind === 'aborted') throw error
-        // A truncated or unusable answer was already billed; one retry is worth
-        // it, and the end of the budget is reported as an anomaly, never as a
-        // quality verdict.
-      }
-      if (signal.aborted) throw new VerificationError('aborted', 'the acceptance was cancelled', usage)
+      if (error instanceof VerificationError && (error.kind === 'aborted' || error.kind === 'auth')) throw error
+      if (signal.aborted) throw stopped()
       if (timeout.signal.aborted) {
-        lastError = new VerificationError('timeout', 'the judge request timed out after ' + Math.round(VERIFICATION_CALL_TIMEOUT_MS / 1000) + 's', usage)
+        lastError = new VerificationError('timeout', 'the judge request timed out after ' + Math.round(budget.callTimeoutMs / 1000) + 's', usage)
       }
-      if (attempt + 1 >= VERIFICATION_REQUEST_ATTEMPTS || !retryable(lastError)) break
-      usage.usageIncomplete = true
+      const parseFailure = lastError instanceof VerificationError && lastError.kind === 'parse'
+      if (attempt + 1 >= VERIFICATION_REQUEST_ATTEMPTS || (!parseFailure && !retryable(lastError))) break
+      if (!parseFailure) usage.usageIncomplete = true
       await new Promise(resolve => { setTimeout(resolve, 500 * (attempt + 1)) })
     } finally {
       clearTimeout(timer)
@@ -377,8 +427,8 @@ export interface AcceptanceResult {
  * Run one acceptance: every criterion is judged twice, the odd round with the
  * A/B slots swapped, and the per-round scores are mapped back and averaged per
  * criterion.
- * @param input - the judge route, evidence, threshold and cancellation.
- * @returns the recorded attempt (quality verdict or anomaly).
+ * @param input - the judge route, evidence, threshold, time budget and cancellation.
+ * @returns the recorded attempt (quality verdict, anomaly, or budget stop).
  */
 export async function runAcceptance(input: {
   llm: LlmRuntime
@@ -387,6 +437,10 @@ export async function runAcceptance(input: {
   threshold: number
   index: number
   signal: AbortSignal
+  /** Instant (ms epoch) the attempt runs out at; defaults to now plus the default budget. */
+  deadline?: number
+  /** Ceiling of one judge call; defaults to {@link VERIFICATION_CALL_TIMEOUT_MS}. */
+  callTimeoutMs?: number
   /** Host-observed workspace changes, rendered as the prompt's reference context. */
   context?: string
   /** How many changed files that context shows. */
@@ -395,6 +449,11 @@ export async function runAcceptance(input: {
 }): Promise<AcceptanceResult> {
   const now = input.now ?? Date.now
   const startedAt = now()
+  const budget: AcceptanceBudget = {
+    deadline: input.deadline ?? startedAt + DEFAULT_VERIFICATION_BUDGET_MS,
+    callTimeoutMs: input.callTimeoutMs ?? VERIFICATION_CALL_TIMEOUT_MS,
+    now,
+  }
   const usage = emptyUsage()
   const evidenceSummary: VerificationEvidenceSummary = {
     chars: input.evidence.trace.length,
@@ -416,9 +475,10 @@ export async function runAcceptance(input: {
         const candidateA = swapped ? EMPTY_WORK_BASELINE : input.evidence.trace
         const candidateB = swapped ? input.evidence.trace : EMPTY_WORK_BASELINE
         const prompt = buildAcceptancePrompt(input.evidence.problem, candidateA, candidateB, criterion, undefined, input.context)
-        const answer = await judgeOnce(input.llm, input.route, prompt, input.signal)
+        const answer = await judgeOnce(input.llm, input.route, prompt, input.signal, budget)
         const scoreA = extractScore(answer.text, 'score_A')
         const scoreB = extractScore(answer.text, 'score_B')
+        if (answer.usage.usageIncomplete === true) usage.usageIncomplete = true
         usage.calls += answer.usage.calls
         usage.inputTokens += answer.usage.inputTokens
         usage.outputTokens += answer.usage.outputTokens
@@ -473,7 +533,10 @@ export async function runAcceptance(input: {
       attempt: {
         index: input.index,
         at: startedAt,
-        stage: 'exception',
+        // A budget stop is its own stage: the time ran out before any verdict,
+        // which is neither a judgement of the work nor an anomaly of the
+        // judge route, so it is charged to no budget.
+        stage: kind === 'budget' ? 'budget' : 'exception',
         passed: false,
         score: 0,
         baseline: 0,
@@ -516,6 +579,7 @@ function classifyMessage(kind: VerificationErrorKind, message: string): string {
     parse: '验收异常（裁判回答无法解析）',
     request: '验收异常（裁判请求失败）',
     aborted: '验收异常（验收被取消）',
+    budget: '验收未完成（时间预算耗尽，未产生任何判定，不计入异常额度）',
   }
   return labels[kind] + ': ' + message
 }

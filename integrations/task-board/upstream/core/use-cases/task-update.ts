@@ -16,7 +16,7 @@ import type { TaskHandoverInput } from '../handover.ts'
  * Editable fields on a task (the update patch surface). `freeze` replaces the
  * continuation-card snapshot (restamping frozenAt); an explicit null clears it.
  */
-export type TaskUpdatePatch = Partial<Pick<TaskRecord, 'title' | 'description' | 'prompt' | 'workspaceId' | 'mode' | 'permission' | 'model' | 'reuseSession' | 'teamRun' | 'goalRun'>> & {
+export type TaskUpdatePatch = Partial<Pick<TaskRecord, 'title' | 'description' | 'prompt' | 'workspaceId' | 'mode' | 'permission' | 'model' | 'reuseSession' | 'teamRun' | 'goalRun' | 'skipVerification'>> & {
   freeze?: FreezeSnapshot & { redacted?: boolean } | null
   /** Replaces the handover bundle (restamping bundledAt); an explicit null clears it. */
   handover?: TaskHandoverInput | null
@@ -113,6 +113,10 @@ export function applyUpdateTask(
     // The /goal opt-in is default-ON: true (or an explicit null) returns the
     // card to the default and stores nothing, only false pins a plain turn.
     if ('goalRun' in patch) next.goalRun = patch.goalRun === false ? false : undefined
+    // The acceptance opt-out is the mirror image: default OFF, so only true
+    // pins a card out of the gate; false (or an explicit null) returns it to
+    // inheriting the board-wide switch and stores nothing.
+    if ('skipVerification' in patch) next.skipVerification = patch.skipVerification === true ? true : undefined
     if (workspaceId !== undefined || 'workspaceId' in patch) next.workspaceId = workspaceId
     if (mode !== undefined || 'mode' in patch) next.mode = mode
     if (permission !== undefined || 'permission' in patch) next.permission = permission

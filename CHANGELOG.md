@@ -1,5 +1,41 @@
 # Changelog
 
+## 2.7.7 - 2026-10-03
+
+### 中文
+
+更新公告：
+
+1. 兼容 DSH `0.2.1-alpha.1`：9 个 `@deepseek-ai/dsh*` 开发依赖、`npm-shrinkwrap.json`、安装器与 bundled Docker 默认运行时统一解析并锁定到官方 alpha.1；版本门禁收窄为单一 patch 线 `>=0.2.1-alpha.1 <0.2.2-0`，接受 alpha.1 起的 `0.2.1` 预发布与稳定 `0.2.1`，拒绝已退役的 `0.1.x` / `0.2.0` 线、`0.2.1-alpha.0` 与所有 `0.2.2+` 身份；`patch off` 回滚旁路不受版本门禁限制。
+2. 修复 Issue #35：`GET /gateway/login` 仅在现有 CSRF cookie 通不过双重提交校验时才换发新 token；未认证精确路径 `/favicon.ico` 返回 204（不渲染、不重定向、不下发 cookie），避免 favicon 子请求触发 CSRF cookie 轮换，导致登录或首次配置的首次提交被 403 拒绝。
+3. Issue #35 后续（审计 P0）：`csrfMatches` 的签名段改用严格 32 位小写十六进制白名单，替换原先的字符串长度校验。原先「32 个 JS 码元 / 33 个 UTF-8 字节」的多字节签名变体可绕过长度检查，令 `timingSafeEqual` 抛 `RangeError`；该异常发生在 Express 4 不接管的 async 路由内，升级为未处理拒绝并以退出码 1 结束密码门，宿主插件按永久错误不再自动重启。现在畸形 cookie 只照常返回登录页，不再打挂网关。
+4. Issue #35 后续（审计 P2）：`POST /gateway/login` 与 `POST /gateway/setup` 先做同源校验再进入限速（仅回环反代采纳 `X-Forwarded-Host`；非浏览器客户端不带 Origin 时保持原行为），堵住「同站子域植入合法 cookie 后跨源自动提交」的 cookie-tossing CSRF；跨源请求同时不消耗受害者 IP 的限速配额。
+5. Issue #35 后续（审计 P3）：未认证的浏览器自动探针路径扩为精确集合 `/favicon.ico`、`/apple-touch-icon.png`、`/apple-touch-icon-precomposed.png`、`/manifest.json`、`/manifest.webmanifest`、`/browserconfig.xml`、`/robots.txt`、`/sitemap.xml`，命中一律 204（不渲染、不重定向、不下发 cookie、不转发上游）；非探针路径仍按归一化精确匹配 302，刻意不改成按扩展名或 `Sec-Fetch-Dest`/`Accept` 判断。
+6. 跨租户路径保护：会话创建、文件读取和工作区变更会拒绝落入其他子用户拥有的工作区子树，路径 canonicalization 沿最近的现存祖先解析，以保留大小写不敏感文件系统上的实际路径；工作区白名单追加改为只更新目标列，避免并发权限收紧被旧快照覆盖。
+7. 同源保护：集中式 API 写路由与代理到 DSH 的状态变更请求在带 Origin 时校验来源，拒绝同站兄弟子域表单 CSRF；反代部署需保留外部 Host。
+8. 流与进程健壮性：SSE 过滤按 LF/CRLF/CR 解析并保留跨 chunk UTF-8；无法解析的 session history/page 响应 fail-closed；Remote mux 发送缓冲限制为 2 MiB 余量加单个最大合法帧；插件卸载期间不再创建孤儿网关进程，spawn 错误可正确重试。
+9. 客户端可用性与维护：文件下载和目录删除控件支持键盘访问，移除无消费者的客户端导出。
+10. 发布打包卫生：`prepack` 在构建前运行 `scripts/clean-dist.mjs`，删除 `src/` 已无同名 `.ts` 的陈旧成对编译产物（例如旧版 `dist/gateway-admin.js`、`gateway-media.js`、`gateway-messages.js`、`gateway-proxy.js`、`plugin-compat.js` 及其 `.d.ts`），避免 `files:["dist/"]` 把旧构建残留打进 npm 包；普通 `npm test` / `npm run build` 不清理 `dist`，保留用户本地已生成产物。
+
+验证：本地 `npm test` 705/705、独立 dist 回归脚本 `node test/issue-35-standalone.mjs`（A 组 8/8 断言，P0 畸形多字节签名 cookie 未崩溃）、`npm run build`、`npx tsc -p tsconfig.json --noEmit` 与 `git diff --check` 通过；`npm-shrinkwrap.json` 经官方 registry 重建后零版本漂移，280 个 `@deepseek-ai/dsh*` 条目全部锁定 `0.2.1-alpha.1`。
+
+### English
+
+Release notes:
+
+1. DSH `0.2.1-alpha.1` compatibility: the nine `@deepseek-ai/dsh*` dev dependencies, `npm-shrinkwrap.json`, the installers, and the bundled Docker default runtime all resolve and lock to the official alpha.1; the version gate is narrowed to the single patch line `>=0.2.1-alpha.1 <0.2.2-0`, accepting the `0.2.1` prereleases from alpha.1 up and stable `0.2.1`, and rejecting the retired `0.1.x` / `0.2.0` lines, `0.2.1-alpha.0`, and every `0.2.2+` identity; the `patch off` rollback bypass stays outside the version gate.
+2. Fixed Issue #35: `GET /gateway/login` now rotates the CSRF token only when the existing cookie fails double-submit validation, and an unauthenticated exact `/favicon.ico` request returns 204 (no render, no redirect, no cookie), so the favicon sub-request no longer rotates the CSRF cookie and breaks the first login / first-time setup submit with a 403.
+3. Issue #35 follow-up (audit P0): the `csrfMatches` signature check now uses a strict 32-character lowercase-hex allowlist instead of a string-length check. A multibyte signature variant with 32 JS code units but 33 UTF-8 bytes could previously pass the length check and make `timingSafeEqual` throw a `RangeError`; because that throw happens inside an async route Express 4 does not catch, it escalated to an unhandled rejection and terminated the password gate with exit code 1, which the host plugin treats as permanent and never auto-restarts. Malformed cookies now return the login page instead of taking the gateway down.
+4. Issue #35 follow-up (audit P2): `POST /gateway/login` and `POST /gateway/setup` now check the request is same-origin before rate limiting (only a loopback reverse proxy may supply `X-Forwarded-Host`; non-browser clients without an Origin keep the previous behavior), closing the cookie-tossing CSRF path where a same-site subdomain plants a valid cookie and auto-submits cross-origin; a cross-origin request also no longer consumes the victim IP's rate-limit quota.
+5. Issue #35 follow-up (audit P3): the unauthenticated browser auto-probe paths are now an exact set of `/favicon.ico`, `/apple-touch-icon.png`, `/apple-touch-icon-precomposed.png`, `/manifest.json`, `/manifest.webmanifest`, `/browserconfig.xml`, `/robots.txt`, and `/sitemap.xml`, all answered with 204 (no render, no redirect, no cookie, no upstream forward); non-probe paths still redirect with 302 on an exact normalised match, deliberately not widened to an extension or `Sec-Fetch-Dest`/`Accept` check.
+6. Cross-tenant path protection: session creation, file reads, and workspace changes reject targets inside another subuser's owned workspace subtree; path canonicalization resolves through the nearest existing ancestor so case-insensitive filesystems retain their actual path spelling. Workspace allowlist registration updates only its target column so concurrent permission tightening cannot be overwritten by a stale snapshot.
+7. Same-origin protection: centralized API writes and proxied DSH state changes validate supplied Origin headers and reject sibling-subdomain form CSRF; reverse proxies must preserve the external Host.
+8. Stream and process hardening: SSE filtering handles LF/CRLF/CR and split UTF-8 chunks; unprocessable session history/page responses fail closed; Remote mux buffering permits 2 MiB of queue headroom plus one maximum legal frame; plugin disposal no longer spawns orphan gateways and spawn failures can retry.
+9. Client usability and maintenance: file-download and directory-delete controls are keyboard accessible; unused client exports were removed.
+10. Packaging hygiene: `prepack` now runs `scripts/clean-dist.mjs` before the build to delete obsolete paired compiled outputs whose `src/` `.ts` source no longer exists (for example the old `dist/gateway-admin.js`, `gateway-media.js`, `gateway-messages.js`, `gateway-proxy.js`, and `plugin-compat.js` plus their `.d.ts`), so `files:["dist/"]` no longer packs leftovers from an older build; ordinary `npm test` / `npm run build` do not clean `dist`, preserving the user's local generated artifacts.
+
+Validation: local `npm test` 705/705, the standalone dist regression script `node test/issue-35-standalone.mjs` (A-group 8/8 assertions, and the malformed multibyte-signature P0 cookie did not crash), `npm run build`, `npx tsc -p tsconfig.json --noEmit`, and `git diff --check` passed. `npm-shrinkwrap.json` was rebuilt against the official registry with zero version drift, with all 280 `@deepseek-ai/dsh*` entries pinned to `0.2.1-alpha.1`.
+
 ## 2.7.6 - 2026-09-29
 
 ### 中文

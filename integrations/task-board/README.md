@@ -1,6 +1,6 @@
 # Task board Host engine
 
-Pinned from [sdwhwzp/dsh-web](https://github.com/sdwhwzp/dsh-web) commit `1c743d227a054bcfa4ca69d445bca9324f5f687e`, package `@linxin666/dsh-client-ui-task-board` version `0.4.4-dsh.20261003.1` (Apache-2.0). [source.json](source.json) records the 33 files in the Host service, ledger, routes, parser and acceptance gate dependency closure with their Git blob hashes. Files under `upstream/` are unchanged copies of that commit.
+Pinned from [sdwhwzp/dsh-web](https://github.com/sdwhwzp/dsh-web) commit `f6dde580c57a56d551ba9ec65a443d7b7ab3b385`, package `@linxin666/dsh-client-ui-task-board` version `0.4.5-dsh.20261008.1` (Apache-2.0). [source.json](source.json) records the 35 files in the Host service, ledger, routes, parser and acceptance gate dependency closure with their Git blob hashes. Files under `upstream/` are unchanged copies of that commit.
 
 The tenant adapter authenticates requests, isolates ledgers by account and sends every execution RPC through the passwords gateway. Parent-child links, workspace IDs, tags and session-reuse preferences survive ledger reloads; the matching dsh-web client uses those workspace IDs for project partitions. Parent links can reference only tasks in the same account ledger; absent parents and cycles are rejected. Workspace creation and session reuse retain the gateway's account permissions and session ownership checks.
 
@@ -27,3 +27,5 @@ Per-account Hosts receive no shared GitHub client or repository configuration. G
 The account adapter reads acceptance fields from the live `web-ui-task-board` / `task-board` settings descriptor. A programmatic mount without that form leaves acceptance disabled. Each judge model call repeats catalog, account and quota admission and records usage under `task-board-verification:<uuid>`. The pre-execution gate verifies both the durable session owner and principal access before reading the execution evidence; persisted verdicts survive reload. Workspace candidates and their creator-session IDs are filtered by principal access before card creation and execution.
 
 The bundled Host stops its current registration pass when the framework rejects a late tool registration with `INACTIVE_EFFECT` during unload. Other registration failures remain visible, and disposal releases registered tools and extension handles.
+
+Per-account Hosts receive no shared GitHub client or repository configuration. GitHub synchronization and pull-request actions therefore fail as not configured, while the shared action protocol and existing private cards remain readable.

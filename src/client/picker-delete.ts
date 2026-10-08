@@ -171,7 +171,7 @@ export function extractPickerListings(envelope: unknown): PickerEntry[][] {
 }
 
 /** 一份已被抓到的列列表（按列名序列索引行 → 绝对路径）。 */
-export interface CapturedListing {
+interface CapturedListing {
   names: string[];
   /** 与 names 同序的绝对路径：用于区分不同目录下恰好同名的列。 */
   paths: string[];
@@ -204,11 +204,6 @@ function rememberListings(entries: PickerEntry[]): void {
   if (capturedListings.length > MAX_LISTINGS) capturedListings.length = MAX_LISTINGS;
 }
 
-/** 供 scan 读取的当前列表快照（最新在前）。 */
-export function pickerListings(): readonly CapturedListing[] {
-  return capturedListings;
-}
-
 // ── 列 ↔ 列表匹配 ──────────────────────────────────────────────
 
 /**
@@ -222,7 +217,7 @@ export function pickerListings(): readonly CapturedListing[] {
  * 指向其目录列表里同名条目的路径，而同名即同目录下的同一项。
  *
  * @param names - 该列当前可见行的名字序列（textContent.trim()）。
- * @param listings - 候选列表（通常来自 pickerListings()）。
+ * @param listings - 候选列表（scan 侧直接传入 capturedListings 快照）。
  * @returns 命中下标；无候选/无命中为 null。
  */
 export function matchPickerListing(
@@ -465,7 +460,8 @@ function clearRetryState(node: HTMLElement, rowHost: Element, path: string): voi
   cleanupsPending.delete(path);
   node.removeAttribute('data-dshpw-picker-del-retry');
   node.classList.remove('dshpw-picker-del-retry');
-  node.setAttribute('tabindex', '-1');
+  // 退出墓碑后仍是可键盘操作的常规删除入口：保持在 Tab 序列内。
+  node.setAttribute('tabindex', '0');
   rowHost.classList.remove('dshpw-picker-del-tombstone');
   setRowKeyboardInert(rowHost, false);
 }
@@ -511,14 +507,15 @@ function injectRowButton(rowHost: Element, entry: PickerEntry): void {
   ) {
     host.style.position = 'relative';
   }
-  // 原生 button：Enter/Space 原生可操作，aria-label 直接是辅助技术的可读名称。
-  // 默认 tabindex=-1（悬停显现的便利入口，不做 Tab 停靠）；墓碑重试态改 0。
+  // 原生 button：Enter/Space 原生可操作（与鼠标共用同一 click handler，不绕过
+  // 二次确认与授权/请求语义），aria-label 直接是辅助技术的可读名称。
+  // tabindex=0：键盘可达，聚焦时由 :focus-visible 规则显形（与悬停同款）。
   const node = document.createElement('button');
   node.type = 'button';
   node.className = 'dshpw-picker-del';
   node.setAttribute('data-dshpw-picker-del', '1');
   node.setAttribute(PATH_ATTR, path);
-  node.setAttribute('tabindex', '-1');
+  node.setAttribute('tabindex', '0');
   setDeleteButtonLabel(node, entry.name);
   node.innerHTML = TRASH_ICON;
 

@@ -43,7 +43,7 @@ Do not paste `.env`, `setup-key.txt`, JWTs, cookies, API keys, SSH passwords, pr
 Supported development baseline:
 
 - Node.js `22.19+` or `24+`
-- The private Harness `0.2.0-rc.2` checkout supplies native tenant extensions. Development packages link to it; candidate and production acceptance are recorded separately from upstream release results.
+- Private Harness `0.2.1-alpha.1` provides the native account extensions. Development packages link to that checkout; the runtime gate accepts `>=0.2.1-alpha.1 <0.2.2-0`. Candidate acceptance is recorded separately from upstream release results.
 - npm and git
 
 Clone and install:

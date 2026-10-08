@@ -33,7 +33,7 @@ const PATH_ATTR = 'data-dshpwDlPath';
 /** 注入按钮与 toast 的样式（<style> 只注入一次；类名固定，不进官方 CSS 命名空间）。
  *  文案/图标颜色用 label-primary（黑白主题自适应），不用 *-inverted。 */
 const FILE_DL_CSS = `
-.dshpw-dl{--dshpw-ease:cubic-bezier(.22,1,.36,1);--dshpw-spring:cubic-bezier(.34,1.4,.64,1);position:absolute;right:6px;top:50%;transform:translateY(-50%) scale(.9);display:flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:6px;color:var(--dsw-alias-label-primary,#172026);background:transparent;cursor:pointer;opacity:0;pointer-events:none;transition:opacity .16s var(--dshpw-ease),transform .28s var(--dshpw-spring),background-color .16s var(--dshpw-ease),color .16s var(--dshpw-ease);-webkit-user-select:none;user-select:none;z-index:1}
+.dshpw-dl{--dshpw-ease:cubic-bezier(.22,1,.36,1);--dshpw-spring:cubic-bezier(.34,1.4,.64,1);position:absolute;right:6px;top:50%;transform:translateY(-50%) scale(.9);display:flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:6px;color:var(--dsw-alias-label-primary,#172026);background:transparent;border:0;padding:0;font:inherit;-webkit-appearance:none;appearance:none;cursor:pointer;opacity:0;pointer-events:none;transition:opacity .16s var(--dshpw-ease),transform .28s var(--dshpw-spring),background-color .16s var(--dshpw-ease),color .16s var(--dshpw-ease);-webkit-user-select:none;user-select:none;z-index:1}
 li[data-files-entry="file"]:hover>.dshpw-dl,.dshpw-dl:focus-visible{opacity:1;pointer-events:auto;transform:translateY(-50%) scale(1)}
 .dshpw-dl:hover{background:color-mix(in srgb,var(--dsw-alias-brand-primary,#14b8a6) 16%,transparent);color:var(--dsw-alias-brand-primary,#14b8a6)}
 .dshpw-dl:active{transform:translateY(-50%) scale(.86);transition-duration:.08s}
@@ -149,12 +149,13 @@ function injectRowButton(rowHost: HTMLLIElement, absPath: string): void {
     getComputedStyle(rowHost).position === 'static') {
     rowHost.style.position = 'relative';
   }
-  const node = document.createElement('span');
+  // 原生 button：默认进入 Tab 序列（键盘可达），Enter/Space 原生触发 click，
+  // 与鼠标点击走同一 handler（同一 HEAD 探测 + 下载语义）。无需 role=button。
+  const node = document.createElement('button');
+  node.type = 'button';
   node.className = 'dshpw-dl';
   node.setAttribute('data-dshpw-dl', '1');
   node.setAttribute(PATH_ATTR, absPath);
-  node.setAttribute('role', 'button');
-  node.setAttribute('tabindex', '-1');
   const label = `${downloadText.aria}`;
   node.setAttribute('aria-label', label);
   node.setAttribute('title', label);

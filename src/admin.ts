@@ -107,6 +107,13 @@ export interface AdminRouteDeps {
   nullableInt: (v: unknown) => number | null;
   /** 子用户权限（缺行时默认关闭全部工作区）。 */
   effectivePermissions: (userId: number) => UserPermissionsRow;
+  /**
+   * 目标路径是否伸进「另一存活子用户创建的工作区子树」（含相等）。
+   * 与 /api/file 的对象级授权同口径（gateway 内 workspaceSubtreeOverlap），
+   * 供 /gateway/api/download 在白名单之外再做归属校验：只被分配了共享父目录的
+   * 子用户不能借白名单读到物主在父目录下自建子树里的文件。
+   */
+  workspaceSubtreeOverlap: (userId: number, workspacePath: string) => boolean;
   /** 规范化 model allowlist（失效项剔除、去重、截断）。 */
   normalizeAllowedModels: (value: readonly string[]) => string[];
   /** 解析单条 `provider/model` allowlist 项。 */
@@ -202,6 +209,7 @@ export function registerAdminRoutes(app: Application, deps: AdminRouteDeps): Adm
     jsonBody,
     stringArray,
     effectivePermissions,
+    workspaceSubtreeOverlap,
     normalizeAllowedModels,
     parseAllowedModelSpec,
     verifyAdminPassword,
@@ -637,6 +645,13 @@ export function registerAdminRoutes(app: Application, deps: AdminRouteDeps): Adm
         return;
       }
       if (!folderAllowed(real, perms.allowed_folders)) {
+        res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '目录越权' });
+        return;
+      }
+      // 对象级授权（与 /api/file 同口径）：白名单只表达「能进哪些目录」，不表达
+      // 「目录里哪些子树属于别人」。被分配共享父目录的子用户不得凭白名单读到物主
+      // 在父目录下自建 workspace 子树内的文件（workspaceSubtreeOverlap 单向含相等）。
+      if (workspaceSubtreeOverlap(me.userId, real)) {
         res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '目录越权' });
         return;
       }

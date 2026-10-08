@@ -30,6 +30,8 @@ function readEnv(name: string, fallback: string): string {
 // 不能被 dsh 常驻进程继承下来的陈旧值覆盖。IP/端口/上游 TLS 校验开关、设置文件锚点
 // 和 bindAll 补丁开关都直接影响认证面与网络暴露，遗漏会造成插件与网关撕裂。
 const MANAGED_ENV_KEYS = [
+  'MCP_GATEWAY_INTERNAL_PROBE_TIMEOUT_MS',
+  'MCP_DSH_PASSWORDS_INVENTORY_TTL_MS',
   'SETUP_KEY', 'MCP_DB_PATH', 'MCP_DB_ENC_KEY', 'MCP_JWT_SECRET', 'MCP_INTERNAL_SECRET',
   'MCP_DSH_ROOT', 'MCP_DSH_RESTART_SERVICE', 'MCP_DSH_AUTO_UPDATE', 'MCP_DSH_UPDATE_MAX_BPS',
   'MCP_DSH_SETTINGS_FILE', 'MCP_DSH_PATCH_ALLOW_BIND_ALL',
@@ -79,6 +81,11 @@ const MANAGED_ENV_KEYS = [
   'DSH_PASSWORDS_MYSQL_PASSWORD',
   'TENANT_SSH_ENABLED',
   'TENANT_SSH_TRUSTED_HOSTS',
+  // Upper bound (ms) for waiting on upstream response headers. Workspace inventory
+  // enumeration can far exceed the 60s default on large session corpora; if this key
+  // is not managed, a .env value never reaches the gateway process and the 504
+  // cannot be worked around by configuration alone.
+  'MCP_GATEWAY_UPSTREAM_HEADER_TIMEOUT_MS',
 ] as const;
 const managedFileKeys = new Map<string, Set<string>>();
 

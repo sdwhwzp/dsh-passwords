@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, realpathSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -67,6 +67,9 @@ test('register-plugin 经安全 cmd shim（非 shell:true）调用 pnpm 并传�
   const dshHome = path.join(root, 'dsh-home');
   const profile = path.join(dshHome, 'profiles', 'web');
   const bin = path.join(root, 'bin');
+  const isolatedRoot = path.join(root, 'plugin');
+  cpSync(path.join(projectRoot, 'scripts'), path.join(isolatedRoot, 'scripts'), { recursive: true });
+  cpSync(path.join(projectRoot, 'package.json'), path.join(isolatedRoot, 'package.json'));
   const marker = path.join(root, 'pnpm-argv.txt');
   mkdirSync(bin, { recursive: true });
   // 假 pnpm shim 记录收到的参数并以 0 退出，证明脚本确实经由 pnpm shim 调用。
@@ -77,7 +80,7 @@ test('register-plugin 经安全 cmd shim（非 shell:true）调用 pnpm 并传�
     writeFileSync(path.join(bin, 'pnpm'), `#!/bin/sh\necho "$@" > "${marker}"\nexit 0\n`, { mode: 0o755 });
   }
   try {
-    const result = spawnSync(process.execPath, [registerScript], {
+    const result = spawnSync(process.execPath, [path.join(isolatedRoot, 'scripts/register-plugin.mjs')], {
       env: { ...commandEnvironment(bin), DSH_HOME: dshHome },
       encoding: 'utf8',
     });
@@ -85,7 +88,7 @@ test('register-plugin 经安全 cmd shim（非 shell:true）调用 pnpm 并传�
     assert.doesNotMatch(result.stderr, /DEP0190/, '不得再以 shell:true 调用 pnpm');
     assert.equal(readFileSync(marker, 'utf8').trim().replace(/"/g, ''), 'install');
     const manifest = JSON.parse(readFileSync(path.join(profile, 'package.json'), 'utf8'));
-    assert.equal(manifest.dependencies['dsh-passwords'], `link:${projectRoot}`);
+    assert.equal(manifest.dependencies['dsh-passwords'], `link:${realpathSync(isolatedRoot)}`);
     assert.ok(manifest.dsh.profile.bundles.includes('dsh-passwords'));
   } finally {
     rmSync(root, { recursive: true, force: true });

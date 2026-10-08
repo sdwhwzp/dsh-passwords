@@ -63,7 +63,7 @@ test('readiness proves database and authenticated Host data access without expos
     upstreamRequests += 1;
     upstreamCookies.push(req.headers.cookie);
     upstreamAuthorities.push(req.headers.host);
-    if (req.headers.cookie !== HOST_BROWSER_COOKIE) {
+    if (!req.headers.cookie?.split(';').map((part) => part.trim()).includes(HOST_BROWSER_COOKIE)) {
       res.writeHead(401).end();
       return;
     }
@@ -143,7 +143,7 @@ test('readiness proves database and authenticated Host data access without expos
     const rejectUpgrade = (status: number, reason: string) => {
       socket.end(`HTTP/1.1 ${String(status)} ${reason}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
     };
-    if (req.headers.cookie !== HOST_BROWSER_COOKIE) {
+    if (!req.headers.cookie?.split(';').map((part) => part.trim()).includes(HOST_BROWSER_COOKIE)) {
       rejectUpgrade(401, 'Unauthorized');
       return;
     }

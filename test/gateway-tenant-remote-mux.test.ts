@@ -392,12 +392,42 @@ tenantTest('restoring saved terminals preserves the workspace stream when a term
   }
 });
 
-tenantTest('terminal retention rejects foreign, missing, disabled and forged sessions before forwarding', async mobile => {
+tenantTest('saved terminals without current session access leave workspace groups connected', async mobile => {
+  const env = await setup(mobile);
+  try {
+    env.disableSession();
+    for (const sessionId of ['other-session', 'missing-session', 'own-session']) {
+      const { downstream, upstream } = await env.connect();
+      try {
+        const opened = nextMessage(upstream);
+        downstream.send(JSON.stringify({ type: 'open', streamId: 'workspaces', endpoint: 'workspace/follow', payload: { args: {} } }));
+        await opened;
+        const forwarded: unknown[] = [];
+        upstream.on('message', data => forwarded.push(JSON.parse(data.toString())));
+        const rejected = nextMessage(downstream);
+        downstream.send(JSON.stringify({ type: 'open', streamId: 'term', endpoint: 'terminal/retain', payload: { args: { sessionId, id: 'saved-terminal' } } }));
+        assert.deepEqual(await rejected, {
+          type: 'error', streamId: 'term',
+          error: { code: 'terminal/unavailable', message: 'Terminal is unavailable for this account', details: {} },
+        });
+        downstream.send(JSON.stringify({ type: 'cancel', streamId: 'term' }));
+        const baseline = nextMessage(downstream);
+        upstream.send(muxItem('workspaces', { type: 'baseline', value: { items: [{ workspaceId: 'own', path: ownRoot, sessionIds: [] }], archivedSessionIds: [] } }));
+        assert.equal((await baseline).streamId, 'workspaces');
+        assert.equal(downstream.readyState, WebSocket.OPEN);
+        const cancelled = nextMessage(upstream);
+        downstream.send(JSON.stringify({ type: 'cancel', streamId: 'workspaces' }));
+        assert.deepEqual(await cancelled, { type: 'cancel', streamId: 'workspaces' });
+        assert.deepEqual(forwarded, [{ type: 'cancel', streamId: 'workspaces' }]);
+      } finally { downstream.terminate(); }
+    }
+  } finally { await env.cleanup(); }
+});
+
+tenantTest('malformed terminal retention still closes the carrier without forwarding', async mobile => {
   const env = await setup(mobile);
   try {
     for (const args of [
-      { sessionId: 'other-session', id: 'term' },
-      { sessionId: 'missing-session', id: 'term' },
       { sessionId: 'own-session', id: 'term', workspaceRoot: otherRoot },
       { sessionId: 'own-session' },
     ]) {
@@ -411,14 +441,5 @@ tenantTest('terminal retention rejects foreign, missing, disabled and forged ses
       await upstreamClosed;
       assert.deepEqual(forwarded, []);
     }
-    env.disableSession();
-    const { downstream, upstream } = await env.connect();
-    const closed = nextClose(downstream);
-    const upstreamClosed = nextClose(upstream);
-    downstream.send(JSON.stringify({ type: 'open', streamId: 'term', endpoint: 'terminal/retain', payload: { args: { sessionId: 'own-session', id: 'term' } } }));
-    assert.equal(await closed, 1008);
-    await upstreamClosed;
-  } finally {
-    await env.cleanup();
-  }
+  } finally { await env.cleanup(); }
 });

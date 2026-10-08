@@ -1,7 +1,7 @@
 
 FROM node:22.19.0-slim
 
-ARG DSH_VERSION=0.2.0-rc.1
+ARG DSH_VERSION=0.2.1-alpha.1
 WORKDIR /opt/dsh-passwords
 
 RUN apt-get update \
@@ -13,7 +13,8 @@ RUN npm install -g pnpm@11.7.0
 RUN mkdir -p /opt/dsh \
   && printf '%s\n' '{"name":"bundled-dsh","private":true}' > /opt/dsh/package.json \
   && printf '%s\n' 'packages:' '  - .' 'nodeLinker: hoisted' 'allowBuilds:' '  "@deepseek-ai/dsh-subprocess-local": true' '  "@google/genai": true' '  koffi: true' '  node-pty: true' '  protobufjs: true' > /opt/dsh/pnpm-workspace.yaml \
-  && pnpm --dir /opt/dsh add @deepseek-ai/dsh@${DSH_VERSION}
+  && pnpm --dir /opt/dsh add @deepseek-ai/dsh@${DSH_VERSION} \
+  && node -e "const v=require('/opt/dsh/node_modules/@deepseek-ai/dsh/package.json').version; if (v !== process.env.DSH_VERSION) { console.error('bundled DSH mismatch: '+v+' != '+process.env.DSH_VERSION); process.exit(1); } console.log('bundled DSH '+v);"
 
 COPY package.json npm-shrinkwrap.json tsconfig.json cordis.yml ./
 RUN npm ci --no-audit --no-fund

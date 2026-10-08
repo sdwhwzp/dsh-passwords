@@ -9,7 +9,8 @@
 //     所有路径都显式携带 retry；409 CLEANUP_RETRY_CONFLICT 归一化为 conflict
 //     （撤销墓碑/重试状态，恢复常规删除）
 //   - 源码契约（Node 侧无真实 DOM，参照 client-chat-fab 的静态断言方式）：
-//     注入控件是原生 button、重试态 tabindex=0（Enter/Space 可操作）、
+//     注入控件是原生 button 且键盘可达（普通行与重试态 tabindex=0，Enter/Space
+//     原生触发同一 click handler，不绕过二次确认/授权语义）、
 //     墓碑行同时退出指针与键盘可达、墓碑 CSS 不误伤重试按钮、扫描排除注入按钮、
 //     React 复用行时重绑路径并解除在途 pending（防永久 disabled）、迟到结果按
 //     路径+请求代次丢弃、conflict 分支不卡在仅重试
@@ -310,14 +311,20 @@ function pickerSource(): string {
   return readFileSync(new URL('../src/client/picker-delete.ts', import.meta.url), 'utf8');
 }
 
-test('源码契约：注入控件是原生 button；默认 tabindex=-1，重试态 tabindex=0（Enter/Space 原生可操作）', () => {
+test('源码契约：注入控件是原生 button 且键盘可达；普通行与重试态都 tabindex=0（Enter/Space 原生可操作）', () => {
   const source = pickerSource();
   assert.match(source, /document\.createElement\('button'\)/, '注入控件必须是原生 <button>');
   assert.match(source, /node\.type = 'button'/, '原生按钮需显式 type=button（不参与表单提交）');
-  assert.match(source, /node\.setAttribute\('tabindex', '-1'\)/, '普通行按钮保持悬停显现、不进 Tab 序列');
-  assert.match(source, /node\.setAttribute\('tabindex', '0'\)/, '墓碑重试按钮必须进入 Tab 序列');
+  assert.match(source, /node\.setAttribute\('tabindex', '0'\)/, '普通行按钮必须进入 Tab 序列，键盘可达');
+  assert.doesNotMatch(source, /node\.setAttribute\('tabindex', '-1'\)/, '注入按钮不得移出 Tab 序列');
   assert.match(source, /node\.setAttribute\('aria-label', label\)/, '重试按钮需设置可读名称');
   assert.match(source, /\$\{pickerText\.retry\}: \$\{name\}/, '重试名称来自 pickerText.retry + 目录名');
+});
+
+test('源码契约：键盘激活与鼠标共用同一 click handler（不新增 keydown 旁路，授权/请求语义一致）', () => {
+  const source = pickerSource();
+  assert.match(source, /node\.addEventListener\('click'/, '原生 button 的 Enter/Space 会 native 触发 click');
+  assert.doesNotMatch(source, /addEventListener\('keydown'/, '不得用自定义 keydown 另开一条激活路径');
 });
 
 test('源码契约：重试单击直达，不进入二次确认武装（不会再次物理删除）', () => {

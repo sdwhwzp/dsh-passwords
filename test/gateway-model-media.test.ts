@@ -38,11 +38,21 @@ const { WebSocketServer, WebSocket: NodeWebSocket } = require('ws') as {
   WebSocket: { new (url: string, options?: { headers?: Record<string, string> }): any };
 };
 
-import { createGatewayServer } from '../src/gateway.js';
+import { createGatewayServer, internalProbeTimeoutMs } from '../src/gateway.js';
 import { AuthService } from '../src/auth.js';
 import { Database } from '../src/db.js';
 import { createFieldCrypto } from '../src/encrypt.js';
 import type { PlatformConfig } from '../src/config.js';
+
+test('internal assignable-resource probe timeout keeps a bounded default', () => {
+  assert.equal(internalProbeTimeoutMs({}), 10_000);
+  assert.equal(internalProbeTimeoutMs({ MCP_GATEWAY_INTERNAL_PROBE_TIMEOUT_MS: '' }), 10_000);
+  assert.equal(internalProbeTimeoutMs({ MCP_GATEWAY_INTERNAL_PROBE_TIMEOUT_MS: '999' }), 10_000);
+  assert.equal(internalProbeTimeoutMs({ MCP_GATEWAY_INTERNAL_PROBE_TIMEOUT_MS: '1000' }), 1000);
+  assert.equal(internalProbeTimeoutMs({ MCP_GATEWAY_INTERNAL_PROBE_TIMEOUT_MS: '600000' }), 600_000);
+  assert.equal(internalProbeTimeoutMs({ MCP_GATEWAY_INTERNAL_PROBE_TIMEOUT_MS: '600001' }), 10_000);
+  assert.equal(internalProbeTimeoutMs({ MCP_GATEWAY_INTERNAL_PROBE_TIMEOUT_MS: 'invalid' }), 10_000);
+});
 
 const HASH = '$2a$10$dummyhashdummyhashdummyhashdu';
 

@@ -6,7 +6,7 @@
 // （此后启动 dsh 会自动拉起密码门）→ 应用远程设置补丁。
 // 幂等：已存在 .env 不覆盖，已记录插件不重复加，本地 link 源不被默认源覆盖。
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, chmodSync, mkdirSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -32,27 +32,28 @@ function commandPath(command) {
   return isWin && WINDOWS_SHIMS.has(command) ? `${command}.cmd` : command;
 }
 
-function run(command, args = [], { quiet = false, env } = {}) {
-  const runOptions = {
-    stdio: quiet ? 'ignore' : 'inherit',
-    cwd: root,
-    env: env ?? process.env,
-  };
-  let result;
+function spawnCommand(command, args, runOptions) {
   if (isWin && WINDOWS_SHIMS.has(command)) {
     // Windows 的 npm/pnpm/dsh 是 .cmd shim，只能由 cmd.exe 启动。
     // cmd /d /s /c 显式调用（不用 shell:true，避开 Node 22 的 DEP0190
     // "shell:true + 参数数组"弃用警告）；外部双引号让 /s 剥壳后
     // 留下 "npm.cmd" "install" ... 的标准命令串。
     const line = [commandPath(command), ...args].map((a) => `"${a}"`).join(' ');
-    result = spawnSync(
+    return spawnSync(
       process.env.ComSpec || 'cmd.exe',
       ['/d', '/s', '/c', `"${line}"`],
       runOptions,
     );
-  } else {
-    result = spawnSync(commandPath(command), args, runOptions);
   }
+  return spawnSync(commandPath(command), args, runOptions);
+}
+
+function run(command, args = [], { quiet = false, env } = {}) {
+  const result = spawnCommand(command, args, {
+    stdio: quiet ? 'ignore' : 'inherit',
+    cwd: root,
+    env: env ?? process.env,
+  });
   if (result.error !== undefined) {
     // ENOENT（Unix 上命令不存在）等 spawn 错误：返回非零状态码，走调用方的
     // 友好错误路径——不能 throw，否则 mustRun 的"先检测后安装"分支
@@ -60,6 +61,18 @@ function run(command, args = [], { quiet = false, env } = {}) {
     return 1;
   }
   return result.status ?? 1;
+}
+
+/** 捕获命令 stdout（读取 dsh --version 用）；命令缺失/非零退出/无输出时返回 null。 */
+function capture(command, args) {
+  const result = spawnCommand(command, args, {
+    stdio: ['ignore', 'pipe', 'ignore'],
+    cwd: root,
+    env: process.env,
+    encoding: 'utf8',
+  });
+  if (result.error !== undefined || result.status !== 0 || typeof result.stdout !== 'string') return null;
+  return result.stdout;
 }
 
 /** Windows 无 POSIX 权限：用 icacls 收紧密钥文件 ACL（仅当前用户 + SYSTEM 可读写），
@@ -98,7 +111,7 @@ if (!existsSync(pkgPath)) {
   process.exit(1);
 }
 
-// ── 1. Node.js（本包 engines ^22.19.0 || >=24.0.0；DSH 0.2.0-rc.1 依赖树中的
+// ── 1. Node.js（本包 engines ^22.19.0 || >=24.0.0；DSH 0.2.1-alpha.1 依赖树中的
 //    @deepseek-ai/libreoffice-kit 声明 node >=22.19.0；DSH CLI 包自身未声明 engines） ──
 const [nodeMajor, nodeMinor] = process.versions.node.split('.').map(Number);
 if ((nodeMajor === 22 && nodeMinor < 19) || nodeMajor < 22 || nodeMajor === 23) {
@@ -108,24 +121,111 @@ if ((nodeMajor === 22 && nodeMinor < 19) || nodeMajor < 22 || nodeMajor === 23) 
 }
 say(`Node.js v${process.versions.node} ✓`);
 
-// ── 2. dsh（DeepSeek Harness）──
-if (run('dsh', ['--version'], { quiet: true }) !== 0) {
-  err('未找到 dsh。请先安装 DeepSeek Harness：');
-  err('  npm install -g @deepseek-ai/dsh@0.2.0-rc.1');
-  err('  然后用 DEEPSEEK_API_KEY=sk-你的key dsh web 先跑一次确认能用');
+// ── 2. dsh（DeepSeek Harness）版本窗口校验 ──
+// 支持的补丁线：>=0.2.1-alpha.1 <0.2.2-0（与 src/cli.ts 的运行时门禁同一身份边界）。
+// 0.2.1 的后续预发布（alpha.2/beta/rc）与稳定版共享同一 bundle/wire 契约，仍在窗口内；
+// 0.1.x、0.2.0、0.2.1-alpha.0 以及 0.2.2+ 都不允许打补丁或公开监听，安装器必须同样失败。
+const DSH_SUPPORTED_RANGE = '>=0.2.1-alpha.1 <0.2.2-0';
+const DSH_SUPPORTED_CORE = '0.2.1';
+const DSH_SUPPORTED_PRERELEASE_FLOOR = ['alpha', '1'];
+const SEMVER_RE = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+
+function stripBuildMetadata(version) {
+  const plus = version.indexOf('+');
+  return plus === -1 ? version : version.slice(0, plus);
+}
+
+/** SemVer 2.0 预发布优先级比较（数值标识低于字母数字标识，短列表低于其延长列表）。 */
+function comparePrerelease(a, b) {
+  const length = Math.max(a.length, b.length);
+  for (let i = 0; i < length; i += 1) {
+    const x = a[i];
+    const y = b[i];
+    if (x === undefined) return -1;
+    if (y === undefined) return 1;
+    const xNumeric = /^\d+$/.test(x);
+    const yNumeric = /^\d+$/.test(y);
+    if (xNumeric && yNumeric) {
+      if (Number(x) !== Number(y)) return Number(x) - Number(y);
+    } else if (xNumeric) {
+      return -1;
+    } else if (yNumeric) {
+      return 1;
+    } else if (x !== y) {
+      return x < y ? -1 : 1;
+    }
+  }
+  return 0;
+}
+
+function isSupportedDshVersion(version) {
+  if (typeof version !== 'string' || !SEMVER_RE.test(version)) return false;
+  const stripped = stripBuildMetadata(version);
+  const dash = stripped.indexOf('-');
+  const core = dash === -1 ? stripped : stripped.slice(0, dash);
+  const prerelease = dash === -1 ? [] : stripped.slice(dash + 1).split('.');
+  if (core !== DSH_SUPPORTED_CORE) return false;
+  return prerelease.length === 0 || comparePrerelease(prerelease, DSH_SUPPORTED_PRERELEASE_FLOOR) >= 0;
+}
+
+function assertSupportedDshVersion(version) {
+  if (isSupportedDshVersion(version)) return;
+  err(`不支持的 dsh 版本（当前 ${version}），本安装器仅支持 ${DSH_SUPPORTED_RANGE}。`);
+  err('  请安装受支持版本后重试：npm install -g @deepseek-ai/dsh@0.2.1-alpha.1');
+  err('  源码部署请将 MCP_DSH_ROOT 指向该版本所在的 dsh 目录。');
   process.exit(1);
 }
-say('dsh ✓');
+
+// 版本来源优先采用 MCP_DSH_ROOT（网关补丁会以它为准），否则回退 dsh --version。
+// 显式指定的安装根不可读时不回退全局 CLI——避免校验到与运行时不同的另一份 DSH。
+const explicitDshRoot = process.env.MCP_DSH_ROOT?.trim();
+if (explicitDshRoot) {
+  const manifestPath = path.join(explicitDshRoot, 'package.json');
+  let manifestVersion = null;
+  try {
+    manifestVersion = JSON.parse(readFileSync(manifestPath, 'utf8')).version;
+  } catch {
+    // 交由下方统一报错。
+  }
+  if (typeof manifestVersion !== 'string') {
+    err(`无法从 MCP_DSH_ROOT 读取 dsh 版本（${manifestPath} 缺失或损坏）。`);
+    err('  请把 MCP_DSH_ROOT 指向包含 package.json 的 dsh 安装目录，或取消该变量后重试。');
+    process.exit(1);
+  }
+  assertSupportedDshVersion(manifestVersion);
+  say(`dsh ${manifestVersion} ✓`);
+} else {
+  const versionOutput = capture('dsh', ['--version']);
+  // dsh --version 可能带前缀/多行；取第一个 semver 形状的 token。
+  const versionMatch = versionOutput === null
+    ? null
+    : versionOutput.match(/\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?/);
+  if (versionMatch === null) {
+    err('未找到 dsh（DeepSeek Harness）。请先安装：');
+    err('  npm install -g @deepseek-ai/dsh@0.2.1-alpha.1');
+    err('  然后确认 dsh --version 可读，或设置 MCP_DSH_ROOT 指向 dsh 安装目录后重试。');
+    process.exit(1);
+  }
+  assertSupportedDshVersion(versionMatch[0]);
+  say(`dsh ${versionMatch[0]} ✓`);
+}
 
 // 首次安装的特权检查必须在安装任何工具或依赖之前完成：非特权账号最终无法绑定自动 HTTPS 的 80/443，
 // 不应让用户先修改全局 pnpm、下载或构建再失败。
-const envPath = path.join(root, '.env');
-const keyFile = path.join(root, 'setup-key.txt');
+// 部署文件路径：DSH_PASSWORDS_ENV_FILE 显式指定时跟随它（dsh 插件/网关进程读的就是这份），
+// 否则仍写在包根。setup-key.txt 始终与 .env 同目录，保证引导文件与配置在一起。
+const explicitEnvFile = process.env.DSH_PASSWORDS_ENV_FILE?.trim();
+const envPath = explicitEnvFile ? path.resolve(explicitEnvFile) : path.join(root, '.env');
+const keyFile = explicitEnvFile
+  ? path.join(path.dirname(envPath), 'setup-key.txt')
+  : path.join(root, 'setup-key.txt');
+// 显式部署目录可能尚未创建；写入前补齐，避免安装器在半途 ENOENT。
+if (explicitEnvFile) mkdirSync(path.dirname(envPath), { recursive: true });
 const isFirstInstall = !existsSync(envPath);
 if (isFirstInstall && existsSync(keyFile)) {
   // .env 已丢失但旧引导文件还在：其 key 与即将生成的新 key 不可信地不一致。
   // 在写任何新文件之前失败，避免留下半成品配置。
-  err(`检测到 ${keyFile}，但 .env 不存在。请先确认是否需要恢复旧 .env；否则删除/备份该残留文件后重试。`);
+  err(`检测到 ${keyFile}，但 ${envPath} 不存在。请先确认是否需要恢复旧配置；否则删除/备份该残留文件后重试。`);
   process.exit(1);
 }
 if (isFirstInstall && !isWin && typeof process.getuid === 'function' && process.getuid() !== 0) {
@@ -267,10 +367,24 @@ const patchResult = spawnSync(
     env: { ...process.env, MCP_DSH_RESTART_SERVICE: '' },
   },
 );
-if (patchResult.status !== 0) {
-  say('补丁暂时无法应用（未找到 dsh 安装目录），密码门启动时会自动重试');
-} else {
+// 退出码由 dist/cli.js 的补丁命令定义（与 src/cli.ts 一致）；按原因给出可操作提示，
+// 不再把任何失败都归为“未找到 dsh 安装目录”。
+const PATCH_EXIT_REASONS = {
+  34: '未找到 dsh 安装目录（请在 .env 设置 MCP_DSH_ROOT 或确保 dsh 已安装）',
+  35: '当前 dsh 版本缺少可打补丁的目标文件',
+  36: '补丁写入或校验失败（DSH 文件可能被其他工具改动）',
+  37: `dsh 版本不受支持（仅支持 ${DSH_SUPPORTED_RANGE}）`,
+};
+if (patchResult.error !== undefined) {
+  say(`补丁暂时无法应用（执行失败：${patchResult.error.message}），密码门启动时会自动重试`);
+} else if (patchResult.status === 0) {
   say('补丁已应用');
+} else if (patchResult.status === 37) {
+  say(`补丁未应用：${PATCH_EXIT_REASONS[37]}；密码门将拒绝启动，请改用受支持的 dsh 版本`);
+} else {
+  const reason = PATCH_EXIT_REASONS[patchResult.status]
+    ?? `未知原因（退出码 ${patchResult.status ?? 'signal'}）`;
+  say(`补丁暂时无法应用（${reason}），密码门启动时会自动重试`);
 }
 
 // ── 9. 完成 ──

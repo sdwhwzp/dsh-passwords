@@ -18,6 +18,11 @@
  * - an anomaly (timeout, authentication, unparseable answer, an unusable judge
  *   route) is recorded separately from a quality verdict and is never treated
  *   as one;
+ * - exhausting the anomaly budget does NOT judge the card: an environment that
+ *   cannot answer is not the work failing, so the cycle is held open with no
+ *   judge call until a user clears the recorded anomalies (issue #1828);
+ * - an attempt the time budget ends before any verdict is recorded as its own
+ *   stage and charged to no budget at all (issue #1828);
  * - concurrent completion calls for one execution share one acceptance.
  */
 import type { PreToolDecision } from '@deepseek-ai/dsh-tools'
@@ -37,6 +42,7 @@ import {
 } from '../core/verification.ts'
 import { collectEvidence, evidenceEvents, runAcceptance } from './verification-runner.ts'
 import { renderWorkspaceEvidence, type WorkspaceChangeSource } from './workspace-evidence.ts'
+import { DEFAULT_VERIFICATION_BUDGET_MS, verificationBudgetMs, verificationCallTimeoutMs } from '../core/verification-budget.ts'
 import type { HostTaskLedger } from '../host-ledger.ts'
 import type { ExecutionRecord, TaskRecord } from '../core/tasks.ts'
 
@@ -58,6 +64,16 @@ export interface GoalVerificationGateDeps {
    * that serves none) simply means the judge sees the trajectory alone.
    */
   workspaceChanges?: () => WorkspaceChangeSource | undefined
+  /**
+   * Ceiling of one judge request, read per acceptance (a row setting). Absent
+   * keeps the default, so a programmatic mount still judges.
+   */
+  callTimeoutMs?: () => number
+  /**
+   * Total ceiling of one acceptance attempt, read per acceptance (a row
+   * setting). Absent keeps the default.
+   */
+  budgetMs?: () => number
   logger: { warn(message: string, ...rest: unknown[]): void }
   now?: () => number
 }
@@ -140,6 +156,47 @@ export function createGoalVerificationGate(deps: GoalVerificationGateDeps): (exe
     )
   }
 
+  /**
+   * Hold the cycle open after its non-quality budget ran out.
+   *
+   * A judge route that times out, cannot authenticate or cannot be resolved is
+   * the ENVIRONMENT failing, not the work, so this records the attempt and
+   * refuses the completion claim without writing a `failedReason` and without
+   * blocking the goal (issue #1828). The execution therefore survives for a
+   * user who fixes the environment and clears the recorded anomalies, instead
+   * of carrying a verdict that only the clock produced.
+   */
+  const hold = (
+    taskId: string,
+    executionId: string,
+    verification: ExecutionVerification,
+    message: string,
+    detail: string,
+    code: string,
+  ): PreToolDecision => {
+    write(taskId, executionId, { ...verification, inFlight: undefined })
+    return deny(bounded(message), code, detail)
+  }
+
+  /** The refusal one recorded anomaly returns to the fixing agent. */
+  const anomalyRefusal = (spend: ExecutionVerification, error: string | undefined): PreToolDecision =>
+    deny(
+      bounded('[任务看板 · 验收异常] ' + (error ?? 'unknown') + '\n这是验收异常而非质量判定，本次未消耗质量验收额度（已用 ' + exceptionAttempts(spend).length + '/' + MAX_EXCEPTION_ATTEMPTS + '）。请修复环境后再次调用 update_goal(action: complete)。'),
+      'TASK_BOARD_VERIFICATION_ANOMALY',
+      error,
+    )
+
+  /** The refusal a spent anomaly budget returns: no verdict, and no card failure. */
+  const anomalyHeld = (taskId: string, executionId: string, spend: ExecutionVerification): PreToolDecision =>
+    hold(
+      taskId,
+      executionId,
+      spend,
+      '[任务看板 · 验收异常] 验收异常额度已用尽（' + MAX_EXCEPTION_ATTEMPTS + '/' + MAX_EXCEPTION_ATTEMPTS + '）：本执行周期不再调用裁判模型，也不把这次执行判为失败。\n这是环境异常而非质量判定：请如实告诉用户验收环境当前不可用，由用户修复环境后用 task_board_manage(action=reset-verification) 清除已记录的异常，再重新完成目标。',
+      'acceptance anomaly budget exhausted; a user action must clear the recorded anomalies',
+      'TASK_BOARD_VERIFICATION_ANOMALY',
+    )
+
   /** Record one attempt and decide whether the completion claim may proceed. */
   const settle = async (input: {
     task: TaskRecord
@@ -171,14 +228,10 @@ export function createGoalVerificationGate(deps: GoalVerificationGateDeps): (exe
       const attempts = [...verification.attempts, attempt]
       const spend = { ...verification, attempts, inFlight: undefined }
       if (exceptionAttempts(spend).length >= MAX_EXCEPTION_ATTEMPTS) {
-        return finalize(task.id, execution.id, spend, '验收异常达到上限：' + attempt.error, agent)
+        return anomalyHeld(task.id, execution.id, spend)
       }
       write(task.id, execution.id, spend)
-      return deny(
-        bounded('[任务看板 · 验收异常] ' + attempt.error + '\n这是验收异常而非质量判定，本次未消耗质量验收额度（已用 ' + exceptionAttempts(spend).length + '/' + MAX_EXCEPTION_ATTEMPTS + '）。请修复环境后再次调用 update_goal(action: complete)。'),
-        'TASK_BOARD_VERIFICATION_ANOMALY',
-        attempt.error,
-      )
+      return anomalyRefusal(spend, attempt.error)
     }
     write(task.id, execution.id, baselines)
     const llm = deps.llm?.()
@@ -201,14 +254,19 @@ export function createGoalVerificationGate(deps: GoalVerificationGateDeps): (exe
       }
       const spend = { ...verification, attempts: [...verification.attempts, attempt], inFlight: undefined }
       if (exceptionAttempts(spend).length >= MAX_EXCEPTION_ATTEMPTS) {
-        return finalize(task.id, execution.id, spend, '验收异常达到上限：' + attempt.error, agent)
+        return anomalyHeld(task.id, execution.id, spend)
       }
       write(task.id, execution.id, spend)
       return deny(bounded('[任务看板 · 验收异常] ' + attempt.error), 'TASK_BOARD_VERIFICATION_ANOMALY', attempt.error)
     }
     const session = (agent as { session?: unknown }).session
     const evidence = collectEvidence(session, objective, execution.startedAt)
-    const acceptance = AbortSignal.timeout(600_000)
+    // Both ceilings are row settings read live: raising one unblocks a card
+    // whose acceptance is stuck on a slow route without a plugin reload.
+    const callTimeout = deps.callTimeoutMs?.() ?? verificationCallTimeoutMs(undefined)
+    const budget = deps.budgetMs?.() ?? DEFAULT_VERIFICATION_BUDGET_MS
+    const deadline = now() + budget
+    const acceptance = AbortSignal.timeout(budget)
     // The host's own record of what changed on disk is offered next to the
     // trajectory; an unavailable service or a failed read degrades to the
     // trajectory alone instead of failing an acceptance already under way.
@@ -230,21 +288,32 @@ export function createGoalVerificationGate(deps: GoalVerificationGateDeps): (exe
       context: workspace.text === '' ? undefined : workspace.text,
       workspaceFiles: workspace.files,
       signal: acceptance,
+      deadline,
+      callTimeoutMs: callTimeout,
       now,
     })
     const attempt = result.attempt
     const attempts = [...verification.attempts, attempt]
     const spend: ExecutionVerification = { ...verification, attempts, inFlight: undefined }
+    // A budget stop is charged to no budget at all (issue #1828): the judge route
+    // may be healthy and the machine simply out of time, so it is neither an
+    // anomaly nor a verdict, and it must never close the card.
+    if (attempt.stage === 'budget') {
+      return hold(
+        task.id,
+        execution.id,
+        spend,
+        '[任务看板 · 验收未完成] ' + (attempt.error ?? '时间预算耗尽') + '\n本次没有产生任何质量判定，也不消耗质量或异常额度。请稍后重试；若裁判路由确实很慢，可调大验收的单次调用上限或总时间预算。',
+        attempt.error ?? 'the acceptance time budget ran out before a verdict',
+        'TASK_BOARD_VERIFICATION_BUDGET',
+      )
+    }
     if (attempt.stage === 'exception') {
       if (exceptionAttempts(spend).length >= MAX_EXCEPTION_ATTEMPTS) {
-        return finalize(task.id, execution.id, spend, '验收异常达到上限：' + (attempt.error ?? 'unknown'), agent)
+        return anomalyHeld(task.id, execution.id, spend)
       }
       write(task.id, execution.id, spend)
-      return deny(
-        bounded('[任务看板 · 验收异常] ' + (attempt.error ?? 'unknown') + '\n这是验收异常而非质量判定，本次未消耗质量验收额度（已用 ' + exceptionAttempts(spend).length + '/' + MAX_EXCEPTION_ATTEMPTS + '）。请修复环境后再次调用 update_goal(action: complete)。'),
-        'TASK_BOARD_VERIFICATION_ANOMALY',
-        attempt.error,
-      )
+      return anomalyRefusal(spend, attempt.error)
     }
     if (attempt.passed) {
       write(task.id, execution.id, spend)
@@ -279,8 +348,14 @@ export function createGoalVerificationGate(deps: GoalVerificationGateDeps): (exe
         verification.failedReason,
       )
     }
-    if (!hasQualityBudget(verification) && !hasExceptionBudget(verification)) {
+    if (!hasQualityBudget(verification)) {
       return finalize(binding.task.id, binding.execution.id, verification, 'goal 验收额度已耗尽，本次 execution 判失败。', exec.agent)
+    }
+    // A spent anomaly budget is an environment that could not answer, not a
+    // judged work: the claim is refused and NO judge call is spent until a user
+    // clears the recorded anomalies (issue #1828).
+    if (!hasExceptionBudget(verification)) {
+      return anomalyHeld(binding.task.id, binding.execution.id, verification)
     }
     const key = binding.execution.id
     const running = inFlight.get(key)

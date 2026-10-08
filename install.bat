@@ -108,10 +108,10 @@ exit /b 1
 rem -- 3. dsh (DeepSeek Harness, auto-install if missing) --
 where dsh >nul 2>nul
 if not errorlevel 1 goto dsh_ok
-echo [dsh-passwords] dsh (DeepSeek Harness) not found, installing...
+echo [dsh-passwords] dsh (DeepSeek Harness) not found, installing @deepseek-ai/dsh@0.2.1-alpha.1...
 rem dsh needs native builds; newer npm blocks install scripts, allow them first
 call npm config set allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user
-call npm install -g @deepseek-ai/dsh@0.2.0-rc.1
+call npm install -g @deepseek-ai/dsh@0.2.1-alpha.1
 if errorlevel 1 goto dsh_manual
 where dsh >nul 2>nul
 if errorlevel 1 (
@@ -126,7 +126,8 @@ goto prepare_dest
 
 :dsh_manual
 echo [dsh-passwords] dsh auto-install failed. Run it manually:
-echo [dsh-passwords]   npm install -g @deepseek-ai/dsh@0.2.0-rc.1
+echo [dsh-passwords]   npm install -g @deepseek-ai/dsh@0.2.1-alpha.1
+echo [dsh-passwords]   (supported DSH: ^>=0.2.1-alpha.1 ^<0.2.2-0)
 echo [dsh-passwords] then verify with: DEEPSEEK_API_KEY=sk-your-key dsh web
 echo [dsh-passwords] and run this installer again.
 exit /b 1
@@ -168,7 +169,10 @@ if errorlevel 1 exit /b %errorlevel%
 echo.
 echo [dsh-passwords] Install finished!
 echo [dsh-passwords] SETUP_KEY is shown in the output above and saved to:
-echo [dsh-passwords]   %SCRIPT_DIR%setup-key.txt (auto-deleted after first-time setup)
+rem install.mjs writes setup-key.txt next to the .env it uses (DSH_PASSWORDS_ENV_FILE overrides the package root)
+set "KEY_DIR=%SCRIPT_DIR%"
+if defined DSH_PASSWORDS_ENV_FILE for %%I in ("%DSH_PASSWORDS_ENV_FILE%") do set "KEY_DIR=%%~dpI"
+echo [dsh-passwords]   %KEY_DIR%setup-key.txt (auto-deleted after first-time setup)
 echo [dsh-passwords] Next: start dsh (dsh web) -^> open https://server-IP.sslip.io
 echo [dsh-passwords]       -^> enter SETUP_KEY to create the owner account.
 exit /b 0

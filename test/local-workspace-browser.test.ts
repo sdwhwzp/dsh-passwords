@@ -41,6 +41,7 @@ for (const shellEnabled of [false, true]) test(`paired file and Git routes use t
   const token = 'x'.repeat(43);
   const workspace = db.createLocalWorkspace({ id: 'browser-workspace', userId: owner.id, token, deviceName: 'computer', workspaceName: 'project', remoteRoot: root, placeholderPath: placeholder, platform: process.platform, shellEnabled });
   const header = { id: 'session-local', cwd: placeholder };
+  ctx.provide('sessionPersistence', { stat: async (id: string) => id === header.id ? { header } : undefined } as never);
   ctx.provide('sessionQuery', { listSessions: async () => [{ header }] } as never);
   let registry = ctx.provide('workspaceRegistry', { list: () => [{ id: 'workspace', path: placeholder }] } as never);
   let requestPrincipal = principal;

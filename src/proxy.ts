@@ -154,11 +154,55 @@ type RemoteMuxUserConnection = {
   publishSessionAttachment: (sessionId: string, cwd: string) => void;
   publishWorkspaceUpsert: (workspace: Record<string, unknown>) => void;
 };
+
+/** WebSocket.OPEN；有界发送 helper 不依赖 ws，故本地保留常量。 */
+const MUX_SOCKET_OPEN = 1;
+
+/** Remote mux 有界发送所需的最小 socket 面（生产为 ws 连接，测试为 stub）。 */
+export type MuxBufferedSocket = {
+  readonly readyState: number;
+  readonly bufferedAmount: number;
+  send(data: string): void;
+};
+
+export type MuxSendOutcome = 'sent' | 'skipped' | 'overflow' | 'failed';
+
+/**
+ * Remote mux 两侧共用的有界发送。`bufferedAmount` 是 socket 内尚未冲出的字节：
+ * 总积压上限为 `limit + maxFrameBytes`，即正常待发送余量再加一个最大合法帧，
+ * 允许单个历史快照及其后的帧正常排队，但不能让多个慢消费帧无界累积。检查写入后的
+ * 预计总量，超过上限时调用方以 1013 关闭。返回：
+ *  - 'sent'     写出（顺序不变）；
+ *  - 'skipped'  socket 非 OPEN，未写出也无需收尾；
+ *  - 'overflow' 写入后会超过缓冲上限，调用方以 1013 关闭；
+ *  - 'failed'   `send` 抛异常，调用方以 1011 关闭。
+ */
+export function sendMuxFrameBounded(
+  socket: MuxBufferedSocket,
+  text: string,
+  limit: number,
+  maxFrameBytes: number,
+): MuxSendOutcome {
+  if (socket.readyState !== MUX_SOCKET_OPEN) return 'skipped';
+  const frameBytes = Buffer.byteLength(text);
+  if (frameBytes > maxFrameBytes || socket.bufferedAmount + frameBytes > limit + maxFrameBytes) return 'overflow';
+  try {
+    socket.send(text);
+  } catch {
+    return 'failed';
+  }
+  return 'sent';
+}
 /**
  * 跨块依赖注入面。共注入 117 个符号：107 项值/函数容器
  * + 10 项 get/set/bump 访问器（被迁代码会读写的可变 let）。全部来自 gateway.ts 的
  * createGatewayServer 闭包或其导入项——本模块自身不复制任何授权状态。
  */
+export function upstreamResponseHeaderTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.MCP_GATEWAY_UPSTREAM_HEADER_TIMEOUT_MS ?? '');
+  return Number.isFinite(raw) && raw >= 1 && raw <= 600_000 ? raw : 60_000;
+}
+
 export interface ProxyDeps {
   db: Database;
   auth: AuthService;
@@ -526,6 +570,40 @@ export function registerProxyRoutes(app: Application, deps: ProxyDeps): ProxyRou
     );
   }
 
+  // ── 子用户删除自建工作区后的内存收口 ──────────────────────────────
+  // 30 分钟 pending 目录窗口只存在内存中（gateway.ts），proxy 侧拿不到可写引用；
+  // 删除成功后把该路径记入本地墓碑，使它不再能借残留 pending 重新登记。只有重新
+  // 通过目录选择器创建同名目录（recordPendingCreatedDirectory 成功）才解除。
+  // 键用 canonicalizePathBestEffort 同一口径，避免别名/大小写导致墓碑命中不一致。
+  const deletedOwnedWorkspacePaths = new Map<number, Set<string>>();
+  const deletedOwnedWorkspaceKey = (candidate: string): string =>
+    normalizePath(canonicalizePathBestEffort(candidate));
+  const markDeletedOwnedWorkspace = (userId: number, workspacePath: string): void => {
+    let set = deletedOwnedWorkspacePaths.get(userId);
+    if (set === undefined) {
+      set = new Set();
+      deletedOwnedWorkspacePaths.set(userId, set);
+    }
+    if (set.size >= 256 && !set.has(deletedOwnedWorkspaceKey(workspacePath))) {
+      const oldest = set.values().next().value;
+      if (typeof oldest === 'string') set.delete(oldest);
+    }
+    set.add(deletedOwnedWorkspaceKey(workspacePath));
+  };
+  const clearDeletedOwnedWorkspace = (userId: number, workspacePath: string): void => {
+    const set = deletedOwnedWorkspacePaths.get(userId);
+    if (set === undefined) return;
+    set.delete(deletedOwnedWorkspaceKey(workspacePath));
+    if (set.size === 0) deletedOwnedWorkspacePaths.delete(userId);
+  };
+  /** pending 目录授权（workspace/create 的 30 分钟信任窗口）减去已删除的自建工作区。 */
+  const visiblePendingCreatedDirectories = (userId: number): string[] => {
+    const deleted = deletedOwnedWorkspacePaths.get(userId);
+    const pending = pendingCreatedDirectoryPaths(userId);
+    if (deleted === undefined || deleted.size === 0) return pending;
+    return pending.filter((entry) => !deleted.has(deletedOwnedWorkspaceKey(entry)));
+  };
+
   // ── 反向代理私有 helper（原 gateway.ts L3808-L3924）──────────────────────
   // ── 反向代理（HTTP）→ 上游 dsh ──────────────────────────────
   // 改写路径：body 已重算，分帧以新 content-length 为准，必须清掉上游的
@@ -555,16 +633,7 @@ export function registerProxyRoutes(app: Application, deps: ProxyDeps): ProxyRou
   /** 安全过滤分支专属：解压超限时 fail-closed（502），不得透传未过滤内容 */
   class OversizeResponseError extends Error {}
 
-  /** 等待上游响应头的默认上限：请求体写尽后上游既不回响应头也不断开时，客户端不应永久挂起 */
-  const UPSTREAM_RESPONSE_HEADER_TIMEOUT_MS = 60_000;
-  /**
-   * 响应头等待上限（毫秒）。按请求读取环境变量，便于自动化测试把窗口压到毫秒级
-   * （与 MCP_GATEWAY_UPSTREAM_TLS_VERIFY 同口径）；非法值回落到默认上限，保证窗口有界。
-   */
-  function upstreamResponseHeaderTimeoutMs(): number {
-    const raw = Number(process.env.MCP_GATEWAY_UPSTREAM_HEADER_TIMEOUT_MS ?? '');
-    return Number.isFinite(raw) && raw > 0 ? raw : UPSTREAM_RESPONSE_HEADER_TIMEOUT_MS;
-  }
+
 
   /**
    * 有界解压：用 zlib 的 maxOutputLength 在分配内存前限制输出——事后 body.length 检查
@@ -743,6 +812,11 @@ export function registerProxyRoutes(app: Application, deps: ProxyDeps): ProxyRou
     // 外部网关 JWT 与 alpha 根路径 launch token 都是本层凭据，不能通过 query
     // 泄露到 dsh 或第三方插件；其余业务 query 参数原样保留。
     const proxyPath = normalizeDecodedPath(parsedUrl.pathname);
+    const stateChanging = req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH' || req.method === 'DELETE';
+    if (stateChanging && req.headers.origin !== undefined && !originHostMatches(req)) {
+      res.status(403).type('text/plain').send('403 Forbidden');
+      return;
+    }
     const upstreamSearch = stripGatewayAuthQuery(req.originalUrl, proxyPath);
     // 请求上挂的用户/权限（子用户才有）
     const reqAs = req as Req;
@@ -915,10 +989,12 @@ export function registerProxyRoutes(app: Application, deps: ProxyDeps): ProxyRou
                   // 上游 created:true 只表示 DSH registry 新增了条目，不代表目录由
                   // 当前子用户创建。主用户分配的共享目录不能因此变成私有工作区。
                   const owned = db.listUserWorkspacePaths(reqAs.dshpwUser!);
-                  const pending = pendingCreatedDirectoryPaths(reqAs.dshpwUser!);
+                  const pending = visiblePendingCreatedDirectories(reqAs.dshpwUser!);
                   if (created && workspaceRegistrationAllowed(reqAs.dshpwWorkspacePath, [], owned, pending)) {
                     db.addUserWorkspace(reqAs.dshpwUser!, reqAs.dshpwWorkspacePath);
                     db.addAllowedFolder(reqAs.dshpwUser!, reqAs.dshpwWorkspacePath);
+                    // 该路径重新成为活跃工作区：解除删除墓碑，避免后续 pending 被误屏蔽。
+                    clearDeletedOwnedWorkspace(reqAs.dshpwUser!, reqAs.dshpwWorkspacePath);
                   }
                   // 立即更新该用户的 workspaceId→path 映射并向已建立的 Remote mux
                   // 连接补发过滤后的 upsert：否则紧随其后的 session.create（带
@@ -936,7 +1012,53 @@ export function registerProxyRoutes(app: Application, deps: ProxyDeps): ProxyRou
               } else if (reqAs.dshpwWorkspaceOldPath !== undefined && reqAs.dshpwWorkspaceNewPath !== undefined) {
                 db.renameUserWorkspace(reqAs.dshpwUser!, reqAs.dshpwWorkspaceOldPath, reqAs.dshpwWorkspaceNewPath);
               } else if (/(?:remove|delete)(?:[./]|$)/.test(proxyPath) && reqAs.dshpwWorkspacePath !== undefined) {
-                db.removeUserWorkspace(reqAs.dshpwUser!, reqAs.dshpwWorkspacePath);
+                const deleteUserId = reqAs.dshpwUser!;
+                const deletedPath = normalizePath(reqAs.dshpwWorkspacePath);
+                // 归属该工作区的会话：内存 cwd 快照 + 全局 cwd 缓存 + pending 会话。
+                // 只取精确 cwd，避免误伤同用户其它（嵌套）工作区的会话。
+                const affectedSessionIds = new Set<string>();
+                for (const [sessionId, cwd] of userSessionAccess.get(deleteUserId) ?? new Map<string, string>()) {
+                  if (normalizePath(cwd) === deletedPath) affectedSessionIds.add(sessionId);
+                }
+                for (const [sessionId, cwd] of sessionCwdById) {
+                  if (normalizePath(cwd) === deletedPath) affectedSessionIds.add(sessionId);
+                }
+                for (const [sessionId, marker] of pendingCreatedSessions.get(deleteUserId) ?? new Map<string, { cwd: string }>()) {
+                  if (normalizePath(marker.cwd) === deletedPath) affectedSessionIds.add(sessionId);
+                }
+                // DB 收口：归属行 + 自建白名单条目（精确，保留管理员父目录/其它分配）
+                // + 该工作区会话授权，单事务。
+                db.removeUserOwnedWorkspace(deleteUserId, deletedPath, [...affectedSessionIds]);
+                const epoch = userAccessEpochFor(deleteUserId);
+                // workspaceId→path 映射：本用户快照与全局缓存都清掉，旧 id 不再解析到已删工作区。
+                if (userWorkspacePaths.has(deleteUserId)) {
+                  const paths = new Map(userWorkspacePaths.get(deleteUserId)!);
+                  for (const [workspaceId, workspacePath] of [...paths]) {
+                    if (normalizePath(workspacePath) === deletedPath) paths.delete(workspaceId);
+                  }
+                  replaceUserWorkspacePaths(deleteUserId, paths, epoch);
+                }
+                for (const [workspaceId, workspacePath] of [...workspacePathById]) {
+                  if (normalizePath(workspacePath) === deletedPath) workspacePathById.delete(workspaceId);
+                }
+                // 会话 cwd 缓存与 pending 会话：一并清掉已删除工作区的条目。
+                for (const sessionId of affectedSessionIds) {
+                  sessionCwdById.delete(sessionId);
+                  clearPendingCreatedSession(deleteUserId, sessionId);
+                }
+                // 授权快照：去掉已删除工作区的会话，旧 baseline 不再放行；并令 Remote mux
+                // 重建 baseline（proxy 侧无可直接推进的 epoch 写入入口，重建是最强可用口径）。
+                const existingAccess = userSessionAccess.get(deleteUserId);
+                if (existingAccess !== undefined) {
+                  const access = new Map(existingAccess);
+                  for (const [sessionId, cwd] of [...access]) {
+                    if (normalizePath(cwd) === deletedPath) access.delete(sessionId);
+                  }
+                  replaceUserSessionAccess(deleteUserId, access, epoch);
+                }
+                // 残留 pending 目录不再能重新登记同一路径（否则删除形同虚设）；重建目录时解除。
+                markDeletedOwnedWorkspace(deleteUserId, deletedPath);
+                closeUserRemoteMuxClients(deleteUserId, 1012, 'Workspace deleted');
               }
             }
             if (rewrittenBody !== null) {
@@ -978,7 +1100,11 @@ export function registerProxyRoutes(app: Application, deps: ProxyDeps): ProxyRou
                   pathWithin(result.value, requestedParent) ||
                   pathWithin(createdPath, canonicalizePathBestEffort(requestedParent))
                 );
-                if (insideRequestedParent) recordPendingCreatedDirectory(reqAs.dshpwUser!, createdPath);
+                if (insideRequestedParent) {
+                  // 用户重新创建了同名目录：解除删除墓碑，使其进入正常 pending 信任窗口。
+                  clearDeletedOwnedWorkspace(reqAs.dshpwUser!, createdPath);
+                  recordPendingCreatedDirectory(reqAs.dshpwUser!, createdPath);
+                }
               }
             } catch {
               // 记账失败 fail-safe：后续登记会因不在 pending 表而被拒绝。
@@ -1705,9 +1831,10 @@ export function registerProxyRoutes(app: Application, deps: ProxyDeps): ProxyRou
                 if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response too large');
                 return;
               }
-              const respHeaders = headersForStreaming(upstreamRes.headers);
-              if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
-              if (!res.writableEnded) res.end(raw);
+              // 隐藏 Unicode 清洗对所有用户强制生效（受限子用户还叠加沙盒降级）。
+              // 解码/解析失败时无法产出已清洗历史，绝不能把上游原始体回放给客户端；
+              // 未知 content-encoding（如 br）或畸形 JSON 一律 fail-closed 502。
+              if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response unprocessable');
             }
           });
           return;
@@ -1732,10 +1859,9 @@ export function registerProxyRoutes(app: Application, deps: ProxyDeps): ProxyRou
                 if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response too large');
                 return;
               }
-              // 采集/清洗失败不影响会话读取本身，原样透传（不因此放行任何请求）。
-              const respHeaders = headersForStreaming(upstreamRes.headers);
-              if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
-              if (!res.writableEnded) res.end(raw);
+              // 隐藏 Unicode 清洗同样对所有用户强制生效；解码/解析失败时无法产出
+              // 已清洗内容，绝不回放上游原始体，fail-closed 502。
+              if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response unprocessable');
             }
           });
           return;
@@ -2219,11 +2345,13 @@ export function registerProxyRoutes(app: Application, deps: ProxyDeps): ProxyRou
           const targetAllowed = (candidate: string | null): candidate is string => {
             if (candidate === null || sessionRoot === null || canonicalSessionRoot === null) return false;
             const canonicalCandidate = canonicalizePathBestEffort(candidate);
+            // 归属用单向子树：会话根可能落在被分配的父目录下，只要目标伸进另一
+            // 子用户创建的工作区子树（含相等）就拒——等值判定会漏掉深一层的目标。
             return pathWithin(candidate, sessionRoot) &&
               pathWithin(canonicalCandidate, canonicalSessionRoot) &&
               folderAllowed(candidate, reqAs.dshpwPerms!.allowed_folders) &&
               folderAllowed(canonicalCandidate, reqAs.dshpwPerms!.allowed_folders) &&
-              !workspaceOwnedByAnotherSubuser(reqAs.dshpwUser!, candidate);
+              !workspaceSubtreeOverlap(reqAs.dshpwUser!, candidate);
           };
           const baseFileTarget = request === null || sessionRoot === null || request.baseFile === null
             ? null
@@ -2352,7 +2480,7 @@ export function registerProxyRoutes(app: Application, deps: ProxyDeps): ProxyRou
           const canonical = canonicalizePathBestEffort(requestedPath);
           const folders = reqAs.dshpwPerms!.allowed_folders;
           // 刚创建的目录视作临时授权根：picker 里能立即看到并进入（选择新文件夹必需）。
-          const pendingDirs = pendingCreatedDirectoryPaths(reqAs.dshpwUser!);
+          const pendingDirs = visiblePendingCreatedDirectories(reqAs.dshpwUser!);
           const withinPending = pendingDirs.some((entry) => pathWithin(canonical, entry));
           if ((folderAllowed(requestedPath, folders) && folderAllowed(canonical, folders)) || withinPending ||
               (folders.includes('__deny__') && reqAs.dshpwPerms!.allow_workspace_create && canonical === canonicalizePathBestEffort(os.homedir()))) {
@@ -2443,9 +2571,11 @@ export function registerProxyRoutes(app: Application, deps: ProxyDeps): ProxyRou
               }
             }
           // session.create 即使用户的目录白名单为空（不限目录），仍不可借共享父目录
-          // 或 workspaceId 缓存向其他用户拥有的工作区创建会话。
+          // 或 workspaceId 缓存向其他用户拥有的工作区创建会话。用单向子树判定：
+          // A 被分配父目录、B 拥有其子工作区时，目标只要伸进 B 的子树（含相等）即拒；
+          // 等值会漏掉 /A/B-child/sub 这类深一层的目标。
           if (targetPath !== null && WORKSPACE_ENDPOINT_RE.test(proxyPath) && !reqAs.dshpwIsAdmin) {
-            if (workspaceOwnedByAnotherSubuser(reqAs.dshpwUser!, targetPath)) {
+            if (workspaceSubtreeOverlap(reqAs.dshpwUser!, targetPath)) {
               upstreamReq.destroy();
               res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.workspaceDenied')));
               return;
@@ -2465,7 +2595,7 @@ export function registerProxyRoutes(app: Application, deps: ProxyDeps): ProxyRou
             const canonicalParent = canonicalizePathBestEffort(targetPath);
             const folders = reqAs.dshpwPerms!.allowed_folders;
             const denyAll = folders.includes('__deny__');
-            const pendingDirs = pendingCreatedDirectoryPaths(reqAs.dshpwUser!);
+            const pendingDirs = visiblePendingCreatedDirectories(reqAs.dshpwUser!);
             const homeCanonical = canonicalizePathBestEffort(os.homedir());
             const parentAllowed =
               (folderAllowed(targetPath, folders) && folderAllowed(canonicalParent, folders)) ||
@@ -2490,7 +2620,7 @@ export function registerProxyRoutes(app: Application, deps: ProxyDeps): ProxyRou
                 .filter((entry) => entry !== '__deny__')
                 .flatMap((entry) => [entry, canonicalizePathBestEffort(entry)]);
               const owned = db.listUserWorkspacePaths(reqAs.dshpwUser!).flatMap((entry) => [entry, canonicalizePathBestEffort(entry)]);
-              if (!workspaceRegistrationAllowed(canonicalTarget, assigned, owned, pendingCreatedDirectoryPaths(reqAs.dshpwUser!)) ||
+              if (!workspaceRegistrationAllowed(canonicalTarget, assigned, owned, visiblePendingCreatedDirectories(reqAs.dshpwUser!)) ||
                 workspaceSubtreeOverlap(reqAs.dshpwUser!, canonicalTarget)) {
                 upstreamReq.destroy();
                 res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.workspaceDenied')));
@@ -2963,7 +3093,7 @@ export function registerProxyRoutes(app: Application, deps: ProxyDeps): ProxyRou
           pendingBytes = Math.max(0, pendingBytes - entry.bytes);
         };
         const publishSessionAttachment = (sessionId: string, cwd: string): void => {
-          if (!isSubuser || client.readyState !== WebSocket.OPEN) return;
+          if (!isSubuser) return;
           const perms = effectivePermissions(authUserId!);
           const access = userSessionAccess.get(authUserId!);
           if (access === undefined || normalizePath(access.get(sessionId) ?? '') !== normalizePath(cwd) ||
@@ -2981,16 +3111,16 @@ export function registerProxyRoutes(app: Application, deps: ProxyDeps): ProxyRou
                 : [];
               const row = { ...previous, sessionIds: [...new Set([...previousIds, sessionId])] };
               state.visibleWorkspaceRows.set(workspaceId, row);
-              client.send(JSON.stringify({
+              if (!sendClientFrame(JSON.stringify({
                 type: 'item',
                 streamId: state.streamId,
                 value: { type: 'upsert', workspace: row },
-              }));
+              }))) break;
             }
           }
         };
         const publishWorkspaceUpsert = (workspace: Record<string, unknown>): void => {
-          if (!isSubuser || client.readyState !== WebSocket.OPEN) return;
+          if (!isSubuser) return;
           const workspaceId = typeof workspace.workspaceId === 'string' ? workspace.workspaceId : null;
           const workspacePath = typeof workspace.path === 'string' ? workspace.path : null;
           if (workspaceId === null || workspacePath === null) return;
@@ -3021,11 +3151,11 @@ export function registerProxyRoutes(app: Application, deps: ProxyDeps): ProxyRou
             const row = { ...workspace, sessionIds: [...new Set([...rowIds, ...previousIds])] };
             state.visibleWorkspaces.set(workspaceId, workspacePath);
             state.visibleWorkspaceRows.set(workspaceId, row);
-            client.send(JSON.stringify({
+            if (!sendClientFrame(JSON.stringify({
               type: 'item',
               streamId: state.streamId,
               value: { type: 'upsert', workspace: row },
-            }));
+            }))) break;
           }
         };
         const connection: RemoteMuxUserConnection = { socket: client, publishSessionAttachment, publishWorkspaceUpsert };
@@ -3048,6 +3178,15 @@ export function registerProxyRoutes(app: Application, deps: ProxyDeps): ProxyRou
           try { if (client.readyState === WebSocket.OPEN) client.close(code, reason); else client.terminate(); } catch {}
           try { if (upstreamWs.readyState === WebSocket.OPEN) upstreamWs.close(code, reason); else upstreamWs.terminate(); } catch {}
         };
+        // 下行（网关→浏览器）有界发送：与上行共用 REMOTE_MUX_MAX_PENDING_BYTES。
+        // 浏览器消费不过来导致 bufferedAmount 超预算时关闭整条 carrier（1013），
+        // 不丢单帧、不重排，也不改变既有授权判断。
+        const sendClientFrame = (text: string): boolean => {
+          const outcome = sendMuxFrameBounded(client, text, REMOTE_MUX_MAX_PENDING_BYTES, REMOTE_MUX_MAX_PAYLOAD_BYTES);
+          if (outcome === 'overflow') { closeBoth(1013, 'Remote stream backpressure limit exceeded'); return false; }
+          if (outcome === 'failed') { closeBoth(1011, 'Remote stream send failed'); return false; }
+          return outcome === 'sent';
+        };
         // A denied logical stream is an application-level Remote failure, not a
         // carrier failure. Sending an error frame lets DSH stop retrying that
         // stream while workspace/control/events streams on the same mux survive.
@@ -3064,16 +3203,11 @@ export function registerProxyRoutes(app: Application, deps: ProxyDeps): ProxyRou
             // 也要由网关回收宿主侧流。cancel 自身走同一 pending budget。
             queueUpstreamFrame(JSON.stringify({ type: 'cancel', streamId }));
           }
-          if (client.readyState !== WebSocket.OPEN) return;
-          try {
-            client.send(JSON.stringify({
-              type: 'error',
-              streamId,
-              error: { code, message, details: {} },
-            }));
-          } catch {
-            // A concurrently closing client needs no secondary carrier failure.
-          }
+          sendClientFrame(JSON.stringify({
+            type: 'error',
+            streamId,
+            error: { code, message, details: {} },
+          }));
         };
         const startHeartbeat = (): void => {
           if (heartbeat !== undefined) return;
@@ -3113,8 +3247,11 @@ export function registerProxyRoutes(app: Application, deps: ProxyDeps): ProxyRou
             pendingBytes += textBytes;
             return true;
           }
-          upstreamWs.send(text);
-          return true;
+          // 上行（网关→上游）有界发送：最大帧外留有 2 MiB 队列余量。
+          const outcome = sendMuxFrameBounded(upstreamWs, text, REMOTE_MUX_MAX_PENDING_BYTES, REMOTE_MUX_MAX_PAYLOAD_BYTES);
+          if (outcome === 'overflow') { closeBoth(1013, 'Remote stream backpressure limit exceeded'); return false; }
+          if (outcome === 'failed') { closeBoth(1011, 'Remote stream send failed'); return false; }
+          return outcome === 'sent';
         };
         /**
          * 延迟等待 baseline 的会话/控制流已在上面登记授权身份；超时即拒（该逻辑流的
@@ -3389,9 +3526,15 @@ export function registerProxyRoutes(app: Application, deps: ProxyDeps): ProxyRou
         upstreamWs.on('open', () => {
           upstreamOpen = true;
           while (pending.length > 0 && upstreamWs.readyState === WebSocket.OPEN) {
-            const text = pending.shift()!;
-            pendingBytes -= Buffer.byteLength(text);
-            upstreamWs.send(text);
+            const text = pending[0]!;
+            const bytes = Buffer.byteLength(text);
+            const outcome = sendMuxFrameBounded(upstreamWs, text, REMOTE_MUX_MAX_PENDING_BYTES, REMOTE_MUX_MAX_PAYLOAD_BYTES);
+            if (outcome === 'overflow') { closeBoth(1013, 'Remote stream backpressure limit exceeded'); return; }
+            if (outcome === 'failed') { closeBoth(1011, 'Remote stream send failed'); return; }
+            // socket 在本轮中途不再 OPEN：保留该帧在队列里，交由后续路径处理。
+            if (outcome !== 'sent') return;
+            pending.shift();
+            pendingBytes -= bytes;
           }
         });
         upstreamWs.on('message', (data: Buffer, isBinary: boolean) => {
@@ -3425,7 +3568,7 @@ export function registerProxyRoutes(app: Application, deps: ProxyDeps): ProxyRou
               return;
             }
             if (filtered === null) return;
-            client.send(JSON.stringify({ type: 'item', streamId: frame.streamId, value: filtered }));
+            sendClientFrame(JSON.stringify({ type: 'item', streamId: frame.streamId, value: filtered }));
             if (
               state.endpoint === 'workspace/follow' &&
               typeof filtered === 'object' &&
@@ -3434,7 +3577,7 @@ export function registerProxyRoutes(app: Application, deps: ProxyDeps): ProxyRou
               flushPendingSessionStreams();
             }
           } else {
-            client.send(JSON.stringify(frame));
+            sendClientFrame(JSON.stringify(frame));
           }
           if (frame.type === 'end' || frame.type === 'error') {
             active.delete(frame.streamId);

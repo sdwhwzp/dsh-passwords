@@ -15,6 +15,9 @@ import type { PlatformConfig } from '../src/config.js';
 let appDir: string;
 let workspaceDir: string;
 let otherWorkspaceDir: string;
+let sharedRootDir: string;
+let sharedOwnedDir: string;
+let sharedForeignDir: string;
 let db: Database;
 let gateway: http.Server;
 let upstream: http.Server;
@@ -24,9 +27,13 @@ let downloadsAllowedCookie = '';
 let downloadsDeniedCookie = '';
 let bannedCookie = '';
 let otherFolderCookie = '';
+let sharedOwnerCookie = '';
+let sharedPeerCookie = '';
 let ordinaryFile = '';
 let otherFile = '';
 let envFile = '';
+let sharedOwnedFile = '';
+let sharedForeignFile = '';
 let escapeLink: string | null = null;
 
 function request(pathname: string, cookie?: string): Promise<{ status: number; body: Buffer; headers: http.IncomingHttpHeaders }> {
@@ -54,14 +61,23 @@ before(async () => {
   appDir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-download-app-'));
   workspaceDir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-download-workspace-'));
   otherWorkspaceDir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-download-other-'));
+  sharedRootDir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-download-shared-'));
+  sharedOwnedDir = path.join(sharedRootDir, 'owned');
+  sharedForeignDir = path.join(sharedRootDir, 'foreign');
+  mkdirSync(sharedOwnedDir);
+  mkdirSync(sharedForeignDir);
   mkdirSync(path.join(appDir, 'data'));
   ordinaryFile = path.join(workspaceDir, 'generated.md');
   otherFile = path.join(otherWorkspaceDir, 'other.md');
   envFile = path.join(appDir, '.env');
+  sharedOwnedFile = path.join(sharedOwnedDir, 'own.md');
+  sharedForeignFile = path.join(sharedForeignDir, 'secret.md');
   const candidateEscapeLink = path.join(workspaceDir, 'escape-link');
   writeFileSync(ordinaryFile, 'ordinary workspace content');
   writeFileSync(otherFile, 'outside subuser allowlist');
   writeFileSync(envFile, 'SETUP_KEY=must-not-download');
+  writeFileSync(sharedOwnedFile, 'shared owner own content');
+  writeFileSync(sharedForeignFile, 'shared peer private content');
 
   const dbPath = path.join(appDir, 'data', 'test.db');
   db = new Database(dbPath, createFieldCrypto('testkey', 'testkey'));
@@ -71,6 +87,8 @@ before(async () => {
   const denied = db.createUser('denied', '$2a$10$dummyhashdummyhashdummyhashdu');
   const banned = db.createUser('banned', '$2a$10$dummyhashdummyhashdummyhashdu');
   const otherFolder = db.createUser('otherfolder', '$2a$10$dummyhashdummyhashdummyhashdu');
+  const sharedOwner = db.createUser('sharedowner', '$2a$10$dummyhashdummyhashdummyhashdu');
+  const sharedPeer = db.createUser('sharedpeer', '$2a$10$dummyhashdummyhashdummyhashdu');
   db.setPermissions(allowed.id, {
     allowedFolders: [workspaceDir], hourlyTokenLimit: null, dailyMinutesLimit: null,
     allowUpload: true, allowGitDownload: true, allowWorkspaceCreate: false,
@@ -91,6 +109,17 @@ before(async () => {
     allowUpload: true, allowGitDownload: true, allowWorkspaceCreate: false,
     banned: false, sandboxMode: null,
   });
+  // 共享父目录场景：两个子用户都被分配同一父目录，但各自在父目录下自建了
+  // 私有 workspace 子树。白名单只到父目录，归属由 user_workspaces 行区分。
+  for (const user of [sharedOwner, sharedPeer]) {
+    db.setPermissions(user.id, {
+      allowedFolders: [sharedRootDir], hourlyTokenLimit: null, dailyMinutesLimit: null,
+      allowUpload: true, allowGitDownload: true, allowWorkspaceCreate: false,
+      banned: false, sandboxMode: null,
+    });
+  }
+  db.addUserWorkspace(sharedOwner.id, sharedOwnedDir);
+  db.addUserWorkspace(sharedPeer.id, sharedForeignDir);
   try {
     symlinkSync(dbPath, candidateEscapeLink);
     escapeLink = candidateEscapeLink;
@@ -120,6 +149,8 @@ before(async () => {
   downloadsDeniedCookie = tokenFor(denied);
   bannedCookie = tokenFor(banned);
   otherFolderCookie = tokenFor(otherFolder);
+  sharedOwnerCookie = tokenFor(sharedOwner);
+  sharedPeerCookie = tokenFor(sharedPeer);
 
   gateway = createGatewayServer(config, new AuthService(config, db), db);
   await new Promise<void>((resolve) => gateway.listen(0, '127.0.0.1', resolve));
@@ -129,7 +160,7 @@ before(async () => {
 after(() => {
   gateway?.close();
   upstream?.close();
-  for (const dir of [appDir, workspaceDir, otherWorkspaceDir]) {
+  for (const dir of [appDir, workspaceDir, otherWorkspaceDir, sharedRootDir]) {
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* Windows file handles are best-effort. */ }
   }
 });
@@ -200,4 +231,29 @@ test('Issue #15: download requires an authenticated session and regular file', a
 
   const missing = await request(downloadPath(path.join(workspaceDir, 'missing.md')), adminCookie);
   assert.equal(missing.status, 404);
+});
+
+// 回归：子用户 A 的 allowed_folders 覆盖共享父目录，但同父目录下 B 自建的
+// workspace 子树属于 B。download 路由必须与 /api/file 一样做对象级归属校验，
+// 不能因为白名单包含父目录就放行 B 的私有文件。
+test('Issue #15: subuser cannot download a peer tenant workspace subtree inside a shared allowlisted parent', async () => {
+  const leaked = await request(downloadPath(sharedForeignFile), sharedOwnerCookie);
+  assert.equal(leaked.status, 403);
+  assert.notEqual(leaked.body.toString(), 'shared peer private content');
+
+  const unauthenticated = await request(downloadPath(sharedForeignFile));
+  assert.equal(unauthenticated.status, 401);
+
+  const sensitive = await request(downloadPath(envFile), sharedOwnerCookie);
+  assert.equal(sensitive.status, 403);
+});
+
+test('Issue #15: peer tenant keeps access to its own workspace and its own allowlisted subtree', async () => {
+  const owner = await request(downloadPath(sharedForeignFile), sharedPeerCookie);
+  assert.equal(owner.status, 200);
+  assert.equal(owner.body.toString(), 'shared peer private content');
+
+  const ownSubtree = await request(downloadPath(sharedOwnedFile), sharedOwnerCookie);
+  assert.equal(ownSubtree.status, 200);
+  assert.equal(ownSubtree.body.toString(), 'shared owner own content');
 });

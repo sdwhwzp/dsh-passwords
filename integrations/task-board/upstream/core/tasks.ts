@@ -37,8 +37,23 @@ export interface ExecutionRecord {
    * Session id of the DSH session that issued the run/rerun action (issue #6
    * audit origin). Client-asserted, not a trust boundary; absent when the run
    * was triggered by cron (source unknown).
+   *
+   * On an EXTERNAL record (issue #1826) this names the agent that completed the
+   * work outside the Host instead, which is what makes the history readable.
    */
   initiatedBy?: string
+  /**
+   * True when this outcome was recorded from outside the Host by
+   * `record-external-outcome` rather than observed from a DSH session
+   * (issue #1826).
+   *
+   * The board never manufactures one of these itself: every Host-side path
+   * (`run`, `settle`, cascade folding, restart recovery) writes an execution
+   * without it, so `external` is the single field separating work this Host ran
+   * from work an outside agent reported. Such a record never carries a
+   * `sessionId` and never claims a verdict the Host observed.
+   */
+  external?: boolean
   /** Freeze instant captured from the card snapshot when the run opened. */
   frozenAt?: number
   /** Freeze source session captured from the card snapshot when the run opened. */
@@ -306,6 +321,20 @@ export interface TaskRecord {
    */
   goalRun?: boolean
   /**
+   * Run this task's goal executions WITHOUT the board's acceptance gate.
+   *
+   * Absent means INHERIT: the execution's applicability is decided by the
+   * board-wide `goalVerification` switch frozen at start, exactly as a card
+   * that never touched this option behaves. Only an explicit `true` opts the
+   * card out, and the execution records `applicability: 'disabled'` so the
+   * report says plainly that nothing certified this run.
+   *
+   * The opt-out is per execution, not per run: flipping it never rewrites the
+   * verdict rule of an execution already open, and a rerun or a scheduled
+   * occurrence reads the card's current value when it freezes its contract.
+   */
+  skipVerification?: boolean
+  /**
    * Frozen context snapshot for a continuation card; absent on plain tasks.
    * Sanitized before it enters the ledger (redaction, slash-command taint,
    * 8 KiB per-field cap) by the protocol gate and re-normalized on load.
@@ -400,6 +429,11 @@ export interface NewTaskInput {
    * default (goal run); an explicit false requests a single plain turn.
    */
   goalRun?: boolean
+  /**
+   * Run this task's goal executions without the acceptance gate; absent
+   * inherits the board-wide `goalVerification` switch.
+   */
+  skipVerification?: boolean
   /**
    * Optional scheduled-run rule requested at creation time (the new-task
    * dialog): an enable flag, a 5-field cron expression, and the IANA zone its
@@ -546,6 +580,10 @@ export function createTask(input: NewTaskInput, now: number, id: string): TaskRe
     // touched the option (and every card written before the field existed)
     // keeps starting its runs with /goal.
     goalRun: input.goalRun === false ? false : undefined,
+    // Default OFF: only an explicit true is stored, so a card that never
+    // touched the option inherits the board-wide acceptance switch exactly as
+    // every card written before the field existed does.
+    skipVerification: input.skipVerification === true ? true : undefined,
     ...(input.freeze === undefined ? {} : { freeze: freezeOf(input.freeze, now) }),
     ...(input.handover === undefined ? {} : { handover: { ...input.handover, bundledAt: now } }),
     ...(tags === undefined ? {} : { tags }),
@@ -632,6 +670,21 @@ export function startExecution(
 }
 
 /**
+ * The column a settled outcome puts a card in. The ONE derivation shared by
+ * every settlement path (issue #1826): a Host-run execution and an outcome an
+ * outside agent reported both land in the same column from the same rule, so
+ * the column never becomes a second, independent piece of state.
+ @param task - the card being settled.
+ @param outcome - the settled outcome.
+ @returns the status the card shows afterwards.
+ */
+export function settledStatus(task: TaskRecord, outcome: ExecutionOutcome): TaskStatus {
+  if (outcome === 'succeeded') return task.schedule?.enabled === true ? 'todo' : 'done'
+  if (outcome === 'failed') return 'failed'
+  return task.status === 'running' ? 'todo' : task.status
+}
+
+/**
  * Settle a running execution: record the outcome and move the task into the
  * matching column. No-op (returns the input task) when the execution is not
  * the task's latest or is already settled.
@@ -650,11 +703,7 @@ export function settleExecution(
   const settled: ExecutionRecord = { ...execution, endedAt: now, result: outcome, error }
   const executions = [...task.executions]
   executions[index] = settled
-  const status: TaskStatus = outcome === 'succeeded'
-    ? (task.schedule?.enabled ? 'todo' : 'done')
-    : outcome === 'failed' ? 'failed'
-      : task.status === 'running' ? 'todo' : task.status
-  return { ...task, status, updatedAt: now, executions }
+  return { ...task, status: settledStatus(task, outcome), updatedAt: now, executions }
 }
 
 /** A settled-execution summary string for the detail view. */

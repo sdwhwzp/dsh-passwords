@@ -1,12 +1,19 @@
 /**
  * SSE 事件帧的有界缓冲。
  *
- * 事件流用空行（`\n\n`）分隔事件。网关只把完整帧交给过滤函数，未终止的尾部必须留在
- * 缓冲里等待下一个 chunk。若上游不按协议发送空行（例如心跳只有单换行）或单个帧被
- * 无限拉长，这个尾部会无界增长；本类在超过上限时丢弃该未终止帧并从下一个空行重新
- * 同步。被丢弃的内容本来就无法解析成合法帧，调用方的过滤函数对无法解析的帧一律
- * fail-closed 丢弃，因此既不会放行未过滤内容，也不会让内存无界增长。
+ * 事件流用空行分隔事件。按 WHATWG SSE 语义，行终止符是 CRLF、LF 或单个 CR 三者
+ * 之一，空行即两个连续的行终止符，因此 `\n\n`、`\r\n\r\n`、`\r\r` 以及混合形式
+ * （如 `\n\r\n`）都分隔事件。网关只把完整帧交给过滤函数，未终止的尾部必须留在
+ * 缓冲里等待下一个 chunk（这也覆盖定界符被切到两个 chunk 的情况）。若上游不按协议
+ * 发送空行（例如心跳只有单换行）或单个帧被无限拉长，这个尾部会无界增长；本类在
+ * 超过上限时丢弃该未终止帧并从下一个空行重新同步。被丢弃的内容本来就无法解析成
+ * 合法帧，调用方的过滤函数对无法解析的帧一律 fail-closed 丢弃，因此既不会放行
+ * 未过滤内容，也不会让内存无界增长。
  */
+
+/** 两个行终止符；裸 LF/CR 分支不得拆开 CRLF 的两个字符。 */
+const SSE_BLANK_LINE = /(?:\r\n|\r(?!\n)|(?<!\r)\n)(?:\r\n|\r(?!\n)|(?<!\r)\n)/;
+
 export class SseFrameBuffer {
   private pending = '';
   private pendingBytes = 0;
@@ -20,10 +27,10 @@ export class SseFrameBuffer {
     if (text === '') return [];
     if (this.resyncing) {
       const window = this.pending + text;
-      const separator = /\r?\n\r?\n/.exec(window);
+      const separator = SSE_BLANK_LINE.exec(window);
       if (separator === null) {
-        // 只保留末尾一个字符，避免把跨 chunk 的空行定界符切断。
-        this.pending = window.slice(-1);
+        // 保留最多 3 个字符，覆盖 `\r\n\r` + 后续 `\n` 这种跨 chunk 的 CRLF 空行。
+        this.pending = window.slice(-3);
         return [];
       }
       this.pending = '';
@@ -47,7 +54,7 @@ export class SseFrameBuffer {
   private collect(text: string): string[] {
     this.pending += text;
     this.pendingBytes += Buffer.byteLength(text, 'utf8');
-    const frames = this.pending.split(/\r?\n\r?\n/);
+    const frames = this.pending.split(SSE_BLANK_LINE);
     const tail = frames.pop() ?? '';
     // 没有命中分隔符时 split 返回同一个字符串实例，累计字节数无需重算；命中时
     // 尾部通常很短，重算成本可忽略。

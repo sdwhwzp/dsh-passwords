@@ -30,6 +30,12 @@ export const TASK_BOARD_MIGRATABLE_SCHEMA_VERSIONS: readonly number[] = [
 ]
 export const TASK_BOARD_API_PREFIX = '/api/task-board'
 
+/** Longest accepted caller identity on an external outcome record. */
+export const EXTERNAL_INITIATOR_MAX_LENGTH = 200
+
+/** Longest accepted free-text summary on an external outcome record. */
+export const EXTERNAL_SUMMARY_MAX_LENGTH = 1_000
+
 export type PowerPhase = 'disabled' | 'idle' | 'acquiring' | 'active' | 'error' | 'unsupported'
 
 export interface TaskBoardPowerSnapshot {
@@ -139,6 +145,17 @@ export type TaskBoardAction =
   | { kind: 'archive'; taskId: string }
   | { kind: 'restore'; taskId: string }
   | { kind: 'settle'; taskId: string }
+  /** Clear the acceptance anomalies recorded on a card's open execution (issue #1828). */
+  | { kind: 'reset-verification'; taskId: string }
+  /**
+   * Record an outcome an agent OUTSIDE the Host produced (issue #1826).
+   *
+   * It writes a real execution record, so the terminal column and the run
+   * history both derive from that one record instead of a bare column edit.
+   * `cancelled` is deliberately absent: nothing outside a DSH session may
+   * claim the Host closed a run, and `running` must stay Host-only.
+   */
+  | { kind: 'record-external-outcome'; taskId: string; result: 'succeeded' | 'failed'; initiatedBy: string; summary?: string }
   | { kind: 'set-schedule'; taskId: string; patch: { enabled?: boolean; cron?: string; timeZone?: string | null } }
   | { kind: 'run'; taskId: string }
   | { kind: 'rerun'; taskId: string }
@@ -209,6 +226,10 @@ function validImportedKnownFields(value: Record<string, unknown>): boolean {
       if (!optionalFiniteNumber(execution.endedAt) || !optionalString(execution.error)) return false
       if (execution.result !== undefined && !['succeeded', 'failed', 'cancelled'].includes(String(execution.result))) return false
       if (execution.initiatedBy !== undefined && typeof execution.initiatedBy !== 'string') return false
+      // An imported external marker is accepted (it is a declaration an
+      // operator made about their own board), but it is still just a boolean:
+      // the acceptance block below is what must never arrive from an import.
+      if (execution.external !== undefined && typeof execution.external !== 'boolean') return false
       if (execution.frozenBy !== undefined && typeof execution.frozenBy !== 'string') return false
       if (execution.frozenAt !== undefined && typeof execution.frozenAt !== 'number') return false
       // A well-formed acceptance block may be imported for inspection, but the
@@ -241,6 +262,7 @@ function importedTask(value: unknown): TaskRecord | undefined {
       result: execution.result,
       error: execution.error,
       ...(execution.initiatedBy === undefined ? {} : { initiatedBy: execution.initiatedBy }),
+      ...(execution.external === true ? { external: true } : {}),
       ...(execution.frozenAt === undefined ? {} : { frozenAt: execution.frozenAt }),
       ...(execution.frozenBy === undefined ? {} : { frozenBy: execution.frozenBy }),
       // 安全门（对抗场景 d）：验收报告是 Host 的判定，不接受 import 携带——
@@ -263,6 +285,11 @@ function importedTask(value: unknown): TaskRecord | undefined {
     ...(task.permission === undefined ? {} : { permission: task.permission }),
     ...(task.reuseSession === undefined ? {} : { reuseSession: task.reuseSession }),
     ...(task.goalRun === undefined ? {} : { goalRun: task.goalRun }),
+    // The per-card acceptance opt-out rides the import like the /goal opt-in:
+    // it is a user-chosen execution preference on their own board, not a
+    // verdict. The per-execution `verification` block is still stripped below, so
+    // no imported card can arrive already accepted.
+    ...(task.skipVerification === undefined ? {} : { skipVerification: task.skipVerification }),
     ...(task.archivedAt === undefined ? {} : { archivedAt: task.archivedAt }),
     ...(task.freeze === undefined ? {} : { freeze: task.freeze }),
     ...(task.handover === undefined ? {} : { handover: task.handover }),
@@ -301,13 +328,14 @@ function handoverPayload(value: unknown): TaskHandoverInput | undefined {
 
 function createInput(value: unknown): value is NewTaskInput {
   const input = record(value)
-  if (input === undefined || !exactKeys(input, ['title', 'description', 'prompt', 'parentId', 'workspaceId', 'mode', 'permission', 'schedule', 'freeze', 'handover', 'model', 'reuseSession', 'teamRun', 'goalRun', 'tags', 'integrations'])) return false
+  if (input === undefined || !exactKeys(input, ['title', 'description', 'prompt', 'parentId', 'workspaceId', 'mode', 'permission', 'schedule', 'freeze', 'handover', 'model', 'reuseSession', 'teamRun', 'goalRun', 'skipVerification', 'tags', 'integrations'])) return false
   if (input.parentId !== undefined && (typeof input.parentId !== 'string' || input.parentId.trim() === '')) return false
   if (typeof input.title !== 'string' || typeof input.description !== 'string' || typeof input.prompt !== 'string') return false
   if (!optionalString(input.workspaceId) || !optionalString(input.mode) || !optionalString(input.model)) return false
   if (input.reuseSession !== undefined && typeof input.reuseSession !== 'boolean') return false
   if (input.teamRun !== undefined && typeof input.teamRun !== 'boolean') return false
   if (input.goalRun !== undefined && typeof input.goalRun !== 'boolean') return false
+  if (input.skipVerification !== undefined && typeof input.skipVerification !== 'boolean') return false
   if (input.permission !== undefined && !isTaskPermission(input.permission)) return false
   if (input.tags !== undefined && !isTaskTagList(input.tags)) return false
   if (input.integrations !== undefined && normalizeTaskIntegrations(input.integrations) === undefined) return false
@@ -325,13 +353,16 @@ function createInput(value: unknown): value is NewTaskInput {
 
 function updatePatch(value: unknown): boolean {
   const patch = record(value)
-  if (patch === undefined || !exactKeys(patch, ['title', 'description', 'prompt', 'workspaceId', 'mode', 'permission', 'freeze', 'handover', 'model', 'reuseSession', 'teamRun', 'goalRun', 'tags'])) return false
+  if (patch === undefined || !exactKeys(patch, ['title', 'description', 'prompt', 'workspaceId', 'mode', 'permission', 'freeze', 'handover', 'model', 'reuseSession', 'teamRun', 'goalRun', 'skipVerification', 'tags'])) return false
   // null (or false) clears the reuse opt-in; only a real boolean is accepted.
   if (patch.reuseSession !== undefined && patch.reuseSession !== null && typeof patch.reuseSession !== 'boolean') return false
   if (patch.teamRun !== undefined && patch.teamRun !== null && typeof patch.teamRun !== 'boolean') return false
   // The goal opt-in is tri-state: null/true return the card to its default
   // (goal run), false pins a single plain turn.
   if (patch.goalRun !== undefined && patch.goalRun !== null && typeof patch.goalRun !== 'boolean') return false
+  // The acceptance opt-out is the mirror tri-state: null/false return the card
+  // to inheriting the board-wide switch, true pins it out of the gate.
+  if (patch.skipVerification !== undefined && patch.skipVerification !== null && typeof patch.skipVerification !== 'boolean') return false
   for (const key of ['title', 'description', 'prompt', 'workspaceId', 'mode', 'model'] as const) {
     if (!optionalString(patch[key])) return false
   }
@@ -463,11 +494,36 @@ function parseEnvelopeAction(value: unknown): TaskBoardActionEnvelope | undefine
         },
       }
     }
+    case 'record-external-outcome': {
+      if (!exactKeys(action, ['kind', 'taskId', 'result', 'initiatedBy', 'summary'])) return undefined
+      if (taskId === undefined) return undefined
+      // Only a real outside verdict is accepted: `running` is Host-only and
+      // `cancelled` is the Host's own bookkeeping for a run it closed.
+      if (action.result !== 'succeeded' && action.result !== 'failed') return undefined
+      if (typeof action.initiatedBy !== 'string') return undefined
+      const initiatedBy = action.initiatedBy.trim()
+      // The caller must be identifiable: an unattributed external outcome is
+      // the same 'state without history' the record exists to avoid.
+      if (initiatedBy === '' || initiatedBy.length > EXTERNAL_INITIATOR_MAX_LENGTH) return undefined
+      if (action.summary !== undefined && typeof action.summary !== 'string') return undefined
+      const summary = typeof action.summary === 'string' ? action.summary.trim().slice(0, EXTERNAL_SUMMARY_MAX_LENGTH) : ''
+      return {
+        requestId: envelope.requestId,
+        action: {
+          kind: 'record-external-outcome',
+          taskId,
+          result: action.result,
+          initiatedBy,
+          ...(summary === '' ? {} : { summary }),
+        },
+      }
+    }
     case 'confirm-permission':
     case 'delete':
     case 'archive':
     case 'restore':
     case 'settle':
+    case 'reset-verification':
     case 'run':
     case 'rerun':
       if (!exactKeys(action, ['kind', 'taskId'])) return undefined

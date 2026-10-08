@@ -163,7 +163,7 @@ test('Issue #33：插件拉起的子进程以部署文件为准，重启子进�
   }
 });
 
-test('MANAGED_ENV_KEYS 覆盖设置文件、bindAll 与上游 TLS 校验开关，且随文件删除而清除', () => {
+test('MANAGED_ENV_KEYS 覆盖设置、超时与缓存开关，且随文件删除而清除', () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'dshpw-envprec-'));
   const file = path.join(dir, '.env');
   try {
@@ -172,6 +172,9 @@ test('MANAGED_ENV_KEYS 覆盖设置文件、bindAll 与上游 TLS 校验开关�
       'MCP_DSH_SETTINGS_FILE=file-settings.yaml',
       'MCP_DSH_PATCH_ALLOW_BIND_ALL=1',
       'MCP_GATEWAY_UPSTREAM_TLS_VERIFY=0',
+      'MCP_GATEWAY_UPSTREAM_HEADER_TIMEOUT_MS=180000',
+      'MCP_GATEWAY_INTERNAL_PROBE_TIMEOUT_MS=120000',
+      'MCP_DSH_PASSWORDS_INVENTORY_TTL_MS=60000',
       '',
     ].join('\n'));
     // 模拟 dsh 常驻进程继承下来的陈旧值：部署文件必须覆盖它们。
@@ -180,12 +183,18 @@ test('MANAGED_ENV_KEYS 覆盖设置文件、bindAll 与上游 TLS 校验开关�
       MCP_DSH_SETTINGS_FILE: 'stale-settings.yaml',
       MCP_DSH_PATCH_ALLOW_BIND_ALL: '0',
       MCP_GATEWAY_UPSTREAM_TLS_VERIFY: '1',
+      MCP_GATEWAY_UPSTREAM_HEADER_TIMEOUT_MS: '60000',
+      MCP_GATEWAY_INTERNAL_PROBE_TIMEOUT_MS: '10000',
+      MCP_DSH_PASSWORDS_INVENTORY_TTL_MS: '0',
       MCP_DSH_ROOT: 'environment-only',
     };
     const snapshot = deploymentGatewayEnv(file, inherited);
     assert.equal(snapshot.MCP_DSH_SETTINGS_FILE, 'file-settings.yaml');
     assert.equal(snapshot.MCP_DSH_PATCH_ALLOW_BIND_ALL, '1');
     assert.equal(snapshot.MCP_GATEWAY_UPSTREAM_TLS_VERIFY, '0');
+    assert.equal(snapshot.MCP_GATEWAY_UPSTREAM_HEADER_TIMEOUT_MS, '180000');
+    assert.equal(snapshot.MCP_GATEWAY_INTERNAL_PROBE_TIMEOUT_MS, '120000');
+    assert.equal(snapshot.MCP_DSH_PASSWORDS_INVENTORY_TTL_MS, '60000');
     // 未纳入管理的键仍沿用环境变量。
     assert.equal(snapshot.MCP_DSH_ROOT, 'environment-only');
 
@@ -196,6 +205,9 @@ test('MANAGED_ENV_KEYS 覆盖设置文件、bindAll 与上游 TLS 校验开关�
     assert.equal(cleared.MCP_DSH_SETTINGS_FILE, undefined);
     assert.equal(cleared.MCP_DSH_PATCH_ALLOW_BIND_ALL, undefined);
     assert.equal(cleared.MCP_GATEWAY_UPSTREAM_TLS_VERIFY, undefined);
+    assert.equal(cleared.MCP_GATEWAY_UPSTREAM_HEADER_TIMEOUT_MS, undefined);
+    assert.equal(cleared.MCP_GATEWAY_INTERNAL_PROBE_TIMEOUT_MS, undefined);
+    assert.equal(cleared.MCP_DSH_PASSWORDS_INVENTORY_TTL_MS, undefined);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

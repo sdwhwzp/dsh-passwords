@@ -6,6 +6,32 @@
 
 为 DeepSeek Harness（dsh）的网页入口加上登录、账号管理和访问控制，适合把 dsh 放到服务器上给团队或客户使用。
 
+<p align="center">
+  <a href="https://github.com/sdwhwzp/dsh-passwords/releases/latest"><img src="https://img.shields.io/github/v/release/sdwhwzp/dsh-passwords?style=flat-square" alt="Version"></a>
+  &nbsp;
+  <a href="https://github.com/sdwhwzp/dsh-passwords/stargazers"><img src="https://img.shields.io/github/stars/sdwhwzp/dsh-passwords?style=flat-square" alt="Stars"></a>
+  &nbsp;
+  <a href="https://www.npmjs.com/package/dsh-passwords"><img src="https://img.shields.io/npm/v/dsh-passwords?style=flat-square" alt="npm"></a>
+  &nbsp;
+  <a href="https://www.npmjs.com/package/dsh-passwords"><img src="https://img.shields.io/npm/dm/dsh-passwords?style=flat-square" alt="Downloads"></a>
+  &nbsp;
+  <a href="https://github.com/sdwhwzp/dsh-passwords/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/sdwhwzp/dsh-passwords/ci.yml?style=flat-square&label=CI" alt="CI"></a>
+  &nbsp;
+  <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/DSH-0.2.1--alpha.1-4c6ef5?style=flat-square&labelColor=454a54" alt="DSH"></a>
+  &nbsp;
+  <img src="https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square" alt="License">
+  &nbsp;
+  <a href="https://github.com/awesome-dsh-plugin/awesome-dsh-plugin"><img src="https://img.shields.io/badge/Awesome-DSH%20Plugin-9370db?style=flat-square" alt="Awesome DSH Plugin"></a>
+  &nbsp;
+  <a href="https://github.com/0xsline/awesome-deepseek-harness"><img src="https://img.shields.io/badge/Awesome-DeepSeek%20Harness-4c6ef5?style=flat-square" alt="Awesome DeepSeek Harness"></a>
+  &nbsp;
+  <a href="https://github.com/Zhiyuan-Fan/Awesome-DeepSeek-Harness-Plugins"><img src="https://img.shields.io/badge/%E6%94%B6%E5%BD%95-Awesome%20%E6%8F%92%E4%BB%B6%E7%B2%BE%E9%80%89-15aabf?style=flat-square" alt="Awesome 插件精选收录"></a>
+  &nbsp;
+  <a href="https://github.com/bruc3van/awesome-dsh-plugin"><img src="https://img.shields.io/badge/%E6%94%B6%E5%BD%95-DSH%20%E7%B2%BE%E9%80%89%E7%9B%AE%E5%BD%95-1c7ed6?style=flat-square" alt="DSH 精选目录收录"></a>
+  &nbsp;
+  <a href="https://github.com/imsai-sh/awesome-deepseek-harness-plugins"><img src="https://img.shields.io/badge/%E6%94%B6%E5%BD%95-1024%20%E6%8F%92%E4%BB%B6%E5%95%86%E5%BA%97-0ca678?style=flat-square" alt="1024 插件商店收录"></a>
+</p>
+
 dsh 的网页界面默认面向本机使用。服务器地址一旦暴露，拿到链接的人就可以进入，也会共用模型额度。dsh-passwords 放在 dsh 前面：先登录，再按账号应用工作区、会话、沙盒和用量限制。
 
 纯本机使用 dsh 不需要安装它；需要远程访问、多人共用或管理子账号时再使用即可。
@@ -14,7 +40,7 @@ dsh 的网页界面默认面向本机使用。服务器地址一旦暴露，拿�
 
 收录于 [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek-harness)（Infrastructure & Development）和 [Awesome DSH Plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)（Development & Runtime）。
 
-Harness 0.1.7 的账号网关支持工作区置顶会话列表，并严格校验置顶 ID；会话和工作区仍按登录账号隔离。
+Harness 0.2.1-alpha.1 的账号网关支持工作区置顶会话列表，并严格校验置顶 ID；会话和工作区仍按登录账号隔离。
 
 上游 HTTP 连接池通过 `MCP_GATEWAY_UPSTREAM_IDLE_TIMEOUT_MS` 设置闲置连接保留时间（默认 5000 毫秒），并遵循 Host 的更短 Keep-Alive 提示。新建或复用的活动请求、SSE 不继承闲置截止；请求自身的超时仍有效。连接失败不会自动重放请求。
 
@@ -118,7 +144,7 @@ Android / iOS 原生 `dsh-mobile` 的多账号登录、账号切换及协议桥�
 
 ### 0. 前置条件（三样）
 
-宿主机安装需要 Node.js 22.19+ 或 24+、git 和带本 fork 租户扩展的 Harness。当前部署目标为私有 Harness `0.2.0-rc.2`；运行时版本识别采用上游 0.1.7 和 0.2.0 发布线规则，实际部署仍须验收本 fork 的租户扩展。安装器与 bundled Docker 继承上游的公开 `0.2.0-rc.1` 默认值，不能代替本部署的私有构建。实际检查与部署状态见部署记录及 [兼容说明](docs/compatibility-matrix.md)。
+宿主机安装需要 Node.js 22.19+ 或 24+、可正常运行的 dsh、git 与 pnpm（手动执行 `node scripts/register-plugin.mjs` 注册插件时需要；一键安装器会自动安装 pnpm）。兼容门禁只接受 DSH `0.2.1` patch 线，即 `>=0.2.1-alpha.1 <0.2.2-0`（alpha.1 起的预发布与稳定 0.2.1）；当前开发树与 bundled Docker 默认运行时锁定 `0.2.1-alpha.1`。已退役的 `0.1.x` / `0.2.0` 线、`0.2.1-alpha.0` 以及所有 `0.2.2+` 身份都会被拒绝。Docker 安装只需要 Docker Engine 或 Docker Desktop 和一个 DeepSeek API key。
 
 ### 1. 安装（按平台）
 
@@ -147,20 +173,32 @@ dsh-passwords install     # 生成随机 SETUP_KEY + 恢复插件栈 + 应用补
 
 ### 自动恢复已安装插件
 ```bash
-# 4. Docker
+# 4. Docker：一条命令完成安装并初始化
 docker run -d \
   --name dsh-passwords \
   --restart unless-stopped \
-  --env-file .env \
+  -e DEEPSEEK_API_KEY=sk-你的key \
+  -e SETUP_KEY=自己设定的强随机串 \
   -p 127.0.0.1:3088:3088 \
   -v dsh-home:/data/dsh \
   -v dsh-passwords-state:/data/dsh-passwords \
-  skywalker237234/dsh-passwords:2.7.6
+  skywalker237234/dsh-passwords:2.7.7
 ```
 
-`.env` 至少包含 `DEEPSEEK_API_KEY`。`MCP_GATEWAY_PUBLIC_HOST` 建议填实际访问的域名。宿主端口只发布在回环地址 `127.0.0.1:3088`，容器内监听 `0.0.0.0:3088`；公网访问由 nginx 或 Caddy 终结 TLS 后转发。镜像默认内置公开 DSH `0.2.0-rc.1`（不包含本 fork 所需的租户扩展）；初始化完成以 healthz/readyz 均返回 `ok:true` 为准。
+启动后浏览器打开 `http://127.0.0.1:3088`，用你自己设置的 `SETUP_KEY` 完成首次配置。若省略 `-e SETUP_KEY`，容器会随机生成密钥并写入卷内 `setup-key.txt`，用 `docker exec dsh-passwords cat /data/dsh-passwords/setup-key.txt` 读取后再完成首次配置（首次配置成功后该文件自动删除）。`-e SETUP_KEY` 会在首次初始化时作为初始 SETUP_KEY 写入卷内 `.env`，不会与随机值分叉，去掉该 env 重启也不会因此锁死（首次配置成功后 `.env` 中的 SETUP_KEY 会按既有加固流程自动轮换，此后登录使用你创建的账号密码，不再需要它）。
+
+如需自定义端口、域名、SSH 端点或第三方端点登记等高级配置，可复制 `docker/.env.example` 为 `docker/.env` 并追加 `--env-file docker/.env`（Docker Compose 则可 `docker compose --env-file docker/.env -f docker/docker-compose.yml up -d`）；它是可选的进阶配置，不再是安装前置步骤。不要用仓库根目录的宿主机模板 `.env.example`：它会注入占位 `SETUP_KEY`（`change-me-…`）、`MCP_GATEWAY_PORT=443` 与空的 `MCP_GATEWAY_AUTO_TLS=`，覆盖镜像内置的 `3088` 端口和 `MCP_GATEWAY_AUTO_TLS=0`，导致容器不监听 `3088`、网关拒绝启动；其中相对的 `MCP_DB_PATH=./data/platform.db` 也会偏离容器默认的 `/data/dsh-passwords/platform.db`。
+
+Docker 部署至少需要 `DEEPSEEK_API_KEY`。`MCP_GATEWAY_PUBLIC_HOST` 建议填实际访问的域名。宿主端口只发布在回环地址 `127.0.0.1:3088`，容器内监听 `0.0.0.0:3088`；公网访问由 nginx 或 Caddy 终结 TLS 后转发。镜像内置 DSH `0.2.1-alpha.1`（DSH 0.2.1 patch 线当前锁定版本；该镜像尚未做运行验收）；初始化完成以 healthz/readyz 均返回 `ok:true` 为准。
 
 `scripts/profile-plugins.json` 是跨机器部署的版本化插件清单。运行 `dsh-passwords install` 会把清单中的 NPM/Git 来源、bundle 顺序、Git 构建授权和必要的 profile patch 幂等合并到 `~/.dsh/profiles/web`，然后统一执行 `pnpm install`。已有本地 `link:` 开发源和未纳入清单的自定义插件不会被覆盖或删除；只有链接实际指向清单声明的相邻源码时才构建其配套工作区，指向独立发布目录的链接不会误用相邻路径。清单明确标记的旧聚合包会自动迁移。
+
+- 宿主机安装默认目录为 `/opt/dsh-passwords`，可用 `DSH_PASSWORDS_DIR` 更改；检测到已有 dsh-passwords 目录时就地幂等重跑，其他同名目录会报错退出
+- SETUP_KEY：宿主机安装结束时打印并写入安装目录的 `setup-key.txt`；Docker 用 `-e SETUP_KEY` 指定，省略则随机生成并写入卷内 `setup-key.txt`
+- Docker 的两个命名卷分别存 dsh profile 与 `.env`、数据库、证书；删除即丢数据
+- Docker 中的“保命技能”不会尝试在容器内自删；Compose 部署需要彻底清理时，在宿主机执行 `docker compose down -v`，而 `docker run` 部署需要先 `docker rm -f dsh-passwords`，再执行 `docker volume rm dsh-home dsh-passwords-state`（都会永久删除卷数据）
+- 私有部署使用带账号 principal 扩展的 Harness；网关交换官方认证 URL，不改写安装后的 Host bundle。公开 Docker 镜像不能替代私有候选验收。
+- npm 全局安装（方式 3）：Unix 首次安装需要 `sudo`（自动 HTTPS 要监听 80/443）；`nvm` / Homebrew 管理的 Node 常不在 root 或系统 PATH 中，可能找不到 `dsh-passwords` 命令；npm 全局目录会随包更新被替换，不适合长期保存 `.env` 与 `data/`，推荐 clone 后安装，或用 `DSH_PASSWORDS_ENV_FILE` 把配置与数据指向稳定目录
 
 清单默认自动安装 `dshmarket@1.16.2`、你自己的 `sdwhwzp/dsh-web` 仓库 `master` 分支中的 `@linxin666/dsh-web-all`、`dsh-spend` 的 `dev` 分支、`dsh-plugin-subscriptions` 的 `dev` 分支、`dsh-at-file` 的 `dev` 分支、`sdwhwzp/dsh-weknora` 的 `main` 分支、better-sidebar 的 Office 预览插件以及当前 `dsh-passwords`。Office 插件为右侧文件栏提供 `.docx`、`.xlsx` 和 `.pptx` 预览。`dsh-at-file` 在输入框键入 `@` 时搜索当前会话工作区中的文件和文件夹；搜索请求按会话归属校验，工作区外的符号链接不进入索引，子账号不能修改共享的插件设置。安装器会移除已停用的 `@linxin666/dsh-web-ui-all` 依赖和 bundle；如果 `dsh-web`、`dsh-at-file`、`dsh-plugin-subscriptions`、`dsh-weknora` 与 `dsh-passwords` 位于同一父目录，则优先链接对应本地源码，确保 DSH 能从 profile 根目录解析每个 loader，也便于直接开发。安装器会在启动前为本地 `dsh-at-file` 链接与当前 DSH 版本匹配的 Host peer，并自动放行其运行时依赖所需的 `protobufjs` 安装脚本；非标准运行时目录可用 `DSH_RUNTIME_NODE_MODULES` 指定。没有相邻源码时，`dsh-at-file` 和 `dsh-plugin-subscriptions` 才回退到清单记录的 GitHub `dev` 分支；存在已打包的相邻源码时直接使用本地链接，服务器无需额外安装 Git，同时仍避免新机器误装 NPM 稳定版。
 
@@ -168,7 +206,9 @@ WeKnora 插件注册知识库列表、检索、文档读取和问答工具。未
 
 `dsh-shandong-tizhi-brand` 和 `dsh-nas-webdav` 也在清单中，但目前只有本机源码，没有可公开拉取的远程分支。新机器部署前分别设置 `DSH_PLUGIN_BRAND_SPEC` 和 `DSH_PLUGIN_NAS_SPEC` 为可访问的 NPM、Git 或 `link:` 来源；未设置时安装器会明确提示并跳过，其他插件继续安装。
 
-结束时会显示首次配置用的 `SETUP_KEY`，并在安装目录写入 `setup-key.txt`。首次配置完成后，这个文件会自动删除；`.env` 中实际使用的密钥会被保留为独立值。
+首次配置成功后 `setup-key.txt` 自动删除，`.env` 中的密钥自动固化并轮换。
+
+Docker 用户一条命令启动后直接打开 `http://127.0.0.1:3088` 完成首次配置，公网访问再自行用 nginx 或 Caddy 把 80/443 反代到 `http://127.0.0.1:3088`；首次配置用的 SETUP_KEY 就是 `-e SETUP_KEY` 设置的值，省略时用 `docker exec dsh-passwords cat /data/dsh-passwords/setup-key.txt` 读取。
 
 ## 卸载
 
@@ -336,6 +376,15 @@ node scripts/start-http.mjs [端口]    # 默认 8080，会弹 y/N 确认
 | `MCP_DSH_ROOT` | 自动探测 | dsh Web Profile 根目录或其中的 `@deepseek-ai/dsh` 包目录；补丁会自动向上定位同一 Profile 的客户端包 |
 | `MCP_DSH_RESTART_SERVICE` | `dsh-web` | 重载补丁后自动重启的 dsh systemd 服务名；显式留空不自动重启 |
 | `DSH_PASSWORDS_ENV_FILE` | 空 | Host 与网关共用的 `.env` 路径；生产环境在 Host 启动环境中指定包目录外的持久文件，升级替换 `node_modules` 时保留配置。未指定时使用包目录内的 `.env`。 |
+| `MCP_INTERNAL_SECRET` | 从 SETUP_KEY 派生 | 网关内部管理接口密钥（dsh 插件通知网关用），与 JWT 域分离派生；显式设置后不要随意更换 |
+| `MCP_GATEWAY_UPSTREAM_TLS_VERIFY` | 开 | 上游 dsh 为 HTTPS/WSS 时校验其证书；`0` 关闭（仅调试，勿用于生产） |
+| `MCP_DSH_SETTINGS_FILE` | 自动探测 | dsh `settings.yaml` 路径，网关与 dsh 不在同一台机器时显式指定；留空按 `DSH_HOME/settings.yaml` 等候选位置探测 |
+| `MCP_DSH_AUTO_UPDATE` | 开 | 部署级自动更新总开关 |
+| `MCP_DSH_UPDATE_MAX_BPS` | 1MiB/s | 自动下载限速，只能调低 |
+| `MCP_DSH_DOCKER_SELF_UPDATE` / `_COMPOSE_DIR` / `_COMPOSE_FILE` / `_IMAGE` / `_SOCKET` | 关 / 空 | Docker 应用内更新的启用开关与 Compose 配置 |
+| `MCP_DSH_PATCH_ALLOW_BIND_ALL` | 关 | 分容器拓扑允许 dsh web 绑定 0.0.0.0（`0.2.1-alpha.1` 的 `dsh-web-app` 仍未原生放行，仍需该子补丁） |
+
+环境变量与 `.env` 的优先级按安装方式不同：Docker 内以容器环境变量（`--env-file docker/.env`）优先于卷内 `.env`；宿主安装相反，部署 `.env` 中的托管键优先于进程中继承的同名环境变量。
 
 ## 常用命令
 
@@ -444,7 +493,7 @@ curl -so /dev/null -w "TLS:%{time_appconnect}s\n" https://地址/gateway/login
 
 ### 手动安装
 
-> v2.7.5 的上游功能已合入本 fork；本部署使用私有 Harness `0.2.0-rc.2`，账号隔离和受管目录规则见 [兼容说明](docs/compatibility-matrix.md)。上游测试服务器的结果不代表本 fork 已部署。
+> 当前发布版本 2.7.7 只支持 DSH `0.2.1` patch 线（`>=0.2.1-alpha.1 <0.2.2-0`）；开发与 bundled Docker 运行时锁定 `0.2.1-alpha.1`。已退役的 `0.1.x` / `0.2.0` 线、`0.2.1-alpha.0` 以及所有 `0.2.2+` 身份都会被版本门禁拒绝。宿主机安装器会检查 Node.js `22.19+` 或 `24+`，注册插件并应用兼容补丁。
 
 1. `git clone https://github.com/sdwhwzp/dsh-passwords && cd dsh-passwords`
 2. `npm install && npm run build`
@@ -479,7 +528,7 @@ curl -so /dev/null -w "TLS:%{time_appconnect}s\n" https://地址/gateway/login
 - **命令行（CLI）**：跟随 `LANG` / `LC_ALL` 环境变量（`en` 开头即英文）。
 
 ## 更新日志
-当前候选版本基于 2.7.4；当前运行目标、检查和部署记录见 [兼容说明](docs/compatibility-matrix.md)。
+本 fork 的 2.7.7 候选使用私有 Harness `0.2.1-alpha.1`，开发依赖链接实际源码；运行时版本门禁为 `>=0.2.1-alpha.1 <0.2.2-0`。组合验收与正式发布状态见部署记录；上游测试结果不代表本 fork 已上线。
 
 ### v2.6.20（2026-09-08）
 
@@ -635,19 +684,23 @@ Linux 部署由管理员将 `scripts/tenant-terminal-launcher.py` 安装为 root
 
 扩展订阅插件 `@goodandready/dsh-subscriptions` 的账号管理界面和 `/dsh-subscriptions/*` 接口仅管理员可用。普通账号使用 `subscriptions-codex` 模型时同样要求 GPT 5.6 或以上。
 
-桌面端通过 `terminal/retain` 恢复终端标签时，网关校验会话归属、文件夹权限和禁用状态；终端已失效只结束该终端的逻辑流，不会断开工作区与会话共用的连接。
+桌面端通过 `terminal/retain` 恢复终端标签时，网关校验会话归属、文件夹权限和禁用状态；终端已失效、关联会话不存在或当前账号无权访问时，只拒绝该终端的逻辑流，不向上游转发，也不会断开工作区与会话共用的连接。伪造字段或缺失必需参数的协议帧仍关闭连接。
 
 Host 登录交换兼容根目录重定向 `/` 与 `./`；不跟随跳转，拒绝外部地址和带查询参数的目标。
 
-已验证的 Harness 0.1.7-alpha.2 与 0.1.7-rc.2 可启动网关并使用原生权限接口，无需改写安装包；未验证的新版本仍由启动检查拒绝。
+已验证的 Harness 0.2.1-alpha.1 可启动网关并使用原生权限接口，无需改写安装包；未验证的新版本仍由启动检查拒绝。
 
 会话归属校验接受旧版投影以及新版 `cached`／`sequenced` 投影和 `agentAvailable` 标记，仍严格校验类型与允许字段。
 ## Harness 0.2 部署
 
-本 fork 在原有运行时范围之外支持 Harness `0.2.0-rc.2`。部署时所有 Harness 依赖必须来自同一版本；账号授权、配置持久化和网页／桌面功能继续使用现有集成。
+本 fork 在原有运行时范围之外支持 Harness `0.2.1-alpha.1`。部署时所有 Harness 依赖必须来自同一版本；账号授权、配置持久化和网页／桌面功能继续使用现有集成。
 
 任务看板支持手动切换待办池、待执行、进行中、已完成和失败状态；切换只修改列，不启动会话，也不产生执行记录。有未结束执行的卡片不能手动移动，每个账号只能移动自己的卡片。
 
 账号独立看板不继承 Host 的 GitHub 凭据或仓库配置，GitHub 刷新及 PR 操作返回未配置；已有个人任务仍可正常管理。
 
 任务看板的 goal 验收继承管理员在看板设置中的开关、模型及思考级别，每次执行开始时固定设置。裁判请求仍须通过执行账号的模型目录、额度和用量计费，完成工具调用前核对会话归属与当前访问权限；失败或异常不会被当作通过。工作区继承只在该账号可访问的工作区和会话内选择；标签改名、删除只修改该账号账本。旧 schema 2–4 账本升级为 5，并保留已有任务和执行记录。
+
+本 fork 通过原生 Host principal 隔离账号，保留受管终端、本机目录及持久服务。仅失效的终端逻辑流返回错误，其他工作区订阅继续运行。
+
+本 fork 的工作区创建能力仅作用于账号授权的个人根；目录选择器不会给普通账号临时授权服务器目录。共享父目录下其他账号的工作区子树仍禁止下载和读取。Host 认证通过原生 authenticatedUrl 兑换，刷新 Cookie 的内部接口同时检查回环来源、内部密钥和目标主机；HTTP 与 HTTPS 上游均保留仅作用于空闲连接的回收期限。

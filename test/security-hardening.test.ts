@@ -12,6 +12,9 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import os from 'node:os';
+
+const externalAddress = Object.values(os.networkInterfaces()).flat()
+  .find((entry) => entry?.family === 'IPv4' && !entry.internal)?.address;
 import path from 'node:path';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -184,12 +187,15 @@ function gatewayReq(
   headers: Record<string, string> = {},
   cookie = adminCookie,
   body?: string,
+  localAddress?: string,
 ): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const req = http.request(
       {
         host: '127.0.0.1',
         port: gatewayPort,
+        // 指定源地址可模拟非回环 peer（127.0.0.2 不在 originHostMatches 的回环白名单内）
+        localAddress,
         method,
         path: url,
         headers: {
@@ -245,7 +251,7 @@ before(async () => {
       upstream: `http://127.0.0.1:${upstreamPort}`,
       tls: null,
       redirectPort: null,
-      publicHost: '',
+      publicHost: 'public.example.test',
       domain: 'localhost',
       autoTls: false,
       acmeEmail: '',
@@ -309,6 +315,34 @@ test('H-2：跨源 Origin 写自身插件路由被 403 且不转发', async () =
   assert.equal(upstreamUrls.length, 0, '跨源请求不得到达上游');
 });
 
+// 字面量 `Origin: null`（opaque 序列化）与「无 Origin」是不同语义：前者必须拒绝。
+// 修复前 new URL('null') 抛异常落进 origin-unparsable；分类为 origin-null 后仍返回 false。
+test('H-2：字面量 Origin: null 写自身插件路由仍 403 且不转发', async () => {
+  upstreamUrls.length = 0;
+  const r = await gatewayReq(
+    'POST',
+    '/api/dsh-passwords/password',
+    { origin: 'null', 'sec-fetch-site': 'same-origin' },
+    adminCookie,
+    '{}',
+  );
+  assert.equal(r.status, 403, 'Origin: null 不得被当作无 Origin 放行');
+  assert.equal(upstreamUrls.length, 0, 'Origin: null 请求不得到达上游');
+});
+
+test('H-2：配置的公开域名 Origin 经回环反代放行', async () => {
+  upstreamUrls.length = 0;
+  const r = await gatewayReq(
+    'POST',
+    '/api/dsh-passwords/password',
+    { host: '127.0.0.1', origin: 'https://public.example.test' },
+    adminCookie,
+    '{}',
+  );
+  assert.equal(r.status, 200);
+  assert.equal(upstreamUrls.length, 1, '配置的公开域名经受信回环反代应正常转发');
+});
+
 test('H-2：同源 Origin 写自身插件路由放行', async () => {
   upstreamUrls.length = 0;
   const r = await gatewayReq(
@@ -320,6 +354,117 @@ test('H-2：同源 Origin 写自身插件路由放行', async () => {
   );
   assert.equal(r.status, 200);
   assert.equal(upstreamUrls.length, 1, '同源请求应正常转发');
+});
+
+// 回归：非回环反向代理把 Host 改写为内网地址，浏览器 Origin 仍是配置的公开主机。
+// configuredHosts 是服务端显式配置的信任来源，匹配不得受 peer 是否回环限制；
+// 但非回环 peer 携带的 X-Forwarded-Host 仍不得被采纳。
+test('H-2：非回环反代改写 Host 为内网时，配置的公开主机 Origin 仍放行', { skip: externalAddress === undefined ? 'No non-loopback IPv4 interface available' : false }, async () => {
+  upstreamUrls.length = 0;
+  const r = await gatewayReq(
+    'POST',
+    '/api/dsh-passwords/password',
+    { host: `127.0.0.1:${gatewayPort}`, origin: 'https://public.example.test' },
+    adminCookie,
+    '{}',
+    externalAddress,
+  );
+  assert.equal(r.status, 200, '非回环 peer 下配置的公开主机 Origin 不得被误判为跨源');
+  assert.equal(upstreamUrls.length, 1, '配置的公开主机 Origin 应正常转发');
+});
+
+test('H-2：非回环 peer 的恶意 Origin 仍 403，且伪造 X-Forwarded-Host 不被采纳', { skip: externalAddress === undefined ? 'No non-loopback IPv4 interface available' : false }, async () => {
+  upstreamUrls.length = 0;
+  const r = await gatewayReq(
+    'POST',
+    '/api/dsh-passwords/password',
+    {
+      host: `127.0.0.1:${gatewayPort}`,
+      origin: 'https://evil.example',
+      'x-forwarded-host': 'evil.example',
+    },
+    adminCookie,
+    '{}',
+    externalAddress,
+  );
+  assert.equal(r.status, 403, '非回环 peer 不得采纳 X-Forwarded-Host 绕过同源校验');
+  assert.equal(upstreamUrls.length, 0, '恶意 Origin 不得到达上游');
+});
+
+// ── 兄弟子域 CSRF：apiAuth 状态变更方法必须同源 ─────────────────
+// Sec-Fetch-Site 只区分 cross-site，同站兄弟子域恒为 same-site；全局
+// express.urlencoded 允许无预检的简单表单 POST，因此状态变更路由必须按
+// Origin vs Host 同源判定拒绝，且必须在写库前拒绝。
+
+test('子域 CSRF：同站兄弟子域 Origin 表单 POST /gateway/api/messages → 403 且不落库', async () => {
+  const before = db.listMessagesForUser(adminId, 300).length;
+  const r = await gatewayReq(
+    'POST',
+    '/gateway/api/messages',
+    {
+      host: 'app.example.com',
+      origin: 'http://evil.example.com',
+      'sec-fetch-site': 'same-site',
+      'content-type': 'application/x-www-form-urlencoded',
+    },
+    subuserCookie,
+    'content=csrf-pwned',
+  );
+  assert.equal(r.status, 403);
+  assert.match(r.body, /FORBIDDEN_CSRF/);
+  assert.equal(db.listMessagesForUser(adminId, 300).length, before, '被拒绝的请求不得写入消息');
+});
+
+test('子域 CSRF：无 Origin 的非浏览器/旧客户端表单 POST 仍被接受', async () => {
+  const before = db.listMessagesForUser(adminId, 300).length;
+  const r = await gatewayReq(
+    'POST',
+    '/gateway/api/messages',
+    { 'content-type': 'application/x-www-form-urlencoded' },
+    subuserCookie,
+    'content=no-origin-accepted',
+  );
+  assert.equal(r.status, 200);
+  const after = db.listMessagesForUser(adminId, 300);
+  assert.equal(after.length, before + 1, '无 Origin 客户端应保持原有可用性');
+  assert.ok(after.some((m) => m.content === 'no-origin-accepted'));
+  // 本用例必需的一次真实写入：立即清空，避免污染后续依赖消息基线的用例
+  db.clearMessages();
+});
+
+test('子域 CSRF：同主 Origin 表单 POST 仍被接受', async () => {
+  const before = db.listMessagesForUser(adminId, 300).length;
+  const r = await gatewayReq(
+    'POST',
+    '/gateway/api/messages',
+    {
+      origin: `http://127.0.0.1:${gatewayPort}`,
+      'sec-fetch-site': 'same-origin',
+      'content-type': 'application/x-www-form-urlencoded',
+    },
+    subuserCookie,
+    'content=same-host-accepted',
+  );
+  assert.equal(r.status, 200);
+  assert.equal(db.listMessagesForUser(adminId, 300).length, before + 1);
+  db.clearMessages();
+});
+
+test('子域 CSRF：同站兄弟子域 Origin 表单 POST 管理写路由 /gateway/api/permissions → 403', async () => {
+  const r = await gatewayReq(
+    'POST',
+    '/gateway/api/permissions',
+    {
+      host: 'app.example.com',
+      origin: 'http://evil.example.com',
+      'sec-fetch-site': 'same-site',
+      'content-type': 'application/x-www-form-urlencoded',
+    },
+    adminCookie,
+    `userId=${subuserId}&allowedFolders=%2Ftmp`,
+  );
+  assert.equal(r.status, 403);
+  assert.match(r.body, /FORBIDDEN_CSRF/);
 });
 
 // ── H-1：安全过滤分支缓冲超限 fail-closed ─────────────────────

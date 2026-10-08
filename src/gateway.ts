@@ -4,7 +4,7 @@
 //   → 已认证请求反向代理到上游 dsh（HTTP + WebSocket，Host 改写为上游地址）
 import http, { type IncomingMessage, type IncomingHttpHeaders } from 'node:http';
 import https from 'node:https';
-import { createSecureContext } from 'node:tls';
+import { connect as connectTls, createSecureContext } from 'node:tls';
 import {
   readSync, readFileSync, createReadStream, createWriteStream, realpathSync, openSync, fstatSync, closeSync,
   mkdirSync, renameSync, statSync, unlinkSync, readdirSync, rmSync, copyFileSync, writeFileSync, mkdtempSync, existsSync, constants as fsConstants,
@@ -18,12 +18,14 @@ import path from 'node:path';
 import { createHmac, createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { type Duplex, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import { StringDecoder } from 'node:string_decoder';
+import { SseFrameBuffer } from './sse-frames.js';
 import zlib from 'node:zlib';
 import { URL, fileURLToPath } from 'node:url';
 import dns from 'node:dns';
 import express, { type Request, type Response } from 'express';
 import { registerMessageRoutes } from './messages.js';
-import { UpstreamHttpAgent } from './upstream-agent.js';
+import { UpstreamHttpAgent, UpstreamHttpsAgent } from './upstream-agent.js';
 import { createSandboxApplier } from './proxy.js';
 import { registerMediaRoutes } from './media.js';
 import { MobileAuth, isMobileRequest, mobileRequestToken } from './mobile-auth.js';
@@ -44,6 +46,11 @@ import {
   parseManagedGitUrl,
   redactManagedGitOutput,
 } from './managed-git.js';
+
+export function internalProbeTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(String(env.MCP_GATEWAY_INTERNAL_PROBE_TIMEOUT_MS ?? '').trim());
+  return Number.isFinite(raw) && raw >= 1_000 && raw <= 600_000 ? raw : 10_000;
+}
 import type { PlatformConfig } from './config.js';
 import { hardenSecretsAfterSetup, readEndpointRuntimeConfig } from './config.js';
 import { AuthService, AuthError, type RequestMeta } from './auth.js';
@@ -791,6 +798,60 @@ function safeNext(next: string | undefined): string {
   return decoded;
 }
 
+/**
+ * 同源判定（浏览器 Origin vs 请求 Host），网关写路由与登出共用同一口径。
+ * 跨源攻击的本质是跨主机（攻击者无法在受害者主机名上托管内容），因此只比
+ * 主机:端口、不比协议——否则 nginx/caddy 在 80/443 终结 TLS 的反代部署
+ * （网关收到明文 HTTP、req.protocol=http，浏览器 Origin=https）会全部误判。
+ * Host 只信直接对端：仅当对端是本机回环（受信本地反代）才采纳 X-Forwarded-Host，
+ * 公网直连请求不能带伪造头绕过。配置的公开主机（gateway.domain/publicHost）是
+ * 服务端显式声明的信任来源：反代改写 Host 后 peer 可能非回环，但 Origin 命中配置
+ * 主机时仍须放行；该兜底只比对服务端配置、不读请求头，故不受 peer 回环与否限制。
+ * 无 Origin（非浏览器/旧客户端）返回 true，由 HttpOnly+SameSite Cookie 兜底。
+ */
+type OriginRequest = {
+  method?: string;
+  url?: string;
+  headers: {
+    origin?: string | string[];
+    host?: string | string[];
+    'x-forwarded-host'?: string | string[];
+    'sec-fetch-site'?: string | string[];
+  };
+  socket: { remoteAddress?: string | null };
+};
+
+function firstHeader(value: string | string[] | undefined): string {
+  return Array.isArray(value) ? value[0] ?? '' : value ?? '';
+}
+
+/**
+ * 同源校验拒绝时的诊断日志。只记录路由元数据（方法/路径/Host/Origin/对端），
+ * 绝不读取或记录 Cookie、Authorization、查询串——避免把凭据写进 journal。
+ */
+function logOriginRejection(req: OriginRequest, reason: string): void {
+  const clean = (value: string): string => value.replace(/[\r\n\t]/g, ' ').slice(0, 120);
+  const path = (req.url ?? '').split('?')[0] ?? '';
+  console.error(
+    '[dsh-passwords] origin-rejected reason=' +
+      clean(reason) +
+      ' method=' +
+      clean(req.method ?? '') +
+      ' path=' +
+      clean(path) +
+      ' peer=' +
+      clean(req.socket.remoteAddress ?? '') +
+      ' host=' +
+      clean(firstHeader(req.headers.host)) +
+      ' origin=' +
+      clean(firstHeader(req.headers.origin)) +
+      ' xfh=' +
+      clean(firstHeader(req.headers['x-forwarded-host'])) +
+      ' sfs=' +
+      clean(firstHeader(req.headers['sec-fetch-site'])),
+  );
+}
+
 function decodedQueryKey(rawKey: string): string | null {
   try {
     return decodeURIComponent(rawKey.replace(/\+/g, ' '));
@@ -820,31 +881,59 @@ function stripGatewayAuthQuery(rawUrl: string, pathname: string): string {
   return kept.length === 0 ? '' : `?${kept.join('&')}`;
 }
 
-/**
- * 同源判定（浏览器 Origin vs 请求 Host），网关写路由与登出共用同一口径。
- * 跨源攻击的本质是跨主机（攻击者无法在受害者主机名上托管内容），因此只比
- * 主机:端口、不比协议——否则 nginx/caddy 在 80/443 终结 TLS 的反代部署
- * （网关收到明文 HTTP、req.protocol=http，浏览器 Origin=https）会全部误判。
- * Host 只信直接对端：仅当对端是本机回环（受信本地反代）才采纳 X-Forwarded-Host，
- * 公网直连请求不能带伪造头绕过。无 Origin（非浏览器/旧客户端）返回 true，
- * 由 HttpOnly+SameSite Cookie 兜底。
- */
-function originHostMatches(req: Request): boolean {
-  const originRaw = req.headers.origin;
-  if (typeof originRaw !== 'string' || originRaw === '') return true;
+function upstreamCookieHeader(browserCookie: string | undefined, authoritativeCookie: string): string | undefined {
+  const authoritativeName = authoritativeCookie.split('=', 1)[0] ?? '';
+  const kept: string[] = [];
+  for (const part of (browserCookie ?? '').split(';')) {
+    const trimmed = part.replace(/^[ \t]+/, '');
+    const equalsIndex = trimmed.indexOf('=');
+    if (equalsIndex <= 0) continue;
+    const name = trimmed.slice(0, equalsIndex);
+    // The gateway JWT and DSH browser-auth cookies never belong to arbitrary
+    // upstream plugins. Other plugin cookies retain their original pair bytes.
+    if (name === COOKIE_NAME || name.startsWith('dsh-auth-') || name === authoritativeName) continue;
+    kept.push(trimmed);
+  }
+  if (authoritativeCookie !== '') kept.push(authoritativeCookie);
+  return kept.length === 0 ? undefined : kept.join('; ');
+}
+
+function originHostMatches(req: OriginRequest, configuredHosts: readonly string[] = []): boolean {
+  const originRaw = firstHeader(req.headers.origin);
+  if (originRaw === '') return true;
+  // 字面量 `Origin: null` 无法被 new URL 解析，会落进 catch 误记为
+  // origin-unparsable；先显式分类为 origin-null，返回值仍为拒绝。
+  if (originRaw === 'null') {
+    logOriginRejection(req, 'origin-null');
+    return false;
+  }
   try {
     const origin = new URL(originRaw);
-    if (origin.origin === 'null') return false;
+    if (origin.origin === 'null') {
+      logOriginRejection(req, 'origin-null');
+      return false;
+    }
     const peer = req.socket.remoteAddress ?? '';
     const trustedProxy = peer === '127.0.0.1' || peer === '::1' || peer === '::ffff:127.0.0.1';
-    const forwardedHost =
-      typeof req.headers['x-forwarded-host'] === 'string'
-        ? req.headers['x-forwarded-host'].split(',')[0].trim()
-        : '';
-    const effectiveHost =
-      trustedProxy && forwardedHost !== '' ? forwardedHost : String(req.headers.host ?? '');
-    return origin.host === effectiveHost;
+    const forwardedHost = firstHeader(req.headers['x-forwarded-host']).split(',')[0].trim();
+    const effectiveHost = trustedProxy && forwardedHost !== '' ? forwardedHost : firstHeader(req.headers.host);
+    const normalizeHost = (value: string): string => {
+      const host = value.trim().toLowerCase();
+      if (origin.protocol === 'https:' && host.endsWith(':443')) return host.slice(0, -4);
+      if (origin.protocol === 'http:' && host.endsWith(':80')) return host.slice(0, -3);
+      return host;
+    };
+    const originHost = normalizeHost(origin.host);
+    if (originHost === normalizeHost(effectiveHost)) return true;
+    // 配置的公开主机是服务端显式声明的信任来源：反向代理可能把 Host 改写为内网
+    // 地址（peer 非回环），此时 Origin 仍在配置白名单内，必须放行。该兜底只比对
+    // 服务端配置值、不含任何请求头，故无需受 peer 是否回环限制；X-Forwarded-Host
+    // 的采纳仍限定回环 peer（见上）。
+    if (configuredHosts.some((host) => normalizeHost(host) === originHost)) return true;
+    logOriginRejection(req, 'host-mismatch');
+    return false;
   } catch {
+    logOriginRejection(req, 'origin-unparsable');
     return false;
   }
 }
@@ -853,6 +942,12 @@ function originHostMatches(req: Request): boolean {
 // 登录/配置表单：GET 渲染时下发 Cookie + 表单隐藏域同一随机值，
 // POST 时恒定时间比对。无服务端会话也能防跨站表单伪造。
 const CSRF_COOKIE = 'dsh_csrf';
+
+// P0 加固：签名段的服务端规范形式恒为 32 个小写十六进制字符
+// （newCsrfToken 用 createHmac(...).digest('hex').slice(0, 32)）。
+// 用严格白名单而不是字符串长度做前置判定，杜绝「32 个 JS 字符但 33 个字节」
+// 这类多字节变体绕过长度检查、进而在 timingSafeEqual 抛 RangeError。
+const CSRF_SIG_RE = /^[0-9a-f]{32}$/;
 
 function newCsrfToken(secret: string): string {
   // 签名双重提交：token 随机 + HMAC 签名。攻击者即使能自选 cookie 值
@@ -872,7 +967,12 @@ function csrfMatches(secret: string, cookieValue: string | null, fieldValue: str
   // 双重提交：cookie 与表单的 token 必须一致，且签名必须等于服务端 HMAC
   if (cookieToken.length === 0 || cookieToken !== fieldToken) return false;
   const expected = createHmac('sha256', secret).update(cookieToken).digest('hex').slice(0, 32);
-  if (expected.length !== cookieSig.length || expected.length !== fieldSig.length) return false;
+  // JS `.length` 是 UTF-16 码元数，Buffer/`timingSafeEqual` 用 UTF-8 字节数：
+  // 31 个 ASCII + U+00E9 是「32 码元 / 33 字节」，能骗过长度校验并让
+  // timingSafeEqual 抛 ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH。三个调用点都在
+  // async 路由内，Express 4 不接住 async 拒绝，异常会升级为未处理拒绝 → 进程退出。
+  // 因此改用与服务端签名完全一致的白名单：非 32 位小写十六进制一律拒绝。
+  if (!CSRF_SIG_RE.test(cookieSig) || !CSRF_SIG_RE.test(fieldSig)) return false;
   return (
     timingSafeEqual(Buffer.from(cookieSig), Buffer.from(fieldSig)) &&
     timingSafeEqual(Buffer.from(cookieSig), Buffer.from(expected))
@@ -887,6 +987,23 @@ function setCsrfCookie(res: Response, token: string, secure: boolean): void {
     }`,
   );
 }
+
+/**
+ * 未认证 / 幽灵会话时，浏览器与爬虫自动探测的精确路径。命中直接 204：不渲染
+ * 登录页、不重定向、不下发 cookie、不转发上游，避免匿名探测触发整页渲染与
+ * CSRF 轮换。只做精确 Set 匹配（绑定已归一化的 gatePath），刻意不改成前缀、
+ * 扩展名或 Sec-Fetch-Dest/Accept 判断，以免扩大匿名可达面。
+ */
+const ANONYMOUS_STATIC_PROBES: ReadonlySet<string> = new Set([
+  '/favicon.ico',
+  '/apple-touch-icon.png',
+  '/apple-touch-icon-precomposed.png',
+  '/manifest.json',
+  '/manifest.webmanifest',
+  '/browserconfig.xml',
+  '/robots.txt',
+  '/sitemap.xml',
+]);
 
 // ── 主题同步：合理化跟随 dsh 主题 ─────────────────────────────
 // dsh 的主题偏好持久化在 <dsh home>/settings.yaml 的 ui-theme.preference
@@ -1354,6 +1471,8 @@ export interface GatewayServerOptions {
   proxyRequestMaxBytes?: number;
   /** Trusted Host browser Cookie pair, or a resolver updated by the parent-managed refresh loop. */
   upstreamBrowserCookie?: string | (() => string | null);
+  /** Update the shared Cookie when upstreamBrowserCookie is a resolver. */
+  setUpstreamBrowserCookie?: (cookie: string) => void;
   /** Use alpha.1 slash RPCs and Remote streams exposed by BrowserAuth-capable Hosts. */
   upstreamRemoteTransport?: boolean;
   /** Deployment env file polled for endpoint-registry hot reload; defaults to DSH_PASSWORDS_ENV_FILE. */
@@ -1735,6 +1854,11 @@ export function createGatewayServer(
   }
 
 
+  const configuredOriginHosts = [config.gateway.domain, config.gateway.publicHost].filter(
+    (host): host is string => typeof host === 'string' && host.trim() !== '',
+  );
+  // 宿主进程低频推送的已注册 Remote/HTTP 扩展面。已加载扩展不绑定 allow_ssh；
+  // 官方 terminal、SSH 端点和宿主级敏感能力仍由各自边界控制。
   let dynamicPluginManifest: DynamicPluginManifest | undefined;
   const registryAuthorizedSockets = new Set<Duplex>();
   // 不泄露框架信息
@@ -1758,6 +1882,21 @@ export function createGatewayServer(
     const original = req.originalUrl;
     if (original === '/remote' || original.startsWith('/remote/') || original.startsWith('/remote?')) {
       req.originalUrl = strip(original);
+    }
+    next();
+  });
+  // Browser writes must pass Origin validation before any route can mutate state.
+  app.use((req, res, next) => {
+    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) &&
+        typeof req.headers.origin === 'string' && !originHostMatches(req, configuredOriginHosts)) {
+      if (req.path.startsWith('/gateway/mobile/')) {
+        res.status(403).json({ code: 'CSRF_REJECTED' });
+      } else if (req.path.startsWith('/gateway/api/')) {
+        res.status(403).json({ ok: false, code: 'FORBIDDEN_CSRF', error: 'forbidden' });
+      } else {
+        res.status(403).type('text').send('403 Forbidden');
+      }
+      return;
     }
     next();
   });
@@ -1843,11 +1982,14 @@ export function createGatewayServer(
     res.json({ ok: true, generation, namespaces: dynamicPluginManifest.namespaces.size, streamEndpoints: dynamicPluginManifest.streamEndpoints.size });
   });
   // 登录/配置页安全响应头（仅 /gateway/* 自有页面；代理的 dsh 响应不强制
-  // CSP，避免破坏 dsh 前端）：禁嗅探、禁嵌入、无 Referrer、禁缓存、禁索引
+  // CSP，避免破坏 dsh 前端）：禁嗅探、禁嵌入、Referrer 仅同源、禁缓存、禁索引
   app.use('/gateway', (_req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'DENY');
-    res.setHeader('Referrer-Policy', 'no-referrer');
+    // 必须用 same-origin：no-referrer 会让真实同源 HTML 表单 POST 变为
+    // Origin: null + Sec-Fetch-Site: same-origin，被同源校验误判 403，
+    // 登录卡在 /gateway/login。same-origin 仍不向跨源泄露 Referer。
+    res.setHeader('Referrer-Policy', 'same-origin');
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Robots-Tag', 'noindex, nofollow');
     // 网关标识：客户端插件探测此头判断是否经 dsh-passwords 远程访问
@@ -1864,15 +2006,21 @@ export function createGatewayServer(
 
   const upstream = new URL(config.gateway.upstream);
   const upstreamHost = upstream.hostname;
-  const upstreamPort = Number(upstream.port || 80);
+  const upstreamPort = Number(upstream.port || (upstream.protocol === 'https:' ? 443 : 80));
+  const upstreamIsHttps = upstream.protocol === 'https:';
+  const upstreamScheme = upstreamIsHttps ? 'https' : 'http';
   const upstreamAuthority = upstream.host;
 
-  const upstreamAgent = new UpstreamHttpAgent(config.gateway.upstreamIdleTimeoutMs);
+  const upstreamAgent = upstreamIsHttps
+    ? new UpstreamHttpsAgent(config.gateway.upstreamIdleTimeoutMs, process.env.MCP_GATEWAY_UPSTREAM_TLS_VERIFY !== '0')
+    : new UpstreamHttpAgent(config.gateway.upstreamIdleTimeoutMs);
   const configuredUpstreamBrowserCookie = options.upstreamBrowserCookie;
   const upstreamRemoteTransport = options.upstreamRemoteTransport === true;
+  let retainedUpstreamCookie = typeof configuredUpstreamBrowserCookie === 'string'
+    ? configuredUpstreamBrowserCookie : process.env.DSH_UPSTREAM_AUTH_COOKIE ?? null;
   const rawUpstreamBrowserCookie: () => string | null = typeof configuredUpstreamBrowserCookie === 'function'
     ? configuredUpstreamBrowserCookie
-    : () => configuredUpstreamBrowserCookie ?? null;
+    : () => retainedUpstreamCookie;
   const upstreamBrowserCookieHeader = (): string | null => {
     const value = rawUpstreamBrowserCookie();
     if (value === null || value === '') return null;
@@ -1918,7 +2066,7 @@ export function createGatewayServer(
   /** Verify that the retained Host browser session still serves the application index. */
   function probeUpstreamBrowserSession(): Promise<void> {
     return new Promise((resolve, reject) => {
-      const request = http.request({
+      const request = upstreamTransport.request({
         hostname: upstreamHost,
         port: upstreamPort,
         path: '/',
@@ -2301,7 +2449,7 @@ export function createGatewayServer(
       payload: { sessionId, beforeSeq: 512, maxMessages: 512 },
     }), 'utf8');
     const pending = new Promise<number | null>((resolve, reject) => {
-      const request = http.request(
+      const request = upstreamTransport.request(
         {
           hostname: upstreamHost,
           port: upstreamPort,
@@ -2454,7 +2602,7 @@ export function createGatewayServer(
       payload: { args: { request: requestValue } },
     }), 'utf8');
     return new Promise<RemoteHistoryRead>((resolve, reject) => {
-      const request = http.request(
+      const request = upstreamTransport.request(
         {
           hostname: upstreamHost,
           port: upstreamPort,
@@ -3045,6 +3193,7 @@ export function createGatewayServer(
 
   /** 文件夹白名单与两类用户专属工作区所有权的统一判定。 */
   function pathAllowedFor(userId: number, candidate: string, allowedFolders: string[]): boolean {
+    if (workspaceSubtreeOverlap(userId, candidate)) return false;
     const localWorkspaceOwner = db.localWorkspaceOwnerForPath(candidate);
     if (localWorkspaceOwner !== null) return localWorkspaceOwner === userId;
     const managedWorkspaceAccess = managedWorkspaceAccessFor(userId, candidate);
@@ -3261,8 +3410,10 @@ export function createGatewayServer(
       auth.isInitialized().catch(() => false),
       db.health().catch(() => false),
     ]);
-    // 每次渲染下发新 CSRF token（Cookie + 表单隐藏域）
-    const csrf = newCsrfToken(csrfSecret);
+    // Reuse a valid signed cookie so another login tab cannot invalidate this form.
+    const existingCsrf = readCookie(req.headers.cookie, CSRF_COOKIE);
+    const csrf = existingCsrf !== null && csrfMatches(csrfSecret, existingCsrf, existingCsrf)
+      ? existingCsrf : newCsrfToken(csrfSecret);
     setCsrfCookie(res, csrf, config.gateway.tls !== null);
     // 显式 ?lang= 选择持久化到 cookie（语言切换链接点出来的）。
     // 注意 Set-Cookie 头已由 CSRF 占用，这里用数组追加而不是 setHeader 覆盖。
@@ -3434,7 +3585,7 @@ export function createGatewayServer(
   app.post('/gateway/logout', (req, res) => {
     // 同站子域页面可借表单强制登出（SameSite=Lax 只挡跨站、不挡同站子域）：
     // 与网关写路由同口径做 Origin 主机校验，提交方与 Host 不一致时拒绝。
-    if (!originHostMatches(req)) {
+    if (!originHostMatches(req, configuredOriginHosts)) {
       res.status(403).type('text/plain').send('403 Forbidden');
       return;
     }
@@ -3464,8 +3615,53 @@ export function createGatewayServer(
     const secret = typeof req.headers['x-internal-secret'] === 'string' ? req.headers['x-internal-secret'] : '';
     const actual = Buffer.from(secret);
     const expected = Buffer.from(config.internalSecret);
-    return actual.length === expected.length && timingSafeEqual(actual, expected);
+    return expected.length > 0 && actual.length === expected.length && timingSafeEqual(actual, expected);
   }
+
+  app.get('/gateway/internal/owner', (req, res) => {
+    if (!internalRequestAuthorized(req)) {
+      res.status(403).json({ ok: false, error: 'forbidden' });
+      return;
+    }
+    const parentPid = Number(process.env.DSH_GATEWAY_PARENT_PID ?? '');
+    res.json({ ok: true, parentPid: Number.isInteger(parentPid) && parentPid > 0 ? parentPid : null });
+  });
+  app.get('/gateway/internal/upstream-auth/health', async (req, res) => {
+    if (!internalRequestAuthorized(req)) {
+      res.status(403).json({ ok: false, error: 'forbidden' });
+      return;
+    }
+    try {
+      if (upstreamBrowserCookieHeader() === null) throw new Error('Host Cookie unavailable');
+      await probeUpstreamBrowserSession();
+      res.json({ ok: true, authenticated: true });
+    } catch {
+      res.status(503).json({ ok: false, authenticated: false });
+    }
+  });
+  app.post('/gateway/internal/upstream-auth', express.json({ limit: '1kb' }), (req, res) => {
+    if (!internalRequestAuthorized(req)) {
+      res.status(403).json({ ok: false, error: 'forbidden' });
+      return;
+    }
+    const cookie: unknown = req.body?.cookie;
+    const expectedName = `dsh-auth-${createHash('sha256').update(upstreamAuthority).digest('base64url')}`;
+    if (typeof cookie !== 'string' || !cookie.startsWith(`${expectedName}=`) ||
+        !/^[A-Za-z0-9_-]+=[A-Za-z0-9._~-]+$/.test(cookie)) {
+      res.status(400).json({ ok: false, error: 'invalid cookie' });
+      return;
+    }
+    if (typeof configuredUpstreamBrowserCookie === 'function') {
+      if (options.setUpstreamBrowserCookie === undefined) {
+        res.status(409).json({ ok: false, error: 'Cookie resolver is read-only' });
+        return;
+      }
+      options.setUpstreamBrowserCookie(cookie);
+    } else {
+      retainedUpstreamCookie = cookie;
+    }
+    res.json({ ok: true });
+  });
 
   app.get('/gateway/internal/readyz', async (req, res) => {
     res.setHeader('cache-control', 'no-store');
@@ -4606,6 +4802,28 @@ export function createGatewayServer(
       samePathForMatch(owner.path, workspacePath),
     );
   };
+  // 「该子用户私有归属的工作区」判定：只有精确相等的注册目录算归属。
+  // 不能用子树包含（pathWithin）代替等值：workspaceOwnedByUser 是会话可见性对
+  // 显式 grant 的替代依据（session.list / workspace.list 槽位 / Remote baseline /
+  // session/follow 与 workspaceFiles 作用域），而 workspaceOwnedByAnotherSubuser
+  // 仍是等值语义（见上）。若此处按子树放宽，则「分配目录恰好嵌在该子用户自建目录
+  // 之内」时，其中由主用户或另一子用户创建、从未逐条授权的既有会话会被自动判定为
+  // 可见（工作区权限 ≠ 会话授权）。子用户自己创建的每一层工作区在登记时都会写入
+  // 自己的 user_workspaces 行，因此等值语义不会阻碍合法流程。
+  const workspaceOwnedByUser = (userId: number, workspacePath: string): boolean => {
+    const normalizedPath = normalizePath(workspacePath);
+    return db.listUserWorkspacePaths(userId).some((ownedPath) => normalizePath(ownedPath) === normalizedPath);
+  };
+  /** candidate 是否落在另一子用户（存在且非主用户）创建的工作区子树内（含相等）。
+ *  单向判定：共享的分配根下创建兄弟目录不受影响，只有伸进他人子树才拦；
+ *  物主已被删除的孤儿行不构成冲突（无存活租户可保护）。 */
+  const workspaceSubtreeOverlap = (userId: number, workspacePath: string): boolean => {
+    return workspaceOwnersSnapshot().some((owner) =>
+      owner.userId !== userId &&
+      db.getUserById(owner.userId)?.role === 'user' &&
+      pathWithinDeletedTree(workspacePath, owner.path),
+    );
+  };
 
   /** 一条会话授权快照条目当前是否仍然完全合法（grant + 未逐会话关闭 + 目录白名单 +
    *  非其它子用户创建的工作区）。baseline 合并与快照回写共用这一套口径。 */
@@ -4660,6 +4878,215 @@ export function createGatewayServer(
     for (const [workspaceId, workspacePath] of visible) merged.set(workspaceId, workspacePath);
     return merged;
   };
+
+  /** 子用户 host SSE 事件按 workspace.list 建立的快照过滤；快照缺失时敏感事件一律丢弃。 */
+  const hostEventFilter = (userId: number, perms: UserPermissionsRow): Transform => {
+    // 单帧解析缓冲有界（见 SseFrameBuffer），上限与 WS 承载的单条消息上限同口径：
+    // 上游不发空行时不能无界增长，同时不影响正常大小的事件帧。
+    const frames = new SseFrameBuffer(REMOTE_MUX_MAX_PAYLOAD_BYTES);
+    // 按流维护解码状态：多字节 UTF-8 字符跨 Buffer 边界时先留在解码器里，避免被
+    // 逐 chunk 解码成 U+FFFD 替换字符而破坏过滤输出。
+    const decoder = new StringDecoder('utf8');
+    const workspacePathAllowed = (candidate: string): boolean => {
+      const currentPerms = db.getPermissions(userId) ?? perms;
+      if (!folderAllowed(candidate, currentPerms.allowed_folders)) return false;
+
+      return !workspaceOwnedByAnotherSubuser(userId, candidate);
+    };
+
+    // 连接级工作区快照副本：同一用户并行多个 SSE 连接时，单个连接收到
+    // workspace-removed 不得影响其他连接的可见性判断。
+    const workspaceIdsForEvent = (): Set<string> | undefined => {
+      const snapshot = userWorkspaceIds.get(userId);
+      return snapshot === undefined ? undefined : new Set(snapshot);
+    };
+
+    const sensitiveTypes = new Set([
+      'host/session-added',
+      'host/session-removed',
+      'host/session-status',
+      'host/agent-error',
+      'host/workspace-changed',
+      'host/workspace-removed',
+      'host/workspace-order-changed',
+      'host/archived-sessions-changed',
+      'host/remote-event',
+    ]);
+    const filterFrame = (frame: string): string => {
+      // 按 SSE 行语义归一化：CRLF、LF、裸 CR 都是行终止符，遗漏裸 CR 会把
+      // 「注释\rdata: 敏感事件」当成一行而跳过 data: 解析，导致敏感事件被整帧放行。
+      const normalized = frame.replace(/\r\n|\r|\n/g, '\n');
+      const dataLines = normalized.split('\n').filter((line) => line.startsWith('data:'));
+      if (dataLines.length === 0) return frame;
+      let envelope: Record<string, unknown>;
+      try {
+        envelope = JSON.parse(dataLines.map((line) => line.slice(5).trimStart()).join('\n')) as Record<string, unknown>;
+      } catch {
+        return '';
+      }
+      const payload = envelope.payload;
+      if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) return '';
+      const event = payload as Record<string, unknown>;
+      const type = event.type;
+      if (typeof type !== 'string' || !sensitiveTypes.has(type)) return '';
+      const currentPerms = db.getPermissions(userId) ?? perms;
+      const access = userSessionAccess.get(userId);
+      const workspaceIds = workspaceIdsForEvent();
+      if (access === undefined || workspaceIds === undefined) return '';
+      const allowedSession = (id: unknown): id is string =>
+        typeof id === 'string' && access.has(id) && !currentPerms.disabled_sessions.includes(id);
+      const sessionIdOf = (event: Record<string, unknown>): string | null =>
+        typeof event.sessionId === 'string' ? event.sessionId : null;
+      if (type === 'host/session-added') {
+        if (!allowedSession(event.sessionId)) return '';
+        if (typeof event.sessionId === 'string' && typeof event.agentPreset === 'string') {
+          sessionAgentPresetMapFor(userId).set(event.sessionId, event.agentPreset);
+        }
+        delete event.cwd;
+        delete event.parentSessionId;
+      } else if (
+        type === 'host/session-removed' ||
+        type === 'host/session-status' ||
+        type === 'host/agent-error'
+      ) {
+        const sessionId = sessionIdOf(event);
+        if (sessionId === null || !allowedSession(sessionId)) return '';
+      } else if (type === 'host/workspace-changed') {
+        const workspace = event.workspace;
+        if (workspace === null || typeof workspace !== 'object' || Array.isArray(workspace)) return '';
+        const row = workspace as Record<string, unknown>;
+        const workspaceId = row.workspaceId;
+        const workspacePath = row.path;
+        if (
+          typeof workspaceId !== 'string' ||
+          !workspaceIds.has(workspaceId) ||
+          typeof workspacePath !== 'string' ||
+          !workspacePathAllowed(workspacePath)
+        ) {
+          return '';
+        }
+        if (Array.isArray(row.sessionIds)) row.sessionIds = row.sessionIds.filter(allowedSession);
+      } else if (type === 'host/workspace-removed') {
+        const id = typeof event.workspaceId === 'string' ? event.workspaceId : event.id;
+        if (typeof id !== 'string' || !workspaceIds.has(id)) return '';
+      } else if (type === 'host/workspace-order-changed') {
+        const ids = event.workspaceIds;
+        if (!Array.isArray(ids)) return '';
+        event.workspaceIds = ids.filter((id): id is string => typeof id === 'string' && workspaceIds.has(id));
+      } else if (type === 'host/archived-sessions-changed') {
+        const ids = event.archivedSessionIds;
+        if (!Array.isArray(ids)) return '';
+        event.archivedSessionIds = ids.filter(allowedSession);
+      } else if (type === 'host/remote-event') {
+        return '';
+      }
+      return `data: ${JSON.stringify(envelope)}\n\n`;
+    };
+    return new Transform({
+      transform(chunk: Buffer, _encoding, callback) {
+        for (const frame of frames.push(decoder.write(chunk))) {
+          const out = filterFrame(frame);
+          if (out !== '') this.push(out);
+        }
+        callback();
+      },
+      flush(callback) {
+        for (const frame of frames.push(decoder.end())) {
+          const out = filterFrame(frame);
+          if (out !== '') this.push(out);
+        }
+        for (const frame of frames.flush()) {
+          const out = filterFrame(frame);
+          if (out !== '') this.push(out);
+        }
+        callback();
+      },
+    });
+  };
+
+  /** rc.2 WebSocket 下行事件过滤：协议帧是 server-request，客户端不能上行 RPC。 */
+  const filterEventWebSocketFrame = (userId: number, perms: UserPermissionsRow, channel: 'host' | 'mux', data: Buffer): Buffer | null => {
+    let envelope: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(data.toString('utf8')) as unknown;
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+      envelope = parsed as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+    if (envelope.type !== 'server-request' || typeof envelope.rpcId !== 'string') return null;
+    const payload = envelope.payload;
+    if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) return null;
+    const event = payload as Record<string, unknown>;
+    if (envelope.method !== event.type || typeof event.type !== 'string') return null;
+    const current = db.getPermissions(userId) ?? perms;
+    const access = userSessionAccess.get(userId);
+    const workspaceIds = userWorkspaceIds.get(userId);
+    const allowedSession = (id: unknown): id is string =>
+      typeof id === 'string' && access !== undefined && access.has(id) && !current.disabled_sessions.includes(id);
+    if (channel === 'host') {
+      if (workspaceIds === undefined || access === undefined) return null;
+      const type = event.type;
+      if (type === 'host/session-added') {
+        if (!allowedSession(event.sessionId)) return null;
+        delete event.cwd;
+        delete event.parentSessionId;
+      } else if (type === 'host/session-removed' || type === 'host/session-status' || type === 'host/agent-error') {
+        if (!allowedSession(event.sessionId)) return null;
+      } else if (type === 'host/workspace-changed') {
+        const workspace = event.workspace;
+        if (workspace === null || typeof workspace !== 'object' || Array.isArray(workspace)) return null;
+        const row = workspace as Record<string, unknown>;
+        if (typeof row.workspaceId !== 'string' || !workspaceIds.has(row.workspaceId) || typeof row.path !== 'string') return null;
+        const workspacePath = row.path;
+        if (!folderAllowed(workspacePath, current.allowed_folders)) return null;
+        if (workspaceOwnedByAnotherSubuser(userId, workspacePath)) return null;
+        if (Array.isArray(row.sessionIds)) row.sessionIds = row.sessionIds.filter(allowedSession);
+      } else if (type === 'host/workspace-removed') {
+        const id = typeof event.workspaceId === 'string' ? event.workspaceId : event.id;
+        if (typeof id !== 'string' || !workspaceIds.has(id)) return null;
+      } else if (type === 'host/workspace-order-changed') {
+        if (!Array.isArray(event.workspaceIds)) return null;
+        event.workspaceIds = event.workspaceIds.filter((id): id is string => typeof id === 'string' && workspaceIds.has(id));
+      } else if (type === 'host/archived-sessions-changed') {
+        if (!Array.isArray(event.archivedSessionIds)) return null;
+        event.archivedSessionIds = event.archivedSessionIds.filter(allowedSession);
+      } else {
+        return null;
+      }
+    } else {
+      const allowedTypes = new Set(['session/event', 'session/subscribed', 'approval/requested', 'approval/resolved', 'question/requested', 'question/resolved', 'session/queue', 'session/jobs', 'session/projection']);
+      if (!allowedTypes.has(event.type) || !allowedSession(event.sessionId)) return null;
+    }
+    return Buffer.from(JSON.stringify(envelope), 'utf8');
+  };
+
+  // Keep the carrier limit aligned with ws's default and the official DSH RC.1
+  // gateway. History snapshots are one Remote item and can legitimately exceed
+  // 1 MiB after compaction; request queue limits remain independent below.
+  const REMOTE_MUX_MAX_PAYLOAD_BYTES = 100 * 1024 * 1024;
+  const REMOTE_MUX_MAX_STREAMS = 64;
+  const REMOTE_MUX_MAX_PENDING_BYTES = 2 * 1024 * 1024;
+  const REMOTE_MUX_HEARTBEAT_INTERVAL_MS = 2_000;
+  const REMOTE_MUX_MAX_MISSED_HEARTBEATS = 2;
+
+  const upstreamWsOptions = (): {
+    headers: Record<string, string>;
+    rejectUnauthorized?: boolean;
+    agent?: any;
+    maxPayload: number;
+  } => ({
+    headers: {
+      host: upstreamAuthority,
+      origin: `${upstreamScheme}://${upstreamAuthority}`,
+      ...upstreamAuthenticationHeaders(),
+    },
+    ...(upstreamIsHttps ? {
+      rejectUnauthorized: process.env.MCP_GATEWAY_UPSTREAM_TLS_VERIFY !== '0',
+      agent: upstreamAgent,
+    } : {}),
+    maxPayload: REMOTE_MUX_MAX_PAYLOAD_BYTES,
+  });
 
   /**
    * RC.1 Remote mux bridge. Administrators may use registered Remote endpoints;
@@ -4777,15 +5204,18 @@ export function createGatewayServer(
   }
   /**
    * 把一个只剩绝对路径的官方接口参数（/api/file 的 ?path=）绑回租户工作区：
-   * 必须落在某个「仍然授权的会话工作区根」内，且在文件夹白名单内、不属于其他
-   * 子用户创建的工作区。只在命中包含关系时才查 grant，避免逐请求全表扫描。
+   * 必须落在某个「仍然授权的会话工作区根」内，且在文件夹白名单内、不伸进其他
+   * 子用户创建的工作区子树。只在命中包含关系时才查 grant，避免逐请求全表扫描。
+   * 归属判定用单向子树（不是等值）：被分配了父目录 A 的子用户不能借白名单
+   * 停留在 /A，再读取 /A/B-child/sub 里物主 B 的内容——等值只在目标恰好等于
+   * B 的工作区根时命中，深一层就会漏放。
    */
   const pathBoundToAuthorizedWorkspace = (userId: number, perms: UserPermissionsRow, candidate: string): boolean => {
     const access = userSessionAccess.get(userId);
     if (access === undefined) return false;
     if (!folderAllowed(candidate, perms.allowed_folders) &&
         !folderAllowed(canonicalizePathBestEffort(candidate), perms.allowed_folders)) return false;
-    if (workspaceOwnedByAnotherSubuser(userId, candidate)) return false;
+    if (workspaceSubtreeOverlap(userId, candidate)) return false;
     for (const [sessionId, sessionRoot] of access) {
       // 词法与真实路径两种形态都做包含性比较：候选路径由请求方给出时（官方
       // /api/file?path=），调用方已对两种形态分别判定；这里同样不因别名/大小写/
@@ -4835,7 +5265,7 @@ export function createGatewayServer(
     const targetCanonical = canonicalizePathBestEffort(target);
     if (!pathWithin(root, target) || !pathWithin(rootCanonical, targetCanonical) ||
       !folderAllowed(target, perms.allowed_folders) || !folderAllowed(targetCanonical, perms.allowed_folders) ||
-      workspaceOwnedByAnotherSubuser(userId, target)) return null;
+      workspaceSubtreeOverlap(userId, target)) return null;
     return { scopeId: request.scopeId, root, target, rootCanonical, targetCanonical };
   };
 
@@ -5171,6 +5601,105 @@ export function createGatewayServer(
     }
     return null;
   };
+
+  const muxEventFilter = (
+    userId: number,
+    perms: UserPermissionsRow,
+  ): Transform => {
+    // 单帧解析缓冲有界（见 SseFrameBuffer），上限与 WS 承载的单条消息上限同口径：
+    // 上游不发空行时不能无界增长，同时不影响正常大小的事件帧。
+    const frames = new SseFrameBuffer(REMOTE_MUX_MAX_PAYLOAD_BYTES);
+    // 按流维护解码状态：多字节 UTF-8 字符跨 Buffer 边界时先留在解码器里，避免被
+    // 逐 chunk 解码成 U+FFFD 替换字符而破坏过滤输出。
+    const decoder = new StringDecoder('utf8');
+
+    const allowedSession = (sessionId: unknown): boolean => {
+      const access = userSessionAccess.get(userId);
+      return (
+        typeof sessionId === 'string' &&
+        access !== undefined &&
+        access.has(sessionId) &&
+        !perms.disabled_sessions.includes(sessionId)
+      );
+    };
+
+    const filterFrame = (frame: string): string => {
+      // 按 SSE 行语义归一化：CRLF、LF、裸 CR 都是行终止符，遗漏裸 CR 会把
+      // 「注释\rdata: 敏感事件」当成一行而跳过 data: 解析，导致敏感事件被整帧放行。
+      const normalized = frame.replace(/\r\n|\r|\n/g, '\n');
+      const dataLines = normalized
+        .split('\n')
+        .filter((line) => line.startsWith('data:'));
+
+      if (dataLines.length === 0) return frame;
+
+      let envelope: Record<string, unknown>;
+      try {
+        envelope = JSON.parse(
+          dataLines.map((line) => line.slice(5).trimStart()).join('\n'),
+        ) as Record<string, unknown>;
+      } catch {
+        return '';
+      }
+
+      const payload = envelope.payload;
+      if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+        return '';
+      }
+
+      const event = payload as Record<string, unknown>;
+      const type = event.type;
+
+      if (typeof type !== 'string') return '';
+
+      if (
+        type === 'session/event' ||
+        type === 'session/subscribed' ||
+        type === 'approval/requested' ||
+        type === 'approval/resolved' ||
+        type === 'question/requested' ||
+        type === 'question/resolved' ||
+        type === 'session/queue' ||
+        type === 'session/jobs' ||
+        type === 'session/projection'
+      ) {
+        return allowedSession(event.sessionId)
+          ? `data: ${JSON.stringify(envelope)}\n\n`
+          : '';
+      }
+
+      // stream/error 没有 sessionId，不能确认租户归属时丢弃。
+      if (type === 'stream/error') return '';
+
+      // 未知 mux 类型不能安全判断归属。
+      return '';
+    };
+
+    return new Transform({
+      transform(chunk: Buffer, _encoding, callback) {
+        for (const frame of frames.push(decoder.write(chunk))) {
+          const out = filterFrame(frame);
+          if (out !== '') this.push(out);
+        }
+
+        callback();
+      },
+
+      flush(callback) {
+        for (const frame of frames.push(decoder.end())) {
+          const out = filterFrame(frame);
+          if (out !== '') this.push(out);
+        }
+
+        for (const frame of frames.flush()) {
+          const out = filterFrame(frame);
+          if (out !== '') this.push(out);
+        }
+
+        callback();
+      },
+    });
+  };
   const gatewayRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const configuredRoot = process.env.DSH_PASSWORDS_ENV_FILE?.trim()
     ? path.dirname(path.resolve(process.env.DSH_PASSWORDS_ENV_FILE.trim()))
@@ -5432,7 +5961,7 @@ export function createGatewayServer(
         method: 'workspace/delete',
         payload: { args: { request: { workspaceId } } },
       });
-      const request = http.request({
+      const request = upstreamTransport.request({
         hostname: upstreamHost,
         port: upstreamPort,
         path: '/api/workspace/delete',
@@ -6646,6 +7175,10 @@ export function createGatewayServer(
       }
       const user = sessionOf(req);
       if (!user) {
+        if (ANONYMOUS_STATIC_PROBES.has(gatePath)) {
+          res.status(204).end();
+          return;
+        }
         if (isMachineRequestPath(gatePath)) {
           denyRequest(req, res, langOf(req), t(langOf(req), 'err.NOT_AUTHENTICATED'), 401);
           return;
@@ -6659,6 +7192,10 @@ export function createGatewayServer(
       }
       const row = db.getUserById(user.userId);
       if (!row) {
+        if (ANONYMOUS_STATIC_PROBES.has(gatePath)) {
+          res.status(204).end();
+          return;
+        }
         if (isMachineRequestPath(gatePath)) {
           denyRequest(req, res, langOf(req), t(langOf(req), 'err.NOT_AUTHENTICATED'), 401);
           return;
@@ -6676,12 +7213,12 @@ export function createGatewayServer(
       if (editorPath && (
         !config.tenantEditor?.enabled ||
         req.headers['sec-fetch-site'] === 'cross-site' ||
-        (typeof req.headers.origin === 'string' && !originHostMatches(req))
+        (typeof req.headers.origin === 'string' && !originHostMatches(req, configuredOriginHosts))
       )) {
         denyRequest(req, res, langOf(req), '403 Forbidden');
         return;
       }
-      // 自身插件的写操作必须同源：Sec-Fetch-Site 可被缺省/伪造，且 text/plain
+      // 所有代理写操作必须同源：Sec-Fetch-Site 可被缺省/伪造，且 text/plain
       // 可避免 CORS 预检；浏览器提供 Origin 时严格与请求 Host 一致。跨源攻击的
       // 本质是跨主机（攻击者无法在受害者主机名上托管内容），因此只比主机:端口、
       // 不比协议——否则 README 支持的 nginx/caddy 终结 TLS 反代部署（网关收到
@@ -6690,11 +7227,9 @@ export function createGatewayServer(
       // X-Forwarded-Host，公网直连请求不能带伪造头绕过。
       if (
         ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) &&
-        requestPath.startsWith('/api/dsh-passwords/') &&
-        !requestPath.startsWith('/api/dsh-passwords/internal/') &&
         typeof req.headers.origin === 'string'
       ) {
-        if (!originHostMatches(req)) {
+        if (!originHostMatches(req, configuredOriginHosts)) {
           denyRequest(req, res, langOf(req), '403 Forbidden');
           return;
         }
@@ -7379,7 +7914,7 @@ export function createGatewayServer(
       payload: {},
     }), 'utf8');
     const pending = new Promise<void>((resolve, reject) => {
-      const request = http.request(
+      const request = upstreamTransport.request(
         {
           hostname: upstreamHost,
           port: upstreamPort,
@@ -7824,7 +8359,7 @@ export function createGatewayServer(
           payload: { args: { _request: {} } },
         }), 'utf8');
     return new Promise<SessionIdentitySnapshot>((resolve, reject) => {
-      const request = http.request(
+      const request = upstreamTransport.request(
         {
           hostname: upstreamHost,
           port: upstreamPort,
@@ -8219,19 +8754,24 @@ export function createGatewayServer(
         }, config.internalSecret));
       }
     }
-    // F-15: browser-provided cookies never cross the proxy boundary. Ordinary Host
-    // requests receive only the in-memory Host cookie; own-plugin routes additionally
-    // receive the gateway JWT after the gateway has verified it.
+    // Plugin cookies survive proxying; browser-supplied Host and gateway credentials
+    // are replaced by the authenticated server credentials.
     const ownPluginRoute = normalizeDecodedPath(
       new URL(req.originalUrl, `http://${req.headers.host ?? 'localhost'}`).pathname,
     ).startsWith('/api/dsh-passwords/');
     const trustedCookies: string[] = [];
+    if (!ownPluginRoute) {
+      const pluginCookies = upstreamCookieHeader(req.headers.cookie, upstreamBrowserCookieHeader() ?? '');
+      if (pluginCookies !== undefined) trustedCookies.push(pluginCookies);
+    }
     if (ownPluginRoute && !isMobileRequest(req)) {
       const gatewayToken = readCookie(req.headers.cookie, COOKIE_NAME);
       if (gatewayToken !== null) trustedCookies.push(`${COOKIE_NAME}=${encodeURIComponent(gatewayToken)}`);
     }
-    const hostCookie = upstreamBrowserCookieHeader();
-    if (hostCookie !== null) trustedCookies.push(hostCookie);
+    if (ownPluginRoute) {
+      const hostCookie = upstreamBrowserCookieHeader();
+      if (hostCookie !== null) trustedCookies.push(hostCookie);
+    }
     if (trustedCookies.length === 0) delete headers.cookie;
     else headers.cookie = trustedCookies.join('; ');
     // 只允许 gzip/identity：HTML 注入与 workspace/session 过滤只处理 gzip，
@@ -8356,7 +8896,7 @@ export function createGatewayServer(
       proxyRequestRejected = true;
       completeProxyRequestBody();
     };
-    const upstreamReq = http.request(
+    const upstreamReq = upstreamTransport.request(
       {
         hostname: upstreamHost,
         port: upstreamPort,
@@ -8388,8 +8928,6 @@ export function createGatewayServer(
           /^attachment(?:;|$)/i.test(String(upstreamRes.headers['content-disposition'] ?? ''));
         const isSessionHistoryResponse =
           req.method === 'POST' && /^\/api\/session[.\/](?:history|page)$/.test(proxyPath);
-        const isRestrictedSessionHistoryResponse =
-          isSessionHistoryResponse && reqAs.dshpwPerms !== undefined;
         if (
           reqAs.dshpwUser !== undefined &&
           (
@@ -8401,10 +8939,8 @@ export function createGatewayServer(
           isolatePrincipalResponse(upstreamRes.headers);
         }
 
-        // A login/error page from Host is never a usable tenant history response. Letting the
-        // browser parse it as RPC JSON exposes upstream markup and produces an opaque syntax error.
-        // Administrators keep the generic HTML compatibility path below.
-        if (isRestrictedSessionHistoryResponse && contentType.includes('text/html')) {
+        // History RPCs always return JSON, including for administrators.
+        if (isSessionHistoryResponse && contentType.includes('text/html')) {
           upstreamRes.on('error', () => {
             if (!res.writableEnded) res.destroy();
           });
@@ -8551,9 +9087,7 @@ export function createGatewayServer(
         if (req.method === 'POST' && proxyPath === '/aionui-panel/read') {
           bufferUpstream(upstreamRes, res, (raw) => {
             try {
-              let body = raw;
-              const enc = String(upstreamRes.headers['content-encoding'] ?? '');
-              if (enc.includes('gzip')) body = gunzipBounded(body);
+              const body = decodeUpstreamBody(raw, String(upstreamRes.headers['content-encoding'] ?? ''));
               const parsed = JSON.parse(body.toString('utf8'));
               const cleaned = sanitizeHiddenUnicodeJson(parsed);
               const out = Buffer.from(JSON.stringify(cleaned), 'utf8');
@@ -8709,9 +9243,7 @@ export function createGatewayServer(
         ) {
           bufferUpstream(upstreamRes, res, (raw) => {
             try {
-              let body = raw;
-              const enc = String(upstreamRes.headers['content-encoding'] ?? '');
-              if (enc.includes('gzip')) body = gunzipBounded(body);
+              const body = decodeUpstreamBody(raw, String(upstreamRes.headers['content-encoding'] ?? ''));
               const parsed = JSON.parse(body.toString('utf8'));
               const restricted = restrictManagedDirectoryListing(parsed, reqAs.dshpwUser!);
               const out = Buffer.from(JSON.stringify(restricted), 'utf8');
@@ -8737,9 +9269,7 @@ export function createGatewayServer(
         if ((req.method === 'GET' || req.method === 'POST') && /^\/api\/workspace[.\/]list$/.test(proxyPath)) {
           bufferUpstream(upstreamRes, res, (raw) => {
             try {
-              let body = raw;
-              const enc = String(upstreamRes.headers['content-encoding'] ?? '');
-              if (enc.includes('gzip')) body = gunzipBounded(body);
+              const body = decodeUpstreamBody(raw, String(upstreamRes.headers['content-encoding'] ?? ''));
               const parsed = JSON.parse(body.toString('utf8'));
               // 原子替换当前工作区与活动会话快照；已删除工作区/会话不得残留在授权缓存。
               replaceWorkspaceAccessSnapshot(
@@ -9351,9 +9881,7 @@ export function createGatewayServer(
         if (isSessionHistoryResponse) {
           bufferSessionHistory(upstreamRes, res, (raw) => {
             try {
-              let body = raw;
-              const enc = String(upstreamRes.headers['content-encoding'] ?? '');
-              if (enc.includes('gzip')) body = gunzipBounded(body);
+              const body = decodeUpstreamBody(raw, String(upstreamRes.headers['content-encoding'] ?? ''));
               const parsed = JSON.parse(body.toString('utf8'));
               if (reqAs.dshpwPerms !== undefined && reqAs.dshpwPerms.sandbox_mode !== null) {
                 void clampSessionHistorySandbox(
@@ -9374,23 +9902,9 @@ export function createGatewayServer(
               if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
               if (!res.writableEnded) res.end(out);
             } catch (error) {
-              if (isRestrictedSessionHistoryResponse) {
-                console.warn(
-                  '[dsh-passwords] session.history 租户响应改写失败:',
-                  error instanceof Error ? error.message : String(error),
-                );
-                if (!res.headersSent) {
-                  sendApiError(res, 502, 'UPSTREAM_UNAVAILABLE', 'session history response is invalid');
-                }
-                return;
-              }
-              if (error instanceof OversizeResponseError) {
-                if (!res.headersSent) res.status(502).type('text/plain').send('502 Upstream response too large');
-                return;
-              }
-              const respHeaders = headersForStreaming(upstreamRes.headers);
-              if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
-              if (!res.writableEnded) res.end(raw);
+              console.warn('[dsh-passwords] session history response rejected:',
+                error instanceof Error ? error.message : String(error));
+              if (!res.headersSent) sendApiError(res, 502, 'UPSTREAM_UNAVAILABLE', 'session history response is invalid');
             }
           });
           return;
@@ -9851,7 +10365,7 @@ export function createGatewayServer(
               pathWithin(canonicalSessionRoot, canonicalCandidate) &&
               folderAllowed(candidate, reqAs.dshpwPerms!.allowed_folders) &&
               folderAllowed(canonicalCandidate, reqAs.dshpwPerms!.allowed_folders) &&
-              !workspaceOwnedByAnotherSubuser(reqAs.dshpwUser!, candidate);
+              !workspaceSubtreeOverlap(reqAs.dshpwUser!, candidate);
           };
           const baseFileTarget = request === null || sessionRoot === null || request.baseFile === null
             ? null
@@ -10866,6 +11380,10 @@ export function createGatewayServer(
                 : followAddress !== null ? sessionAuthorizationId(followAddress) : jobSessionId;
             if (authorizedSessionId !== null &&
                 !subuserCanAccessSession(userId, perms, authorizedSessionId)) {
+              if (officialTerminalStream) {
+                rejectStream('terminal/unavailable', 'Terminal is unavailable for this account');
+                return;
+              }
               throw new Error('Remote stream session is not allowed');
             }
             streams.set(frame.streamId, {
@@ -11112,6 +11630,10 @@ export function createGatewayServer(
       // Browsers can reset a stale upgrade while the gateway is rejecting or
       // preparing it. The connection is already unusable and has no response left.
     });
+    if (req.headers['sec-fetch-site'] === 'cross-site' || !originHostMatches(req, configuredOriginHosts)) {
+      rejectUpgrade(socket, 403);
+      return;
+    }
     // F-03 同口径：网关前缀判定与转发路径都用「原始路径迭代解码 + 压平
     // 斜杠 + WHATWG 归一化」，与 HTTP 代理保持一致，杜绝 %2f/%2e 变体
     // 在 WS 升级请求里漂移（HTTP 侧已修，这里补齐同口径）。
@@ -11201,10 +11723,10 @@ export function createGatewayServer(
     const editorPath = /^\/dsh-vsceditor\/ide\/session-[a-zA-Z0-9-]{1,100}\/(?:stable-[a-f0-9]{40})?$/.test(gatePath);
     if (editorPath && (
       !config.tenantEditor?.enabled ||
-      req.headers['sec-fetch-site'] === 'cross-site' || !originHostMatches(req as Request) ||
+      req.headers['sec-fetch-site'] === 'cross-site' || !originHostMatches(req, configuredOriginHosts) ||
       (userRole !== 'admin' && (authedUserId === null || !effectivePermissions(authedUserId).allow_upload))
     )) { rejectUpgrade(socket, 403); return; }
-    if (terminalPath && (req.headers['sec-fetch-site'] === 'cross-site' || !originHostMatches(req as Request))) { rejectUpgrade(socket, 403); return; }
+    if (terminalPath && (req.headers['sec-fetch-site'] === 'cross-site' || !originHostMatches(req, configuredOriginHosts))) { rejectUpgrade(socket, 403); return; }
     if (terminalPath && userRole !== 'admin') {
       if (!config.tenantTerminal?.launcher) { rejectUpgrade(socket, 403); return; }
       fwdPath = '/api/dsh-passwords/tenant-terminal' + fwdPath.slice(gatePath.length);
@@ -11230,7 +11752,7 @@ export function createGatewayServer(
       socket.once('close', () => { registryAuthorizedSockets.delete(socket); });
     }
     if ((isSshTerminalEndpoint(gatePath) || configuredSshPath) &&
-        (req.headers['sec-fetch-site'] === 'cross-site' || !originHostMatches(req as Request))) {
+        (req.headers['sec-fetch-site'] === 'cross-site' || !originHostMatches(req, configuredOriginHosts))) {
       rejectUpgrade(socket, 403);
       return;
     }
@@ -11359,7 +11881,12 @@ export function createGatewayServer(
     socket.once('close', releaseProxyConnection);
 
     // 转发升级请求（Host/Origin 改写，同 HTTP 路径；路径已规范化）
-    const upstreamSocket = net.connect(upstreamPort, upstreamHost, () => {
+    const upstreamSocket = upstreamIsHttps
+      ? connectTls({ port: upstreamPort, host: upstreamHost,
+          ...(net.isIP(upstreamHost) === 0 ? { servername: upstreamHost } : {}),
+          rejectUnauthorized: process.env.MCP_GATEWAY_UPSTREAM_TLS_VERIFY !== '0' })
+      : net.connect(upstreamPort, upstreamHost);
+    upstreamSocket.once(upstreamIsHttps ? 'secureConnect' : 'connect', () => {
       const lines: string[] = [
         `${req.method ?? 'GET'} ${fwdPath} HTTP/1.1`,
       ];
@@ -11372,13 +11899,13 @@ export function createGatewayServer(
         if (lower === 'host') {
           lines.push(`Host: ${upstreamHost}:${upstreamPort}`);
         } else if (lower === 'origin' && typeof value === 'string') {
-          lines.push(`Origin: http://${upstreamHost}:${upstreamPort}`);
+          lines.push(`Origin: ${upstreamScheme}://${upstreamAuthority}`);
         } else if (value !== undefined) {
           lines.push(`${key}: ${Array.isArray(value) ? value.join(', ') : value}`);
         }
       }
-      const hostCookie = upstreamBrowserCookieHeader();
-      if (hostCookie !== null) lines.push(`Cookie: ${hostCookie}`);
+      const hostCookie = upstreamCookieHeader(req.headers.cookie, upstreamBrowserCookieHeader() ?? '');
+      if (hostCookie !== undefined) lines.push(`Cookie: ${hostCookie}`);
       for (const [key, value] of Object.entries(principalHeaders)) lines.push(`${key}: ${value}`);
       lines.push('', '');
       upstreamSocket.write(lines.join('\r\n'));

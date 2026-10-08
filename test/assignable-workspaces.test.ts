@@ -45,7 +45,7 @@ test('persisted blank sessions remain assignable without activating them', async
       readTitle: async (id) => id === 'titled' ? { title: 'Saved session' } : undefined,
     },
   );
-  assert.deepEqual(reads, ['titled', 'untitled']);
+  assert.deepEqual(reads, ['untitled']);
   assert.deepEqual(result[0]?.sessions, [
     { id: 'titled', title: 'Saved session' },
     { id: 'untitled', title: 'untitled' },
@@ -104,15 +104,13 @@ test('storage failures and missing referenced events reject the inventory', asyn
   }
 });
 
-test('title read failures do not turn a readable session into a missing entry', async () => {
-  const failure = Object.assign(new Error('title unavailable'), { code: 'SESSION_QUERY_SESSION_NOT_FOUND' });
-  await assert.rejects(
-    listAssignableWorkspaces(registry(['blank']), undefined, undefined, {
-      readSurface: async () => ({ events: [] }),
-      readTitle: async () => { throw failure; },
-    }),
-    (error) => error === failure,
-  );
+test('a missing title observation omits a deleted session without loading its surface', async () => {
+  const failure = Object.assign(new Error('session deleted'), { code: 'SESSION_QUERY_SESSION_NOT_FOUND' });
+  const result = await listAssignableWorkspaces(registry(['deleted']), undefined, undefined, {
+    readSurface: async () => { throw new Error('deleted sessions must not load'); },
+    readTitle: async () => { throw failure; },
+  });
+  assert.deepEqual(result[0]?.sessions, []);
 });
 
 test('missing Host services reject unverified entries instead of returning an empty inventory', async () => {

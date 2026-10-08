@@ -1,5 +1,6 @@
 /** HTTP pooling with a deadline only while a Host connection is idle. */
 import http from 'node:http';
+import https from 'node:https';
 import { Socket } from 'node:net';
 import type { Duplex } from 'node:stream';
 
@@ -25,6 +26,28 @@ export class UpstreamHttpAgent extends http.Agent {
     // Node only caps its idle deadline by the Host's Keep-Alive hint when the
     // configured timeout is nonzero. Limit this synchronous setting to release;
     // new requests must retain their own timeout instead of inheriting this one.
+    this.options.timeout = this.idleTimeoutMs;
+    try {
+      return super.keepSocketAlive(socket);
+    } finally {
+      this.options.timeout = 0;
+    }
+  }
+
+  override reuseSocket(socket: Duplex, request: http.ClientRequest): void {
+    if (socket instanceof Socket) socket.setTimeout(0);
+    super.reuseSocket(socket, request);
+  }
+}
+
+/** TLS pooling preserves the same idle-only deadline as plaintext Host connections. */
+export class UpstreamHttpsAgent extends https.Agent {
+  declare readonly options: https.AgentOptions;
+  constructor(private readonly idleTimeoutMs: number = 5_000, rejectUnauthorized = true) {
+    super({ keepAlive: true, maxSockets: 64, keepAliveMsecs: 30_000, rejectUnauthorized });
+  }
+
+  override keepSocketAlive(socket: Duplex): void {
     this.options.timeout = this.idleTimeoutMs;
     try {
       return super.keepSocketAlive(socket);

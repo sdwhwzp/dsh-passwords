@@ -1,22 +1,20 @@
-# Fork compatibility and deployment
-
-This fork integrates `slywalker2006/dsh-passwords` commit `9ca1a31` (v2.7.6) on `dev`. Its candidate version is `2.7.6-dsh.20260930.1`; the owned push repository is `git@github.com:sdwhwzp/dsh-passwords.git`.
+# Compatibility and deployment
 
 ## Runtime requirements
 
-Use Node.js 22.19+ or 24+ and the matching private Harness `0.2.0-rc.2` build. Development dependencies link to that checkout; runtime peers refer to the same release. An official npm Harness or bundled Docker installation alone does not provide the native principal extensions needed by this tenant deployment. The native adapter does not rewrite installed Harness bundles. Startup validates the version, native settings support, and authenticated Host connection before opening the public listener.
+The private candidate targets Harness `0.2.1-alpha.1` with native account principal extensions. Node.js must be 22.19+ or 24+. The runtime identity gate accepts `>=0.2.1-alpha.1 <0.2.2-0`, rejects retired and future patch lines before startup, and verifies settings host mode and browser authentication. Development dependencies link the private checkout; public installers and bundled Docker pin `0.2.1-alpha.1` but do not replace private candidate acceptance.
 
-The gateway recognizes the upstream supported 0.1.2, 0.1.3, 0.1.5, 0.1.6, 0.1.7 and 0.2.0 release identities, including valid prereleases and build metadata. The private candidate targets `0.2.0-rc.2`; native principal extensions remain required. Identity recognition does not establish candidate or production acceptance. Unknown future lines, including 0.2.1, remain rejected before public startup.
+Browser authentication exchanges the official authenticated URL over process IPC and retains the resulting Host cookie in memory. Installed Host bundles are not rewritten. Loopback-only internal refresh and health endpoints require the independent internal secret; refreshed cookies must match the configured upstream authority. Missing native Host support or credentials prevents public startup. Later accepted release identities are not a claim of runtime acceptance.
 
-## Account authorization
+Proxy writes and WebSocket upgrades validate the browser Origin. Third-party cookies are preserved while browser-supplied gateway and Host credentials are removed; authenticated Host credentials are injected by the gateway. Own-plugin HTTP routes additionally receive the verified gateway JWT. Session history and page RPCs reject invalid HTML, unsupported encodings and malformed JSON with HTTP 502 for every account.
+
+## Account behavior
 
 Session ownership, managed workspaces, monthly budgets, MySQL/MariaDB storage, local workspaces, tenant terminals/editors and the independent account management page remain part of this fork. Host reads use authenticated immutable account identities. Credential changes, logout, permission changes and directory cleanup close affected account connections. Workspace creation, pin and archive responses filter their session lists by the same verified owner and explicit grant; malformed lists fail closed. Unknown Remote streams remain denied. The upstream dynamic manifest receiver records the Host catalog but does not grant new account permissions.
 
 Directory deletion uses the authenticated Host workspace registry, verifies removed entries, and persists retry information when either registry or database cleanup fails. Both SQLite and MySQL store cleanup intents. Deleted managed roots and folder grants are removed; an emptied folder allowlist becomes `__deny__`. Affected Sessions become disabled while their immutable owners remain recorded, preventing adoption by another account. This fork does not issue temporary directory grants.
 
 Managed uploads remove their temporary files before returning a success or failure response, including concurrent accepted and oversized uploads.
-
-Session grants may restrict an account’s own immutable Session identities; granting a Session owned by another account is rejected. Existing owned Sessions are seeded once, legacy claims receive an initial grant atomically; new create/fork responses receive a grant only after sandbox validation and an unchanged permission revision, and stale permission drafts return a conflict instead of dropping concurrent grants.
 
 Ordinary accounts retain the existing GPT 5.6-and-later model policy. An optional per-account allowlist also applies to catalogs, model selection and every Host model request. History pages never replace the live model selection. The upstream per-model allowlist editor is not composed into the fork's account table. Shared skill-file read/update routes, shared platform balances and the Host default-model initializer (`session/initializeDefaultModel`) are administrator-only. The initializer is rejected for ordinary accounts over both HTTP and Remote mux. Tenant SSH hosts, credentials and transfers remain isolated, with upload/download permissions independent of directory browsing.
 
@@ -43,3 +41,8 @@ Partial permission updates, transactional grant checks and media-removal queues 
 The emergency uninstall helper validates process and filesystem targets before starting its separate cleanup process. It is tested only with isolated fixtures; no destructive purge is run against production. Fork updates remain pinned and cannot be installed from the settings card.
 
 The gateway child reads the deployment environment file before startup and refuses credentials, database, or listener settings that differ from the Host snapshot. The native Host authentication exchange continues over private process IPC. Windows npm discovery uses the upstream explicit CLI or safe command shim. Persisted initialization-only untitled sessions are omitted from the assignment inventory; live drafts remain assignable.
+
+
+## Current validation
+
+The candidate is based on upstream 2.7.7. Local checks, built-package and browser acceptance, deployment and rollback evidence are recorded per release. The combined candidate has not yet been deployed. Terminal `retain` and `follow` failures affect only that logical stream; malformed wire frames still close the carrier. The previously released grouping fix must survive this update.

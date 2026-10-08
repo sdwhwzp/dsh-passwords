@@ -499,6 +499,18 @@ CREATE TABLE IF NOT EXISTS session_model_selections (
   reasoning_effort TEXT,
   updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
+-- 子用户「自建工作区」自动并入 allowed_folders 的来源标记：仅由 workspace/create 成功
+-- 回调的 addAllowedFolder 在**实际新增**该目录时写入。管理员 setPermissions 显式
+-- 指定的路径（含恰好等于自建路径的情形）不经此表，因此 workspace/delete 只回收标记过
+-- 的自建条目，绝不误删管理员分配。
+-- 升级兼容：本表随版本新增，升级前已存在的自建条目没有标记。无标记一律不回收（无法
+-- 可靠区分「自建自动授予」与「管理员显式授权」，保留条目是对管理员授权的 fail-closed）。
+-- 残留条目需管理员在权限面板手动清理；不做事后回填，避免把管理员授权误标成自建来源。
+CREATE TABLE IF NOT EXISTS user_auto_granted_folders (
+  user_id INTEGER NOT NULL,
+  path    TEXT NOT NULL,
+  PRIMARY KEY (user_id, path)
+);
 -- 删除联动失败后的清理意图（跨重启的重试凭证）：只在目录已物理删除且 DB 清理
 -- 事务回滚时写入；记录受信的 realpath/归一化根 + 受影响会话 + 操作者。重试准入
 -- 只认与记录根同一路径的请求（共用 pathWithinDeletedTree/samePathForMatch），
@@ -653,6 +665,11 @@ CREATE TABLE IF NOT EXISTS user_workspaces (
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   PRIMARY KEY (user_id, path),
   KEY idx_user_workspaces_path (path)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+CREATE TABLE IF NOT EXISTS user_auto_granted_folders (
+  user_id INT UNSIGNED NOT NULL,
+  path VARCHAR(700) COLLATE utf8mb4_bin NOT NULL,
+  PRIMARY KEY (user_id, path)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE IF NOT EXISTS user_session_grants (
   user_id INT UNSIGNED NOT NULL,
@@ -823,15 +840,23 @@ function foldPathCase(value: string): string {
   return process.platform === 'win32' ? value.toLowerCase() : value;
 }
 
-/** realpath 优先；路径已删除时用「父目录 realpath + 末段」尽力归位；最后退回字符串归一。 */
+/**
+ * realpath 优先；路径不存在时向上找到最近的现存祖先，再按原顺序补回缺失段。
+ * 这样 Windows/macOS 大小写不敏感卷上的大小写别名，即使目标还有多层不存在的
+ * 子目录，也会沿用现存祖先的真实路径拼写；大小写敏感卷则仍保留不同路径语义。
+ */
 export function canonicalForMatch(candidate: string): string {
-  try {
-    return normalizePath(realpathSync(candidate));
-  } catch {
+  const missingSegments: string[] = [];
+  let current = normalizePath(candidate);
+  while (true) {
     try {
-      return normalizePath(path.join(realpathSync(path.dirname(candidate)), path.basename(candidate)));
+      const resolved = realpathSync.native(current);
+      return normalizePath(path.join(resolved, ...missingSegments.reverse()));
     } catch {
-      return normalizePath(candidate);
+      const parent = normalizePath(path.dirname(current));
+      if (parent === current || parent === '.' || parent === '') return normalizePath(candidate);
+      missingSegments.push(path.basename(current));
+      current = parent;
     }
   }
 }
@@ -938,6 +963,7 @@ export class Database {
       this.migratePermissions();
       this.migrateSessionOwners();
       this.migrateLocalWorkspaces();
+      this.purgeOrphanOwnershipRows();
       this.migrateUsers();
       this.migrateAuditLogs();
       this.setSetting('mysql_schema_version', '1');
@@ -954,6 +980,7 @@ export class Database {
     this.migratePermissions();
     this.migrateSessionOwners();
     this.migrateLocalWorkspaces();
+    this.purgeOrphanOwnershipRows();
     const changedUsers = this.migrateUsers();
     const changedAudit = this.migrateAuditLogs();
     const changedAttempts = this.migrateLoginAttempts();
@@ -992,7 +1019,17 @@ export class Database {
     }
   }
 
-  // ── 迁移：user_permissions 补后续版本列（均可重复执行） ─────────────────
+  // ── 迁移：清理已删除用户残留的孤儿所有权行 ──────────────────────
+  // 历史 deleteUser 不清理 user_workspaces，残留行会被当作「另一子用户的
+  // 所有权」阻断 baseline 可见性与该目录的登记/创建。幂等：每次启动扫一次。
+  // 只清所有权：孤儿权限/授权行无人可读（无害），且旧库迁移场景可能存在
+ // 「先导权限行、后建用户」的历史数据，不能误删。
+  private purgeOrphanOwnershipRows(): void {
+    this.db.exec('DELETE FROM user_workspaces WHERE user_id NOT IN (SELECT id FROM users)');
+    this.db.exec('DELETE FROM user_auto_granted_folders WHERE user_id NOT IN (SELECT id FROM users)');
+  }
+
+  // ── 迁移：user_permissions 补 sandbox_mode / disabled_sessions 列 ─────────────────
   private migratePermissions(): void {
     const names = new Set(
       this.mysql
@@ -1325,6 +1362,7 @@ export class Database {
       this.stmt('DELETE FROM user_session_grants WHERE user_id = ?').run(id);
       this.stmt('DELETE FROM user_usage WHERE user_id = ?').run(id);
       this.stmt('DELETE FROM user_workspaces WHERE user_id = ?').run(id);
+      this.stmt('DELETE FROM user_auto_granted_folders WHERE user_id = ?').run(id);
       const ownedMediaKeys = (this.stmt(
         'SELECT storage_key FROM media_assets WHERE owner_id = ?',
       ).all(id) as { storage_key: string }[]).map((row) => String(row.storage_key));
@@ -2015,6 +2053,161 @@ export class Database {
       this.db.exec('ROLLBACK');
       throw error;
     }
+  }
+
+  // ── 子用户创建的工作区 ─────────────────────────
+  addUserWorkspace(userId: number, workspacePath: string): void {
+    this.stmt(
+      (this.mysql ? 'INSERT IGNORE INTO' : 'INSERT OR IGNORE INTO') + ' user_workspaces (user_id, path) VALUES (?, ?)',
+    ).run(userId, normalizePath(workspacePath));
+  }
+
+  /**
+   * 子用户登记新工作区时把目录并进白名单（原子窄更新）。
+   *
+   * 只改 allowed_folders 一列：读与写在同一 BEGIN IMMEDIATE 事务内完成，绝不在
+   * 事务外读旧权限行再整体回写——调用方（workspace/create 成功回调）会 await 上游，
+   * 期间另一管理员或本进程可能已改写 banned / allow_upload / sandbox_mode /
+   * disabled_sessions 等安全字段；用旧快照整体重放会把这些并发收紧静默回滚。
+   *
+   * 语义保持不变：缺权限行 no-op（不得隐式补行把「缺行=拒绝全部」变成空白名单）；
+   * __deny__ 仅剩新目录；空白名单（不限目录）no-op；已含同一路径不重复追加。
+   */
+  addAllowedFolder(userId: number, workspacePath: string): void {
+    const canonical = normalizePath(workspacePath);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const row = this.stmt('SELECT allowed_folders FROM user_permissions WHERE user_id = ?' + (this.mysql ? ' FOR UPDATE' : '')).get(userId) as
+        | { allowed_folders: string | null }
+        | undefined;
+      if (row === undefined) {
+        this.db.exec('COMMIT');
+        return;
+      }
+      const folders = parseAllowedFolders(row.allowed_folders);
+      // __deny__ 是「尚无预分配根」的哨兵：登记新目录后以该目录替换哨兵。
+      // 空白名单表示不限目录，登记不能把它收窄成单目录白名单。
+      const next = folders.includes('__deny__')
+        ? sanitizeAllowedFolders([canonical])
+        : folders.length > 0 && !folders.some((entry) => normalizePath(entry) === canonical)
+          ? sanitizeAllowedFolders([...folders, canonical])
+          : null;
+      if (next !== null) {
+        this.stmt(
+          "UPDATE user_permissions SET allowed_folders = ?, updated_at = datetime('now') WHERE user_id = ?",
+        ).run(JSON.stringify(next), userId);
+        // 只有本次真正新增/替换哨兵时才标记为自建自动授予；若该目录本来就是管理员
+        // 分配的（next===null 的“已包含”分支），保留管理员来源、不写标记。
+        this.stmt(
+          (this.mysql ? 'INSERT IGNORE INTO' : 'INSERT OR IGNORE INTO') + ' user_auto_granted_folders (user_id, path) VALUES (?, ?)',
+        ).run(userId, canonical);
+      }
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  listUserWorkspacePaths(userId: number): string[] {
+    return (this.stmt('SELECT path FROM user_workspaces WHERE user_id = ?').all(userId) as { path: string }[]).map((row) => row.path);
+  }
+
+  listWorkspaceOwners(): Array<{ userId: number; path: string }> {
+    return (this.stmt('SELECT user_id AS userId, path FROM user_workspaces').all() as Array<{ userId: number; path: string }>).map((row) => ({ ...row, path: normalizePath(row.path) }));
+  }
+
+  removeUserWorkspace(userId: number, workspacePath: string): void {
+    this.stmt('DELETE FROM user_workspaces WHERE user_id = ? AND path = ?').run(userId, normalizePath(workspacePath));
+  }
+
+  renameUserWorkspace(userId: number, oldPath: string, newPath: string): void {
+    this.stmt('UPDATE user_workspaces SET path = ? WHERE user_id = ? AND path = ?').run(normalizePath(newPath), userId, normalizePath(oldPath));
+  }
+
+  /**
+   * 子用户删除自己登记的工作区（alpha.1 workspace/delete 成功回调）后的定向清理：
+   * 该用户的归属行、与工作区精确相等的自建白名单条目、该工作区内的会话授权，
+   * 在同一事务内删除。
+   *
+   * 与 cleanupDeletedWorkspaceTree（管理员物理删目录，按整棵子树清理）不同：
+   * workspace/delete 只把工作区从 DSH 注册表移除、不保证删除磁盘目录，因此这里只做
+   * **精确路径**清理，绝不按子树删除——管理员分配在父目录或其它路径上的白名单条目
+   * 不会被连带回收。
+   *
+   * 来源区分：自建自动授予由 workspace/create 成功回调的 addAllowedFolder 写入，并在同一
+   * 事务内记入 user_auto_granted_folders 来源标记；管理员 setPermissions 显式指定的路径
+   * 不经此表。因此这里只回收**带来源标记且精确相等**的那一条白名单条目：
+   *   · 管理员把白名单精确设成该自建工作区路径（自建前它已存在）→ addAllowedFolder
+   *     走「已包含」分支不写标记 → 删除时保留管理员分配；
+   *   · 管理员分配的父目录/其它目录 → 不等值 → 一律保留。
+   *   · **存量兼容（fail-closed）**：升级前已有、无来源标记的自建条目一律保留。无标记时
+   *     无法可靠区分「自建自动授予」与「管理员显式授权」，删掉可能误伤后者，因此保留
+   *     并交由管理员在权限面板清理。此类残留条目本次不会被回收，不能声称已完全回收。
+   *   · **自建后被管理员重新显式分配同路径**：标记仍在，workspace/delete 仍按自建来源
+   *     回收（拒绝访问）。这是有意的 fail-closed 取舍：不能因一条可能过期的标记反向放行；
+   *     管理员需在删除后重新分配。该行为由测试显式锁定，不属于静默丢失管理员授权。
+   *
+   * 白名单删空必须回落 `__deny__`：空 allowed_folders 被 folderAllowed 当作「不限目录」
+   * （fail-open），删除用户最后一条白名单后若留空数组会瞬间放开全盘工作区。
+   *
+   * @param sessionIds - 明确归属该工作区的会话（内存 cwd 快照 / pending 得出）。
+   * @returns 各表实际删除计数；removedFolder=false 表示该路径并非带标记的自建条目
+   *          （不在白名单、属管理员分配，或升级前无标记的存量条目），管理员分配未被触碰。
+   */
+  removeUserOwnedWorkspace(
+    userId: number,
+    workspacePath: string,
+    sessionIds: readonly string[] = [],
+  ): { removedWorkspace: boolean; removedFolder: boolean; removedGrants: number } {
+    const target = normalizePath(workspacePath);
+    const doomedSessions = [...new Set(
+      sessionIds.filter((id): id is string => typeof id === 'string' && id.length > 0 && id.length <= 200),
+    )];
+    let removedWorkspace = false;
+    let removedFolder = false;
+    let removedGrants = 0;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const deleted = this.stmt('DELETE FROM user_workspaces WHERE user_id = ? AND path = ?').run(userId, target);
+      removedWorkspace = Number(deleted.changes) > 0;
+      // 只有带来源标记（本版本 workspace/create 回调实际新增）的条目才回收。升级前
+      // 存量条目无标记 → autoGranted=false → 原样保留，绝不动管理员可能显式分配的授权。
+      const autoGranted = this.stmt(
+        'SELECT 1 FROM user_auto_granted_folders WHERE user_id = ? AND path = ?',
+      ).get(userId, target) !== undefined;
+      if (autoGranted) {
+        const permissionRow = this.stmt('SELECT allowed_folders FROM user_permissions WHERE user_id = ?' + (this.mysql ? ' FOR UPDATE' : '')).get(userId) as
+          | { allowed_folders: string | null }
+          | undefined;
+        if (permissionRow !== undefined) {
+          const folders = parseAllowedFolders(permissionRow.allowed_folders);
+          // 空数组=不限目录（不得收窄成白名单）；__deny__=已无可回收项。
+          if (folders.length > 0 && !folders.includes('__deny__')) {
+            const kept = folders.filter((folder) => normalizePath(folder) !== target);
+            if (kept.length !== folders.length) {
+              const next = kept.length === 0 ? ['__deny__'] : kept;
+              this.stmt(
+                "UPDATE user_permissions SET allowed_folders = ?, updated_at = datetime('now') WHERE user_id = ?",
+              ).run(JSON.stringify(next), userId);
+              removedFolder = true;
+            }
+          }
+        }
+        this.stmt('DELETE FROM user_auto_granted_folders WHERE user_id = ? AND path = ?').run(userId, target);
+      }
+      if (doomedSessions.length > 0) {
+        const deleteGrant = this.stmt('DELETE FROM user_session_grants WHERE user_id = ? AND session_id = ?');
+        for (const sessionId of doomedSessions) {
+          removedGrants += Number(deleteGrant.run(userId, sessionId).changes);
+        }
+      }
+      this.db.exec('COMMIT');
+    } catch (error) {
+      try { this.db.exec('ROLLBACK'); } catch { /* 无活动事务 */ }
+      throw error;
+    }
+    return { removedWorkspace, removedFolder, removedGrants };
   }
 
   /**
@@ -3463,43 +3656,6 @@ export class Database {
       this.db.exec('ROLLBACK');
       throw error;
     }
-  }
-
-  // ── 子用户创建的工作区 ─────────────────────────
-  addUserWorkspace(userId: number, workspacePath: string): void {
-    this.stmt(
-      (this.mysql ? 'INSERT IGNORE INTO' : 'INSERT OR IGNORE INTO') + ' user_workspaces (user_id, path) VALUES (?, ?)',
-    ).run(userId, normalizePath(workspacePath));
-  }
-
-  addAllowedFolder(userId: number, workspacePath: string): void {
-    const canonical = normalizePath(workspacePath);
-    const current = this.getPermissions(userId);
-    if (!current || current.allowed_folders.includes('__deny__')) {
-      if (current) this.setPermissions(userId, { allowedFolders: [canonical], hourlyTokenLimit: current.hourly_token_limit, dailyMinutesLimit: current.daily_minutes_limit, allowUpload: current.allow_upload, allowGitDownload: current.allow_git_download, allowWorkspaceCreate: current.allow_workspace_create, banned: current.banned, sandboxMode: current.sandbox_mode, disabledSessions: current.disabled_sessions });
-      return;
-    }
-    // Explicit empty folder permissions remain unrestricted after workspace registration.
-    if (current.allowed_folders.length === 0) return;
-    if (!current.allowed_folders.some((entry) => normalizePath(entry) === canonical)) {
-      this.setPermissions(userId, { allowedFolders: [...current.allowed_folders, canonical], hourlyTokenLimit: current.hourly_token_limit, dailyMinutesLimit: current.daily_minutes_limit, allowUpload: current.allow_upload, allowGitDownload: current.allow_git_download, allowWorkspaceCreate: current.allow_workspace_create, banned: current.banned, sandboxMode: current.sandbox_mode, disabledSessions: current.disabled_sessions });
-    }
-  }
-
-  listUserWorkspacePaths(userId: number): string[] {
-    return (this.stmt('SELECT path FROM user_workspaces WHERE user_id = ?').all(userId) as { path: string }[]).map((row) => row.path);
-  }
-
-  listWorkspaceOwners(): Array<{ userId: number; path: string }> {
-    return (this.stmt('SELECT user_id AS userId, path FROM user_workspaces').all() as Array<{ userId: number; path: string }>).map((row) => ({ ...row, path: normalizePath(row.path) }));
-  }
-
-  removeUserWorkspace(userId: number, workspacePath: string): void {
-    this.stmt('DELETE FROM user_workspaces WHERE user_id = ? AND path = ?').run(userId, normalizePath(workspacePath));
-  }
-
-  renameUserWorkspace(userId: number, oldPath: string, newPath: string): void {
-    this.stmt('UPDATE user_workspaces SET path = ? WHERE user_id = ? AND path = ?').run(normalizePath(newPath), userId, normalizePath(oldPath));
   }
 
   /** 持有这些显式会话授权之一的用户 ID（清理失败时补齐 mux/WS 失效范围；不修改数据）。 */

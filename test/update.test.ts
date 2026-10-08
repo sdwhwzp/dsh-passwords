@@ -211,8 +211,8 @@ test('Harness compiler links resolve the same native build declared by runtime p
       assert.ok(specifier.startsWith('file:'), `${name} needs the personal Harness checkout`);
       const linked = JSON.parse(readFileSync(new URL(`${specifier.slice(5)}/package.json`, new URL('../', import.meta.url)), 'utf8'));
       assert.equal(linked.name, name);
-      assert.equal(linked.version, "0.2.0-rc.2", `${name} compiler uses the candidate build`);
-      assert.equal(version, "^0.1.7-rc.2 || ^0.2.0-rc.1", `${name} runtime retains released compatibility`);
+      assert.equal(linked.version, "0.2.1-alpha.1", `${name} compiler uses the candidate build`);
+      assert.equal(version, ">=0.2.1-alpha.1 <0.2.2-0", `${name} runtime retains released compatibility`);
     }
   }
   assert.equal(pkg.peerDependenciesMeta?.['@deepseek-ai/dsh-principal-access']?.optional, true);
