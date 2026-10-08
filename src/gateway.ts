@@ -10866,6 +10866,10 @@ export function createGatewayServer(
                 : followAddress !== null ? sessionAuthorizationId(followAddress) : jobSessionId;
             if (authorizedSessionId !== null &&
                 !subuserCanAccessSession(userId, perms, authorizedSessionId)) {
+              if (officialTerminalStream) {
+                rejectStream('terminal/unavailable', 'Terminal is unavailable for this account');
+                return;
+              }
               throw new Error('Remote stream session is not allowed');
             }
             streams.set(frame.streamId, {

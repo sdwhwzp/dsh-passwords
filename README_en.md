@@ -597,7 +597,7 @@ Desktop catalogs accept `unsigned`, `developer-id-signed`, and `apple-notarized`
 
 The extended subscription plugin account UI and `/dsh-subscriptions/*` endpoints are administrator-only. Customer accounts using `subscriptions-codex` follow the same GPT 5.6 minimum as Codex.
 
-Desktop terminal restoration through `terminal/retain` checks session ownership, folder permissions, and disabled-session state. An unavailable terminal ends only its logical stream, preserving the shared workspace and session connection.
+Desktop terminal restoration through `terminal/retain` checks session ownership, folder permissions, and disabled-session state. An unavailable terminal, missing session, or session inaccessible to the current account rejects only that terminal stream without forwarding it upstream, preserving the shared workspace and session connection. Forged fields or missing required arguments still close the connection.
 
 Host login exchange accepts root redirects `/` and `./` without following them; external destinations and query-bearing targets are rejected.
 
