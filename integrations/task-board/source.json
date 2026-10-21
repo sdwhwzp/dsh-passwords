@@ -1,9 +1,9 @@
 {
   "repository": "https://github.com/sdwhwzp/dsh-web",
   "branch": "dev",
-  "commit": "26919234820653e017485e52ce8176775a734cde",
+  "commit": "b8a7e94eac4b64a7405af4ddc3fad9368b6215b6",
   "package": "@linxin666/dsh-client-ui-task-board",
-  "version": "0.4.8-dsh.20261021.1",
+  "version": "0.4.8-dsh.20261021.2",
   "files": {
     "core/card-defaults.ts": "95c6ee30cdb57ff937ec18eeac03d5e6d4732e35",
     "core/execution-summary.ts": "60df0735e94cf884937700b8d907109e21de9e7f",
@@ -28,13 +28,13 @@
     "core/use-cases/task-update.ts": "338bb10fa6693cee51c50c72dfb446d7c46dedaf",
     "core/verification-budget.ts": "bd3aec959abf9d589d254bcc8a52dec849d0dd44",
     "core/verification.ts": "6372d19f0135e257842cc1dcb916c080c975bd29",
-    "core/workspace-target.ts": "6455d0c8d6fd2b7f750f068fa0281c575643c7c5",
+    "core/workspace-target.ts": "efdbf38383098c84a59ad7e31f8474990d7bd0aa",
     "dsh-home.ts": "bb586c1b8f1504e2fcb16f2cedb38598665d2852",
     "host-accounts.ts": "193c2869b1c9a5ca6d71a3fc0a6da59e55ef3e6c",
     "host-ai.ts": "4ae257353e9bb90373ecf449b78c4712644259ef",
     "host-ledger.ts": "6e790e39f185cc3f9ddff79bbec96599c6d9b7ae",
     "host-routes.ts": "69fcef4913391fe620f5fa1629b7f1b084bc0266",
-    "host-runner.ts": "5ee653e1d01c88cc7062f0768ebbb9c1ac94f872",
+    "host-runner.ts": "d74b903e83052ee6051941c2a271bb5982708d12",
     "host-service.ts": "ecc960b39186f45528ce3484d545a39b6cdf4aee",
     "host-spend.ts": "3ba7395c818d6d96793e35b94c31d12ef9b84359",
     "host/extension-registry.ts": "9073def219571ee03f3ae26dd7422eef9d35d8f5",
@@ -50,7 +50,7 @@
   },
   "client": {
     "path": "client-shell/client.js",
-    "sha256": "c2e3260462f79de3c0d20df7bd61135f4f493637602e8c6e5bc65f6697287d24",
+    "sha256": "38312cdca7a2327ee783c20c0bf4239632aceaa6d6a648d62edc97e8b9898b26",
     "registration": "path-mounted client-shell/index.js; Host apply is empty"
   }
 }

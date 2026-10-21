@@ -5,7 +5,7 @@ import type { CommandResult } from '@deepseek-ai/dsh-commands/types'
 import type { Workspace } from '@deepseek-ai/dsh-workspace/types'
 import type { TaskBoardPrincipal } from './host-accounts.ts'
 import { teammateName } from './core/subtask.ts'
-import { mostRecentWorkspaceId } from './core/workspace-target.ts'
+import { MISSING_WORKSPACE_REASON, mostRecentWorkspaceId } from './core/workspace-target.ts'
 import { declaredRoute, normalizeReasoningEffort, resolveReasoningEffort, type ReasoningRoute } from './core/reasoning-effort.ts'
 import type { ModelCatalogView } from './core/verification.ts'
 import type { ExecutionSummary, TaskPermission, TaskRecord } from './core/tasks.ts'
@@ -482,7 +482,8 @@ export class HostExecutionRunner {
     // card that pins nothing is resolved to the deployment's most recently used
     // workspace instead of being left to `session.create`, whose own fallback is
     // the Host process working directory (the desktop app's profile directory) —
-    // never the project the user was in when the card was written.
+    // never the project the user was in when the card was written. A deployment
+    // with no workspace to offer gets a refusal below, not that fallback.
     const workspaceId = task.handover?.workspaceId ?? task.workspaceId ?? this.recentWorkspaceId()
     const mode = task.handover?.mode ?? task.mode
     const permission = task.handover?.permission ?? task.permission
@@ -522,8 +523,15 @@ export class HostExecutionRunner {
       }
       return reused
     }
+    // Nothing names a workspace and the deployment has none to resolve to, so
+    // there is no place this run may legitimately start: `session.create` would
+    // quietly land it in the Host process working directory (the desktop app's
+    // profile directory). Refuse before the session exists, with the reason the
+    // board settles the card with and the browser renders in the user's
+    // language, so the fix (pick a workspace on the card) is what the user reads.
+    if (workspaceId === undefined) throw new Error(MISSING_WORKSPACE_REASON)
     const created = await this.invoke('session', 'create', {
-      ...(workspaceId === undefined ? {} : { workspaceId }),
+      workspaceId,
       ...(mode === undefined ? {} : { agentPreset: mode }),
     }, principal) as { sessionId: ExecutionSessionId }
     const sessionId = created.sessionId

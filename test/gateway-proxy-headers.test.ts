@@ -2203,6 +2203,35 @@ test('普通第三方根级路径对子用户直接放行：注册 WS 通道不�
   }
 });
 
+test('共享 Agent Teams 路由仅管理员可访问，普通账号请求不会到达上游', async () => {
+  const subUser = createOwnedFixtureUser('agents-subuser', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: [], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: true, allowGitDownload: true, allowWorkspaceCreate: false,
+    banned: false, sandboxMode: null, disabledSessions: [],
+  });
+  const adminCookie = cookie;
+  try {
+    cookie = `dsh_gateway_token=${jwt.sign({ sub: String(subUser.id), username: subUser.username, cv: 0 }, 'test-secret', { expiresIn: '12h' })}`;
+    for (const [method, route] of [
+      ['GET', '/dsh-agents/api/state'],
+      ['POST', '/dsh-agents/api/team'],
+      ['POST', '/dsh-agents/api/squad/run'],
+      ['POST', '/api/agentTeams/spawn'],
+    ]) {
+      const before = lastUpstreamUrl;
+      const response = await gatewayReq(method, route, { origin: `http://127.0.0.1:${String(gatewayPort)}` }, method === 'POST' ? '{}' : undefined);
+      assert.equal(response.status, 403, route);
+      assert.equal(lastUpstreamUrl, before, 'refused route must not reach the Host');
+    }
+    cookie = adminCookie;
+    const response = await gatewayReq('GET', '/dsh-agents/api/state');
+    assert.equal(response.status, 200, 'administrator reaches the Host account guard');
+  } finally {
+    cookie = adminCookie;
+  }
+});
+
 test('代理写请求拒绝恶意 Origin，同源请求仍转发', async () => {
   const subUser = createOwnedFixtureUser('proxy-origin-guard-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
   db.setPermissions(subUser.id, {

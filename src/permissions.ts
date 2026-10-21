@@ -356,6 +356,7 @@ export function isLegacyOfficialApiRoute(pathname: string): boolean {
 export const SUBUSER_BLOCKED_API_NAMESPACES: ReadonlySet<string> = new Set([
   'pluginManager',
   'agentTeams',
+  'dsh-agents',
   'pluginRegistryProbe',
   'dynamicCordisRunner',
   'officeToPdf',

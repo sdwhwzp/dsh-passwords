@@ -253,6 +253,9 @@ test('通用 SSH 登记规则不能改变 pluginManager / officeToPdf / terminal
   // 宽泛规则（运维常见写法）不得把特权/未验证命名空间带进来
   const generic = parseEndpointAllowlist('/api/*,ws:/api/*,http:/api/*', 'TEST');
   const blockedPaths = [
+    '/dsh-agents/api/state',
+    '/dsh-agents/api/squad/run',
+    '/api/dsh-agents/state',
     '/api/pluginManager',
     '/api/pluginManager/change',
     '/api/pluginManager/runPnpm',
@@ -318,7 +321,7 @@ test('通用 SSH 登记规则不能改变 pluginManager / officeToPdf / terminal
   assert.equal(classifySubuserPath('/api/officeToPdfBackup', { endpointRules: generic, transport: 'http' }), 'ssh');
 
   // Agent Teams 随已安装扩展适配，宿主代码执行与 terminal 仍走专门边界。
-  assert.deepEqual([...SUBUSER_BLOCKED_API_NAMESPACES].sort(), ['agentTeams', 'dynamicCordisRunner', 'officeToPdf', 'pluginManager', 'pluginRegistryProbe', 'productAnalytics', 'speech', 'terminal']);
+  assert.deepEqual([...SUBUSER_BLOCKED_API_NAMESPACES].sort(), ['agentTeams', 'dsh-agents', 'dynamicCordisRunner', 'officeToPdf', 'pluginManager', 'pluginRegistryProbe', 'productAnalytics', 'speech', 'terminal']);
 });
 
 test('宿主遥测、registry 探针和可选语音命名空间不落入普通插件透传面', () => {

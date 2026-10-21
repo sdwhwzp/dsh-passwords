@@ -3590,7 +3590,7 @@ window.__ModuleLoader__.load({
 			"status.move.running": "移到进行中",
 			"status.move.done": "移到已完成",
 			"status.move.failed": "移到已失败",
-			"exec.error.noWorkspace": "没有可用工作区，无法执行任务",
+			"exec.error.noWorkspace": "这张卡没有指定工作区，请先在卡片上选择工作区",
 			"exec.error.promptRejected": "Prompt 被拒绝",
 			"run.failed": "执行失败：{error}",
 			"time.justNow": "刚刚",
@@ -4056,7 +4056,7 @@ window.__ModuleLoader__.load({
 			"status.move.running": "Move to Running",
 			"status.move.done": "Move to Done",
 			"status.move.failed": "Move to Failed",
-			"exec.error.noWorkspace": "No workspace is available to run the task",
+			"exec.error.noWorkspace": "This card has no workspace pinned; choose one on the card before it can run",
 			"exec.error.promptRejected": "Prompt rejected",
 			"run.failed": "Run failed: {error}",
 			"time.justNow": "just now",
@@ -9748,6 +9748,29 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 			})] });
 		}
 		//#endregion
+		//#region src/core/workspace-target.ts
+		/**
+		* The failure text the Host records when a card names no workspace and the
+		* deployment has none to resolve it to: the run is refused before any session
+		* exists instead of letting `session.create` fall back to the Host process
+		* working directory (the desktop app's profile directory), which is never the
+		* project the user meant.
+		*
+		* A finished sentence rather than a code: the ledger stores it as the
+		* execution's failure text, which the agent tools serve to a model and which
+		* any client prints verbatim. It names the fix, not the mechanism.
+		*/
+		const MISSING_WORKSPACE_REASON = "this card pins no workspace; choose a workspace on the card before running";
+		/**
+		* Whether a recorded failure text is the missing-workspace refusal, which the
+		* browser half renders in the reader's own language.
+		* @param reason - the execution's recorded failure text.
+		* @returns true when that run was refused for naming no workspace.
+		*/
+		function isMissingWorkspaceReason(reason) {
+			return reason === MISSING_WORKSPACE_REASON;
+		}
+		//#endregion
 		//#region src/client/board/VerificationReport.tsx
 		/**
 		* One execution's goal-acceptance report.
@@ -10126,7 +10149,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 						execution.verification !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(VerificationReport, { verification: execution.verification }),
 						execution.error !== void 0 && execution.error !== "" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 							className: board_module_css_default.executionError,
-							children: execution.error
+							children: isMissingWorkspaceReason(execution.error) ? t("exec.error.noWorkspace") : execution.error
 						})
 					]
 				})]
@@ -14388,7 +14411,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 		/** The building package's version, when the bundle carries it. */
 		function bakedVersion() {
 			try {
-				return "0.4.8-dsh.20261021.1";
+				return "0.4.8-dsh.20261021.2";
 			} catch {
 				return;
 			}

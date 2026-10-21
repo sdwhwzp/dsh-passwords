@@ -36,7 +36,7 @@ async function fixture(t: TestContext, timer?: HostTimerFace, seed?: (directory:
     accessRevoked: false,
     sessionOwner: undefined as number | undefined,
     settings: undefined as Record<string, unknown> | undefined,
-    workspaces: undefined as Array<{ id: string; updatedAt: string; sessionIds: string[]; path: string }> | undefined,
+    workspaces: (timer ? [2, 3].map(id => ({ id: `workspace-${id}`, path: `/account/${id}`, updatedAt: `2026-10-0${id}T00:00:00Z`, sessionIds: [`author-${id}`] })) : undefined) as Array<{ id: string; updatedAt: string; sessionIds: string[]; path: string }> | undefined,
     hourly_token_limit: null as number | null,
     daily_minutes_limit: null as number | null,
     monthly_budget_micros: null as number | null,
@@ -806,4 +806,34 @@ test('workspace inheritance and tag changes stay within each signed account ledg
   const options = await (await fetch(f.origin + '/api/task-board/verification', { headers: f.headers(2) })).json();
   assert.equal(options.settings.enabled, false);
   assert.deepEqual(options.catalog.groups.map((group: { models: Array<{ id: string }> }) => group.models.map(model => model.id)), [['model-2']]);
+});
+
+
+test('an account without a readable workspace cannot start a task in an ambient directory', async t => {
+  for (const available of ['none', 'foreign'] as const) await t.test(available, async t => {
+    const f = await fixture(t, boardTimers().timer);
+    f.state.workspaces = available === 'none' ? [] : [{ id: 'workspace-3', path: '/account/3', updatedAt: '2026-10-21T00:00:00Z', sessionIds: ['author-3'] }];
+    for (const action of [
+      { kind: 'create', id: 'no-workspace', input: { title: 'Mine', description: '', prompt: 'Run my task' } },
+      { kind: 'run', taskId: 'no-workspace' },
+    ]) {
+      const response = await fetch(f.origin + '/api/task-board/action', {
+        method: 'POST', headers: f.headers(2), body: JSON.stringify({ requestId: randomUUID(), action }),
+      });
+      assert.equal(response.status, 200, await response.clone().text());
+      await response.body?.cancel();
+    }
+    const deadline = performance.now() + 3_000;
+    for (;;) {
+      const response = await fetch(f.origin + '/api/task-board/state', { headers: f.headers(2) });
+      const board = await response.json();
+      const execution = board.tasks[0].executions[0];
+      if (execution?.result === 'failed') {
+        assert.match(JSON.stringify(execution), /this card pins no workspace/);
+        break;
+      }
+      assert.ok(performance.now() < deadline, 'missing workspace was not rejected');
+    }
+    assert.deepEqual(f.taskCalls, []);
+  });
 });

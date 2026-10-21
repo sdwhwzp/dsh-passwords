@@ -6,7 +6,9 @@ description: Tenant task boards require Harness rc.2, an explicit browser regist
 
 ## Change
 
-The gateway requires Harness `>=0.2.1-rc.2 <0.2.2-0` for native Peer APIs. The account task-board Host uses schema 6 and the matching `@linxin666/dsh-client-ui-task-board@0.4.8-dsh.20261021.1` client. Goal runs require both the administrator setting and each card's explicit opt-in; tasks without that field execute one plain turn.
+The gateway requires Harness `>=0.2.1-rc.2 <0.2.2-0` for native Peer APIs. The account task-board Host uses schema 6 and the matching `@linxin666/dsh-client-ui-task-board@0.4.8-dsh.20261021.2` client. Goal runs require both the administrator setting and each card's explicit opt-in; tasks without that field execute one plain turn.
+
+Creating a task session requires a pinned or recently used workspace visible to the account. A deployment with no such workspace rejects the run instead of using the Host process directory. Register an account-owned workspace or choose a permitted workspace on the card before retrying. The new Agent Teams row stays disabled; its shared Host teams are available only to administrators if explicitly enabled.
 
 ## Migration
 
