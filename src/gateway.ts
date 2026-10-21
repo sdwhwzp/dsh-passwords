@@ -8612,13 +8612,14 @@ export function createGatewayServer(
         !hasOnlyKeys(
           summary,
           ['sessionId', 'updatedAt', 'running', 'blank'],
-          ['parentSessionId', 'origin', 'cwd', 'projections', 'agentAvailable'],
+          ['parentSessionId', 'origin', 'cwd', 'projections', 'agentAvailable', 'formatStatus'],
         ) ||
         typeof summary.sessionId !== 'string' || summary.sessionId.length === 0 ||
         typeof summary.updatedAt !== 'number' || !Number.isFinite(summary.updatedAt) ||
         typeof summary.running !== 'boolean' ||
         typeof summary.blank !== 'boolean' ||
         (Object.hasOwn(summary, 'agentAvailable') && typeof summary.agentAvailable !== 'boolean') ||
+        (Object.hasOwn(summary, 'formatStatus') && summary.formatStatus !== 'current' && summary.formatStatus !== 'migration-required') ||
         (Object.hasOwn(summary, 'parentSessionId') && (
           typeof summary.parentSessionId !== 'string' || summary.parentSessionId.length === 0
         )) ||

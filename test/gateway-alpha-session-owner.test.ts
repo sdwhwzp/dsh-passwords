@@ -131,6 +131,7 @@ test('Alpha.4 session/page adopts only complete oldest-prefix ownership evidence
     running: false,
     blank: false,
     cwd: sessionCwd,
+    formatStatus: sessionId === INCOMPLETE_SESSION ? 'migration-required' : 'current',
   }));
   sessionSummaries.push({
     sessionId: SUBAGENT_SESSION,
@@ -428,6 +429,17 @@ test('Alpha.4 session/page adopts only complete oldest-prefix ownership evidence
     assert.equal(httpPaths.filter((requestPath) => requestPath === '/api/session.history').length, 0);
     assert.deepEqual(openedRemoteEndpoints, ['workspace/follow']);
     assert.equal(openedRemoteEndpoints.includes('session/follow'), false);
+    // An explicit new identity forces a fresh roster scan even after bootstrap.
+    sessionSummaries[0]!.formatStatus = 'unsupported';
+    const malformed = await fetch(`http://127.0.0.1:${String(gatewayPort)}/api/session/create`, {
+      method: 'POST',
+      headers: { cookie: `dsh_gateway_token=${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'client-request', rpcId: 'invalid-format-status', method: 'session/create',
+        payload: { args: { request: { sessionId: 'new-explicit-identity', cwd: sessionCwd, agentPreset: 'code' } } } }),
+    });
+    assert.equal(malformed.status, 502);
+    assert.equal(db.getSessionOwner('new-explicit-identity'), null);
+
   } finally {
     for (const client of upstreamWebSockets.clients) client.terminate();
     upstreamWebSockets.close();

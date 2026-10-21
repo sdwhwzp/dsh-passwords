@@ -761,3 +761,5 @@ This upgrade requires Harness `>=0.2.1-rc.2 <0.2.2-0` and the exact task-board c
 Restricted accounts require private sandbox confirmation before prompts run; policy changes during that wait reject the request. Newly granted owned Sessions also require confirmation; failure revokes the grant and closes stale subscriptions. Directory creation and workspace registration recheck current permissions, private roots and ownership when the response arrives and record audit results with sensitive path summaries redacted. Optional loading timelines measure history parsing, filtering, encoding and the first Remote item without recording conversation content or credentials.
 
 The shared Host Agent Teams routes (`/dsh-agents/api/*`) are administrator-only. Endpoint registration or a dynamic manifest cannot grant them to ordinary accounts. The new family row is disabled by default and upgrades do not activate it.
+
+The ownership scan accepts the Host format states `current` and `migration-required`, while validating identity fields and rejecting unknown fields. Tenant lists and historical ownership remain isolated.
