@@ -1,7 +1,7 @@
 {
   "name": "dsh-passwords",
-  "version": "2.7.8-dsh.20261021.3",
-  "description": "dsh-passwords: a server-grade gateway that turns DeepSeek Harness into a multi-tenant platform — remote access + automatic HTTPS, per-subuser permissions & quotas, sandbox enforcement, first-run setup, SQLite/MySQL auth with at-rest encryption, rate-limit and audit log (bilingual zh/en UI)",
+  "version": "2.7.8-dsh.20261021.4",
+  "description": "dsh-passwords: a server-grade gateway that turns DeepSeek Harness into a multi-tenant platform \u2014 remote access + automatic HTTPS, per-subuser permissions & quotas, sandbox enforcement, first-run setup, SQLite/MySQL auth with at-rest encryption, rate-limit and audit log (bilingual zh/en UI)",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -83,7 +83,7 @@
     "build:client": "node scripts/build-client.mjs",
     "typecheck:client": "tsc -p tsconfig.client.json --noEmit",
     "build:local-workspace:bundle": "node scripts/build-local-workspace.mjs",
-    "build:windows-assistant": "npm run build:local-workspace:bundle && pkg dist/local-workspace-standalone.cjs --targets node22-win-x64 --output \"release/山东梯智物联AI本机助手.exe\" --compress Brotli --no-bytecode --public-packages \"*\" --public",
+    "build:windows-assistant": "npm run build:local-workspace:bundle && pkg dist/local-workspace-standalone.cjs --targets node22-win-x64 --output \"release/\u5c71\u4e1c\u68af\u667a\u7269\u8054AI\u672c\u673a\u52a9\u624b.exe\" --compress Brotli --no-bytecode --public-packages \"*\" --public",
     "pretest": "npm run build",
     "test": "node --import tsx --test \"test/**/*.test.ts\"",
     "prepack": "node scripts/clean-dist.mjs && npm run build",
@@ -125,7 +125,7 @@
     "@deepseek-ai/dsh-tools": ">=0.2.1-rc.2 <0.2.2-0",
     "@deepseek-ai/dsh-typert-protocol": ">=0.2.1-rc.2 <0.2.2-0",
     "@deepseek-ai/dsh-workspace": ">=0.2.1-rc.2 <0.2.2-0",
-    "@linxin666/dsh-client-ui-task-board": "0.4.8-dsh.20261021.2"
+    "@linxin666/dsh-client-ui-task-board": "0.4.8-dsh.20261021.3"
   },
   "overrides": {
     "qs": "^6.16.0"
