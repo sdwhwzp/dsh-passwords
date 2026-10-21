@@ -442,7 +442,7 @@ test('terminal：alpha.2 客户端会调用 list/environment/shells/close，网�
 
 // ── alpha.2 官方命名空间清理：清单固定 / 精确路由 / 遗留兼容 / 硬拒单端点 ──
 
-test('OFFICIAL_API_NAMESPACES：alpha.2/rc.2 实测清单精确固定（新增必须显式改测试与兼容性矩阵）', () => {
+test('OFFICIAL_API_NAMESPACES：alpha.1 实测清单精确固定（新增必须显式改测试与兼容性矩阵）', () => {
   assert.deepEqual([...OFFICIAL_API_NAMESPACES].sort(), [
     '$events',
     'account',
@@ -467,6 +467,7 @@ test('OFFICIAL_API_NAMESPACES：alpha.2/rc.2 实测清单精确固定（新增�
     'settings',
     'skills',
     'subagents',
+    'userQuestions',
     'workspace',
     'workspaceFiles',
   ]);
@@ -547,6 +548,12 @@ test('遗留兼容：respond / events / host 目录 / git 取数据只按精确�
   // 未列入精确端点的遗留方法可由主用户显式登记（登记是唯一放行通道）
   const generic = parseEndpointAllowlist('/api/*', 'TEST');
   assert.equal(classifySubuserPath('/api/git.push', { endpointRules: generic, transport: 'http' }), 'ssh');
+});
+
+test('session/initializeDefaultModel：宿主全局模型初始化对子用户硬拒绝', () => {
+  assert.equal(SUBUSER_BLOCKED_API_ENDPOINTS.has('session/initializeDefaultModel'), true);
+  assert.equal(isSubuserBlockedApiPath('/api/session/initializeDefaultModel'), true);
+  assert.equal(isSubuserBlockedApiPath('/api/session.initializeDefaultModel'), true);
 });
 
 test('directoryPicker/pick：宿主原生选择器对子用户硬拒绝，list/createDirectory 保留官方', () => {
@@ -836,6 +843,26 @@ test('sessionQueryTarget：严格取会话身份与坐标（fail-closed）', () 
     '非法坐标记为 null，不编造 0',
   );
   assert.equal(sessionQueryTarget(null), null);
+});
+
+test('SESSION_SCOPED_RE 匹配 userQuestions/answer 的点号与斜杠写法', () => {
+  assert.equal(SESSION_SCOPED_RE.test('/api/userQuestions/answer'), true);
+  assert.equal(SESSION_SCOPED_RE.test('/api/userQuestions.answer'), true);
+  assert.equal(SESSION_SCOPED_RE.test('/api/userQuestions/attachWait'), false);
+});
+
+test('collectAuthorizedSessionIds 从 userQuestions/answer 提取 agentId', () => {
+  const frame = {
+    type: 'client-request',
+    method: 'userQuestions/answer',
+    payload: { args: { agentId: 's1', callId: 'c', answer: {} } },
+  };
+  assert.deepEqual(collectAuthorizedSessionIds(frame), new Set(['s1']));
+  // 缺 agentId 时不收集任何会话身份（空集合），调用方据此 fail-closed 拒绝
+  assert.deepEqual(
+    collectAuthorizedSessionIds({ ...frame, payload: { args: { callId: 'c' } } }),
+    new Set(),
+  );
 });
 
 test('collectAuthorizedSessionIds：workspaceFileScopeId 必须作为会话身份参与归属校验', () => {

@@ -16,6 +16,29 @@ export type TaskStatus = 'backlog' | 'todo' | 'running' | 'done' | 'failed'
 export type ExecutionOutcome = 'succeeded' | 'failed' | 'cancelled'
 
 /**
+ * What one execution left behind: the text of the run's last assistant message
+ * and the session event it was read from.
+ *
+ * The board records a verdict per execution but no output, so a parent card
+ * could see that a subtask succeeded without seeing what it produced. Card
+ * content cannot answer that (it is the plan and freezes at the first
+ * execution), so the closing text rides the execution record instead.
+ */
+export interface ExecutionSummary {
+  /** Last assistant message text of the run, bounded by {@link EXECUTION_SUMMARY_LIMIT}. */
+  text: string
+  /** Seq of the session event that text came from; absent text has no seq either. */
+  seq: number
+}
+
+/**
+ * Upper bound of one recorded summary, in characters. The ledger stores a
+ * conclusion, not a transcript: a reader that needs the whole message follows
+ * {@link ExecutionSummary.seq} into the session history.
+ */
+export const EXECUTION_SUMMARY_LIMIT = 4000
+
+/**
  * One real execution attempt: the run's own id, the dsh session that ran it
  * (filled once the session is created), and the settled outcome once the
  * session's turn ended.
@@ -73,6 +96,16 @@ export interface ExecutionRecord {
   /** Human failure text that arrived with {@link ownResult}. */
   ownError?: string
   /**
+   * What this run left behind: the text of its last assistant message, taken
+   * when the settlement read the session and recorded with the verdict.
+   *
+   * Absent — never an empty string — when the session could not be read or
+   * carried no assistant prose, so "recorded nothing" stays distinguishable
+   * from "produced nothing". Settling never fails over it: a summary is
+   * informational, and every field above is what the board decides with.
+   */
+  summary?: ExecutionSummary
+  /**
    * Goal acceptance state of this execution (task-board goal verification).
    * Fixed when the execution starts and never rewritten from later settings:
    * the contract is frozen here, the attempts accrue here, and the settlement
@@ -104,16 +137,73 @@ export function retainRecentExecutions(executions: readonly ExecutionRecord[]): 
 }
 
 /**
+ * How a rule produces its triggers: a recurring cron rule, or one single
+ * planned instant. The distinction is stored rather than inferred so a
+ * one-shot is never represented as a date-restricted cron expression.
+ */
+export type ScheduleMode = 'cron' | 'once'
+
+/**
+ * Why a due occurrence produced no run, or why a rule stopped on its own.
+ *
+ * These are stable codes, not display text: the board renders them through its
+ * locale dictionary, so the ledger never carries a translated string.
+ */
+export type ScheduleStopReason =
+  /** The single planned instant produced its run. */
+  | 'fired'
+  /** The recurring rule reached its run budget. */
+  | 'limit'
+  /** The plan has no reachable instant any more (an impossible cron). */
+  | 'no-target'
+  /** The instant passed while the board was not running through it. */
+  | 'missed'
+  /** The task already had an open execution, so this occurrence was skipped. */
+  | 'busy'
+  /** An above-default permission was still unconfirmed, so this occurrence was skipped. */
+  | 'permission'
+  /**
+   * A scheduled launch failed before any session existed, so the occurrence
+   * created no execution and its run was refunded rather than spent.
+   */
+  | 'launch-failed'
+
+/** Every stop reason this build understands; the repair and wire gates share it. */
+export const SCHEDULE_STOP_REASONS: readonly ScheduleStopReason[] = [
+  'fired', 'limit', 'no-target', 'missed', 'busy', 'permission', 'launch-failed',
+]
+
+/**
  * A scheduled-run rule attached to a task. The Host scheduler triggers the
  * task when `nextRunAt` is due and persists the rule in the Host ledger.
+ *
+ * A rule is either `cron` (the historical shape: a 5-field expression with an
+ * explicit IANA zone, optionally capped by `maxRuns`) or `once` (one planned
+ * instant, `at`, with an implicit budget of one run). Both modes count the
+ * executions the scheduler actually started in `runCount`; a rule that reaches
+ * its budget stops itself in the ledger (`enabled: false` + `endedReason`)
+ * instead of relying on the execution agent to disable it.
  */
 export interface ScheduleRule {
   /** Whether the schedule is armed. */
   enabled: boolean
-  /** 5-field cron expression: `分 时 日 月 周`. */
-  cron: string
   /**
-   * IANA zone the cron wall clock is read in (issue #1722). Absent means the
+   * Which kind of plan this rule carries. A rule loaded from a ledger written
+   * before the field existed normalizes to `cron` (its `cron` is the plan).
+   */
+  mode: ScheduleMode
+  /**
+   * 5-field cron expression: `分 时 日 月 周`. Present on a `cron` rule and
+   * absent on a `once` rule.
+   */
+  cron?: string
+  /**
+   * The instant a `once` rule executes (ms epoch). Kept after the run so the
+   * detail view can still show the planned time once the rule has ended.
+   */
+  at?: number
+  /**
+   * IANA zone the wall clock is read in (issue #1722). Absent means the
    * Host process zone, which is what a rule written before zones were
    * persisted keeps using; the Host stamps its own zone at ledger migration so
    * a later `TZ` change cannot silently move an existing rule.
@@ -123,6 +213,62 @@ export interface ScheduleRule {
   nextRunAt: number | undefined
   /** Instant of the latest scheduled trigger (ms epoch). */
   lastTriggeredAt: number | undefined
+  /**
+   * Scheduled executions the Host has created under this rule. This is the
+   * run budget's counter: it counts executions that were successfully opened
+   * (whatever their later outcome), never completions, and a manual run never
+   * touches it. A skipped occurrence (busy / permission / missed / no target)
+   * creates no execution and therefore consumes nothing.
+   */
+  runCount: number
+  /**
+   * Maximum scheduled executions for a `cron` rule; absent means unlimited
+   * (the historical behavior). A `once` rule has an implicit budget of one and
+   * stores no `maxRuns`.
+   */
+  maxRuns?: number
+  /** Instant the rule stopped itself (ms epoch); absent while it may still fire. */
+  endedAt?: number
+  /** Why the rule stopped itself; present with `endedAt`. */
+  endedReason?: ScheduleStopReason
+  /** Instant of the latest occurrence that produced no run. */
+  skippedAt?: number
+  /** Why that occurrence produced no run; present with `skippedAt`. */
+  skippedReason?: ScheduleStopReason
+}
+
+/**
+ * The rule's total run budget: one for a one-shot, the stored cap for a
+ * recurring rule, and undefined when the rule is unlimited.
+ * @param rule - the schedule rule.
+ * @returns the budget, or undefined for an uncapped rule.
+ */
+export function scheduleRunBudget(rule: ScheduleRule): number | undefined {
+  if (rule.mode === 'once') return 1
+  return rule.maxRuns
+}
+
+/**
+ * Whether a rule has no runs left. The scheduler refuses to open another
+ * execution for an exhausted rule, which is what makes the budget terminal
+ * regardless of restarts or repeated timer fires.
+ * @param rule - the schedule rule.
+ * @returns true when the run budget is spent.
+ */
+export function scheduleExhausted(rule: ScheduleRule): boolean {
+  const budget = scheduleRunBudget(rule)
+  return budget !== undefined && rule.runCount >= budget
+}
+
+/**
+ * The instant a rule plans to fire next, for display, whatever its mode: the
+ * planned `at` of a one-shot, or the stored `nextRunAt` of a recurring rule.
+ * @param rule - the schedule rule.
+ * @returns the planned instant, or undefined when the rule carries none.
+ */
+export function schedulePlannedAt(rule: ScheduleRule): number | undefined {
+  if (rule.mode === 'once') return rule.at
+  return rule.nextRunAt
 }
 
 /**
@@ -294,6 +440,15 @@ export interface TaskRecord {
    */
   model?: string
   /**
+   * Reasoning effort pinned for that execution route (an adapter-owned id such
+   * as "high"). Absent (or blank) means INHERIT: the session runs at the
+   * model's own default level, exactly as a card written before the field
+   * existed does. The launch sends the value only when the target model's
+   * adapter declares that exact id, so switching a card to a model without
+   * that level never pushes an invalid selection (see core/reasoning-effort.ts).
+   */
+  reasoningEffort?: string
+  /**
    * Whether later executions continue in the previous execution's session
    * (issue #1419) instead of minting a fresh conversation per run. Absent or
    * false keeps the historical one-session-per-execution behavior; the reuse
@@ -315,9 +470,11 @@ export interface TaskRecord {
    * armed with the composed execution prompt as its objective. The session then
    * keeps working automatic continuation rounds until the agent marks the goal
    * complete, and this board settles the execution on the goal's own end
-   * instead of at the first turn end. Absent means ON — the option is checked
-   * by default, so only an explicit `false` runs the task as a single plain
-   * turn. A session whose `/goal` command is refused still runs the prompt.
+   * instead of at the first turn end. Absent means OFF — the option is
+   * unchecked by default, so only an explicit `true` joins the goal run and
+   * every card that never touched it (including every card written before the
+   * field existed) runs one plain turn. A session whose `/goal` command is
+   * refused still runs the prompt.
    */
   goalRun?: boolean
   /**
@@ -420,13 +577,23 @@ export interface NewTaskInput {
   permission?: TaskPermission
   /** Optional pinned model for the execution session; absent = host default. */
   model?: string
+  /** Optional reasoning effort for that model route; empty/absent = the model's own default. */
+  reasoningEffort?: string
+  /**
+   * Opt in to the deployment's new-card defaults: a target this input leaves
+   * out is filled from the configured default (agent preset, permission, model
+   * and the level bound to that model). Absent means the create stores exactly
+   * what it was given, which is what the extension provider's own create path
+   * and the legacy import rely on.
+   */
+  applyCardDefaults?: boolean
   /** Reuse the previous execution's session for later runs (issue #1419). */
   reuseSession?: boolean
   /** Run the subtree as an Agent Team (Team Lead session plus one teammate per direct subtask). */
   teamRun?: boolean
   /**
-   * Start the execution with dsh's built-in `/goal`. Absent/true keeps the
-   * default (goal run); an explicit false requests a single plain turn.
+   * Start the execution with dsh's built-in `/goal`. Absent means the default
+   * (one plain turn); only an explicit true joins the goal run.
    */
   goalRun?: boolean
   /**
@@ -435,12 +602,22 @@ export interface NewTaskInput {
    */
   skipVerification?: boolean
   /**
-   * Optional scheduled-run rule requested at creation time (the new-task
-   * dialog): an enable flag, a 5-field cron expression, and the IANA zone its
-   * wall clock is read in (absent means the Host zone). The create use case
-   * arms it only when enabled and the expression is valid.
+   * Optional scheduling rule requested at creation time (the new-task
+   * dialog): an enable flag, the kind of plan (a recurring 5-field cron
+   * expression, or one planned instant for a one-shot), an optional run cap,
+   * and the IANA zone its wall clock is read in (absent means the Host zone).
+   * The create use case arms it only when enabled and the plan is valid.
    */
-  schedule?: { enabled: boolean; cron: string; timeZone?: string }
+  schedule?: {
+    enabled: boolean
+    mode?: ScheduleMode
+    cron?: string
+    /** Planned instant of a one-shot rule (ms epoch). */
+    at?: number
+    timeZone?: string
+    /** Run cap of a recurring rule; absent means unlimited. */
+    maxRuns?: number
+  }
   /**
    * Optional frozen context snapshot (goal/progress/next, sanitized by the
    * protocol gate) turning the new task into a continuation card.
@@ -574,12 +751,13 @@ export function createTask(input: NewTaskInput, now: number, id: string): TaskRe
     mode: normalizeTargetId(input.mode),
     permission: isTaskPermission(input.permission) ? input.permission : undefined,
     model: normalizeTargetId(input.model),
+    reasoningEffort: normalizeTargetId(input.reasoningEffort),
     reuseSession: input.reuseSession === true ? true : undefined,
     teamRun: input.teamRun === true ? true : undefined,
-    // Default ON: only an explicit false is stored, so a card that never
+    // Default OFF: only an explicit true is stored, so a card that never
     // touched the option (and every card written before the field existed)
-    // keeps starting its runs with /goal.
-    goalRun: input.goalRun === false ? false : undefined,
+    // keeps running one plain turn.
+    goalRun: input.goalRun === true ? true : undefined,
     // Default OFF: only an explicit true is stored, so a card that never
     // touched the option inherits the board-wide acceptance switch exactly as
     // every card written before the field existed does.
@@ -597,35 +775,38 @@ export function withStatus(task: TaskRecord, status: TaskStatus, now: number): T
   return { ...task, status, updatedAt: now }
 }
 
+/** Every field a schedule patch may carry; the rest of the rule is carried over. */
+const SCHEDULE_PATCH_KEYS = [
+  'enabled', 'mode', 'cron', 'at', 'timeZone', 'nextRunAt', 'lastTriggeredAt',
+  'runCount', 'maxRuns', 'endedAt', 'endedReason', 'skippedAt', 'skippedReason',
+] as const satisfies ReadonlyArray<keyof ScheduleRule>
+
 /**
  * Merge a schedule patch into a task's schedule rule (creating it when
  * absent), with a fresh updatedAt. Keys present in the patch overwrite the
  * current value — including explicit `undefined`, which clears a field (used
- * to disarm `nextRunAt`); absent keys keep their current value.
+ * to disarm `nextRunAt` or to drop an ended/skip record); absent keys keep
+ * their current value.
  */
 export function withSchedule(
   task: TaskRecord,
   patch: Partial<ScheduleRule>,
   now: number,
 ): TaskRecord {
-  const current = task.schedule
-  const schedule: ScheduleRule = {
-    enabled: current?.enabled ?? false,
-    cron: current?.cron ?? '',
-    ...(current?.timeZone === undefined ? {} : { timeZone: current.timeZone }),
-    nextRunAt: current?.nextRunAt,
-    lastTriggeredAt: current?.lastTriggeredAt,
+  const schedule: ScheduleRule = task.schedule === undefined
+    ? { enabled: false, mode: 'cron', nextRunAt: undefined, lastTriggeredAt: undefined, runCount: 0 }
+    : { ...task.schedule }
+  const fields = schedule as unknown as Record<string, unknown>
+  const next = patch as unknown as Record<string, unknown>
+  for (const key of SCHEDULE_PATCH_KEYS) {
+    if (!(key in patch)) continue
+    if (next[key] === undefined) delete fields[key]
+    else fields[key] = next[key]
   }
-  if ('enabled' in patch) schedule.enabled = patch.enabled ?? false
-  if ('cron' in patch) schedule.cron = patch.cron ?? ''
-  // An explicit `undefined` drops the stored zone (back to the Host zone);
-  // an absent key keeps it.
-  if ('timeZone' in patch) {
-    if (patch.timeZone === undefined) delete schedule.timeZone
-    else schedule.timeZone = patch.timeZone
-  }
-  if ('nextRunAt' in patch) schedule.nextRunAt = patch.nextRunAt
-  if ('lastTriggeredAt' in patch) schedule.lastTriggeredAt = patch.lastTriggeredAt
+  // The three non-optional fields can never be cleared into an unusable rule.
+  if (schedule.enabled !== true) schedule.enabled = false
+  if (schedule.mode !== 'once') schedule.mode = 'cron'
+  if (!Number.isFinite(schedule.runCount) || schedule.runCount < 0) schedule.runCount = 0
   return { ...task, updatedAt: now, schedule }
 }
 
@@ -695,12 +876,21 @@ export function settleExecution(
   outcome: ExecutionOutcome,
   now: number,
   error: string | undefined,
+  summary?: ExecutionSummary,
 ): TaskRecord {
   const index = task.executions.findIndex(execution => execution.id === executionId)
   if (index === -1) return task
   const execution = task.executions[index]
   if (execution.endedAt !== undefined) return task
-  const settled: ExecutionRecord = { ...execution, endedAt: now, result: outcome, error }
+  // A settle without one keeps whatever an earlier settle already recorded: a
+  // cascade parent's final fold has no session of its own to read.
+  const settled: ExecutionRecord = {
+    ...execution,
+    endedAt: now,
+    result: outcome,
+    error,
+    ...(summary === undefined ? {} : { summary }),
+  }
   const executions = [...task.executions]
   executions[index] = settled
   return { ...task, status: settledStatus(task, outcome), updatedAt: now, executions }

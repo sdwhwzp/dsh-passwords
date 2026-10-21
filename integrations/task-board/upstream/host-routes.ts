@@ -4,7 +4,7 @@ import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import type { TaskBoardHostService } from './host-service.ts'
 import type { TaskBoardPrincipal } from './host-accounts.ts'
 import { writeJson } from './http.ts'
-import { isLoopbackAddress, isLoopbackRequest } from './loopback.ts'
+import { isForwardedLoopbackRequest, isLoopbackAddress, isLoopbackRequest } from './loopback.ts'
 import { TaskParseError, TASK_PARSE_MAX_INPUT } from './host-ai.ts'
 import {
   parseActionEnvelope,
@@ -27,6 +27,15 @@ export interface TaskBoardRouteAccess {
   proxyToken?: string
   authenticate?: (req: IncomingMessage) => Promise<TaskBoardPrincipal | undefined>
   assertPrincipal?: (principal: TaskBoardPrincipal | undefined) => void
+  /**
+   * Whether the operator's own reverse proxy or tunnel may speak for the
+   * browser: a forwarded request that landed on this machine's loopback
+   * upstream then counts as trustable, still behind the browser same-origin
+   * marker. Read at each request (hence the function), so the settings switch
+   * binds the next request without re-registering the routes. Absent or false
+   * keeps the pre-existing fence exactly as it was (issue #1906).
+   */
+  trustForwardedProxy?: () => boolean
 }
 
 /**
@@ -42,6 +51,7 @@ export interface TaskBoardRouteOptions {
 interface ResolvedRouteAccess {
   trustedProxyHosts: ReadonlySet<string>
   proxyToken?: string
+  trustForwardedProxy: () => boolean
 }
 
 function parseAuthority(authority: string): { canonical: string; url: URL } | undefined {
@@ -73,7 +83,11 @@ function resolveAccess(access: TaskBoardRouteAccess): ResolvedRouteAccess {
   if (trustedProxyHosts.size > 0 && (access.proxyToken === undefined || access.proxyToken === '')) {
     throw new Error('task-board: authenticated proxy hosts require a non-empty proxy token')
   }
-  return { trustedProxyHosts, ...(access.proxyToken === undefined ? {} : { proxyToken: access.proxyToken }) }
+  return {
+    trustedProxyHosts,
+    trustForwardedProxy: access.trustForwardedProxy ?? ((): boolean => false),
+    ...(access.proxyToken === undefined ? {} : { proxyToken: access.proxyToken }),
+  }
 }
 
 /**
@@ -149,10 +163,25 @@ function matchesToken(candidate: string | string[] | undefined, expected: string
  * tripwire, the socket/Host/origin-equality checks carry the authority).
  * Authenticated proxies must be explicitly allowlisted and replace the
  * internal token header after their own authentication step.
+ *
+ * A third party's proxy cannot inject that token, so a deployment whose own
+ * tunnel dials the loopback upstream (issue #1918) can instead turn on
+ * trustForwardedProxy: a forwarded request that landed on this machine
+ * (loopback socket AND loopback Host) is then admitted on the same browser
+ * marker alone. The switch defaults off, so an unconfigured board keeps
+ * refusing every forwarded request (issue #1906).
  */
 export function isTrustedTaskBoardRequest(req: IncomingMessage, access: ResolvedRouteAccess): boolean {
   if (!browserSameOriginMarker(req)) return false
   if (isLoopbackRequest(req)) return true
+  // The tunnel makes the socket and the Host describe the proxy, so the
+  // origin-equality check of the direct fence has nothing to compare on this
+  // path; the explicit cross-site marker is then the one signal that separates
+  // the operator's own page from a third-party page posting through the tunnel,
+  // and it is refused instead of being read as a mere tripwire.
+  if (access.trustForwardedProxy()
+    && req.headers['sec-fetch-site'] !== 'cross-site'
+    && isForwardedLoopbackRequest(req)) return true
   if (!isLoopbackAddress(req.socket.remoteAddress)) return false
   const host = req.headers.host
   if (typeof host !== 'string') return false

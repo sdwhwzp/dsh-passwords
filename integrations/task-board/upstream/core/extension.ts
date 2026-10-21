@@ -12,6 +12,7 @@
  * @module dsh-task-board/core/extension
  */
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
+import type { TaskBoardAction, TaskBoardSnapshot, TaskBoardVerificationOptions } from '../protocol.ts'
 import type { ExecutionOutcome, TaskRecord, TaskStatus } from './tasks.ts'
 
 /** Cordis service name the host and browser halves each publish. */
@@ -338,6 +339,39 @@ export interface TaskBoardHostFace {
   registerExtension(extension: TaskBoardExtension): () => void
   /** Whether the board currently runs a given extension (board x extension). */
   isExtensionEnabled(extensionId: string): boolean
+  /**
+   * The whole ledger as the board builds it, tasks included.
+   *
+   * Part of the read/write face an IN-PROCESS consumer drives the board through
+   * (the remote bridge plugin forwarding it to a paired phone); a browser half
+   * reads the same document over the board's own HTTP surface. Forwards
+   * {@link ../host-service.ts | TaskBoardHostService.snapshot}, so nothing is
+   * interpreted between the ledger and the caller.
+   */
+  snapshot(): TaskBoardSnapshot
+  /**
+   * Apply one action through every gate the board already has — the running
+   * lock, the permission confirmation, the subtask depth, the schedule budget —
+   * and answer the resulting snapshot.
+   *
+   * The `requestId` is the ledger's own idempotency key, so a caller that
+   * retries one envelope does not apply it twice. Refusals are the ledger's:
+   * they throw with the Host's own text, which is why this face adds no code
+   * table of its own.
+   */
+  apply(requestId: string, action: TaskBoardAction, initiator?: string): TaskBoardSnapshot | Promise<TaskBoardSnapshot>
+  /**
+   * Follow the board's change notifications. The listener receives no payload —
+   * a consumer that needs the state reads {@link snapshot} — and the returned
+   * disposer unsubscribes.
+   */
+  subscribe(listener: () => void): () => void
+  /**
+   * The acceptance settings, the contract they resolve to right now, and the
+   * model catalog the choices come from. The same document the board's own
+   * `/verification` route serves.
+   */
+  verificationOptions(): Promise<TaskBoardVerificationOptions>
 }
 
 declare module '@deepseek-ai/cordis' {

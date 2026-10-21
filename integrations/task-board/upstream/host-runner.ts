@@ -1,11 +1,15 @@
-import type { TypertGateway } from '@deepseek-ai/dsh-api-gateway'
+import { Context } from '@deepseek-ai/cordis'
+import type { InvokeRemoteRequest, TypertGateway } from '@deepseek-ai/dsh-api-gateway'
 import type { SessionAddress, SessionHistoryRecord, SessionListValue, SessionPage, SessionSummary } from '@deepseek-ai/dsh-api-session-controller/types'
 import type { CommandResult } from '@deepseek-ai/dsh-commands/types'
 import type { Workspace } from '@deepseek-ai/dsh-workspace/types'
 import type { TaskBoardPrincipal } from './host-accounts.ts'
 import { teammateName } from './core/subtask.ts'
 import { mostRecentWorkspaceId } from './core/workspace-target.ts'
-import type { TaskPermission, TaskRecord } from './core/tasks.ts'
+import { declaredRoute, normalizeReasoningEffort, resolveReasoningEffort, type ReasoningRoute } from './core/reasoning-effort.ts'
+import type { ModelCatalogView } from './core/verification.ts'
+import type { ExecutionSummary, TaskPermission, TaskRecord } from './core/tasks.ts'
+import { executionSummaryOf } from './core/execution-summary.ts'
 
 /**
  * Host services needed to validate a task's workspace before creating a
@@ -15,12 +19,68 @@ export interface TaskBoardWorkspaceRegistry {
   list(): readonly Workspace[]
 }
 
+/**
+ * The peer every gateway request names: derived from the public
+ * `InvokeRemoteRequest` type so this package needs no direct dependency on
+ * `@deepseek-ai/dsh-typert-protocol` for the shape.
+ */
+export type GatewayPeer = InvokeRemoteRequest['peer']
+
 interface GatewayRequest {
   namespace: string
   method: string
   args: Record<string, unknown>
+  peer: GatewayPeer
   signal?: AbortSignal
   principal?: TaskBoardPrincipal
+}
+
+/**
+ * Mint the in-process owner peer this plugin's Host calls speak for.
+ *
+ * The 0.2.1 gateway made `peer` mandatory on every request, and the
+ * authorization layer reads only `peer.principal`: a principal of
+ * `{ kind: 'owner' }` is how host-local code states that the call IS the local
+ * user driving their own Host, so the gateway answers it directly instead of
+ * running a remote-access decision (only non-owner principals are judged).
+ * That is exactly the task board's position — it creates, renames, prompts,
+ * and reads sessions as the Host itself, which before 0.2.1 was the implicit
+ * privilege of every in-process caller. The board claims owner explicitly, and
+ * only ever inside its own Host process: no wire field can set a principal,
+ * and this plugin never forwards a browser-supplied one.
+ *
+ * `interactions` stays `'none'`: the board only invokes methods and opens the
+ * short `session/follow` stream. The gateway's interactions check gates
+ * exactly the forwarded-event endpoints (opening an event stream, answering a
+ * waterfall), which this caller never touches; an `'answer'` peer would
+ * additionally receive forwarded Host events, a capability the board neither
+ * needs nor wants.
+ *
+ * The peer's signal aborts once `ctx` disposes, so streams opened for it end
+ * with the plugin fiber, and `dispose()` is idempotent with racing calls
+ * sharing one completion. The id carries no credential — the protocol fixes
+ * `principal` as the only identity persisted in a session log — so a fresh
+ * unique id per mount is sufficient.
+ */
+export function createOwnerPeer(ctx: Context): GatewayPeer {
+  const controller = new AbortController()
+  let completion: Promise<void> | undefined
+  const peer: GatewayPeer = {
+    id: `task-board-owner:${crypto.randomUUID()}` as GatewayPeer['id'],
+    ctx,
+    principal: { kind: 'owner' },
+    signal: controller.signal,
+    interactions: 'none',
+    dispose() {
+      if (completion === undefined) {
+        controller.abort()
+        completion = Promise.resolve()
+      }
+      return completion
+    },
+  }
+  ctx.effect(() => () => { void peer.dispose() }, 'task-board owner peer')
+  return peer
 }
 
 interface SessionGateway {
@@ -122,9 +182,9 @@ export type ExecutionInspection =
    * forever.
    */
   | { outcome: 'pending'; unreadable?: true; reason?: string }
-  | { outcome: 'succeeded' }
-  | { outcome: 'failed'; error: string }
-  | { outcome: 'cancelled'; error: string }
+  | { outcome: 'succeeded'; summary?: ExecutionSummary }
+  | { outcome: 'failed'; error: string; summary?: ExecutionSummary }
+  | { outcome: 'cancelled'; error: string; summary?: ExecutionSummary }
 
 /** A post-create launch failure that still identifies the session to the ledger. */
 export class SessionLaunchError extends Error {
@@ -171,12 +231,12 @@ export interface PromptContext {
   /** True when those members run as teammates inside this session (Team Lead). */
   team?: boolean
   /**
-   * Scheduled-run provenance: the instant the cron rule actually fired and the
-   * IANA zone its wall clock was read in. Present only for a cron-triggered
-   * run, so the model can resolve an unqualified date in the run's own terms
-   * instead of guessing from the Host clock (issue #1722).
+   * Scheduled-run provenance: the instant the rule actually fired, its kind,
+   * and the IANA zone its wall clock was read in. Present only for a
+   * timer-triggered run, so the model can resolve an unqualified date in the
+   * run's own terms instead of guessing from the Host clock (issue #1722).
    */
-  schedule?: { triggeredAt: number; timeZone: string; cron: string }
+  schedule?: { triggeredAt: number; timeZone: string; mode: 'cron' | 'once'; cron?: string }
 }
 
 /**
@@ -196,16 +256,20 @@ function peerPromptPreamble(context: PromptContext): string | undefined {
 }
 
 /**
- * The scheduled-run section: this execution was triggered by the card's cron
- * rule rather than by a person. It states the firing instant, the rule's zone,
- * and the rule text, so the run's own clock is unambiguous — the board's
+ * The scheduled-run section: this execution was triggered by the card's
+ * schedule rather than by a person. It states the firing instant, the rule's
+ * zone, and the rule text, so the run's own clock is unambiguous — the board's
  * scheduler fires on a wall clock in a specific IANA zone, which is not
- * necessarily the zone of whatever session the run lands in.
+ * necessarily the zone of whatever session the run lands in. A one-shot says
+ * so explicitly, so the run does not expect a recurrence.
  */
 function schedulePromptPreamble(context: PromptContext): string | undefined {
   const schedule = context.schedule
   if (schedule === undefined) return undefined
   const stamp = new Date(schedule.triggeredAt).toISOString()
+  if (schedule.mode === 'once') {
+    return `本次执行由任务看板的单次定时自动触发：计划时间 ${stamp}（UTC），时区 ${schedule.timeZone}。这是一次性计划，本次执行之后该卡片不会再自动执行。需要判断「今天」「现在」或计算时间窗口时，以该时区的触发时间为准。`
+  }
   return `本次执行由任务看板的定时规则自动触发：触发时间 ${stamp}（UTC），规则时区 ${schedule.timeZone}，cron 表达式 ${schedule.cron}。需要判断「今天」「现在」或计算时间窗口时，以该时区的触发时间为准。`
 }
 
@@ -321,10 +385,20 @@ function invokeWireArgs(namespace: string, method: string, request: Record<strin
 }
 
 export class HostExecutionRunner {
-  /** Newest scanned event sequence per session with no matching execution end. */
+  /**
+   * Newest event sequence per session whose COMPLETE history walk (reaching
+   * the execution boundary) found no matching execution end. A later walk may
+   * trust everything at or below it and examine only newer records.
+   */
   private readonly scanMemos = new Map<string, number>()
   private readonly unavailableAttempts: number
   private readonly unavailableBackoffMs: number
+  /**
+   * The peer every request speaks for. Production passes the peer bound to the
+   * plugin fiber; a bare runner (unit tests around fake gateways) gets one
+   * bound to a fresh root context instead.
+   */
+  private readonly ownerPeer: GatewayPeer
   private unsupportedSessionListWarned = false
   private principalRequiredWarned = false
 
@@ -334,20 +408,22 @@ export class HostExecutionRunner {
     private readonly workspaceRegistry?: TaskBoardWorkspaceRegistry,
     unavailableRetry?: { attempts?: number; backoffMs?: number },
     private readonly assertPrincipal?: (principal: TaskBoardPrincipal | undefined) => void,
+    ownerPeer?: GatewayPeer,
   ) {
     this.unavailableAttempts = unavailableRetry?.attempts ?? SERVICE_UNAVAILABLE_ATTEMPTS
     this.unavailableBackoffMs = unavailableRetry?.backoffMs ?? SERVICE_UNAVAILABLE_BACKOFF_MS
+    this.ownerPeer = ownerPeer ?? createOwnerPeer(new Context())
   }
 
   private invoke(namespace: string, method: string, request: Record<string, unknown>, principal?: TaskBoardPrincipal, signal?: AbortSignal): Promise<unknown> {
     this.assertPrincipal?.(principal)
-    return this.gateway.invoke({ namespace, method, args: invokeWireArgs(namespace, method, request), ...(principal === undefined ? {} : { principal }), ...(signal === undefined ? {} : { signal }) })
+    return this.gateway.invoke({ namespace, method, args: invokeWireArgs(namespace, method, request), peer: this.ownerPeer, ...(principal === undefined ? {} : { principal }), ...(signal === undefined ? {} : { signal }) })
   }
 
   private stream(namespace: string, method: string, request: Record<string, unknown>, principal?: TaskBoardPrincipal, signal?: AbortSignal): Promise<AsyncIterable<unknown>> {
     this.assertPrincipal?.(principal)
     if (!('stream' in this.gateway) || this.gateway.stream === undefined) throw new Error('gateway stream is unavailable')
-    return this.gateway.stream({ namespace, method, args: { request }, ...(principal === undefined ? {} : { principal }), ...(signal === undefined ? {} : { signal }) })
+    return this.gateway.stream({ namespace, method, args: { request }, peer: this.ownerPeer, ...(principal === undefined ? {} : { principal }), ...(signal === undefined ? {} : { signal }) })
   }
 
   /**
@@ -372,7 +448,33 @@ export class HostExecutionRunner {
    * @param options - optional session to continue in and its Host-verified account.
    * @returns the session id the execution runs in.
    */
-  async launch(task: TaskRecord, options: { reuseSessionId?: string; principal?: TaskBoardPrincipal; promptContext?: PromptContext; onSession?: (sessionId: string) => void; onGoalArmed?: (armed: boolean) => void } = {}): Promise<string> {
+  async launch(task: TaskRecord, options: {
+    reuseSessionId?: string
+    principal?: TaskBoardPrincipal
+    promptContext?: PromptContext
+    onSession?: (sessionId: string) => void
+    onGoalArmed?: (armed: boolean) => void
+    /**
+     * GLOBAL native /goal switch, resolved by the caller ONCE per execution and
+     * carried here so the decision is frozen for this launch.
+     *
+     * Frozen deliberately: a settings edit made while the run is in flight must
+     * not arm, disarm or otherwise change the goal/acceptance contract of a run
+     * already running. Absent means off — the default for every deployment that
+     * never touched the switch, including cards written before the option
+     * existed. A plain single turn is what an off switch produces; the task-level
+     * `goalRun` still applies on top of it (both must ASK for a goal).
+     */
+    goalEnabled?: boolean
+    /**
+     * The host model catalog, read ONCE per execution by the caller. The card's
+     * pinned reasoning effort is sent only when this catalog declares it for the
+     * route the execution runs at, so one snapshot decides both the acceptance
+     * contract and the effort this run freezes. Absent means "no capability
+     * evidence": an effort is then not sent at all.
+     */
+    catalog?: ModelCatalogView
+  } = {}): Promise<string> {
     const principal = options.principal
     this.assertPrincipal?.(principal)
     // A handover bundle overrides the legacy pin fields: the bundle is the
@@ -414,7 +516,7 @@ export class HostExecutionRunner {
         // at the gate without its binding.
         options.onSession?.(reused)
         await this.assertReusedPreset(reused, mode, principal)
-        await this.pinAndPrompt(reused, task, permission, principal, options.promptContext, options.onGoalArmed)
+        await this.pinAndPrompt(reused, task, permission, principal, options.promptContext, options.onGoalArmed, options.goalEnabled === true, options.catalog)
       } catch (error) {
         throw new SessionLaunchError(reused, error)
       }
@@ -428,7 +530,7 @@ export class HostExecutionRunner {
     options.onSession?.(sessionId)
     try {
       await this.invoke('session', 'rename', { sessionId, title: task.title }, principal)
-      await this.pinAndPrompt(sessionId, task, permission, principal, options.promptContext, options.onGoalArmed)
+      await this.pinAndPrompt(sessionId, task, permission, principal, options.promptContext, options.onGoalArmed, options.goalEnabled === true, options.catalog)
     } catch (error) {
       throw new SessionLaunchError(sessionId, error)
     }
@@ -464,9 +566,58 @@ export class HostExecutionRunner {
   }
 
   /**
+   * Split a `provider/model` pin. A pin without a provider keeps only the model
+   * id: the provider is the one the host catalog declares for it, resolved at
+   * launch because the session wire contract requires a provider.
+   */
+  private static pinnedRoute(model: string | undefined): ReasoningRoute | undefined {
+    const raw = model?.trim()
+    if (raw === undefined || raw === '') return undefined
+    const slash = raw.indexOf('/')
+    if (slash < 0) return { model: raw }
+    const provider = raw.slice(0, slash).trim()
+    const modelId = raw.slice(slash + 1).trim()
+    if (provider === '' || modelId === '') return undefined
+    return { provider, model: modelId }
+  }
+
+  /**
+   * The route a card that pins no model actually runs at: the session's own
+   * recorded selection (the durable fold the GUI reads; `next` is the pending
+   * user choice, `lastUsed` what the last request consumed), or — for a session
+   * that has selected none yet, which is exactly a session that would start at
+   * the deployment default — the host default from the catalog.
+   *
+   * A route that cannot be READ is undefined and the effort is not sent:
+   * falling back to the host default there would silently switch the model of a
+   * session this run only meant to continue.
+   */
+  private async sessionRoute(sessionId: ExecutionSessionId, catalog?: ModelCatalogView, principal?: TaskBoardPrincipal): Promise<ReasoningRoute | undefined> {
+    let selection: { provider?: unknown; model?: unknown } | null | undefined
+    try {
+      const projections = await this.invoke('session', 'projections', { sessionId }, principal) as
+        | { values?: { modelSelection?: { lastUsed?: { provider?: unknown; model?: unknown } | null; next?: { provider?: unknown; model?: unknown } | null } } }
+        | null
+      selection = projections?.values?.modelSelection?.next ?? projections?.values?.modelSelection?.lastUsed
+    } catch (error) {
+      console.warn('[dsh-task-board] session/projections failed while resolving the execution model route', error)
+      return undefined
+    }
+    if (typeof selection?.provider === 'string' && selection.provider !== ''
+      && typeof selection.model === 'string' && selection.model !== '') {
+      return { provider: selection.provider, model: selection.model }
+    }
+    return catalog?.default === undefined
+      ? undefined
+      : { provider: catalog.default.provider, model: catalog.default.model }
+  }
+
+  /**
    * Re-assert the pinned execution contract on a session and queue the task
    * prompt. Shared by the fresh-session and reuse paths so both apply exactly
-   * the same permission/model pins before the prompt.
+   * the same permission/model/effort pins before the prompt. A session that
+   * refuses a selection carrying a catalog-confirmed effort throws here, so the
+   * prompt is never queued behind a run at the wrong level.
    */
   private async pinAndPrompt(
     sessionId: ExecutionSessionId,
@@ -475,6 +626,8 @@ export class HostExecutionRunner {
     principal?: TaskBoardPrincipal,
     context: PromptContext = {},
     onGoalArmed?: (armed: boolean) => void,
+    goalEnabled = false,
+    catalog?: ModelCatalogView,
   ): Promise<void> {
     if (permission !== undefined) {
       if (this.commands === undefined) throw new Error('permission command dispatcher is unavailable')
@@ -483,19 +636,43 @@ export class HostExecutionRunner {
       if (command === undefined) throw new Error('permission command was not acknowledged')
       if (command.kind !== 'success') throw new Error(command.text ?? 'permission command failed')
     }
-    if (task.model !== undefined && task.model.trim() !== '') {
-      const rawModel = task.model.trim()
-      const slashIdx = rawModel.indexOf('/')
-      const provider = slashIdx >= 0 ? rawModel.slice(0, slashIdx).trim() : undefined
-      const modelId = slashIdx >= 0 ? rawModel.slice(slashIdx + 1).trim() : rawModel
+    // The effort is bound to the model route the execution runs at. A card that
+    // pins no model of its own runs at the session's route, so that route is
+    // resolved first — and only when there is an effort to place: a card that
+    // never chose one must not gain a model-selection call it did not have.
+    const requestedEffort = normalizeReasoningEffort(task.reasoningEffort)
+    const pinned = HostExecutionRunner.pinnedRoute(task.model)
+    const route = pinned ?? (requestedEffort === undefined ? undefined : await this.sessionRoute(sessionId, catalog, principal))
+    if (route !== undefined) {
+      const routeLabel = `${route.provider === undefined ? '' : route.provider + '/'}${route.model}`
+      const decision = resolveReasoningEffort(requestedEffort, catalog, route)
+      if (decision.dropped !== undefined) {
+        console.warn(`[dsh-task-board] model route ${routeLabel} does not declare reasoning effort "${decision.dropped}"; session ${sessionId} runs at the model default`)
+      }
+      // The catalog completes a bare model pin into the provider the session
+      // request must name; an undeclared pin keeps its own spelling exactly as
+      // before, minus an effort that could not be verified.
+      const declared = declaredRoute(catalog, route)
+      const provider = declared?.provider ?? route.provider
+      const modelId = declared?.model ?? route.model
       try {
         await this.invoke('session', 'selectModel', {
           sessionId,
-          ...(provider ? { provider } : {}),
+          ...(provider === undefined ? {} : { provider }),
           model: modelId,
+          ...(decision.effort === undefined ? {} : { reasoningEffort: decision.effort }),
         }, principal)
       } catch (modelError) {
-        console.warn(`[dsh-task-board] failed to select model "${task.model}" for session ${sessionId}, falling back to default:`, modelError)
+        // An effort the catalog CONFIRMED for this route is a contract, not a
+        // preference: if the session refuses the selection, the run fails here,
+        // before the prompt, rather than silently executing at the model default
+        // the user did not pick. A selection that carries no confirmed effort
+        // keeps the best-effort behavior: the card was asked to run, and losing
+        // the work over a model switch this run never promised is worse.
+        if (decision.effort !== undefined) {
+          throw new Error(`session ${sessionId} refused the model selection "${provider === undefined ? modelId : provider + '/' + modelId}" with reasoning effort "${decision.effort}": ` + (modelError instanceof Error ? modelError.message : String(modelError)))
+        }
+        console.warn(`[dsh-task-board] failed to select model "${provider === undefined ? modelId : provider + '/' + modelId}" for session ${sessionId}, falling back to default:`, modelError)
       }
     }
     await this.invoke('session', 'prompt', {
@@ -504,7 +681,7 @@ export class HostExecutionRunner {
       mode: 'queue' as const,
       content: [{ type: 'text' as const, text: promptText(task, context) }],
     }, principal)
-    const armed = await this.armGoal(sessionId, task, context, principal)
+    const armed = await this.armGoal(sessionId, task, context, goalEnabled, principal)
     onGoalArmed?.(armed)
   }
 
@@ -532,14 +709,25 @@ export class HostExecutionRunner {
    * dsh's goal-round driver keeps starting continuation rounds until the agent
    * marks it complete (see {@link goalVerdict} for how the run settles).
    *
-   * Opt-out: a task whose `goalRun` is an explicit false runs one plain turn.
+   * Two switches gate the arming, and BOTH must ask for it:
+   * - the GLOBAL native-/goal switch (`goalEnabled`, default OFF), frozen when
+   *   this execution started; and
+   * - the task's own `goalRun` (absent means off, only an explicit true opts
+   *   the card into a goal run).
+   *
    * A refusal (no command dispatcher, no `/goal` command in this cohort, an
-   * objective the command rejects) is reported and the run continues as that
-   * plain turn: the task was asked to run, and a missing goal mode must not
-   * lose the work.
+   * objective the command rejects) is reported and the run continues as a plain
+   * turn: the task was asked to run, and a missing goal mode must not lose the
+   * work.
+   * @param sessionId - the session to arm in.
+   * @param task - the task being run.
+   * @param context - the run's prompt context.
+   * @param goalEnabled - the GLOBAL switch, frozen for this execution.
+   * @returns whether `/goal` was really armed.
    */
-  private async armGoal(sessionId: ExecutionSessionId, task: TaskRecord, context: PromptContext, principal?: TaskBoardPrincipal): Promise<boolean> {
-    if (task.goalRun === false) return false
+  private async armGoal(sessionId: ExecutionSessionId, task: TaskRecord, context: PromptContext, goalEnabled: boolean, principal?: TaskBoardPrincipal): Promise<boolean> {
+    if (!goalEnabled) return false
+    if (task.goalRun !== true) return false
     if (this.commands === undefined) {
       console.warn('[dsh-task-board] no command dispatcher is available; task ' + task.id + ' runs without /goal')
       return false
@@ -710,10 +898,21 @@ export class HostExecutionRunner {
     }
     const openingEvents = opening.records.map(record => ({ event: recordEvent(record) }))
     const newestSeq = openingEvents.reduce<number | undefined>((newest, entry) => newest === undefined ? entry.event.seq : Math.max(newest, entry.event.seq), undefined)
-    if (newestSeq !== undefined && this.scanMemos.get(sessionId) === newestSeq) return { outcome: 'pending' }
+    const scannedThrough = this.scanMemos.get(sessionId)
+    if (newestSeq !== undefined && scannedThrough === newestSeq) return { outcome: 'pending' }
+    // The memo is not only "nothing changed": it is the seq up to which a
+    // COMPLETE walk already proved this execution has no completed turn. A
+    // session log is append-only, so records at or below it can never acquire
+    // one — this pass only has to examine what arrived after it. Without that,
+    // a working teammate (whose roster entry never stops reporting `running`,
+    // so every poll re-inspects it) re-read its whole history since the run
+    // started once per poll: a 1200-record history cost 12 page RPCs and 1223
+    // materialized records per session per poll, against 0 and 21 here.
+    const oldestOpeningSeq = openingEvents.reduce<number | undefined>((oldest, entry) => oldest === undefined ? entry.event.seq : Math.min(oldest, entry.event.seq), undefined)
+    const coveredThrough = scannedThrough !== undefined && oldestOpeningSeq !== undefined && oldestOpeningSeq <= scannedThrough
     const events: Array<{ event: { type: string; seq: number; time: number; data: unknown } }> = [...openingEvents]
     let beforeSeq: number | undefined
-    let reachedExecutionBoundary = !opening.hasMore
+    let reachedExecutionBoundary = !opening.hasMore || coveredThrough
     for (let page = 0; page < HISTORY_PAGE_LIMIT && !reachedExecutionBoundary; page += 1) {
       let history: SessionPage
       try {
@@ -730,11 +929,13 @@ export class HostExecutionRunner {
       const pageEntries = pageEvents(history)
       events.push(...pageEntries)
       const oldestTime = pageEntries.reduce<number | undefined>((oldest, entry) => oldest === undefined ? entry.event.time : Math.min(oldest, entry.event.time), undefined)
-      if (!history.hasMore || (oldestTime !== undefined && oldestTime <= startedAt)) {
+      const oldestSeq = pageEntries.reduce<number | undefined>((oldest, entry) => oldest === undefined ? entry.event.seq : Math.min(oldest, entry.event.seq), undefined)
+      if (!history.hasMore
+        || (oldestTime !== undefined && oldestTime <= startedAt)
+        || (scannedThrough !== undefined && oldestSeq !== undefined && oldestSeq <= scannedThrough)) {
         reachedExecutionBoundary = true
         break
       }
-      const oldestSeq = pageEntries.reduce<number | undefined>((oldest, entry) => oldest === undefined ? entry.event.seq : Math.min(oldest, entry.event.seq), undefined)
       if (oldestSeq === undefined || oldestSeq === beforeSeq) return { outcome: 'pending' }
       beforeSeq = oldestSeq
     }
@@ -749,13 +950,20 @@ export class HostExecutionRunner {
       return { outcome: 'pending' }
     }
     this.scanMemos.delete(sessionId)
+    // What the run left behind rides the verdict the caller settles with, for a
+    // success and a failure alike: the events are in hand here, and no later
+    // reader can recover them once the session is gone. A run with no assistant
+    // prose carries no field at all, so settling stays a decision about the
+    // verdict alone.
+    const closing = executionSummaryOf(events.map(entry => entry.event), startedAt)
+    const carried = closing === undefined ? {} : { summary: closing }
     const reason = nonCompletedTurnEnd(turnEnd.event.data)
-    if (reason === undefined) return await this.goalVerdict(sessionId, principal) ?? { outcome: 'succeeded' }
+    if (reason === undefined) return { ...(await this.goalVerdict(sessionId, principal) ?? { outcome: 'succeeded' as const }), ...carried }
     // `error` keeps its historical wording; every other non-completed reason
     // (aborted / blocked / max-tokens / interrupted) now reports instead of
     // silently counting as success.
     return reason === 'error'
-      ? { outcome: 'failed', error: 'agent turn ended with an error' }
-      : { outcome: 'failed', error: 'agent turn ended without completing: ' + reason }
+      ? { outcome: 'failed', error: 'agent turn ended with an error', ...carried }
+      : { outcome: 'failed', error: 'agent turn ended without completing: ' + reason, ...carried }
   }
 }

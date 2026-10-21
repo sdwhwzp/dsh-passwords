@@ -1,9 +1,14 @@
-/** Host inventory, batched title reads and bounded caching for owner permission controls. */
-
+/** Host inventory, title reads and fresh registry authorization. */
 export type AssignableWorkspace = {
   path: string;
   title: string;
   sessions: Array<{ id: string; title: string }>;
+};
+
+export type AssignableInventory = {
+  workspaces: AssignableWorkspace[];
+  assignableSessions: Set<string>;
+  retainedSessions: Set<string>;
 };
 
 export type AssignableWorkspaceRegistry = {
@@ -62,11 +67,16 @@ async function mapBounded<T>(items: readonly T[], limit: number, fn: (item: T) =
 const normalizeTitle = (value: string | undefined): string | undefined =>
   typeof value === 'string' && value !== '' ? value : undefined;
 
+type TitleSnapshotsResult = Awaited<ReturnType<NonNullable<AssignableSessionQuery['readTitleSnapshots']>>>;
+
+/** 批量读取是外部边界：只有真正的数组才消费，任何非数组返回都视为契约偏离并回退逐条。 */
+const isTitleSnapshots = (value: unknown): value is TitleSnapshotsResult => Array.isArray(value);
+
 /**
  * Batched title read: prefer a single readTitleSnapshots call (upstream-internal
- * concurrency), then fill in individually any ids it missed; if the method is absent
- * or the whole batch throws, fall back entirely to per-id readTitle, matching the
- * previous implementation.
+ * concurrency), then fill in individually any ids it missed; if the method is absent,
+ * returns a non-array, or the whole batch throws, fall back entirely to per-id readTitle,
+ * matching the previous implementation.
  */
 async function readAssignableTitles(
   sessionQuery: AssignableSessionQuery,
@@ -87,13 +97,17 @@ async function readAssignableTitles(
   };
   if (ids.length === 0) return { titles, missing };
   if (sessionQuery.readTitleSnapshots !== undefined) {
-    let results: Awaited<ReturnType<NonNullable<AssignableSessionQuery['readTitleSnapshots']>>> | undefined;
+    let results: unknown;
     try {
       results = await sessionQuery.readTitleSnapshots(ids);
-    } catch {
+    } catch (error) {
+      console.warn('[dsh-passwords] 批量标题读取失败，退回逐条读取:', error instanceof Error ? error.message : String(error));
       results = undefined;
     }
-    if (results !== undefined) {
+    if (results !== undefined && !isTitleSnapshots(results)) {
+      console.warn('[dsh-passwords] 批量标题返回非数组，退回逐条读取');
+    }
+    if (isTitleSnapshots(results)) {
       for (const result of results) {
         if (result === null || typeof result !== 'object') continue;
         const sessionId = typeof result.sessionId === 'string' ? result.sessionId : '';
@@ -207,67 +221,202 @@ export async function listAssignableWorkspaces(
   return output;
 }
 
+/** Registry-authoritative assignable resources for the gateway save path. */
+export type RegistryAssignableResources = {
+  folders: string[];
+  assignableSessions: string[];
+  retainedSessions: string[];
+};
+
 /**
- * Inventory TTL cache: the enumeration above reads the session corpus (measured at
- * 40-90s on large corpora), while /workspaces (UI dropdown) and
- * internal/assignable-resources (gateway save validation) are semantically identical
- * and both are read-heavy / write-rare. With MCP_DSH_PASSWORDS_INVENTORY_TTL_MS > 0,
- * hits are served straight from memory; 0 (the default) preserves upstream behavior —
- * no caching, recomputed on every call. What is cached is the assignable inventory,
- * not authorization data: authorization decisions still run on every request in
- * admin.ts, so up to 60s of directory staleness only delays granting a freshly created
- * session — it never relaxes an existing grant.
+ * Save-path authority: derive the assignable folder/session sets from the live DSH
+ * registry and archive list only. It deliberately reads no session log — no batched
+ * title observation and no surface/event probe — so a permission save never cold-reads
+ * the persisted corpus (measured at 40-90s on large corpora).
+ *
+ * The display inventory's initialization-only-slot filter is intentionally not applied
+ * here: it is a presentation rule that requires reading titles, and a submitted session
+ * id that the live registry lists and the archive does not is already authorized by the
+ * gateway's targeted membership check. Archived sessions stay in `retainedSessions` so
+ * existing grants keep their archived history, while new grants of them stay rejected
+ * because they are absent from `assignableSessions`.
  */
-export function createAssignableInventoryLoader(ttlMs: number): (
-  reg: AssignableWorkspaceRegistry | undefined,
-  sessions: AssignableSessions | undefined,
-  sessionTitle: AssignableSessionTitles | undefined,
-  sessionQuery: AssignableSessionQuery | undefined,
-) => Promise<AssignableWorkspace[]> {
+export async function listAssignableResources(
+  reg: AssignableWorkspaceRegistry,
+): Promise<RegistryAssignableResources> {
+  const folders: string[] = [];
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+  for (const workspace of reg.list()) {
+    if (await workspace.status() !== 'ok') continue;
+    folders.push(workspace.path);
+    for (const rawId of workspace.sessionIds) {
+      const id = String(rawId);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      candidates.push(id);
+    }
+  }
+  // 归档状态在枚举期间可能改变；在所有 await 完成后只取一次，令两个输出由同一线性化点派生。
+  const retainedSessions = [...new Set(reg.archivedSessionIds.map((id) => String(id)))];
+  const retained = new Set(retainedSessions);
+  return {
+    folders,
+    assignableSessions: candidates.filter((id) => !retained.has(id)),
+    retainedSessions,
+  };
+}
+
+/**
+ * Display inventory loader for /workspaces (the admin UI dropdown). The enumeration
+ * above reads the session corpus (measured at 40-90s on large corpora), so it is
+ * read-heavy and write-rare.
+ *
+ * The gateway save path does not use this loader: internal/assignable-resources derives
+ * its authority from the live registry via listAssignableResources and never reads
+ * session logs, so a save is neither served from this cache nor delayed by it.
+ *
+ * Two independent mechanisms:
+ *   · Single-flight is unconditional, including when MCP_DSH_PASSWORDS_INVENTORY_TTL_MS
+ *     is 0. Concurrent requests would otherwise each re-run the same corpus-wide
+ *     enumeration. Joining an in-flight call is observationally the same as having the
+ *     later request start after the earlier one resolved; a request arriving after
+ *     resolution still recomputes when TTL=0.
+ *   · Time-based caching is opt-in (> 0): hits within the TTL are served from memory.
+ *     0 (the default) therefore keeps "recompute on every request" semantics, minus the
+ *     concurrent duplicate work.
+ *
+ * What is cached is the display inventory, not authorization data: authorization
+ * decisions run against the live registry on every save, so up to 60s of staleness only
+ * delays showing a freshly created session in the dropdown — it never relaxes a grant.
+ */
+type AssignableInventoryLoader = {
+  (
+    reg: AssignableWorkspaceRegistry,
+    sessions: AssignableSessions | undefined,
+    sessionTitle: AssignableSessionTitles | undefined,
+    sessionQuery: AssignableSessionQuery | undefined,
+  ): Promise<AssignableWorkspace[]>;
+  refresh(
+    reg: AssignableWorkspaceRegistry,
+    sessions: AssignableSessions | undefined,
+    sessionTitle: AssignableSessionTitles | undefined,
+    sessionQuery: AssignableSessionQuery | undefined,
+  ): Promise<AssignableWorkspace[]>;
+};
+
+export function createAssignableInventoryLoader(ttlMs: number): AssignableInventoryLoader {
   let cached: { at: number; workspaces: AssignableWorkspace[] } | null = null;
   let pending: Promise<AssignableWorkspace[]> | null = null;
 
-  /** Publish one enumeration to the cache; concurrent callers share the same attempt. */
-  const startRefresh = (
+  const refresh = async (
     reg: AssignableWorkspaceRegistry,
     sessions: AssignableSessions | undefined,
     sessionTitle: AssignableSessionTitles | undefined,
     sessionQuery: AssignableSessionQuery | undefined,
   ): Promise<AssignableWorkspace[]> => {
     if (pending !== null) return pending;
-    const attempt = listAssignableWorkspaces(reg, sessions, sessionTitle, sessionQuery).then((workspaces) => {
-      cached = { at: Date.now(), workspaces };
+    const request = listAssignableWorkspaces(reg, sessions, sessionTitle, sessionQuery);
+    pending = request;
+    try {
+      const workspaces = await request;
+      if (ttlMs > 0) cached = { at: Date.now(), workspaces };
       return workspaces;
-    });
-    pending = attempt;
-    const release = (): void => {
-      if (pending === attempt) pending = null;
-    };
-    attempt.then(release, release);
-    return attempt;
+    } finally {
+      pending = null;
+    }
   };
 
-  return async (reg, sessions, sessionTitle, sessionQuery) => {
-    if (reg === undefined) throw new Error('workspace registry unavailable');
-    if (ttlMs <= 0) return listAssignableWorkspaces(reg, sessions, sessionTitle, sessionQuery);
-    if (cached !== null && Date.now() - cached.at < ttlMs) return cached.workspaces;
-
-    // Stale but present: answer from the snapshot immediately and revalidate in the
-    // background. A cold enumeration costs 40-90s on a large corpus, and while a caller
-    // waits on one the owner's permissions page renders as an empty list — so expiry must
-    // never be paid for by the request that happens to arrive after it. The next caller
-    // picks up the refreshed snapshot; a failed revalidation keeps the old one.
-    if (cached !== null) {
-      void startRefresh(reg, sessions, sessionTitle, sessionQuery).catch((error) => {
-        // Keep serving the stale snapshot — but say so. Without this line a persistently
-        // failing revalidation would age the cache forever with nothing in the logs.
-        console.warn('[dsh-passwords] inventory revalidation failed:', String(error));
+  const load = async (
+    reg: AssignableWorkspaceRegistry,
+    sessions: AssignableSessions | undefined,
+    sessionTitle: AssignableSessionTitles | undefined,
+    sessionQuery: AssignableSessionQuery | undefined,
+  ): Promise<AssignableWorkspace[]> => {
+    if (ttlMs > 0 && cached !== null && Date.now() - cached.at < ttlMs) return cached.workspaces;
+    if (ttlMs > 0 && cached !== null) {
+      void refresh(reg, sessions, sessionTitle, sessionQuery).catch((error: unknown) => {
+        console.warn(`[dsh-passwords] inventory background refresh failed: ${error instanceof Error ? error.message : String(error)}`);
       });
       return cached.workspaces;
     }
+    return refresh(reg, sessions, sessionTitle, sessionQuery);
+  };
+  return Object.assign(load, { refresh });
+}
 
-    // Cold: there is nothing to answer with yet, so this caller waits for the first pass.
-    return startRefresh(reg, sessions, sessionTitle, sessionQuery);
+/**
+ * Inventory TTL (ms) read from the gateway child's environment. `> 0` enables the
+ * time-based cache; anything else — absent, non-numeric, out of (0, 600_000] — disables
+ * that cache (0), so every request recomputes (concurrent requests are still coalesced by
+ * the loader's single-flight). Exported so tests can join the `.env` source to the value
+ * that actually reaches `createAssignableInventoryLoader`.
+ */
+export function resolveInventoryTtlMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(String(env.MCP_DSH_PASSWORDS_INVENTORY_TTL_MS ?? '0').trim());
+  return Number.isFinite(raw) && raw > 0 && raw <= 600_000 ? raw : 0;
+}
+
+/** 启动预热的有限重试预算：DSH 惰性暴露 registry，单次 0ms 尝试可能早于它就绪。 */
+export const PREWARM_MAX_ATTEMPTS = 6;
+export const PREWARM_RETRY_MS = 500;
+
+export type AssignableInventoryPrewarmOptions = {
+  /** registry 查找次数；每次未命中等待 delayMs 后再试。 */
+  attempts: number;
+  /** 两次 registry 查找之间的延迟。 */
+  delayMs: number;
+  /** 可注入的延迟实现，测试无需真实计时器。 */
+  wait?: (ms: number) => Promise<void>;
+  /** 观察刷新失败与预热耗尽，保留错误可观测性。 */
+  onError?: (error: unknown) => void;
+};
+
+/**
+ * 有界启动预热。DSH 惰性暴露 `workspaceRegistry`，一次性的 0ms 尝试可能在 registry
+ * 出现前运行并静默丢失预热；改为有限次轮询，registry 就绪后只刷新一次，且每个失败都
+ * 上报。返回取消函数以停止后续轮询（插件 dispose 时调用）。刷新失败只观察不重试：重算
+ * 由 loader 负责，预热只为让首个设置页请求命中热缓存。
+ */
+export function prewarmAssignableInventory(
+  getRegistry: () => AssignableWorkspaceRegistry | undefined,
+  refresh: (registry: AssignableWorkspaceRegistry) => Promise<unknown>,
+  options: AssignableInventoryPrewarmOptions,
+): () => void {
+  let cancelled = false;
+  let timer: NodeJS.Timeout | undefined;
+  const delay = async (ms: number): Promise<void> => {
+    if (options.wait !== undefined) {
+      await options.wait(ms);
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, ms);
+      timer.unref?.();
+    });
+  };
+  const run = async (): Promise<void> => {
+    for (let attempt = 0; attempt < options.attempts; attempt += 1) {
+      if (cancelled) return;
+      const registry = getRegistry();
+      if (registry !== undefined) {
+        try {
+          await refresh(registry);
+        } catch (error) {
+          options.onError?.(error);
+        }
+        return;
+      }
+      if (attempt + 1 < options.attempts) await delay(options.delayMs);
+    }
+    if (!cancelled) {
+      options.onError?.(new Error(`workspace registry unavailable after ${options.attempts} attempts`));
+    }
+  };
+  void run();
+  return () => {
+    cancelled = true;
+    if (timer !== undefined) clearTimeout(timer);
   };
 }
 

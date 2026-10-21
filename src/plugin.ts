@@ -31,8 +31,8 @@ import { registerTenantAgentShell } from './tenant-agent-shell.js';
 import { AuthService, AuthError, assertNoSqlInjection, type AuthedUser, type RequestMeta } from './auth.js';
 import { findDshRoot, patchStatus } from './patch.js';
 import { todayLocal } from './permissions.js';
-import { createAssignableInventoryLoader, runInventoryWarmup, type InventoryWarmupTarget, type AssignableWorkspaceRegistry, type AssignableSessions, type AssignableSessionTitles, type AssignableSessionQuery } from './assignable-workspaces.js';
-export { listAssignableWorkspaces, createAssignableInventoryLoader, runInventoryWarmup, isDefiniteMissingSession } from './assignable-workspaces.js';
+import { PREWARM_MAX_ATTEMPTS, PREWARM_RETRY_MS, createAssignableInventoryLoader, prewarmAssignableInventory, listAssignableResources, resolveInventoryTtlMs, runInventoryWarmup, type InventoryWarmupTarget, type AssignableWorkspaceRegistry, type AssignableSessions, type AssignableSessionTitles, type AssignableSessionQuery } from './assignable-workspaces.js';
+export { listAssignableWorkspaces, createAssignableInventoryLoader, prewarmAssignableInventory, listAssignableResources, resolveInventoryTtlMs, runInventoryWarmup, isDefiniteMissingSession } from './assignable-workspaces.js';
 import {
   DEVICE_APPROVAL_ERROR,
   LocalWorkspaceHub,
@@ -146,6 +146,9 @@ function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
         return;
       }
       chunks.push(chunk);
+    });
+    req.on('close', () => {
+      if (!tooLarge) reject(new Error('request aborted'));
     });
     req.on('end', () => {
       if (tooLarge) {
@@ -985,7 +988,7 @@ export function startGateway(
 export function apply(ctx: Context): void {
   let cfg: PlatformConfig;
   let explicitUpstream: string;
-  /** Assignable inventory TTL cache (ms); 0 = no caching (upstream default behavior) */
+  /** Assignable inventory TTL cache (ms); 0 = no time-based caching (single-flight still applies) */
   let inventoryTtlMs = 0;
   try {
     const installRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -993,14 +996,34 @@ export function apply(ctx: Context): void {
     const gatewayEnv = deploymentGatewayEnv(envFile, process.env);
     cfg = loadConfig({ env: gatewayEnv });
     explicitUpstream = gatewayEnv.MCP_GATEWAY_UPSTREAM?.trim() ?? '';
-    const rawTtl = Number(String(gatewayEnv.MCP_DSH_PASSWORDS_INVENTORY_TTL_MS ?? '0').trim());
-    inventoryTtlMs = Number.isFinite(rawTtl) && rawTtl > 0 && rawTtl <= 600_000 ? rawTtl : 0;
+    inventoryTtlMs = resolveInventoryTtlMs(gatewayEnv);
   } catch (error) {
     // 配置损坏/缺失：记录日志而不是静默返回（否则 dsh 侧无任何提示，排查困难）
     console.error('[dsh-passwords] 加载配置失败，插件未激活:', error);
     return;
   }
   const loadAssignableInventory = createAssignableInventoryLoader(inventoryTtlMs);
+  const workspaceRegistry = (): AssignableWorkspaceRegistry | undefined =>
+    ctx.get('workspaceRegistry') as unknown as AssignableWorkspaceRegistry | undefined;
+  // DSH 惰性暴露 registry；有界重试替代一次性的 0ms 尝试，避免 registry 未就绪时静默丢失预热。
+  const cancelAssignableInventoryPrewarm = inventoryTtlMs > 0
+    ? prewarmAssignableInventory(
+        workspaceRegistry,
+        (registry) => loadAssignableInventory.refresh(
+          registry,
+          ctx.get('sessions') as unknown as AssignableSessions | undefined,
+          ctx.get('sessionTitle') as unknown as AssignableSessionTitles | undefined,
+          ctx.get('sessionQuery') as unknown as AssignableSessionQuery | undefined,
+        ),
+        {
+          attempts: PREWARM_MAX_ATTEMPTS,
+          delayMs: PREWARM_RETRY_MS,
+          onError: (error: unknown) => {
+            console.warn(`[dsh-passwords] inventory prewarm failed: ${error instanceof Error ? error.message : String(error)}`);
+          },
+        },
+      )
+    : () => {};
 
   // 未配置 .env（SETUP_KEY 为空）时不初始化数据库，用户管理路由返回 503 提示
   const configured =
@@ -1747,6 +1770,26 @@ export function apply(ctx: Context): void {
     },
     {
       kind: 'exact',
+      path: '/api/dsh-passwords/agent-presets',
+      handler: async (req, res) => {
+        const caller = guard(req, res);
+        if (!caller) return;
+        if (!requireMethod(req, res, 'GET')) return;
+        if (caller.role !== 'admin') {
+          writeJson(res, 403, { ok: false, code: 'FORBIDDEN', error: '仅主用户可操作' });
+          return;
+        }
+        try {
+          const registry = ctx.get('agentPresets');
+          const presets = registry === undefined ? [] : await registry.list();
+          writeJson(res, 200, { ok: true, presets });
+        } catch (error) {
+          writeJson(res, 502, { ok: false, code: 'PRESETS_UNAVAILABLE', error: error instanceof Error ? error.message : 'Agent preset 暂不可用' });
+        }
+      },
+    },
+    {
+      kind: 'exact',
       path: '/api/dsh-passwords/workspaces',
       handler: async (req, res) => {
         const caller = guard(req, res);
@@ -1787,14 +1830,15 @@ export function apply(ctx: Context): void {
         try {
           const registry = ctx.get('workspaceRegistry');
           if (registry === undefined) throw new Error('workspace registry unavailable');
-          const sessions = ctx.get('sessions');
-          const sessionTitle = ctx.get('sessionTitle');
-          const sessionQuery = ctx.get('sessionQuery');
-          const workspaces = await loadAssignableInventory(registry, sessions, sessionTitle, sessionQuery);
+          // 保存路径的权威来自实时 registry/archive，不读会话日志、不经过展示缓存；
+          // 历史 grant 的保留判定在 admin 侧结合当前 DB 集合完成。
+          const { folders, assignableSessions, retainedSessions } = await listAssignableResources(registry);
           writeJson(res, 200, {
             ok: true,
-            folders: workspaces.map((workspace) => workspace.path),
-            sessions: workspaces.flatMap((workspace) => workspace.sessions.map((session) => session.id)),
+            folders,
+            sessions: assignableSessions,
+            assignableSessions,
+            retainedSessions,
           });
         } catch (error) {
           writeJson(res, 502, {
@@ -1849,50 +1893,11 @@ export function apply(ctx: Context): void {
     },
   ];
 
-  // Startup warmup: fill the inventory cache shortly after boot so the first admin who
-  // opens the permissions page is not the one paying for a cold 40-90s enumeration
-  // (typically right after an upgrade or restart). Only when caching is enabled, so
-  // deployments without MCP_DSH_PASSWORDS_INVENTORY_TTL_MS are unaffected. Bound to
-  // ctx.effect so the timer is cleared if the plugin is unloaded or re-applied.
-  if (inventoryTtlMs > 0) {
-    ctx.effect(() => {
-      let warmedUp = false;
-      const resolveWarmupTarget = (): InventoryWarmupTarget | null => {
-        try {
-          const registry = ctx.get('workspaceRegistry') as unknown as AssignableWorkspaceRegistry | undefined;
-          if (registry === undefined || registry === null) return null;
-          return {
-            reg: registry,
-            sessions: ctx.get('sessions') as unknown as AssignableSessions | undefined,
-            sessionTitle: ctx.get('sessionTitle') as unknown as AssignableSessionTitles | undefined,
-            sessionQuery: ctx.get('sessionQuery') as unknown as AssignableSessionQuery | undefined,
-          };
-        } catch (error) {
-          console.warn('[dsh-passwords] inventory warmup target unavailable:', String(error));
-          return null;
-        }
-      };
-      // 8 s covers the normal case; the 60 s pass covers a slow boot where the workspace
-      // registry is not registered yet. Once one of them populated the cache the other is a
-      // no-op, so a successful warmup costs exactly one enumeration.
-      const timers = [8_000, 60_000].map((delayMs) => {
-        const timer = setTimeout(() => {
-          if (warmedUp) return;
-          void runInventoryWarmup(loadAssignableInventory, resolveWarmupTarget).then((ok) => {
-            if (ok) warmedUp = true;
-          });
-        }, delayMs);
-        timer.unref();
-        return timer;
-      });
-      return () => timers.forEach((timer) => clearTimeout(timer));
-    }, 'dsh-passwords: inventory warmup');
-  }
-
   ctx.effect(
     () => {
       const disposers = routes.map((route) => ctx.webServer.register(route));
       return () => {
+        cancelAssignableInventoryPrewarm();
         for (const dispose of disposers) dispose();
       };
     },

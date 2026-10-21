@@ -17,7 +17,7 @@
   &nbsp;
   <a href="https://github.com/sdwhwzp/dsh-passwords/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/sdwhwzp/dsh-passwords/ci.yml?style=flat-square&label=CI" alt="CI"></a>
   &nbsp;
-  <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/DSH-0.2.1--alpha.1-4c6ef5?style=flat-square&labelColor=454a54" alt="DSH"></a>
+  <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/DSH-0.2.1--rc.2-4c6ef5?style=flat-square&labelColor=454a54" alt="DSH"></a>
   &nbsp;
   <img src="https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square" alt="License">
   &nbsp;
@@ -32,15 +32,19 @@
   <a href="https://github.com/imsai-sh/awesome-deepseek-harness-plugins"><img src="https://img.shields.io/badge/%E6%94%B6%E5%BD%95-1024%20%E6%8F%92%E4%BB%B6%E5%95%86%E5%BA%97-0ca678?style=flat-square" alt="1024 插件商店收录"></a>
 </p>
 
-dsh 的网页界面默认面向本机使用。服务器地址一旦暴露，拿到链接的人就可以进入，也会共用模型额度。dsh-passwords 放在 dsh 前面：先登录，再按账号应用工作区、会话、沙盒和用量限制。
+<p align="center">
+  <strong>让多人远程共用 DeepSeek Harness，按账号管理工作区、会话和用量</strong><br>
+  <em>账号登录 · 工作区与会话授权 · 用量配额 · 审计日志 · 中英双语</em>
+</p>
 
 纯本机使用 dsh 不需要安装它；需要远程访问、多人共用或管理子账号时再使用即可。
 
 本轮功能、使用入口与部署验收见 [2026-09-11 更新总结](docs/2026-09-11-changes-overview.md)。
+[适用场景](#适用场景) · [功能](#功能) · [快速开始](#快速开始) · [首次配置](#首次配置) · [卸载](#卸载) · [自动 HTTPS](#自动-https) · [部署拓扑](#部署拓扑) · [配置参考](#配置参考) · [常见问题](#常见问题) · [安全与隐私](#安全与隐私) · [参与贡献](#参与贡献)
 
 收录于 [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek-harness)（Infrastructure & Development）和 [Awesome DSH Plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)（Development & Runtime）。
 
-Harness 0.2.1-alpha.1 的账号网关支持工作区置顶会话列表，并严格校验置顶 ID；会话和工作区仍按登录账号隔离。
+Harness 0.2.1-rc.2 的账号网关支持工作区置顶会话列表，并严格校验置顶 ID；会话和工作区仍按登录账号隔离。
 
 上游 HTTP 连接池通过 `MCP_GATEWAY_UPSTREAM_IDLE_TIMEOUT_MS` 设置闲置连接保留时间（默认 5000 毫秒），并遵循 Host 的更短 Keep-Alive 提示。新建或复用的活动请求、SSE 不继承闲置截止；请求自身的超时仍有效。连接失败不会自动重放请求。
 
@@ -129,22 +133,32 @@ Android / iOS 原生 `dsh-mobile` 的多账号登录、账号切换及协议桥�
 
 ## 界面截图
 
+| 账号管理 | 权限与配额 |
+|:---:|:---:|
+| <img src="https://raw.githubusercontent.com/slywalker2006/dsh-passwords/main/docs/screenshots/card-front.png" width="480"> | <img src="https://raw.githubusercontent.com/slywalker2006/dsh-passwords/main/docs/screenshots/card-back.png" width="480"> |
+
+| dsh 主界面 · 登录后 | 聊天 / 留言 |
+|:---:|:---:|
+| <img src="https://raw.githubusercontent.com/slywalker2006/dsh-passwords/main/docs/screenshots/main-ui.png" width="480"> | <img src="https://raw.githubusercontent.com/slywalker2006/dsh-passwords/main/docs/screenshots/chat.png" width="480"> |
+
 | 登录页 · 浅色 | 登录页 · 深色 | 登录页 · English |
 |:---:|:---:|:---:|
-| <img src="docs/screenshots/white-login.png" width="360"> | <img src="docs/screenshots/black-login.png" width="360"> | <img src="docs/screenshots/white-login-en.png" width="360"> |
+| <img src="https://raw.githubusercontent.com/sdwhwzp/dsh-passwords/dev/docs/screenshots/white-login.png" width="360"> | <img src="https://raw.githubusercontent.com/sdwhwzp/dsh-passwords/dev/docs/screenshots/black-login.png" width="360"> | <img src="https://raw.githubusercontent.com/sdwhwzp/dsh-passwords/dev/docs/screenshots/white-login-en.png" width="360"> |
 
 | dsh 主界面（登录后） | 聊天 / 留言 | 设置页卡片 · 账号管理 |
 |:---:|:---:|:---:|
-| <img src="docs/screenshots/main-ui.png" width="360"> | <img src="docs/screenshots/chat.png" width="360"> | <img src="docs/screenshots/card-front.png" width="360"> |
+| <img src="https://raw.githubusercontent.com/sdwhwzp/dsh-passwords/dev/docs/screenshots/main-ui.png" width="360"> | <img src="https://raw.githubusercontent.com/sdwhwzp/dsh-passwords/dev/docs/screenshots/chat.png" width="360"> | <img src="https://raw.githubusercontent.com/sdwhwzp/dsh-passwords/dev/docs/screenshots/card-front.png" width="360"> |
 
 | | 设置页卡片 · 权限与配额 | |
 |:---:|:---:|:---:|
-| | <img src="docs/screenshots/card-back.png" width="360"> | |
+| | <img src="https://raw.githubusercontent.com/sdwhwzp/dsh-passwords/dev/docs/screenshots/card-back.png" width="360"> | |
 ## 快速开始
 
 ### 0. 前置条件（三样）
 
-宿主机安装需要 Node.js 22.19+ 或 24+、可正常运行的 dsh、git 与 pnpm（手动执行 `node scripts/register-plugin.mjs` 注册插件时需要；一键安装器会自动安装 pnpm）。兼容门禁只接受 DSH `0.2.1` patch 线，即 `>=0.2.1-alpha.1 <0.2.2-0`（alpha.1 起的预发布与稳定 0.2.1）；当前开发树与 bundled Docker 默认运行时锁定 `0.2.1-alpha.1`。已退役的 `0.1.x` / `0.2.0` 线、`0.2.1-alpha.0` 以及所有 `0.2.2+` 身份都会被拒绝。Docker 安装只需要 Docker Engine 或 Docker Desktop 和一个 DeepSeek API key。
+- **Docker**：需要 Docker Engine 或 Docker Desktop 和一个 DeepSeek API key；镜像内置 DSH，不需要先在宿主机安装 Node.js 或 dsh。
+- **宿主机**：运行环境需要 Node.js 22.19+（22.x）或 24+、可正常运行的 dsh、git 与 pnpm；一键安装器会检查依赖并按需安装，手动注册插件需要 pnpm。
+- **DSH 版本**：版本门禁接受 `>=0.2.1-rc.2 <0.2.2-0`，当前开发依赖与 Docker 默认运行时锁定 `0.2.1-rc.2`。通过版本门禁不等于范围内每个版本都已实测，详见[版本兼容](#版本兼容)。
 
 ### 1. 安装（按平台）
 
@@ -182,14 +196,16 @@ docker run -d \
   -p 127.0.0.1:3088:3088 \
   -v dsh-home:/data/dsh \
   -v dsh-passwords-state:/data/dsh-passwords \
-  skywalker237234/dsh-passwords:2.7.7
+  skywalker237234/dsh-passwords:2.7.8
 ```
 
-启动后浏览器打开 `http://127.0.0.1:3088`，用你自己设置的 `SETUP_KEY` 完成首次配置。若省略 `-e SETUP_KEY`，容器会随机生成密钥并写入卷内 `setup-key.txt`，用 `docker exec dsh-passwords cat /data/dsh-passwords/setup-key.txt` 读取后再完成首次配置（首次配置成功后该文件自动删除）。`-e SETUP_KEY` 会在首次初始化时作为初始 SETUP_KEY 写入卷内 `.env`，不会与随机值分叉，去掉该 env 重启也不会因此锁死（首次配置成功后 `.env` 中的 SETUP_KEY 会按既有加固流程自动轮换，此后登录使用你创建的账号密码，不再需要它）。
+Windows PowerShell 可使用同一条命令的一行形式：
 
-如需自定义端口、域名、SSH 端点或第三方端点登记等高级配置，可复制 `docker/.env.example` 为 `docker/.env` 并追加 `--env-file docker/.env`（Docker Compose 则可 `docker compose --env-file docker/.env -f docker/docker-compose.yml up -d`）；它是可选的进阶配置，不再是安装前置步骤。不要用仓库根目录的宿主机模板 `.env.example`：它会注入占位 `SETUP_KEY`（`change-me-…`）、`MCP_GATEWAY_PORT=443` 与空的 `MCP_GATEWAY_AUTO_TLS=`，覆盖镜像内置的 `3088` 端口和 `MCP_GATEWAY_AUTO_TLS=0`，导致容器不监听 `3088`、网关拒绝启动；其中相对的 `MCP_DB_PATH=./data/platform.db` 也会偏离容器默认的 `/data/dsh-passwords/platform.db`。
+```powershell
+docker run -d --name dsh-passwords --restart unless-stopped -e "DEEPSEEK_API_KEY=sk-你的key" -e "SETUP_KEY=自己设定的强随机串" -p 127.0.0.1:3088:3088 -v dsh-home:/data/dsh -v dsh-passwords-state:/data/dsh-passwords skywalker237234/dsh-passwords:2.7.8
+```
 
-Docker 部署至少需要 `DEEPSEEK_API_KEY`。`MCP_GATEWAY_PUBLIC_HOST` 建议填实际访问的域名。宿主端口只发布在回环地址 `127.0.0.1:3088`，容器内监听 `0.0.0.0:3088`；公网访问由 nginx 或 Caddy 终结 TLS 后转发。镜像内置 DSH `0.2.1-alpha.1`（DSH 0.2.1 patch 线当前锁定版本；该镜像尚未做运行验收）；初始化完成以 healthz/readyz 均返回 `ok:true` 为准。
+在**运行 Docker 的机器上**打开 `http://127.0.0.1:3088`，输入你设置的 `SETUP_KEY` 创建主用户，此后使用账号密码登录。这个地址只在 Docker 宿主机本机可访问；若容器运行在远程服务器上，请通过 SSH 端口转发访问，或配置 nginx / Caddy 的 HTTPS 反代。
 
 `scripts/profile-plugins.json` 是跨机器部署的版本化插件清单。运行 `dsh-passwords install` 会把清单中的 NPM/Git 来源、bundle 顺序、Git 构建授权和必要的 profile patch 幂等合并到 `~/.dsh/profiles/web`，然后统一执行 `pnpm install`。已有本地 `link:` 开发源和未纳入清单的自定义插件不会被覆盖或删除；只有链接实际指向清单声明的相邻源码时才构建其配套工作区，指向独立发布目录的链接不会误用相邻路径。清单明确标记的旧聚合包会自动迁移。
 
@@ -206,9 +222,17 @@ WeKnora 插件注册知识库列表、检索、文档读取和问答工具。未
 
 `dsh-shandong-tizhi-brand` 和 `dsh-nas-webdav` 也在清单中，但目前只有本机源码，没有可公开拉取的远程分支。新机器部署前分别设置 `DSH_PLUGIN_BRAND_SPEC` 和 `DSH_PLUGIN_NAS_SPEC` 为可访问的 NPM、Git 或 `link:` 来源；未设置时安装器会明确提示并跳过，其他插件继续安装。
 
-首次配置成功后 `setup-key.txt` 自动删除，`.env` 中的密钥自动固化并轮换。
+   | 部署方式 | 浏览器访问地址 |
+   |---|---|
+   | 宿主机自动 HTTPS | 启动日志打印的公网 HTTPS 地址，默认 `https://<公网IP>.sslip.io`，或你配置的域名 |
+   | Docker 本机试用 | Docker 宿主机上的 `http://127.0.0.1:3088` |
+   | nginx / Caddy 等反代 | 外层反代配置的 HTTPS 域名 |
+   | 显式 HTTP 模式 | 启动时选择的监听地址与端口；脚本默认 `http://127.0.0.1:8080` |
 
-Docker 用户一条命令启动后直接打开 `http://127.0.0.1:3088` 完成首次配置，公网访问再自行用 nginx 或 Caddy 把 80/443 反代到 `http://127.0.0.1:3088`；首次配置用的 SETUP_KEY 就是 `-e SETUP_KEY` 设置的值，省略时用 `docker exec dsh-passwords cat /data/dsh-passwords/setup-key.txt` 读取。
+3. 输入 `SETUP_KEY` 创建主用户，此后使用账号密码登录。
+4. 在设置页创建子账号、授予工作区与会话权限，并用子账号验证实际访问范围。
+
+首次配置成功后，标准流程会删除 `setup-key.txt` 并轮换 `.env` 中的 `SETUP_KEY`。会话、内部接口与数据库加密密钥按现有配置保留；自定义部署应确认 `.env` 可写，并将 `.env` 与数据库一并备份。
 
 ## 卸载
 
@@ -281,11 +305,13 @@ dsh 退出 → 密码门跟着停（不会留僵尸进程占端口）
 - 仅对已启动且未启用宿主浏览器认证的旧版 dsh：可用 `node dist/cli.js serve-gateway` 或 systemd 单独托管。新版 dsh 必须让插件通过内部 IPC 拉起网关；宿主不可达或要求认证时，独立启动都会明确拒绝继续。
 - 临时禁止自动拉起（调试用）：启动 dsh 时加环境变量 `DSH_PASSWORDS_NO_AUTOSTART=1`。
 
+Docker 内的“保命技能”不会自删容器。确需永久清除所有容器数据时，Compose 可执行 `docker compose down -v`；上面的 `docker run` 部署可先执行 `docker rm -f dsh-passwords`，再执行 `docker volume rm dsh-home dsh-passwords-state`。这些操作会删除数据卷，执行前请备份。
+
 ## 自动 HTTPS
 
-- 默认会探测服务器公网 IP，并为 `<IP>.sslip.io` 申请 90 天的 Let's Encrypt 证书；到期前 30 天自动续期，新证书无需重启即可生效
-- 有自己的域名时，在 `.env` 中设置 `MCP_GATEWAY_DOMAIN=你的域名`，并把域名 A 记录指向服务器
-- 首次签发失败时网关不会改用明文 HTTP。续期失败但旧证书仍有效时，会继续使用旧证书并重试
+此节适用于宿主机直接部署；Docker 默认使用 HTTP，由外层反代提供 HTTPS。
+
+默认探测公网 IP，使用 `<IP>.sslip.io` 域名向 Let's Encrypt 申请证书；有自己的域名时在 `.env` 设置 `MCP_GATEWAY_DOMAIN`。需要 DNS 正确解析、外部可访问 80/443，且这些端口未被其他服务占用。程序读取证书的实际到期时间，每天检查一次，在剩余有效期不超过 30 天时尝试续期并热加载。签发失败拒绝启动；续期失败时继续使用仍有效的旧证书并后台重试。
 
 | 错误码 | 含义 | 怎么办 |
 |---|---|---|
@@ -377,14 +403,29 @@ node scripts/start-http.mjs [端口]    # 默认 8080，会弹 y/N 确认
 | `MCP_DSH_RESTART_SERVICE` | `dsh-web` | 重载补丁后自动重启的 dsh systemd 服务名；显式留空不自动重启 |
 | `DSH_PASSWORDS_ENV_FILE` | 空 | Host 与网关共用的 `.env` 路径；生产环境在 Host 启动环境中指定包目录外的持久文件，升级替换 `node_modules` 时保留配置。未指定时使用包目录内的 `.env`。 |
 | `MCP_INTERNAL_SECRET` | 从 SETUP_KEY 派生 | 网关内部管理接口密钥（dsh 插件通知网关用），与 JWT 域分离派生；显式设置后不要随意更换 |
+| `MCP_DB_PATH` | 宿主 `./data/platform.db`；Docker `/data/dsh-passwords/platform.db` | SQLite 数据库路径；相对路径锚定 `.env` 所在目录（`DSH_PASSWORDS_ENV_FILE` 指向的目录），而非进程工作目录 |
+| `MCP_DB_ENC_KEY` | 安装器生成；手动留空时使用 SETUP_KEY 作为主密钥派生 | 用户名及审计敏感字段的加密密钥；没有自动密钥迁移，不能直接替换。数据库与密钥需配套备份，并分别保护 |
+| `MCP_GATEWAY_HOST` / `MCP_GATEWAY_PORT` | `0.0.0.0` / 宿主自动 HTTPS `443`、HTTP 模式 `8080`、Docker `3088` | 网关监听地址与端口；Docker 默认 `0.0.0.0:3088`，示例通过宿主端口映射限制为 `127.0.0.1:3088`；宿主 HTTP 反代需显式设回环地址 |
+| `MCP_GATEWAY_UPSTREAM` | `http://127.0.0.1:3080` | dsh 网页地址，插件自动指向 |
 | `MCP_GATEWAY_UPSTREAM_TLS_VERIFY` | 开 | 上游 dsh 为 HTTPS/WSS 时校验其证书；`0` 关闭（仅调试，勿用于生产） |
+| `MCP_GATEWAY_SSH_ENDPOINTS` | 空 | 登记 DSH 运行时未暴露的传统 HTTP/WS 端点；格式与权限见[端点登记说明](docs/endpoint-registration.md)。 |
+| `MCP_GATEWAY_REDIRECT_PORT` | 自动 HTTPS 时 `80`；关闭自动 HTTPS 时不监听 | ACME 验证与 301 跳转端口；显式 `0` 关闭 |
+| `MCP_GATEWAY_DOMAIN` | 空 | 自定义域名，留空用 `<公网IP>.sslip.io` |
+| `MCP_GATEWAY_AUTO_TLS` | 宿主机开；Docker 镜像默认 `0` | `0` 关闭自动 HTTPS（容器内默认 HTTP，由外层反代提供 HTTPS） |
+| `MCP_GATEWAY_TLS_CERT` / `MCP_GATEWAY_TLS_KEY` | 空 | 自有证书，优先于自动 HTTPS |
+| `MCP_GATEWAY_PUBLIC_HOST` | 空 | 固定跳转地址，防 Host 伪造 |
+| `MCP_GATEWAY_ACME_EMAIL` / `MCP_GATEWAY_ACME_STAGING` | 空 / 关 | 证书提醒邮箱 / LE 测试环境 |
+| 高级调优 | 内置默认值已针对普通安装验证；运维覆盖项见 [`docs/advanced-tuning.md`](docs/advanced-tuning.md)，普通用户无需填写 |
+| `MCP_DSH_ROOT` | 自动探测 | dsh 安装目录 |
 | `MCP_DSH_SETTINGS_FILE` | 自动探测 | dsh `settings.yaml` 路径，网关与 dsh 不在同一台机器时显式指定；留空按 `DSH_HOME/settings.yaml` 等候选位置探测 |
 | `MCP_DSH_AUTO_UPDATE` | 开 | 部署级自动更新总开关 |
 | `MCP_DSH_UPDATE_MAX_BPS` | 1MiB/s | 自动下载限速，只能调低 |
 | `MCP_DSH_DOCKER_SELF_UPDATE` / `_COMPOSE_DIR` / `_COMPOSE_FILE` / `_IMAGE` / `_SOCKET` | 关 / 空 | Docker 应用内更新的启用开关与 Compose 配置 |
-| `MCP_DSH_PATCH_ALLOW_BIND_ALL` | 关 | 分容器拓扑允许 dsh web 绑定 0.0.0.0（`0.2.1-alpha.1` 的 `dsh-web-app` 仍未原生放行，仍需该子补丁） |
+| `MCP_DSH_PATCH_ALLOW_BIND_ALL` | 关 | 分容器拓扑允许 dsh web 绑定 0.0.0.0（`0.2.1-rc.2` 的 `dsh-web-app` 仍未原生放行，仍需该子补丁） |
 
-环境变量与 `.env` 的优先级按安装方式不同：Docker 内以容器环境变量（`--env-file docker/.env`）优先于卷内 `.env`；宿主安装相反，部署 `.env` 中的托管键优先于进程中继承的同名环境变量。
+环境变量与 `.env` 的优先级按安装方式不同：Docker 内以容器环境变量（`--env-file docker/.env`）优先于卷内 `.env`；宿主安装相反，部署 `.env` 中的托管键优先于进程中继承的同名环境变量。Docker 的 `SETUP_KEY` 同样遵循运行时环境变量优先级；首次配置后使用账号密码登录，改变该变量不会重建账号。
+
+高级 Remote mux、网关超时和 inventory 覆盖项的默认值与兼容解析见 [`docs/advanced-tuning.md`](docs/advanced-tuning.md)。普通用户无需配置这些变量；已有部署中的覆盖值仍会读取，不会被自动改写。
 
 ## 常用命令
 
@@ -442,7 +483,7 @@ node -e "const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync('
 <details>
 <summary><strong>非 root 绑定 443 失败</strong></summary>
 
-Linux 下 1024 以下端口需要 root，改用 `MCP_GATEWAY_PORT` 高位端口并自行做端口转发。
+Linux 下 1024 以下端口需要 root，改用 `MCP_GATEWAY_PORT` 高位端口并自行做端口转发。非 root 首次安装还须显式关闭自动 HTTPS（`MCP_GATEWAY_AUTO_TLS=0`）或提供自管证书，否则安装器会要求 root；下载式安装的默认目录会从 `/opt` 改到 `$HOME/dsh-passwords`，也可用 `DSH_PASSWORDS_DIR` 指向其它可写目录。
 
 </details>
 
@@ -453,47 +494,37 @@ Linux 下 1024 以下端口需要 root，改用 `MCP_GATEWAY_PORT` 高位端口�
 
 </details>
 
-<details>
-<summary><strong>npm 安装 dsh 报 node-pty 构建错误</strong></summary>
-
-放行安装脚本后重装：
-
-```bash
-npm config set allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user
-```
-
-</details>
 
 <details>
 <summary><strong>数据库文件泄露是否有风险</strong></summary>
 
-没有。敏感字段全部加密或散列，密码仅存 bcrypt 哈希，无 `.env` 密钥无法解密。
+仍有风险。密码保存为 bcrypt 哈希，用户名及审计的 IP、User-Agent、详情等字段加密；留言正文、部分权限配置和工作区路径等内容不属于这项字段加密保护。密码哈希也可能被离线猜测。请分别保护数据库和 `.env` 密钥，并在备份时保留相匹配的版本。
 
 </details>
 
 <details>
 <summary><strong>能否更换 MCP_DB_ENC_KEY</strong></summary>
 
-不能，启用后更换将导致历史数据无法解密。
+当前没有自动密钥迁移功能，不能直接替换生效的密钥，否则历史加密字段将无法解密。手动配置且尚未完成首次配置时，留空的加密主密钥来自 `SETUP_KEY`，此时也不要直接更换 `SETUP_KEY`。
 
 </details>
 
 <details>
 <summary><strong>加载插件慢 / 访问慢</strong></summary>
 
-网关对内容哈希命中的静态资源强制一年期 immutable 缓存，升级后首次访问完整下载一次，之后秒进。访问慢时网关每请求开销约 1-2ms，先检查 TLS 握手：
+网关为内容哈希匹配的静态资源设置一年期 immutable 缓存，减少重复下载；实际速度取决于资源大小、服务器负载与网络。排查时可先测量 TLS 握手时间：
 
 ```bash
 curl -so /dev/null -w "TLS:%{time_appconnect}s\n" https://地址/gateway/login
 ```
 
-通常瓶颈在到服务器的链路延迟。
+再结合浏览器网络面板中的资源耗时、服务器日志与 DSH 上游响应时间定位瓶颈。
 
 </details>
 
 ### 手动安装
 
-> 当前发布版本 2.7.7 只支持 DSH `0.2.1` patch 线（`>=0.2.1-alpha.1 <0.2.2-0`）；开发与 bundled Docker 运行时锁定 `0.2.1-alpha.1`。已退役的 `0.1.x` / `0.2.0` 线、`0.2.1-alpha.0` 以及所有 `0.2.2+` 身份都会被版本门禁拒绝。宿主机安装器会检查 Node.js `22.19+` 或 `24+`，注册插件并应用兼容补丁。
+> 手动安装适用于已准备好 Node.js、兼容 DSH、git 与 pnpm 的用户。源码插件版本以 `package.json` 为准；DSH 版本要求见[版本兼容](#版本兼容)。使用下面的精确注册脚本，不额外执行 `dsh plugin add`。
 
 1. `git clone https://github.com/sdwhwzp/dsh-passwords && cd dsh-passwords`
 2. `npm install && npm run build`
@@ -528,7 +559,7 @@ curl -so /dev/null -w "TLS:%{time_appconnect}s\n" https://地址/gateway/login
 - **命令行（CLI）**：跟随 `LANG` / `LC_ALL` 环境变量（`en` 开头即英文）。
 
 ## 更新日志
-本 fork 的 2.7.7 候选使用私有 Harness `0.2.1-alpha.1`，开发依赖链接实际源码；运行时版本门禁为 `>=0.2.1-alpha.1 <0.2.2-0`。组合验收与正式发布状态见部署记录；上游测试结果不代表本 fork 已上线。
+本 fork 的 2.7.8 候选使用私有 Harness `0.2.1-rc.2`，开发依赖链接实际源码；运行时版本门禁为 `>=0.2.1-rc.2 <0.2.2-0`。组合验收与正式发布状态见部署记录；上游测试结果不代表本 fork 已上线。
 
 ### v2.6.20（2026-09-08）
 
@@ -611,11 +642,11 @@ keyed slot "settings.plugin.item" requires options.key
 
 Linux 部署由管理员将 `scripts/tenant-terminal-launcher.py` 安装为 root 所有且不可被普通用户修改的 `/usr/local/libexec/dsh-tenant-terminal`，并配置只允许执行这个启动器的 sudoers 规则。启动器中的服务账号和托管根目录必须匹配部署；不得授权任意 `sudo bwrap`。设置 `MCP_TENANT_TERMINAL_LAUNCHER` 后启用，默认每账号最多 8 个终端、断线宽限期 30 秒，可用 `MCP_TENANT_TERMINAL_LIMIT` 和 `MCP_TENANT_TERMINAL_GRACE_MS` 调整。
 
-启用 `MCP_TENANT_AGENT_SHELL=true` 后，Agent 和子代理可在当前服务器个人项目中使用 `bash` 执行命令，结果以终端卡片返回。每次调用重新核对账号和写入权限，当前项目及个人 HOME 可写，其他账号不可访问。HOME 与网页终端和编辑器共用，可安装用户级 Node、pnpm；命令取消或超时会结束进程。发布时必须同时更新启动器及 sudoers 摘要，配置和验证约束见[个人工作区命令执行](docs/plans/2026-09-11-tenant-agent-shell.md)。
+启用 `MCP_TENANT_AGENT_SHELL=true` 后，Agent 和子代理可在当前服务器个人项目中使用 `bash` 执行命令，结果以终端卡片返回。每次调用重新核对账号和写入权限，当前项目及个人 HOME 可写，其他账号不可访问。HOME 与网页终端和编辑器共用，可安装用户级 Node、pnpm；命令取消或超时会结束进程。发布时必须同时更新启动器及 sudoers 摘要，配置和验证约束见[个人工作区命令执行](https://github.com/sdwhwzp/dsh-passwords/blob/dev/docs/plans/2026-09-11-tenant-agent-shell.md)。
 
-设置 `MCP_TENANT_TASK_BOARD=true` 启用按账号分开的任务看板，同时必须关闭聚合插件的全局 `web-ui-task-board` Host，保留客户端。账本保存在 `MCP_TENANT_TASK_BOARD_DIR`，重载后恢复定时任务；执行与历史读取经过 `MCP_TENANT_TASK_BOARD_GATEWAY` 指定的本机网关，沿用当前账号的工作区、模型、沙盒和额度检查。账号删除、禁用或身份不匹配会拒绝执行。旧全局账本不会自动合并进个人账本。 每个账号只为最近的 cron 时点设置一个定时器，新建或导入已启用的计划立即排程；修改、停用、删除或归档会撤销旧时点。重启或恢复运行只排程未来时点，不补跑停机期间错过的任务。
+设置 `MCP_TENANT_TASK_BOARD=true` 启用按账号分开的任务看板，同时把 `web-ui-task-board` 行指向本包 `integrations/task-board/client-shell/index.js` 的绝对或配置相对路径，保留源配置表单与客户端，避免启动第二个全局账本。账本保存在 `MCP_TENANT_TASK_BOARD_DIR`，重载后恢复定时任务；执行与历史读取经过 `MCP_TENANT_TASK_BOARD_GATEWAY` 指定的本机网关，沿用当前账号的工作区、模型、沙盒和额度检查。账号删除、禁用或身份不匹配会拒绝执行。旧全局账本不会自动合并进个人账本。 每个账号只为最近的 cron 时点设置一个定时器，新建或导入已启用的计划立即排程；修改、停用、删除或归档会撤销旧时点。重启或恢复运行只排程未来时点，不补跑停机期间错过的任务。
 
-任务默认启用目标运行：先提交任务提示，再通过当前账号的网关设置 `/goal`，让会话自动继续直到目标结束；取消该选项只执行单轮。旧任务没有此字段时沿用默认启用，显式关闭状态保存在 schema 5 账本中。目标仍活跃时看板保持运行，目标阻塞时显示失败；命令被拒绝时保留已提交的单轮任务。
+目标运行需要管理员启用看板 `goalRun` 设置，并且卡片显式设置 `goalRun: true`；未设置或关闭时只执行单轮。schema 6 账本保留任务与执行历史，并把显式关闭规范化为缺省字段。目标仍活跃时看板保持运行，目标阻塞时显示失败；命令被拒绝时保留已提交的单轮任务。
 
 计划任务支持独立的 IANA 时区，例如 `Asia/Shanghai`；定时触发的提示包含触发时间和规则时区。旧 schema 2/3 账本在原账号目录升级到 schema 4，保留任务、执行历史、工作区和父子关系，没有显式时区的计划使用升级时 Host 的时区。手动结算仅把本人卡片及其子任务的未结束执行记为取消，不会停止底层会话。
 
@@ -657,13 +688,13 @@ Linux 部署由管理员将 `scripts/tenant-terminal-launcher.py` 安装为 root
 
 导出包含子代理的会话时，未单独认领的 Host 子代理沿持久化父会话关系继承读取权限。祖先及子代理都必须处于当前账号允许的目录且未被禁用；显式其他账号归属、普通 fork、缺失祖先和循环关系不会继承权限。
 
-配置 `MCP_TENANT_SERVICE_LAUNCHER` 后，Agent 用 `dev_server` 启动、查询、查看日志和停止当前项目的持久测试环境。服务跨会话、Harness 重启及主机重启保留，只有用户要求停止时才由 Agent 停止；普通 `bash` 的后台进程仍随调用结束清理。安装与网络配置见[持续运行测试环境](docs/plans/2026-09-11-persistent-development-services.md)。
+配置 `MCP_TENANT_SERVICE_LAUNCHER` 后，Agent 用 `dev_server` 启动、查询、查看日志和停止当前项目的持久测试环境。服务跨会话、Harness 重启及主机重启保留，只有用户要求停止时才由 Agent 停止；普通 `bash` 的后台进程仍随调用结束清理。安装与网络配置见[持续运行测试环境](https://github.com/sdwhwzp/dsh-passwords/blob/dev/docs/plans/2026-09-11-persistent-development-services.md)。
 
 管理员可使用 `dev_server_admin` 列出并停止子账号服务，停止操作会写入审计记录，并取消该服务的自启动。
 
 网页左侧“运行服务”在当前应用中打开列表，保留侧栏和原会话，不打开新标签页。“返回对话”恢复原会话。普通账号管理自己的所有项目，管理员管理所有账号；可以搜索并手动确认停止服务，停止后取消自动重启和开机启动。直接访问 `/gateway/services` 仍可打开独立列表。
 
-文件夹管理在应用中央打开，侧栏和原会话保留，支持返回对话。拖动文件或文件夹到目标目录或“返回上级”即可移动；已有移动/粘贴和上传按钮保留。同名冲突会报错。详见[文件夹管理与拖拽移动](docs/plans/2026-09-11-managed-files-page.md)。
+文件夹管理在应用中央打开，侧栏和原会话保留，支持返回对话。拖动文件或文件夹到目标目录或“返回上级”即可移动；已有移动/粘贴和上传按钮保留。同名冲突会报错。详见[文件夹管理与拖拽移动](https://github.com/sdwhwzp/dsh-passwords/blob/dev/docs/plans/2026-09-11-managed-files-page.md)。
 ## 桌面客户端下载
 
 设置 `MCP_DESKTOP_DOWNLOADS_DIR` 为独立、只读的安装包发布目录，可在登录页打开“下载桌面端”；侧栏不显示下载入口。登录后的下载列表使用现有主面板，返回时保留会话。安装包及清单公开下载，不需要业务账号；业务数据和原有文件下载权限保持原有授权检查。Windows 一键助手仍使用原入口，配对时读取服务器提供的连接地址。
@@ -688,19 +719,23 @@ Linux 部署由管理员将 `scripts/tenant-terminal-launcher.py` 安装为 root
 
 Host 登录交换兼容根目录重定向 `/` 与 `./`；不跟随跳转，拒绝外部地址和带查询参数的目标。
 
-已验证的 Harness 0.2.1-alpha.1 可启动网关并使用原生权限接口，无需改写安装包；未验证的新版本仍由启动检查拒绝。
+当前候选使用 Harness 0.2.1-rc.2 原生 Peer 与账号权限接口，不改写安装包；运行时版本门禁与依赖范围保持一致，组合验收状态见部署记录。
 
 会话归属校验接受旧版投影以及新版 `cached`／`sequenced` 投影和 `agentAvailable` 标记，仍严格校验类型与允许字段。
 ## Harness 0.2 部署
 
-本 fork 在原有运行时范围之外支持 Harness `0.2.1-alpha.1`。部署时所有 Harness 依赖必须来自同一版本；账号授权、配置持久化和网页／桌面功能继续使用现有集成。
+本 fork 在原有运行时范围之外支持 Harness `0.2.1-rc.2`。部署时所有 Harness 依赖必须来自同一版本；账号授权、配置持久化和网页／桌面功能继续使用现有集成。
 
 任务看板支持手动切换待办池、待执行、进行中、已完成和失败状态；切换只修改列，不启动会话，也不产生执行记录。有未结束执行的卡片不能手动移动，每个账号只能移动自己的卡片。
 
 账号独立看板不继承 Host 的 GitHub 凭据或仓库配置，GitHub 刷新及 PR 操作返回未配置；已有个人任务仍可正常管理。
 
-任务看板的 goal 验收继承管理员在看板设置中的开关、模型及思考级别，每次执行开始时固定设置。裁判请求仍须通过执行账号的模型目录、额度和用量计费，完成工具调用前核对会话归属与当前访问权限；失败或异常不会被当作通过。工作区继承只在该账号可访问的工作区和会话内选择；标签改名、删除只修改该账号账本。旧 schema 2–4 账本升级为 5，并保留已有任务和执行记录。
+任务看板的 goal 验收继承管理员在看板设置中的开关、模型及思考级别，每次执行开始时固定设置。裁判请求仍须通过执行账号的模型目录、额度和用量计费，完成工具调用前核对会话归属与当前访问权限；失败或异常不会被当作通过。工作区继承只在该账号可访问的工作区和会话内选择；标签改名、删除只修改该账号账本。旧 schema 2–5 账本升级为 6，并保留已有任务和执行记录。
 
 本 fork 通过原生 Host principal 隔离账号，保留受管终端、本机目录及持久服务。仅失效的终端逻辑流返回错误，其他工作区订阅继续运行。
 
 本 fork 的工作区创建能力仅作用于账号授权的个人根；目录选择器不会给普通账号临时授权服务器目录。共享父目录下其他账号的工作区子树仍禁止下载和读取。Host 认证通过原生 authenticatedUrl 兑换，刷新 Cookie 的内部接口同时检查回环来源、内部密钥和目标主机；HTTP 与 HTTPS 上游均保留仅作用于空闲连接的回收期限。
+
+本次升级要求 Harness `>=0.2.1-rc.2 <0.2.2-0`，网关与看板客户端必须按精确依赖版本一同安装；操作步骤及账本备份见[租户看板迁移说明](docs/upgrade-guide/v2.7.8-dsh.20261021.1/tenant-board/guide.zh.md)。订阅插件的新 Fetch 速度查询与修改入口按会话归属授权，普通账号不能操作其他账号的会话。终端不可用只拒绝相应逻辑流，不关闭承载工作区分组的共享连接。
+
+受限账号运行 prompt 前必须取得私有沙盒策略确认，等待期间权限有变化则拒绝该次请求。新增的本人会话授权也必须确认策略；确认失败会收回该授权并断开旧订阅。目录创建及工作区登记在回包时再次核对当前权限、专属根与归属，并记录审计结果；敏感路径仅记录隐藏后的摘要。可选加载时间线记录历史解析、过滤、编码及 Remote 首帧耗时，不记录会话正文或凭据。

@@ -30,7 +30,7 @@ function loginResponse() {
   return response;
 }
 
-async function mountCard(t: TestContext, overrides: Record<string, () => Response> = {}, payloadOverrides: Record<string, unknown> = {}, mode: 'settings' | 'accounts' = 'settings') {
+async function mountCard(t: TestContext, overrides: Record<string, () => Response | Promise<Response>> = {}, payloadOverrides: Record<string, unknown> = {}, mode: 'settings' | 'accounts' = 'settings') {
   const intervals = new Map<number, { callback: () => void; delay: number }>();
   let nextTimer = 0;
   let renderer: ReactTestRenderer | undefined;
@@ -77,7 +77,12 @@ async function mountCard(t: TestContext, overrides: Record<string, () => Respons
     requests.push({ input, init });
     if (overrides[input]) return overrides[input]();
     assert.ok(input in payloads, `Unexpected request: ${input}`);
-    return Response.json(payloads[input]);
+    // payload 可以是函数，让 mock 能反映保存后的服务端新状态（静态对象无法表达）；
+    // 工厂可直接返回 Response（走 overrides 同一路径），否则按 JSON 序列化。
+    const payload = typeof payloads[input] === 'function'
+      ? (payloads[input] as () => unknown)()
+      : payloads[input];
+    return payload instanceof Response ? payload : Response.json(payload);
   });
   const translate: CardProps['t'] = (key) => key === 'err.NOT_AUTHENTICATED'
     ? 'Session expired' : key;
@@ -321,6 +326,80 @@ test('settings card synchronizes an explicitly changed session permission with i
   assert.deepEqual(permissionBody.allowedSessionIds, []);
 });
 
+test('settings card synchronizes the large request body permission to the visible checkbox and save API', async (t) => {
+  const card = await mountPermissionsCard(t, {
+    '/gateway/api/permissions': () => Response.json({ ok: true }),
+  }, {
+    '/gateway/api/overview': {
+      me: { id: 1, username: 'test-admin', role: 'admin' },
+      users: [{
+        id: 2,
+        username: 'subuser',
+        role: 'user',
+        permissions: {
+          allowedFolders: [],
+          hourlyTokenLimit: null,
+          dailyMinutesLimit: null,
+          allowUpload: false,
+          allowGitDownload: false,
+          allowWorkspaceCreate: false,
+          allowSsh: false,
+          allowedAgentPresets: [],
+          banned: false,
+          sandboxMode: null,
+          disabledSessions: [],
+          allowedSessionIds: [],
+        },
+        usage: null,
+      }],
+    },
+  });
+  const uploadLabel = card.renderer.root.findAllByType('label').find((label) => label.children.some((child) => child === 'permsUpload'));
+  assert.ok(uploadLabel, '大请求体权限开关必须出现在子用户权限卡片');
+  const checkbox = uploadLabel!.findByType('input');
+  assert.equal(checkbox.props.checked, false, '前端必须反映后端 allowUpload=false（64 MiB 档位）');
+  await act(async () => { checkbox.props.onChange({ target: { checked: true } }); });
+  const saveButton = card.renderer.root.findAllByType('button').find((button) => button.children.some((child) => child === 'permsSave'));
+  assert.ok(saveButton, '子用户权限卡片必须存在保存按钮');
+  await act(async () => { saveButton!.props.onClick(); });
+  const permissionRequest = card.requests.find((request) => request.input === '/gateway/api/permissions');
+  assert.ok(permissionRequest, '保存必须调用权限 API');
+  assert.equal(JSON.parse(String(permissionRequest!.init?.body)).allowUpload, true, '保存必须提交 allowUpload');
+});
+
+test('settings card shows Agent preset registry failure instead of hiding the permission section', async (t) => {
+  const card = await mountPermissionsCard(t, {
+    '/api/dsh-passwords/agent-presets': () => new Response(JSON.stringify({ ok: false, code: 'PRESETS_UNAVAILABLE' }), { status: 502, headers: { 'content-type': 'application/json' } }),
+  }, {
+    '/gateway/api/overview': {
+      me: { id: 1, username: 'test-admin', role: 'admin' },
+      users: [{ id: 2, username: 'subuser', role: 'user', permissions: { allowedFolders: [], hourlyTokenLimit: null, dailyMinutesLimit: null, allowUpload: true, allowGitDownload: false, allowWorkspaceCreate: false, allowedAgentPresets: [], banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: [] }, usage: null }],
+    },
+  });
+  assert.match(card.text(), /permsAgentPresetsUnavailable/);
+});
+
+test('settings card exposes independent workspace loading state', async (t) => {
+  let release!: (response: Response) => void;
+  const gate = new Promise<Response>((resolve) => { release = resolve; });
+  const card = await mountPermissionsCard(t, {
+    '/api/dsh-passwords/workspaces': () => gate,
+  }, {
+    '/gateway/api/overview': { me: { id: 1, username: 'test-admin', role: 'admin' }, users: [{ id: 2, username: 'sub', role: 'user', permissions: { allowedFolders: [], hourlyTokenLimit: null, dailyMinutesLimit: null, allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false, allowSsh: false, allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: [] }, usage: null }] },
+  });
+  assert.match(card.text(), /permsWorkspacesLoading/);
+  release(Response.json({ workspaces: [] }));
+});
+
+test('settings card preserves workspace error state instead of showing an empty inventory', async (t) => {
+  const card = await mountPermissionsCard(t, {
+    '/api/dsh-passwords/workspaces': () => Response.json({ ok: false, code: 'WORKSPACES_UNAVAILABLE', error: 'down' }, { status: 502 }),
+  }, {
+    '/gateway/api/overview': { me: { id: 1, username: 'test-admin', role: 'admin' }, users: [{ id: 2, username: 'sub', role: 'user', permissions: { allowedFolders: [], hourlyTokenLimit: null, dailyMinutesLimit: null, allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false, allowSsh: false, allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [], allowedSessionIds: [] }, usage: null }] },
+  });
+  assert.match(card.text(), /permsWorkspacesUnavailable|down/);
+});
+
 test('settings card stays mounted when login expires during refresh', async (t) => {
   const responses: Record<string, () => Response> = {};
   const card = await mountCard(t, responses);
@@ -392,7 +471,7 @@ const permissionWorkspaces = {
   }],
 };
 
-function subuserOverview(allowedSessionIds: string[]) {
+function subuserOverview(allowedSessionIds: string[], allowedFolders: string[] = []) {
   return {
     me: { id: 1, username: 'test-admin', role: 'admin' },
     users: [{
@@ -400,7 +479,7 @@ function subuserOverview(allowedSessionIds: string[]) {
       username: 'subuser',
       role: 'user',
       permissions: {
-        allowedFolders: [],
+        allowedFolders,
         hourlyTokenLimit: null,
         dailyMinutesLimit: null,
         allowUpload: false,
@@ -416,6 +495,87 @@ function subuserOverview(allowedSessionIds: string[]) {
       usage: null,
     }],
   };
+}
+
+const DIRECTORY_LIST = '/gateway/api/directory-picker/list';
+
+function dirEntry(path: string, selectable = true, name?: string) {
+  return {
+    name: name ?? path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? path,
+    path,
+    selectable,
+  };
+}
+
+/** 真实后端统一响应体：{ ok, currentPath, parentPath, selectable, entries, truncated }。 */
+function directoryListing(currentPath: string | null, options: {
+  parentPath?: string | null;
+  selectable?: boolean;
+  entries?: Array<Record<string, unknown>>;
+  truncated?: boolean;
+} = {}) {
+  return {
+    ok: true,
+    currentPath,
+    parentPath: options.parentPath ?? null,
+    selectable: options.selectable ?? false,
+    entries: options.entries ?? [],
+    truncated: options.truncated ?? false,
+  };
+}
+
+/** 带 path query 的目录列表 URL（同时校验 URL 编码）。 */
+function directoryUrl(path: string): string {
+  return `${DIRECTORY_LIST}?path=${encodeURIComponent(path)}`;
+}
+
+function classTokens(className: unknown): string[] {
+  return typeof className === 'string' ? className.split(/\s+/).filter((token) => token !== '') : [];
+}
+
+function byClass(card: MountedCard, className: string) {
+  return card.renderer.root.findAll((node) => classTokens(node.props.className).includes(className));
+}
+
+type TestInstance = ReturnType<typeof byClass>[number];
+
+/** 在某个子树（如目录行）内按 class 找节点。 */
+function scopedByClass(instance: TestInstance, className: string): TestInstance[] {
+  return instance.findAll((node) => classTokens(node.props.className).includes(className));
+}
+
+function oneByClass(card: MountedCard, className: string) {
+  const nodes = byClass(card, className);
+  assert.equal(nodes.length, 1, `必须唯一渲染 ${className}`);
+  return nodes[0];
+}
+
+function pickerRow(card: MountedCard, name: string) {
+  return byClass(card, 'dshpw-dir-picker-row')
+    .find((row) => row.findAll((node) => classTokens(node.props.className).includes('dshpw-dir-picker-name'))
+      .some((span) => span.children.join('') === name));
+}
+
+function chipPaths(card: MountedCard): string[] {
+  return card.renderer.root.findAll((node) => classTokens(node.props.className).includes('dshpw-read-path'))
+    .map((span) => span.children.join(''));
+}
+
+function chipFor(card: MountedCard, path: string) {
+  return byClass(card, 'dshpw-read-chip')
+    .find((chip) => chip.findAll((node) => classTokens(node.props.className).includes('dshpw-read-path'))
+      .some((span) => span.children.join('') === path));
+}
+
+async function toggleWorkspaceCreate(card: MountedCard) {
+  const label = card.renderer.root.findAllByProps({ className: 'dshpw-check' })
+    .find((node) => node.findAllByType('input').length === 1
+      && node.children.some((child) => child === 'permsWorkspaceCreate'));
+  assert.ok(label, '可创建工作区开关必须渲染');
+  const input = label!.findByType('input');
+  const next = !input.props.checked;
+  await act(async () => { input.props.onChange({ target: { checked: next } }); });
+  return next;
 }
 
 function saveButton(card: MountedCard) {

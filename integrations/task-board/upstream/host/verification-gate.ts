@@ -23,17 +23,31 @@
  *   judge call until a user clears the recorded anomalies (issue #1828);
  * - an attempt the time budget ends before any verdict is recorded as its own
  *   stage and charged to no budget at all (issue #1828);
+ * - an INVALID acceptance (a veto whose required evidence is missing,
+ *   unlocatable, or aimed at the empty-work baseline) is recorded in its own
+ *   stage, spends its OWN bounded budget, and never consumes a quality attempt
+ *   or fails the card; when that budget is spent the cycle is held for a human
+ *   exactly like a spent anomaly budget;
  * - concurrent completion calls for one execution share one acceptance.
+
+ * The validity check itself is program-level (`assessAcceptanceValidity` in
+ * `core/verification.ts`), applied after the judge answers and BEFORE any
+ * quality verdict is written: a stronger prompt alone could not enforce it.
  */
 import type { PreToolDecision } from '@deepseek-ai/dsh-tools'
 import type { LlmRuntime } from '@deepseek-ai/dsh-llm'
 import {
   MAX_EXCEPTION_ATTEMPTS,
+  MAX_INVALID_ATTEMPTS,
   MAX_QUALITY_ATTEMPTS,
   exceptionAttempts,
   hasExceptionBudget,
   finalFailureReason,
+  hasInvalidBudget,
   hasQualityBudget,
+  invalidAttempts,
+  invalidAcceptanceFeedback,
+  invalidHoldReason,
   passedAttempt,
   qualityAttempts,
   qualityFeedback,
@@ -186,6 +200,39 @@ export function createGoalVerificationGate(deps: GoalVerificationGateDeps): (exe
       error,
     )
 
+  /**
+   * The refusal one recorded INVALID acceptance returns.
+   *
+   * The claim is still refused (no pass record exists), but the agent is told
+   * the veto itself was unusable and is explicitly NOT asked to repair anything
+   * on that basis. The reason and scores stay recorded for review; the quality
+   * budget is untouched.
+   */
+  const invalidRefusal = (spend: ExecutionVerification, attempt: VerificationAttempt): PreToolDecision =>
+    deny(
+      bounded(invalidAcceptanceFeedback(attempt, MAX_INVALID_ATTEMPTS - invalidAttempts(spend).length)),
+      'TASK_BOARD_VERIFICATION_INVALID',
+      attempt.error,
+    )
+
+  /**
+   * Hold a cycle whose invalid-acceptance budget is spent.
+   *
+   * No usable veto was ever produced, so the board neither passes nor fails the
+   * card: it stops calling the judge and leaves the execution for a human. Only
+   * an explicit user action (or a rerun) resumes it, which is what bounds the
+   * retries.
+   */
+  const invalidHeld = (taskId: string, executionId: string, spend: ExecutionVerification): PreToolDecision =>
+    hold(
+      taskId,
+      executionId,
+      spend,
+      '[任务看板 · 验收无效] ' + invalidHoldReason(invalidAttempts(spend).length),
+      'acceptance produced no usable veto; a user action must clear the recorded invalid acceptances',
+      'TASK_BOARD_VERIFICATION_INVALID',
+    )
+
   /** The refusal a spent anomaly budget returns: no verdict, and no card failure. */
   const anomalyHeld = (taskId: string, executionId: string, spend: ExecutionVerification): PreToolDecision =>
     hold(
@@ -315,6 +362,16 @@ export function createGoalVerificationGate(deps: GoalVerificationGateDeps): (exe
       write(task.id, execution.id, spend)
       return anomalyRefusal(spend, attempt.error)
     }
+    // An invalid acceptance is recorded and returned to the agent, but it is
+    // NOT a quality verdict: it spends its own bounded budget, never the
+    // quality one, and it never fails the card.
+    if (attempt.stage === 'invalid') {
+      if (invalidAttempts(spend).length >= MAX_INVALID_ATTEMPTS) {
+        return invalidHeld(task.id, execution.id, spend)
+      }
+      write(task.id, execution.id, spend)
+      return invalidRefusal(spend, attempt)
+    }
     if (attempt.passed) {
       write(task.id, execution.id, spend)
       return { kind: 'allow' }
@@ -324,7 +381,11 @@ export function createGoalVerificationGate(deps: GoalVerificationGateDeps): (exe
       return finalize(task.id, execution.id, spend, finalFailureReason(attempt, used, verification.contract.threshold), agent)
     }
     write(task.id, execution.id, spend)
-    return deny(bounded(qualityFeedback(attempt, MAX_QUALITY_ATTEMPTS - used)), 'TASK_BOARD_VERIFICATION_FAILED', attempt.findings.join('\n'))
+    return deny(
+      bounded(qualityFeedback(attempt, MAX_QUALITY_ATTEMPTS - used)),
+      'TASK_BOARD_VERIFICATION_FAILED',
+      locatedFindingDetail(attempt),
+    )
   }
 
   /** Evaluate one tool call; undefined means "not this gate's business". */
@@ -347,6 +408,12 @@ export function createGoalVerificationGate(deps: GoalVerificationGateDeps): (exe
         'TASK_BOARD_VERIFICATION_FAILED',
         verification.failedReason,
       )
+    }
+    // A spent INVALID budget comes first: the judge produced no usable veto, so
+    // calling it again would only burn quota against a budget that determines
+    // nothing, and the card must stay open for a human rather than be failed.
+    if (!hasInvalidBudget(verification)) {
+      return invalidHeld(binding.task.id, binding.execution.id, verification)
     }
     if (!hasQualityBudget(verification)) {
       return finalize(binding.task.id, binding.execution.id, verification, 'goal 验收额度已耗尽，本次 execution 判失败。', exec.agent)
@@ -398,6 +465,20 @@ export function createGoalVerificationGate(deps: GoalVerificationGateDeps): (exe
       )
     }
   }
+}
+
+/**
+ * The structured detail of one quality refusal: the judge's own findings, in
+ * the order the acceptance recorded them, so the denial carries exactly the
+ * located evidence the report shows.
+ */
+function locatedFindingDetail(attempt: VerificationAttempt): string {
+  const lines: string[] = []
+  for (const finding of attempt.criterionFindings ?? []) {
+    lines.push('[' + finding.criterionId + ' ' + finding.location + '] "' + finding.quote + '"')
+  }
+  if (lines.length === 0) lines.push(...attempt.findings)
+  return lines.join('\n')
 }
 
 /** The bare execution prompt, used when the goal service carries no objective. */

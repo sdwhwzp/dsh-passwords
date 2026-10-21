@@ -9,7 +9,7 @@ import {
   readSync, readFileSync, createReadStream, createWriteStream, realpathSync, openSync, fstatSync, closeSync,
   mkdirSync, renameSync, statSync, unlinkSync, readdirSync, rmSync, copyFileSync, writeFileSync, mkdtempSync, existsSync, constants as fsConstants,
 } from 'node:fs';
-import { cp, link, lstat, mkdir, realpath, rename, rm, unlink } from 'node:fs/promises';
+import { cp, link, lstat, mkdir, opendir, realpath, rename, rm, unlink } from 'node:fs/promises';
 import { spawn, spawnSync } from 'node:child_process';
 
 import net from 'node:net';
@@ -26,6 +26,11 @@ import dns from 'node:dns';
 import express, { type Request, type Response } from 'express';
 import { registerMessageRoutes } from './messages.js';
 import { UpstreamHttpAgent, UpstreamHttpsAgent } from './upstream-agent.js';
+import { createTenantMuxLeg, closeTenantMuxLeg, TENANT_MUX_MAX_MESSAGE_BYTES } from './tenant-mux-leg.js';
+import { createRemoteMuxDiagnosticsSession, type RemoteMuxCloseSource } from './remote-mux-diagnostics.js';
+import { MuxSenderBudget } from './remote-mux-sender.js';
+import { createSensitivePathChecker } from './sensitive-paths.js';
+import { classifyDirectoryPickerTarget, directoryPickerPathWithin, directoryPickerEntryName, resolveDirectoryPickerBrowseRoots, type DirectoryPickerRootRef } from './admin.js';
 import { createSandboxApplier } from './proxy.js';
 import { registerMediaRoutes } from './media.js';
 import { MobileAuth, isMobileRequest, mobileRequestToken } from './mobile-auth.js';
@@ -51,8 +56,117 @@ export function internalProbeTimeoutMs(env: NodeJS.ProcessEnv = process.env): nu
   const raw = Number(String(env.MCP_GATEWAY_INTERNAL_PROBE_TIMEOUT_MS ?? '').trim());
   return Number.isFinite(raw) && raw >= 1_000 && raw <= 600_000 ? raw : 10_000;
 }
+
+/**
+ * internal/assignable-resources 探针的响应体上限。
+ *
+ * 该端点旧实现把响应缓冲硬编码在 256 KiB 之内，清单随工作区/会话规模增长后，一份
+ * 完全合法的清单会被这个固定上限拒绝，直接让管理员保存权限失败（R4）。真正的容量
+ * 约束是条目数上限（folders ≤ 10_000、assignable/retained sessions 各 ≤ 20_000）；
+ * 这里的字节上限只负责让缓冲内存有界，不参与条目判定。取 160 MiB 是为了覆盖条目
+ * 上限内的合法清单经 UTF-8/JSON 放大后的字节数，超出才 fail-closed。解析只拒绝
+ * U+0000–U+001F 控制字符，合法 Unicode 路径/ID（含非 ASCII）原样保留。
+ */
+export const ASSIGNABLE_RESOURCES_MAX_BYTES = 160 * 1024 * 1024;
+
+type AssignableResources = {
+  folders: Set<string>;
+  assignableSessions: Set<string>;
+  retainedSessions: Set<string>;
+};
+
+/**
+ * 解析 assignable-resources 清单：字段/条目任一不符契约（ok≠true、缺数组、含非法元素、
+ * 超条目上限）一律返回 null，调用方 fail-closed，绝不把截断/伪造清单当成权威资源。
+ */
+export function parseAssignableResources(raw: Buffer): AssignableResources | null {
+  try {
+    const parsed = JSON.parse(raw.toString('utf8')) as Record<string, unknown>;
+    let rawAssignable: unknown;
+    if (parsed.assignableSessions === undefined) {
+      rawAssignable = parsed.sessions;
+    } else if (!Array.isArray(parsed.assignableSessions)) {
+      return null;
+    } else if (parsed.sessions !== undefined) {
+      if (!Array.isArray(parsed.sessions)) return null;
+      const canonical = new Set(parsed.assignableSessions);
+      const legacy = new Set(parsed.sessions);
+      if (canonical.size !== legacy.size || [...canonical].some((id) => !legacy.has(id))) return null;
+      rawAssignable = parsed.assignableSessions;
+    } else {
+      rawAssignable = parsed.assignableSessions;
+    }
+    if (parsed.ok !== true || !Array.isArray(parsed.folders) || !Array.isArray(rawAssignable)) return null;
+    if (!Array.isArray(parsed.retainedSessions)) return null;
+    const rawRetained = parsed.retainedSessions;
+    const validResourceString = (value: unknown, maxLength: number): value is string =>
+      typeof value === 'string' && value.length > 0 && value.length <= maxLength && !/[\u0000-\u001f]/.test(value);
+    const folders = parsed.folders.filter((value): value is string => validResourceString(value, 4096));
+    const assignableSessions = rawAssignable.filter((value): value is string => validResourceString(value, 200));
+    const retainedSessions = rawRetained.filter((value): value is string => validResourceString(value, 200));
+    if (folders.length !== parsed.folders.length || assignableSessions.length !== rawAssignable.length || retainedSessions.length !== rawRetained.length || folders.length > 10_000 || assignableSessions.length > 20_000 || retainedSessions.length > 20_000) {
+      return null;
+    }
+    const assignableSet = new Set(assignableSessions);
+    const retainedSet = new Set(retainedSessions);
+    if ([...assignableSet].some((id) => retainedSet.has(id))) return null;
+    return { folders: new Set(folders.map(normalizePath)), assignableSessions: assignableSet, retainedSessions: retainedSet };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 有界读取上游响应体。resolve 覆盖所有终止形态：正常 'end'（返回缓冲体）、超出 maxBytes
+ * 或连接中断（'aborted'/'error'/'close' 早于 'end'，返回 null 并销毁 socket）。
+ *
+ * R2：截断响应（连接结束但从未 emit 'end'）必须在这里有界结束，不能等独立的探测
+ * 超时——否则探针 Promise 永不 settle，管理员保存请求会一直挂起。maxMs 是墙钟截止
+ * 时间，独立于 socket 空闲超时，防止持续 trickle 永久延长请求。'close' 在正常响应里
+ * 排在 'end' 之后（settled 哨兵使其 no-op），只在截断时先于 'end' 触发。
+ */
+export function readBoundedResponseBody(
+  response: IncomingMessage,
+  maxBytes: number,
+  maxMs = 10_000,
+): Promise<Buffer | null> {
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let settled = false;
+    let timer: NodeJS.Timeout | undefined;
+    // settled 哨兵而非 in-flight 摘监听器：'error' 监听必须留到流真正结束，
+    // 否则截断/超限后迟到的 socket error 会变成 uncaughtException。
+    const settle = (value: Buffer | null): void => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      resolve(value);
+    };
+    timer = setTimeout(() => {
+      response.destroy();
+      settle(null);
+    }, maxMs);
+    timer.unref?.();
+    response.on('data', (chunk: Buffer) => {
+      if (settled) return;
+      size += chunk.length;
+      if (size > maxBytes) {
+        response.destroy();
+        settle(null);
+        return;
+      }
+      chunks.push(chunk);
+    });
+    response.on('end', () => settle(Buffer.concat(chunks)));
+    response.on('aborted', () => settle(null));
+    response.on('error', () => settle(null));
+    response.on('close', () => settle(null));
+  });
+}
+
 import type { PlatformConfig } from './config.js';
-import { hardenSecretsAfterSetup, readEndpointRuntimeConfig } from './config.js';
+import { hardenSecretsAfterSetup, readEndpointRuntimeConfig, resolveRemoteMuxConfig } from './config.js';
 import { AuthService, AuthError, type RequestMeta } from './auth.js';
 import { Database, PermissionStateConflictError, SessionGrantsConflictError, canonicalForMatch, pathWithinDeletedTree, samePathForMatch, type UserPermissionsRow, type WorkspaceCleanupIntent } from './db.js';
 import {
@@ -118,6 +232,9 @@ import {
   isPrivateHost,
   isDangerousUploadName,
   sanitizeText,
+  isAbsoluteLikePath,
+  isFullyQualifiedPath,
+  isFilesystemRootPath,
   sanitizeHiddenUnicode,
   containsSessionReference,
   todayLocal,
@@ -159,6 +276,7 @@ export function proxyRequestBodyLimitFor(
   if (isAionuiPanel(pathname)) return AIONUI_REQUEST_BODY_BYTES;
   return SESSION_SCOPED_REQUEST_BODY_BYTES;
 }
+import { loadingTimeline, eventLoopDelaySampler } from './loading-timeline.js';
 
 /** 网关内部扩展请求：权限执行时把用户/权限附在 req 上，供后续中间件与代理读取 */
 function isSafeSshAlias(value: string): boolean {
@@ -173,6 +291,8 @@ type Req = Request & {
   dshpwUser?: number;
   dshpwIsAdmin?: boolean;
   dshpwSshClaimedAlias?: string;
+  /** 已认证用户名（审计用 actor 归属）；权限行仍只挂子用户。 */
+  dshpwUsername?: string;
   dshpwPerms?: UserPermissionsRow;
   /** The authenticated subuser's host-managed workspace root. */
   dshpwManagedWorkspaceRoot?: string;
@@ -213,12 +333,13 @@ const DIRECTORY_PICKER_NATIVE_RE = /^\/api\/directoryPicker[.\/]pick$/;
 const WORKSPACE_CREATE_RE = /^\/api\/workspace[.\/]create$/;
 const WORKSPACE_REMOVE_RE = /^\/api\/workspace[.\/](?:remove|delete)$/;
 
-/** DSH 官方 terminal HTTP unary RPC：主用户直通，子用户真实能力始终拒绝。 */
+/** DSH 官方 terminal HTTP unary RPC：主用户直通，子用户由 allowSsh 控制。 */
 const OFFICIAL_TERMINAL_HTTP_RE = /^\/api\/terminal[.\/](?:environment|shells|list|create|write|resize|rename|close)$/;
-/** DSH 官方 terminal Remote 流：主用户直通，子用户逐逻辑流拒绝。 */
+/** DSH 官方 terminal Remote 流：主用户直通，子用户由 allowSsh 控制。 */
 const OFFICIAL_TERMINAL_REMOTE_ENDPOINTS = new Set(['terminal/follow', 'terminal/retain']);
 /** 子用户 terminal UX 桩路径（点号/斜杠两种官方写法）：list / environment /
- *  shells / close。对子用户只回不放开能力的 server-response，见下方中间件。 */
+ *  shells / close。allowSsh 关闭时只回不放开能力的 server-response，见下方中间件；
+ *  allowSsh 开启后这些请求也原样透传。 */
 const TERMINAL_STUB_RE = /^\/api\/terminal[.\/](list|environment|shells|close)$/;
 
 /** 与 Remote mux 侧共用：两条通道对同一个「terminal 不可用」失败给出同一文案。 */
@@ -380,7 +501,7 @@ function workspaceFileScopeRequest(
  */
 function resolveWorkspaceFileTarget(root: string, requestedPath: string, relativePath: string | null): string | null {
   const normalizedRoot = normalizePath(root);
-  const base = path.isAbsolute(requestedPath)
+  const base = isAbsoluteLikePath(requestedPath)
     ? normalizePath(requestedPath)
     : normalizePath(`${normalizedRoot}/${requestedPath}`);
   if (relativePath === null) return base;
@@ -1336,26 +1457,6 @@ function renderSetupPage(params: { lang: Lang; error?: string; csrf: string }): 
   });
 }
 
-/**
- * F-A2 隐藏 Unicode 清洗的字节级流（插件面板流式文本内容用）：
- * 按 UTF-8 字节模式剥离零宽/bidi 等隐形字符序列，跨 chunk 安全。
- * 用 latin1 做 1:1 字节映射，正则匹配字节序列，不破坏任何非目标字节。
- *
- * tail 策略：保留尾部「可能不完整的多字节 UTF-8 序列」——固定保留 3 字节会把
- * 完整零宽序列（如 E2 80 8B）拆散到 body/tail 两侧，永远无法被正则匹配（实测）。
- * 这里从尾部倒查：找到最后一个非续字节（0x80-0xBF 之外），若其声明长度 > 已见
- * 字节数则整体保留，否则全部进 body。
- */
-// 目标字符的 UTF-8 字节序列（latin1 字符串形式，逐字节 1:1）
-//   E2 80 8B-8F：ZWSP/ZWNJ/ZWJ/LRM/RLM
-//   E2 80 AA-AE：LRE/RLE/PDF/LRO/RLO（bidi）
-//   E2 81 A0-A9：WJ + 隐形运算符 + 新 bidi 隔离（LRI/RLI/FSI/PDI）
-//   EF BB BF：BOM/ZWNBSP
-//   C2 AD：软连字符 SHY
-//   E1 80 8E：蒙古元音分隔符 MVS
-//   CD 8F：组合字连接符 CGJ
-//   D8 9C：阿拉伯字母标记 ALM
-//   E1 85 9F/A0：谚文填充符
 const HIDDEN_BYTES_RE =
   /(?:\xe2\x80[\x8b-\x8f\xaa-\xae]|\xe2\x81[\xa0-\xa9]|\xef\xbb\xbf|\xc2\xad|\xe1\x80\x8e|\xcd\x8f|\xd8\x9c|\xe1\x85[\x9f\xa0])/g;
 
@@ -1607,6 +1708,7 @@ export function createGatewayServer(
       return {
         folders: new Set([...workspacePathById.values()].map(normalizePath)),
         sessions: new Set([...sessionCwdById.keys()].filter((id) => !archivedWorkspaceSessionIds.has(id))),
+        retainedSessions: new Set(archivedWorkspaceSessionIds),
       };
     } catch {
       return null;
@@ -1619,12 +1721,12 @@ export function createGatewayServer(
 
   // dsh rc.8 将归档状态放在全局 workspace registry；session.list 自身经常不带该字段，
   // 因此在网关实例内保存最近一次可信 workspace.list 快照，避免归档会话掉进 Ungrouped。
-  const archivedSessionSnapshot = new Set<string>();
 
   // 只负责「同一用户多个 workspace.list 响应之间的先后顺序」（较早的慢响应不得回滚
   // 更新的快照）。它不是授权版本：授权回写栅栏必须用 userAccessEpoch，绝不能把
   // 这个全局计数器当作授权 revision（详见 replaceUserSessionAccess 的注释）。
   let workspaceListRequestRevision = 0;
+  const bumpWorkspaceListRequestRevision = (): number => ++workspaceListRequestRevision;
 
 
   // 普通用户各自独立的会话授权快照：不能用全局 sessionId → cwd 映射，
@@ -1664,7 +1766,6 @@ export function createGatewayServer(
 
   const userSessionAccessWaiters = new Map<number, Set<() => void>>();
 
-  const userSessionAccessFor = (userId: number): Map<string, string> => userSessionAccess.get(userId) ?? new Map();
 
   // Remote workspace/session 订阅在单条 WebSocket 上长期存活。所有已认证用户（含
   // 主用户）都登记，确保登出、改密、改名和删除账户时能立即终止升级时身份。
@@ -1771,7 +1872,7 @@ export function createGatewayServer(
   };
 
 
-  type AssignableResources = { folders: Set<string>; sessions: Set<string> };
+  type AssignableResources = { folders: Set<string>; sessions: Set<string>; retainedSessions: Set<string> };
 
   // 子用户刚通过目录选择器成功创建、可登记为工作区的目录（带过期）。
   // workspace/create 只接受「显式分配的精确目录 / 自己创建的工作区子树 / 本表命中」，
@@ -1860,6 +1961,14 @@ export function createGatewayServer(
   // 宿主进程低频推送的已注册 Remote/HTTP 扩展面。已加载扩展不绑定 allow_ssh；
   // 官方 terminal、SSH 端点和宿主级敏感能力仍由各自边界控制。
   let dynamicPluginManifest: DynamicPluginManifest | undefined;
+  // 测试服务器由本机反向代理转发；只信任 loopback，恢复按真实客户端
+  // X-Forwarded-For 计算的 req.ip，同时避免信任公网伪造的代理头。
+  app.set('trust proxy', false);
+  // 请求是否应视为 HTTPS：网关自身 TLS，或受信本地反代转发的
+  // X-Forwarded-Proto=https（trust proxy=loopback 保证只有回环对端生效，公网直连
+  // 伪造该头无效）。nginx/caddy 在 80/443 终结 TLS 时网关收到的是明文 HTTP，
+  // 仅凭 config.gateway.tls 会把会话/CSRF/语言 Cookie 漏掉 Secure 标志。
+  const requestIsSecure = (req: Request): boolean => config.gateway.tls !== null || req.secure;
   const registryAuthorizedSockets = new Set<Duplex>();
   // 不泄露框架信息
   app.disable('x-powered-by');
@@ -2111,7 +2220,7 @@ export function createGatewayServer(
   // alpha.3 opens session.list and workspace/follow independently. session.list must
   // wait for the latter's filtered baseline, but an invalidated old baseline is not a
   // valid replacement. Only replaceUserSessionAccess may wake this wait.
-  const waitForUserSessionAccess = (userId: number, timeoutMs = 5_000, requireWorkspacePaths = false): Promise<boolean> => {
+  const awaitUserSessionAccess = (userId: number, timeoutMs = 5_000, requireWorkspacePaths = false): Promise<boolean> => {
     const ready = () => userSessionAccess.has(userId) && (!requireWorkspacePaths || userWorkspacePaths.has(userId));
     if (!ready() && workspaceSnapshotReady) {
       const perms = effectivePermissions(userId);
@@ -2141,6 +2250,15 @@ export function createGatewayServer(
       userSessionAccessWaiters.set(userId, waiters);
     });
   };
+  // 观测：baseline 有界等待耗时与结果。只记录数值/布尔，不涉及任何请求内容；
+  // 时间线关闭时 spanAsync 直接透传原 Promise，不改变语义。
+  const waitForUserSessionAccess = (userId: number, timeoutMs?: number, requireWorkspacePaths?: boolean): Promise<boolean> =>
+    loadingTimeline.spanAsync(
+      'baseline.wait',
+      () => awaitUserSessionAccess(userId, timeoutMs, requireWorkspacePaths),
+      (ready) => ({ ok: ready }),
+    );
+  const userSessionAccessFor = (userId: number): Map<string, string> => userSessionAccess.get(userId) ?? new Map();
   const userAccessEpochFor = (userId: number): number => userAccessEpoch.get(userId) ?? 0;
   /** 推进该用户的授权 epoch（授权/权限实际变更时调用）；单调递增，绝不回退。 */
   const bumpUserAccessEpoch = (userId: number): number => {
@@ -3131,8 +3249,8 @@ export function createGatewayServer(
       // F-04：登出后的 token 立即拒绝（不重新进入缓存）
       if (isTokenRevoked(token)) return null;
       // 用户被删除/重置/改密后旧会话必须失效（缓存有效期 30 秒内生效）
-      const row = db.getUserByUsername(user.username);
-      if (row === null) return null;
+      const row = db.getUserById(user.userId);
+      if (row === null || row.username !== user.username) return null;
       if (user.cv !== row.credential_version) return null;
       // 缓存 TTL 与 JWT 到期时间取最小值：否则刚过期就被缓存的 token 会在
       // 命中路径上绕过验签，额外存活最多 30 秒
@@ -3217,6 +3335,7 @@ export function createGatewayServer(
 
   /** Canonicalize one existing or prospective path and confine it to this user's managed root. */
   function managedPathFor(userId: number, candidate: string): string | null {
+    if (!isFullyQualifiedPath(candidate)) return null;
     const managed = db.getManagedWorkspace(userId);
     if (managed === null) return null;
     const root = canonicalCandidate(managed.path);
@@ -3329,10 +3448,23 @@ export function createGatewayServer(
       const entryPath = (entry as Record<string, unknown>).path;
       if (typeof entryPath !== 'string') return false;
       const canonical = canonicalCandidate(entryPath);
-      return canonical !== null && pathWithin(root, canonical);
+      return canonical !== null && pathWithin(root, canonical) &&
+        !isSensitivePath(entryPath) && !isSensitivePath(canonical) &&
+        !workspaceSubtreeOverlap(userId, entryPath) && !workspaceSubtreeOverlap(userId, canonical);
     });
     return value;
   }
+
+  /** Retain a safe path summary without persisting sensitive host locations. */
+  const auditPathSummary = (value: string): string | { sensitive: true; leaf: string } => {
+    const normalized = normalizePath(value);
+    return isSensitivePath(value) || isSensitivePath(canonicalizePathBestEffort(value))
+      ? { sensitive: true, leaf: path.basename(normalized) } : normalized;
+  };
+  const auditDirectoryEvent = (eventType: string, req: Request, detail: Record<string, unknown>): void => {
+    db.audit(eventType, { username: (req as Req).dshpwUsername ?? null, ip: req.ip,
+      userAgent: req.headers['user-agent'] ?? null, detail: JSON.stringify(detail) });
+  };
 
   /** 从会话 cookie 解析完整用户（含角色）；无会话/失效返回 null */
   function authedUser(req: Request): { userId: number; username: string; role: 'admin' | 'user' } | null {
@@ -5067,14 +5199,16 @@ export function createGatewayServer(
   const REMOTE_MUX_MAX_PAYLOAD_BYTES = 100 * 1024 * 1024;
   const REMOTE_MUX_MAX_STREAMS = 64;
   const REMOTE_MUX_MAX_PENDING_BYTES = 2 * 1024 * 1024;
-  const REMOTE_MUX_HEARTBEAT_INTERVAL_MS = 2_000;
-  const REMOTE_MUX_MAX_MISSED_HEARTBEATS = 2;
+  // Remote mux 心跳/写停滞期限来自已验证配置（loadConfig 解析 MCP_GATEWAY_MUX_*）；
+  // 直接以字面量构造 PlatformConfig 的调用方（测试）缺省时按同一解析器回退默认。
+  const remoteMuxConfig = config.mux ?? resolveRemoteMuxConfig();
 
   const upstreamWsOptions = (): {
     headers: Record<string, string>;
     rejectUnauthorized?: boolean;
     agent?: any;
     maxPayload: number;
+    perMessageDeflate: false;
   } => ({
     headers: {
       host: upstreamAuthority,
@@ -5086,6 +5220,7 @@ export function createGatewayServer(
       agent: upstreamAgent,
     } : {}),
     maxPayload: REMOTE_MUX_MAX_PAYLOAD_BYTES,
+    perMessageDeflate: false,
   });
 
   /**
@@ -5187,8 +5322,8 @@ export function createGatewayServer(
     /** The DSH Remote generation that may submit a result for its waterfall events. */
     remoteEventsClientId?: string;
   };
-  const sessionFollowIdentityAllowed = (userId: number, address: NonNullable<ReturnType<typeof parseSessionAddress>>): boolean =>
-    authorizedSubuserSessionRoot(userId, sessionAuthorizationId(address), effectivePermissions(userId)) !== null;
+  const sessionFollowIdentityAllowed = (userId: number, address: NonNullable<ReturnType<typeof parseSessionAddress>>, permissions = effectivePermissions(userId)): boolean =>
+    authorizedSubuserSessionRoot(userId, sessionAuthorizationId(address), permissions) !== null;
   /**
    * 子用户「该会话现在可否被访问」的唯一判定（HTTP 与 Remote 两条通道同口径）：
    *   · 必须命中该用户的会话授权快照（baseline 已给出可信 cwd）；
@@ -5265,7 +5400,7 @@ export function createGatewayServer(
     const targetCanonical = canonicalizePathBestEffort(target);
     if (!pathWithin(root, target) || !pathWithin(rootCanonical, targetCanonical) ||
       !folderAllowed(target, perms.allowed_folders) || !folderAllowed(targetCanonical, perms.allowed_folders) ||
-      workspaceSubtreeOverlap(userId, target)) return null;
+      workspaceSubtreeOverlap(userId, target) || isSensitivePath(target) || isSensitivePath(targetCanonical)) return null;
     return { scopeId: request.scopeId, root, target, rootCanonical, targetCanonical };
   };
 
@@ -5382,7 +5517,7 @@ export function createGatewayServer(
     // anything racing behind that close.
     if (state.endpoint === 'session/follow') {
       const address = state.followAddress;
-      if (address === null || address === undefined || !sessionFollowIdentityAllowed(userId, address)) return null;
+      if (address === null || address === undefined || !sessionFollowIdentityAllowed(userId, address, fallbackPerms)) return null;
       if (!state.followSnapshotSeen) {
         if (!sessionFollowSnapshotMatches(address, value)) return null;
         state.followSnapshotSeen = true;
@@ -5452,6 +5587,7 @@ export function createGatewayServer(
         pathWithin(state.workspaceFileRootCanonical, changedCanonical);
       if (!withinTarget || !withinRoot ||
         (!folderAllowed(changedPath, perms.allowed_folders) && !folderAllowed(changedCanonical, perms.allowed_folders)) ||
+        isSensitivePath(changedPath) || isSensitivePath(changedCanonical) ||
         workspaceOwnedByAnotherSubuser(userId, changedPath)) return null;
       return frame;
     }
@@ -5568,7 +5704,14 @@ export function createGatewayServer(
         return { type: 'order', workspaceIds: ids };
       }
       if (frame.type === 'archived' && Array.isArray(frame.archivedSessionIds)) {
-        return { type: 'archived', archivedSessionIds: frame.archivedSessionIds.filter(allowedSession) };
+        const projected = frame.archivedSessionIds.filter(allowedSession);
+        if (access !== undefined) {
+          // 归档动作是权威投影：立即刷新该用户的内存归档集合（只含已授权会话），并推进
+          // 同一用户列表顺序水位，令在途更旧的 workspace.list 响应无法回滚它。
+          userArchivedSessionIds.set(userId, new Set(projected));
+          replaceUserSessionAccess(userId, access, userAccessEpochFor(userId), bumpWorkspaceListRequestRevision());
+        }
+        return { type: 'archived', archivedSessionIds: projected };
       }
       if (frame.type === 'pinned' && Array.isArray(frame.pinnedSessionIds)) {
         return { type: 'pinned', pinnedSessionIds: frame.pinnedSessionIds.filter(allowedSession) };
@@ -5705,40 +5848,10 @@ export function createGatewayServer(
     ? path.dirname(path.resolve(process.env.DSH_PASSWORDS_ENV_FILE.trim()))
     : gatewayRoot;
 
-  // ── 敏感目录基列表（下载与目录删除共用）────────────────────
-  // 部署根（盖 .env/dist/scripts）、数据库及其 data/ 父两级、DSH 安装根、
-  // DSH 家目录（会话/设置/凭据）、本机 SSH 凭据、OS 系统目录。
-  const sensitivePathBases = (): string[] => {
-    const dbReal = (() => {
-      try {
-        return realpathSync(config.dbPath);
-      } catch {
-        return path.resolve(config.dbPath);
-      }
-    })();
-    const home = os.homedir();
-    const dshHome = process.env.DSH_HOME !== undefined && process.env.DSH_HOME !== ''
-      ? path.resolve(process.env.DSH_HOME)
-      : path.join(home, '.dsh');
-    // dsh 安装根：显式配置或自动探测（npm root -g/@deepseek-ai/dsh）；
-    // 用 findDshRoot 而不是直接读 config.patch.dshRoot，因为它可能是空（自动探测）
-    const resolvedDshRoot = findDshRoot(config.patch.dshRoot);
-    return [
-      gatewayRoot,
-      configuredRoot,
-      dbReal,
-      path.dirname(dbReal),
-      // 部署目录（dbPath 的 data/ 再上一级）：盖住 .env / dist / scripts
-      path.dirname(path.dirname(dbReal)),
-      resolvedDshRoot !== null ? resolvedDshRoot : '',
-      dshHome,
-      path.join(home, '.ssh'),
-      ...(process.platform === 'win32' ? [] : ['/etc', '/proc', '/sys', '/dev', '/boot']),
-    ].filter((p) => p !== '');
-  };
-  const isSensitivePath = (p: string): boolean =>
-    sensitivePathBases().some((base) => p === base || p.startsWith(base + path.sep));
-
+  const { sensitivePathBases, isSensitivePath } = createSensitivePathChecker({
+    dbPath: config.dbPath, dshRoot: config.patch.dshRoot, gatewayRoot, configuredRoot,
+  });
+  const isPlatformAbsolutePath = isFullyQualifiedPath;
 
   // ── 远程文件下载（Issue #4）──────────────────────────────────
   // 经网关远程访问时，点击对话里的“生成文件”标签不再在服务器容器里执行
@@ -5784,7 +5897,7 @@ export function createGatewayServer(
     }
 
     // 5) 敏感路径屏蔽：与目录删除共用同一套基列表（见 sensitivePathBases）
-    if (isSensitivePath(real)) {
+    if (isSensitivePath(abs) || isSensitivePath(real)) {
       res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '敏感文件不可下载' });
       return;
     }
@@ -5824,6 +5937,170 @@ export function createGatewayServer(
       else res.destroy();
     });
     stream.pipe(res);
+  });
+
+  const DIRECTORY_PICKER_MAX_ENTRIES = 2000;
+  const DIRECTORY_PICKER_SCAN_LIMIT = 4000;
+  type DirectoryPickerEntry = { name: string; path: string; selectable: boolean };
+
+  /** 每请求求值一次的安全 roots；config 已按平台默认/环境变量解析，未配置时为家目录。 */
+  const directoryPickerRoots = (): DirectoryPickerRootRef[] =>
+    resolveDirectoryPickerBrowseRoots(config.directoryPickerRoots ?? [os.homedir()], isSensitivePath);
+
+  /**
+   * 敏感基快照：与 createSensitivePathChecker 的 isSensitivePath 完全一致（normalizePath +
+   * win32 折叠大小写）。每请求按当前文件系统状态求值一次，供目录项逐条复用，避免重复 realpath。
+   */
+  const directoryPickerSensitiveKeys = (): ((candidate: string) => boolean) => {
+    const caseFold = process.platform === 'win32'
+      ? (value: string): string => value.toLowerCase()
+      : (value: string): string => value;
+    const normalizedBases = sensitivePathBases().map((base) => caseFold(normalizePath(base)));
+    return (candidate: string): boolean => {
+      const normalized = caseFold(normalizePath(candidate));
+      return normalizedBases.some((base) => normalized === base || normalized.startsWith(`${base}/`));
+    };
+  };
+
+  /** 收集 dir 的直接子目录（限同一 root 内），过滤敏感项、符号链接与 canonical 逃逸。 */
+  const collectSubdirectories = async (
+    dir: string,
+    root: DirectoryPickerRootRef,
+  ): Promise<{ entries: DirectoryPickerEntry[]; truncated: boolean }> => {
+    const isSensitive = directoryPickerSensitiveKeys();
+    const entries: DirectoryPickerEntry[] = [];
+    let truncated = false;
+    let scanned = 0;
+    const handle = await opendir(dir);
+    try {
+      for await (const dirent of handle) {
+        if (scanned >= DIRECTORY_PICKER_SCAN_LIMIT) { truncated = true; break; }
+        scanned += 1;
+        // 符号链接条目一律不返回：链接目标可能跳出 browse root（fail-closed）。
+        if (dirent.isSymbolicLink() || !dirent.isDirectory()) continue;
+        const lexicalPath = path.join(dir, dirent.name);
+        let real: string;
+        try {
+          if (!statSync(lexicalPath).isDirectory()) continue;
+          real = realpathSync(lexicalPath);
+        } catch {
+          continue;
+        }
+        if (isSensitive(lexicalPath) || isSensitive(real)) continue;
+        // canonical 必须仍在同一 root 内：junction/挂载/链接逃逸一律丢弃。
+        if (!directoryPickerPathWithin(root.lexical, lexicalPath) || !directoryPickerPathWithin(root.real, real)) continue;
+        entries.push({ name: dirent.name, path: normalizePath(lexicalPath), selectable: true });
+      }
+    } finally {
+      await handle.close().catch(() => { /* 关闭失败不影响已读取结果 */ });
+    }
+    entries.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+    if (entries.length > DIRECTORY_PICKER_MAX_ENTRIES) {
+      truncated = true;
+      entries.length = DIRECTORY_PICKER_MAX_ENTRIES;
+    }
+    return { entries, truncated };
+  };
+  app.get('/gateway/api/directory-picker/list', async (req, res) => {
+    const me = apiAuth(req, res, true);
+    if (!me) return;
+    res.setHeader('Cache-Control', 'no-store');
+    try {
+      const rawQuery = req.query.path;
+      if (rawQuery !== undefined && typeof rawQuery !== 'string') {
+        res.status(400).json({ ok: false, code: 'INVALID', error: 'path 无效' });
+        return;
+      }
+      const rawPath = rawQuery === undefined ? '' : rawQuery;
+      const roots = directoryPickerRoots();
+      const rootPaths = roots.map((root) => root.lexical);
+      // 无 path：返回安全 roots 的入口，不下钻到 root 的子目录。
+      if (rawPath === '') {
+        const entries: DirectoryPickerEntry[] = roots.map((root) => ({
+          name: directoryPickerEntryName(root.lexical),
+          path: root.lexical,
+          selectable: true,
+        }));
+        res.json({ ok: true, currentPath: null, parentPath: null, selectable: false, entries, truncated: false, rootPaths });
+        return;
+      }
+      // 有 path：必须是平台合规的绝对路径；相对路径与 Windows 默认盘形态一律拒绝。
+      if (rawPath.includes('\u0000') || !isPlatformAbsolutePath(rawPath)) {
+        res.status(400).json({ ok: false, code: 'INVALID', error: 'path 必须是绝对路径' });
+        return;
+      }
+      const abs = path.resolve(rawPath);
+      let real: string;
+      let st;
+      try {
+        real = realpathSync(abs);
+        st = statSync(abs);
+      } catch {
+        res.status(404).json({ ok: false, code: 'NOT_FOUND', error: '目录不存在' });
+        return;
+      }
+      if (!st.isDirectory()) {
+        res.status(400).json({ ok: false, code: 'INVALID', error: '不是目录' });
+        return;
+      }
+      // 词法与 canonical 都不敏感：管理员也不能浏览 DSH 会话/凭据/部署目录。
+      if (isSensitivePath(abs) || isSensitivePath(real)) {
+        res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '敏感路径不可浏览' });
+        return;
+      }
+      const scope = classifyDirectoryPickerTarget(
+        { lexical: normalizePath(abs), real: normalizePath(real) },
+        roots,
+      );
+      if (scope.kind === 'outside') {
+        // 用户传入的 path 永远不会被当作新的 browse root。
+        res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '不在允许浏览的范围内' });
+        return;
+      }
+      if (scope.kind === 'ancestor') {
+        // 祖先路径只返回通往安全 root 的直接子条目：既不枚举兄弟目录，也不可作为落点。
+        const isSensitive = directoryPickerSensitiveKeys();
+        const entries: DirectoryPickerEntry[] = [];
+        for (const childPath of scope.ancestorEntries) {
+          let childReal: string;
+          try {
+            if (!statSync(childPath).isDirectory()) continue;
+            childReal = realpathSync(childPath);
+          } catch {
+            continue;
+          }
+          if (isSensitive(childPath) || isSensitive(childReal)) continue;
+          entries.push({ name: directoryPickerEntryName(childPath), path: childPath, selectable: false });
+        }
+        const parentPath = isFilesystemRootPath(abs) ? null : normalizePath(path.dirname(abs));
+        res.json({ ok: true, currentPath: normalizePath(abs), parentPath, selectable: false, entries, truncated: false, rootPaths });
+        return;
+      }
+      const root = roots[scope.rootIndex];
+      let listing: { entries: DirectoryPickerEntry[]; truncated: boolean };
+      try {
+        listing = await collectSubdirectories(abs, root);
+      } catch {
+        res.status(500).json({ ok: false, code: 'INTERNAL', error: '目录读取失败' });
+        return;
+      }
+      // root 自身 parentPath=null；子树内目录按真实父目录回溯，绝不越过 root。
+      const parentPath = scope.kind === 'root' ? null : normalizePath(path.dirname(abs));
+      res.json({
+        ok: true,
+        currentPath: normalizePath(abs),
+        parentPath,
+        selectable: true,
+        entries: listing.entries,
+        truncated: listing.truncated,
+        rootPath: root.lexical,
+        rootPaths,
+      });
+    } catch {
+      // 兜底：任何未预期异常都回 HTTP 错误，而不是 Express 未捕获的 rejected promise。
+      if (!res.headersSent) res.status(500).json({ ok: false, code: 'INTERNAL', error: '目录读取失败' });
+      else res.end();
+    }
   });
 
   // ── 目录删除联动：上游 workspace registry 快照与删除 ─────────────
@@ -5911,7 +6188,7 @@ export function createGatewayServer(
           },
           rejectUnauthorized: process.env.MCP_GATEWAY_UPSTREAM_TLS_VERIFY !== '0',
           agent: upstreamAgent,
-          maxPayload: 16 * 1024 * 1024,
+          maxPayload: TENANT_MUX_MAX_MESSAGE_BYTES,
         });
       } catch {
         finish(null);
@@ -6673,6 +6950,10 @@ export function createGatewayServer(
     if (allowWorkspaceCreate === null) return;
     const allowSsh = readBooleanPermission('allowSsh', body.allowSsh, currentPermissions.allow_ssh);
     if (allowSsh === null) return;
+    if (body.workspaceCreationRoots !== undefined) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: 'workspaceCreationRoots 已停用；工作区范围由 allowedFolders 配置' });
+      return;
+    }
     const allowChatMedia = readBooleanPermission('allowChatMedia', body.allowChatMedia, currentPermissions.allow_chat_media);
     if (allowChatMedia === null) return;
     const banned = readBooleanPermission('banned', body.banned, currentPermissions.banned);
@@ -6789,18 +7070,31 @@ export function createGatewayServer(
     // session/create 追加了会话），或者前端拿的是过期快照。两种都必须 fail-closed：
     // 保留服务端 grant 并回 409，让管理员重新同步，而不是静默撤销自己未见过的会话。
     let unackedDroppedGrants: string[] = [];
-    // Explicit assignment is a security-sensitive write. The DSH plugin owns
-    // the live registry and archive state, so a gateway cache or client draft
-    // cannot authorize a deleted/archived session. A missing authority is a
-    // 502, never an implicit allow.
-    if (body.allowedSessionIds !== undefined || allowedFolders.length > 0 && !deniesAllWorkspaces) {
+    // Local directory grants require an existing safe directory; Session grants still require the live Host registry.
+    const folderKnown = (folder: string): boolean => {
+      if (managedPathFor(userId, folder) !== null) return true;
+      if ([...workspacePathById.values()].some(value => normalizePath(value) === normalizePath(folder))) return true;
+      try {
+        const canonical = realpathSync(folder);
+        return statSync(canonical).isDirectory() && !isSensitivePath(folder) && !isSensitivePath(canonical)
+          && !workspaceSubtreeOverlap(userId, canonical)
+          && (db.managedWorkspaceOwnerForPath(canonical) === null || db.managedWorkspaceOwnerForPath(canonical) === userId);
+      } catch {
+        return false;
+      }
+    };
+    if (!deniesAllWorkspaces && allowedFolders.some(folder => !folderKnown(folder))) {
+      res.status(400).json({ ok: false, code: 'WORKSPACE_NOT_ASSIGNABLE', error: '工作区不存在或当前不可分配' });
+      return;
+    }
+    if (body.allowedSessionIds !== undefined) {
       const resources = await fetchAssignableResources();
       if (resources === null) {
         res.status(502).json({ ok: false, code: 'RESOURCES_UNAVAILABLE', error: '可分配资源暂不可用' });
         return;
       }
       const previousGrants = new Set(previousAllowedSessionIds);
-      const staleSessionIds = allowedSessionIds.filter((id) => !resources.sessions.has(id) && previousGrants.has(id));
+      const staleSessionIds = allowedSessionIds.filter((id) => !resources.sessions.has(id) && !resources.retainedSessions.has(id) && previousGrants.has(id));
       const invalidSession = allowedSessionIds.find((id) => !resources.sessions.has(id) && !previousGrants.has(id));
       if (invalidSession !== undefined) {
         res.status(400).json({ ok: false, code: 'SESSION_NOT_ASSIGNABLE', error: '会话不存在、已归档或当前不可分配' });
@@ -6820,7 +7114,7 @@ export function createGatewayServer(
           resources.sessions.has(id) && !submitted.has(id) && !disabled.has(id),
         );
       }
-      if (!deniesAllWorkspaces && allowedFolders.some((folder) => !resources.folders.has(normalizePath(folder)) && managedPathFor(userId, folder) === null)) {
+      if (!deniesAllWorkspaces && allowedFolders.some((folder) => !resources.folders.has(normalizePath(folder)) && !folderKnown(folder))) {
         res.status(400).json({ ok: false, code: 'WORKSPACE_NOT_ASSIGNABLE', error: '工作区不存在或当前不可分配' });
         return;
       }
@@ -6920,9 +7214,21 @@ export function createGatewayServer(
       }
       throw error;
     }
-    // DB 已提交后先设版本栅栏：后续沙盒收紧存在 await，不能让旧请求快照的
-    // create/fork 响应在该窗口把新会话写回刚保存的授权集合。
-    if (accessChanged) fenceUserAccessEpoch(userId);
+    // Revoke existing transports before sandbox confirmation can suspend this request.
+    if (accessChanged || sshChanged || otherPermissionChanged) {
+      if (accessChanged) {
+        fenceUserAccessEpoch(userId);
+        invalidateUserSessionAccess(userId);
+      }
+      if (accessChanged || sshChanged) closeUserRemoteMuxClients(userId);
+      closeUserWebSocketClients(userId);
+    }
+    if (accessChanged || otherPermissionChanged || prevPerms.monthly_budget_micros !== monthlyBudgetMicros) {
+      closeTenantConnections(tenantConnectionsByUserId.get(userId), banned ? 'account unavailable' : 'permissions changed');
+    }
+    if (foldersChanged || prevPerms.allow_workspace_create !== allowWorkspaceCreate) {
+      pendingCreatedDirectories.delete(userId);
+    }
     // alpha.3 在每次工具执行时从 session log 的 sandbox/mode 折叠真实策略。
     // 只在确定为收紧时改写已有会话，绝不由权限保存隐式提升旧 session.
     // A null historical setting predates this control and may have inherited DSH's
@@ -6934,34 +7240,21 @@ export function createGatewayServer(
         : SANDBOX_RANK['danger-full-access'];
     const sandboxTightened = sandboxMode !== null && SANDBOX_RANK[sandboxMode] < previousSandboxRank;
     let sandboxRevokedSessionIds: string[] = [];
-    if (sandboxTightened && sandboxMode !== null) {
-      // A newly shared session can belong to the administrator. Do not mutate its
-      // global DSH sandbox merely because it was granted to this child account.
-      // Only propagate a tightening to sessions this child could already access.
+    if (sandboxMode !== null) {
+      // Newly granted Sessions are already owned by this account; apply its policy
+      // before exposing them, even when the account's configured mode is unchanged.
       const previouslyGranted = new Set(previousAllowedSessionIds);
-      const existingGrantedSessions = allowedSessionIds.filter((id) => previouslyGranted.has(id));
-      sandboxRevokedSessionIds = await applySandboxToSessions(existingGrantedSessions, sandboxMode);
+      const sessionsToConfirm = allowedSessionIds.filter((id) => sandboxTightened || !previouslyGranted.has(id));
+      sandboxRevokedSessionIds = await applySandboxToSessions(sessionsToConfirm, sandboxMode);
       if (sandboxRevokedSessionIds.length > 0) {
         // 只回收被沙盒策略拒绝的会话；整表替换会抹掉本次 await 期间子用户
         // session/create 并发追加（且并未被拒绝）的会话授权。
         db.deleteUserSessionGrants(userId, sandboxRevokedSessionIds);
+        // A carrier may have reconnected during confirmation with the old grant set.
+        invalidateUserSessionAccess(userId);
+        closeUserRemoteMuxClients(userId);
+        closeUserWebSocketClients(userId);
       }
-    }
-    // 只有显式提交会话集合时才完成一次性旧数据迁移/初始化；该标记已与权限行和
-    // grant 集合在同一事务提交，避免沙盒 await 窗口被首次 baseline 全表种子覆盖。
-    // 仅在实际影响会话可见性的权限变化后失效旧快照；同值保存必须是 no-op，
-    // 否则设置页的重复提交会反复撕裂 Remote mux 并触发 DSH 无限重连。
-    if (accessChanged || sshChanged) {
-      if (accessChanged) invalidateUserSessionAccess(userId);
-      // Remote mux 现在也承载官方 terminal 流。SSH 开关变化必须关闭旧 carrier，
-      // 让 DSH 重新认证并重新建立允许的逻辑流，避免撤销后继续持有宿主终端。
-      closeUserRemoteMuxClients(userId);
-    }
-    // SSH 开关变化、封禁或其它实际权限变化都要撤销旧的 legacy/登记 WS；
-    // 没有实际变化时不触碰连接。
-    if (accessChanged || otherPermissionChanged) closeUserWebSocketClients(userId);
-    if (accessChanged || otherPermissionChanged || prevPerms.monthly_budget_micros !== monthlyBudgetMicros) {
-      closeTenantConnections(tenantConnectionsByUserId.get(userId), banned ? 'account unavailable' : 'permissions changed');
     }
     if (quotaChanged) {
       db.resetUsage(userId);
@@ -6971,7 +7264,12 @@ export function createGatewayServer(
     }
     db.audit('permissions_changed', {
       username: target.username,
+      ip: req.ip,
+      userAgent: req.headers['user-agent'] ?? null,
       detail: JSON.stringify({
+        actor: me.username,
+        allowedModels,
+        allowedSessionIds: db.listUserSessionGrants(userId),
         allowedFolders,
         hourlyTokenLimit,
         dailyMinutesLimit,
@@ -7039,6 +7337,7 @@ export function createGatewayServer(
 
   const messageRoutes = registerMessageRoutes(app, {
     db, apiAuth, jsonBody, chatMediaAllowed, nullableInt, stringArray,
+    registerRevocableClient: registerUserWebSocketClient,
   });
 
   // ── 认证门卫：非 /gateway 请求必须带有效会话 ─────────────────
@@ -7237,6 +7536,7 @@ export function createGatewayServer(
       // 记录所有登录用户（含主用户）的用户 id：供 session.create/fork 响应回调
       // 登记 sessionId→cwd 缓存与 dsh-ssh 主机 SSRF 校验使用；权限行仍只挂子用户
       (req as Req).dshpwUser = user.userId;
+      (req as Req).dshpwUsername = row.username;
       (req as Req).dshpwIsAdmin = row.role === 'admin';
       if (row.role !== 'admin') {
         const perms = effectivePermissions(user.userId);
@@ -7311,11 +7611,18 @@ export function createGatewayServer(
           const normalizedPath = requestedPath === null ? null : normalizePath(requestedPath);
           const canonicalPath = requestedPath === null ? null : canonicalizePathBestEffort(requestedPath);
           const allowed = requestedPath !== null && requestedPath !== '' &&
-            !requestedPath.includes('\0') && path.isAbsolute(requestedPath) &&
+            !requestedPath.includes('\0') && isAbsoluteLikePath(requestedPath) &&
             normalizedPath !== null && canonicalPath !== null &&
             pathBoundToAuthorizedWorkspace(user.userId, perms, normalizedPath) &&
             pathBoundToAuthorizedWorkspace(user.userId, perms, canonicalPath);
           if (!allowed) {
+            res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+            return;
+          }
+          // 通过会话根/白名单/归属之后，仍须拒绝敏感路径：管理员可能把敏感目录的祖先
+          // 误登记为工作区，此时目标会同时命中白名单与归属，只有敏感基能挡住。
+          if (normalizedPath !== null && isSensitivePath(normalizedPath) ||
+            canonicalPath !== null && isSensitivePath(canonicalPath)) {
             res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
             return;
           }
@@ -7448,6 +7755,13 @@ export function createGatewayServer(
           denyRequest(req, res, lang, t(lang, 'gw.adminOnly'));
           return;
         }
+        if (req.method === 'POST' && /^\/api\/session[./]uploadFileBinary$/.test(requestPath)) {
+          const sessionId = parsed.searchParams.get('sessionId');
+          if (sessionId === null || authorizedSubuserSessionRoot(user.userId, sessionId, perms) === null) {
+            denyRequest(req, res, lang, t(lang, 'gw.folderDenied'));
+            return;
+          }
+        }
         if (DIRECTORY_PICKER_NATIVE_RE.test(requestPath)) {
           denyRequest(req, res, lang, t(lang, 'gw.workspaceDenied'));
           return;
@@ -7477,6 +7791,7 @@ export function createGatewayServer(
           !isWorkspaceOrderWrite(requestPath) &&
           !WORKSPACE_ARCHIVE_SESSION_RE.test(requestPath) &&
           !privateWorkspaceRemoval &&
+          !isWorkspaceDirectoryCreate(requestPath) &&
           !managedWorkspaceMutation &&
           !grantedWorkspaceMutation
         ) {
@@ -9171,9 +9486,15 @@ export function createGatewayServer(
                   const pending = pendingCreatedDirectories.get(reqAs.dshpwUser!)?.get(reqAs.dshpwWorkspacePath);
                   const owned = workspaceRegistrationOwnedBy(reqAs.dshpwUser!, reqAs.dshpwWorkspacePath)
                     || (pending !== undefined && pending.expiresAt > Date.now());
-                  if (created && owned) {
+                  const livePerms = effectivePermissions(reqAs.dshpwUser!);
+                  if (created && owned && userAccessEpochFor(reqAs.dshpwUser!) === sessionAccessRequestEpoch &&
+                      !livePerms.banned && livePerms.allow_workspace_create &&
+                      managedPathFor(reqAs.dshpwUser!, createdPath) !== null &&
+                      pathAllowedFor(reqAs.dshpwUser!, createdPath, livePerms.allowed_folders) &&
+                      !isSensitivePath(createdPath) && !isSensitivePath(canonicalizePathBestEffort(createdPath))) {
                     db.addUserWorkspace(reqAs.dshpwUser!, reqAs.dshpwWorkspacePath);
                     db.addAllowedFolder(reqAs.dshpwUser!, reqAs.dshpwWorkspacePath);
+                    auditDirectoryEvent('workspace_registered', req, { result: 'ok', path: auditPathSummary(createdPath) });
                   }
                   // 立即更新该用户的 workspaceId→path 映射并向已建立的 Remote mux
                   // 连接补发过滤后的 upsert：否则紧随其后的 session.create（带
@@ -9219,9 +9540,19 @@ export function createGatewayServer(
               const parsed = JSON.parse(body.toString('utf8')) as Record<string, unknown>;
               const result = parsed.result;
               if (isPlainJsonRecord(result) && result.ok === true && typeof result.value === 'string' && result.value.length > 0) {
-                // __deny__（禁止所有工作区）下不记账：哨兵用户不应获得可登记凭据。
-                if (!effectivePermissions(reqAs.dshpwUser!).allowed_folders.includes('__deny__')) {
-                  recordPendingCreatedDirectory(reqAs.dshpwUser!, canonicalizePathBestEffort(result.value));
+                const userId = reqAs.dshpwUser!;
+                const livePerms = effectivePermissions(userId);
+                const parent = reqAs.dshpwSessionCwd;
+                const createdPath = canonicalizePathBestEffort(result.value);
+                if (parent !== undefined && pathWithin(parent, result.value) &&
+                    pathWithin(canonicalizePathBestEffort(parent), createdPath) &&
+                    managedPathFor(userId, createdPath) !== null &&
+                    userAccessEpochFor(userId) === sessionAccessRequestEpoch &&
+                    !livePerms.banned && livePerms.allow_workspace_create &&
+                    pathAllowedFor(userId, createdPath, livePerms.allowed_folders) &&
+                    !isSensitivePath(result.value) && !isSensitivePath(createdPath)) {
+                  recordPendingCreatedDirectory(userId, createdPath);
+                  auditDirectoryEvent('directory_created', req, { result: 'ok', path: auditPathSummary(createdPath) });
                 }
               }
             } catch {
@@ -9345,7 +9676,7 @@ export function createGatewayServer(
                 );
                 if (accessReplaced) {
                   userArchivedSessionIds.set(reqAs.dshpwUser!, new Set(
-                    [...archivedSessionSnapshot].filter((id) => authorizedAccess.has(id)),
+                    [...archivedWorkspaceSessionIds].filter((id) => authorizedAccess.has(id)),
                   ));
                 }
               }
@@ -9491,6 +9822,10 @@ export function createGatewayServer(
                 const value = isPlainJsonRecord(result.value) ? result.value : null;
                 const archived = value === null ? undefined : value.archivedSessionIds;
                 if (value === null || !Array.isArray(archived)) throw new Error('invalid archive value');
+                // A completed archive action supersedes registry reads started earlier.
+                archivedWorkspaceSessionIds = new Set(archived.filter((id): id is string => typeof id === 'string'));
+                appliedWorkspaceSnapshotRevision = ++nextWorkspaceSnapshotRevision;
+                rebuildActiveWorkspaceSessions();
                 const archivePerms = effectivePermissions(archiveUserId);
                 value.archivedSessionIds = archived.filter((id): id is string =>
                   typeof id === 'string' && authorizedSubuserSessionRoot(archiveUserId, id, archivePerms) !== null,
@@ -9881,8 +10216,11 @@ export function createGatewayServer(
         if (isSessionHistoryResponse) {
           bufferSessionHistory(upstreamRes, res, (raw) => {
             try {
+              const stage = /history$/.test(proxyPath) ? 'history' : 'page';
+              const parseStart = loadingTimeline.begin();
               const body = decodeUpstreamBody(raw, String(upstreamRes.headers['content-encoding'] ?? ''));
               const parsed = JSON.parse(body.toString('utf8'));
+              loadingTimeline.elapsed(`gateway.${stage}.parse`, parseStart, { bytesIn: raw.length });
               if (reqAs.dshpwPerms !== undefined && reqAs.dshpwPerms.sandbox_mode !== null) {
                 void clampSessionHistorySandbox(
                   parsed,
@@ -9890,8 +10228,13 @@ export function createGatewayServer(
                 );
               }
               // F-A2：递归清洗历史中所有字符串字段（消息内容/工具结果）的隐藏 Unicode
+              const filterStart = loadingTimeline.begin();
               const cleaned = sanitizeHiddenUnicodeJson(parsed);
+              loadingTimeline.elapsed(`gateway.${stage}.filter`, filterStart);
+              const stringifyStart = loadingTimeline.begin();
               let out = Buffer.from(JSON.stringify(cleaned), 'utf8');
+              loadingTimeline.elapsed(`gateway.${stage}.stringify`, stringifyStart, { bytesOut: out.length });
+              eventLoopDelaySampler.sample('gateway.eventLoop.delay');
               const respHeaders = headersForRewrittenBody(upstreamRes.headers);
               if (/(?:^|,)\s*gzip\s*(?:,|$)/i.test(String(req.headers['accept-encoding'] ?? ''))) {
                 out = zlib.gzipSync(out);
@@ -10131,6 +10474,7 @@ export function createGatewayServer(
       (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH' || req.method === 'DELETE') &&
       (
         SESSION_SCOPED_RE.test(proxyPath) ||
+        /^\/api\/subscriptions-auth[.\/](?:speed|setSpeed)$/.test(proxyPath) ||
         SUBAGENT_SCOPED_RE.test(proxyPath) ||
         COMMANDS_SCOPED_RE.test(proxyPath) ||
         GOALS_SCOPED_RE.test(proxyPath) ||
@@ -10365,7 +10709,8 @@ export function createGatewayServer(
               pathWithin(canonicalSessionRoot, canonicalCandidate) &&
               folderAllowed(candidate, reqAs.dshpwPerms!.allowed_folders) &&
               folderAllowed(canonicalCandidate, reqAs.dshpwPerms!.allowed_folders) &&
-              !workspaceSubtreeOverlap(reqAs.dshpwUser!, candidate);
+              !workspaceSubtreeOverlap(reqAs.dshpwUser!, candidate) &&
+              !isSensitivePath(candidate) && !isSensitivePath(canonicalCandidate);
           };
           const baseFileTarget = request === null || sessionRoot === null || request.baseFile === null
             ? null
@@ -10487,6 +10832,27 @@ export function createGatewayServer(
             denyRequest(req, res, lang, t(lang, 'gw.folderDenied'));
             return;
           }
+          if (workspaceDirectoryCreateRequest || isWorkspaceCreate(proxyPath)) {
+            const target = extractPathFromBody(authorizationPayload);
+            const canonical = target === null ? null : managedPathFor(reqAs.dshpwUser!, target);
+            const allowed = target !== null && canonical !== null &&
+              !isSensitivePath(target) && !isSensitivePath(canonical) &&
+              pathAllowedFor(reqAs.dshpwUser!, target, reqAs.dshpwPerms!.allowed_folders);
+            const managedRoot = db.getManagedWorkspace(reqAs.dshpwUser!)?.path;
+            const requiresCreateGrant = workspaceDirectoryCreateRequest ||
+              (isWorkspaceCreate(proxyPath) && canonical !== canonicalCandidate(managedRoot ?? ''));
+            if (!allowed || (requiresCreateGrant && !reqAs.dshpwPerms!.allow_workspace_create)) {
+              auditDirectoryEvent(workspaceDirectoryCreateRequest ? 'directory_create_denied' : 'workspace_registration_denied', req, {
+                result: 'denied', reason: workspaceDirectoryCreateRequest && !reqAs.dshpwPerms!.allow_workspace_create
+                  ? 'create_disabled' : 'path_not_allowed',
+                target: auditPathSummary(target === null ? '' : workspaceDirectoryCreateRequest && typeof authorizationPayload.name === 'string'
+                  ? path.join(target, authorizationPayload.name) : target),
+              });
+              upstreamReq.destroy();
+              denyRequest(req, res, lang, t(lang, 'gw.folderDenied'));
+              return;
+            }
+          }
           const isLegacyWorkspacePathRename = /^\/api\/workspace\.(rename|update)(?:[./]|$)/.test(proxyPath);
           const renamePaths = isLegacyWorkspacePathRename
             ? extractWorkspaceRenamePaths(authorizationPayload)
@@ -10553,7 +10919,10 @@ export function createGatewayServer(
                 name === '.' ||
                 name === '..' ||
                 /[/\\]/.test(name) ||
-                managedPathFor(reqAs.dshpwUser!, path.join(canonical, name)) === null
+                managedPathFor(reqAs.dshpwUser!, path.join(canonical, name)) === null ||
+                isSensitivePath(path.join(canonical, name)) ||
+                isSensitivePath(canonicalCandidate(path.join(canonical, name)) ?? path.join(canonical, name)) ||
+                workspaceSubtreeOverlap(reqAs.dshpwUser!, path.join(canonical, name))
               ) {
                 upstreamReq.destroy();
                 denyRequest(req, res, lang, t(lang, 'gw.folderDenied'));
@@ -10847,7 +11216,7 @@ export function createGatewayServer(
             ? extractAgentId(bodyObj)
             : SUBAGENT_SCOPED_RE.test(proxyPath)
               ? findStringField(bodyObj, 'parentSessionId')
-            : COMMANDS_SCOPED_RE.test(proxyPath) || GOALS_SCOPED_RE.test(proxyPath)
+            : COMMANDS_SCOPED_RE.test(proxyPath) || GOALS_SCOPED_RE.test(proxyPath) || /^\/api\/userQuestions[.\/]answer$/.test(proxyPath)
               ? extractAgentId(bodyObj)
             : AGENT_PRESET_SELECT_RE.test(proxyPath)
               ? extractSessionId(bodyObj) ?? extractAgentId(bodyObj)
@@ -10892,6 +11261,39 @@ export function createGatewayServer(
               denyRequest(req, res, lang, t(lang, 'gw.folderDenied'));
               return;
             }
+          }
+        }
+
+        if (reqAs.dshpwPerms !== undefined && reqAs.dshpwUser !== undefined && req.method === 'POST' &&
+            /^\/api\/(?:session[.\/]prompt|subagents[.\/]prompt)$/.test(proxyPath)) {
+          const userId = reqAs.dshpwUser;
+          const sessionId = SUBAGENT_SCOPED_RE.test(proxyPath)
+            ? findStringField(bodyObj, 'parentSessionId') : extractSessionId(bodyObj);
+          const requested = reqAs.dshpwPerms;
+          const initial = effectivePermissions(userId);
+          const modes = [requested.sandbox_mode, initial.sandbox_mode].filter(
+            (mode): mode is keyof typeof SANDBOX_RANK => mode !== null && Object.hasOwn(SANDBOX_RANK, mode),
+          );
+          const mode = modes.reduce<keyof typeof SANDBOX_RANK | null>(
+            (minimum, value) => minimum === null || SANDBOX_RANK[value] < SANDBOX_RANK[minimum] ? value : minimum, null,
+          );
+          if (sessionId === null || !subuserCanAccessSession(userId, initial, sessionId)) {
+            upstreamReq.destroy(); denyRequest(req, res, lang, t(lang, 'gw.folderDenied')); return;
+          }
+          if (mode !== null && !(await applySandboxToSession(sessionId, mode))) {
+            upstreamReq.destroy();
+            if (responseWritable()) res.status(502).type('text/plain').send('502 Sandbox enforcement failed');
+            return;
+          }
+          const live = effectivePermissions(userId);
+          // Any policy mutation invalidates the in-flight request, including DB writes
+          // that do not advance the gateway epoch. A retry uses the new policy and principal.
+          if (!responseWritable()) { upstreamReq.destroy(); return; }
+          if (userAccessEpochFor(userId) !== sessionAccessRequestEpoch ||
+              JSON.stringify(live) !== JSON.stringify(initial) ||
+              !subuserCanAccessSession(userId, live, sessionId) ||
+              !db.hasUserSessionGrant(userId, sessionId)) {
+            upstreamReq.destroy(); denyRequest(req, res, lang, t(lang, 'gw.folderDenied')); return;
           }
         }
 
@@ -10972,6 +11374,8 @@ export function createGatewayServer(
   server.requestTimeout = 60_000;
   server.maxConnections = 512;
 
+  const tenantMuxConfig = config.mux ?? resolveRemoteMuxConfig();
+  const tenantMuxBudget = new MuxSenderBudget(512 * 1024 * 1024);
   const tenantWebSockets = new WebSocketServer({
     noServer: true,
     perMessageDeflate: false,
@@ -11247,13 +11651,18 @@ export function createGatewayServer(
         readonly authorizedSessionId: string | null;
         readonly filtered: RemoteMuxUserStreamState | null;
       };
+      const ownerCarrier = db.getUserById(userId)?.role === 'admin';
+      const diagnostics = createRemoteMuxDiagnosticsSession(randomUUID());
       const streams = new Map<string, LogicalStream>();
+      const upstreamForwardedAt = new Map<string, number>();
       const cancelledStreamIds = new Set<string>();
       const pendingFrames: string[] = [];
       let pendingBytes = 0;
       let closed = false;
       let upstreamWebSocket: WebSocket | null = null;
       let unregisterTenantConnection = () => {};
+      let downstreamLeg: ReturnType<typeof createTenantMuxLeg> | null = null;
+      let upstreamLeg: ReturnType<typeof createTenantMuxLeg> | null = null;
 
       const tenantCredentialIsCurrent = () => {
         if (isTokenRevoked(token)) return false;
@@ -11263,7 +11672,7 @@ export function createGatewayServer(
           return verified.userId === userId &&
             verified.cv === credentialVersion &&
             currentUser !== null &&
-            currentUser.role !== 'admin' &&
+            (currentUser.role === 'admin') === ownerCarrier &&
             currentUser.username === verified.username &&
             currentUser.credential_version === credentialVersion;
         } catch {
@@ -11271,48 +11680,73 @@ export function createGatewayServer(
         }
       };
 
-      const closeBoth = (code = 1008, reason = 'invalid Remote stream frame') => {
+      const closeBoth = (code = 1008, reason = 'invalid Remote stream frame', source: RemoteMuxCloseSource = 'protocol') => {
         if (closed) return;
         closed = true;
+        const record = diagnostics.close({ source, code, direction: 'both', pendingBytes, streams: streams.size,
+          bufferedBytes: downstream.bufferedAmount + (upstreamWebSocket?.bufferedAmount ?? 0),
+          clientSender: downstreamLeg?.snapshot(), upstreamSender: upstreamLeg?.snapshot() });
+        if (record !== null) console.error(`[dsh-passwords] remote.mux close source=${record.source} direction=${record.direction} code=${record.code} buffered=${record.bufferedBytes} pending=${record.pendingBytes} streams=${record.streams} clientQueued=${record.clientSender.queuedMessages}/${record.clientSender.queuedBytes} upstreamQueued=${record.upstreamSender.queuedMessages}/${record.upstreamSender.queuedBytes}`);
         unregisterTenantConnection();
+        downstreamLeg?.dispose();
+        upstreamLeg?.dispose();
         streams.clear();
+        upstreamForwardedAt.clear();
         cancelledStreamIds.clear();
         pendingFrames.length = 0;
         pendingBytes = 0;
-        if (downstream.readyState === WebSocket.OPEN) downstream.close(code, reason);
-        else if (downstream.readyState === WebSocket.CONNECTING) downstream.terminate();
+        closeTenantMuxLeg(downstream, code, reason);
         const active = upstreamWebSocket;
         upstreamWebSocket = null;
-        if (active?.readyState === WebSocket.OPEN) active.close(code, reason);
-        else if (active?.readyState === WebSocket.CONNECTING) active.terminate();
+        if (active !== null) closeTenantMuxLeg(active, code, reason);
       };
 
       unregisterTenantConnection = registerTenantConnection(
         userId,
         token,
-        (reason) => closeBoth(1008, reason),
+        (reason) => closeBoth(1008, reason, 'permission-revoked'),
       );
       releasePendingConnection();
 
-      const sendDownstream = (value: string) => {
-        if (closed || downstream.readyState !== WebSocket.OPEN) return;
-        downstream.send(value, (error) => {
-          if (error !== undefined && error !== null) closeBoth(1011, 'Remote stream delivery failed');
-        });
+      downstreamLeg = createTenantMuxLeg(downstream, false, tenantMuxConfig, tenantMuxBudget, closeBoth);
+      downstreamLeg.start();
+      function rejectLogicalStream(streamId: string): void {
+        streams.delete(streamId);
+        upstreamForwardedAt.delete(streamId);
+        cancelledStreamIds.add(streamId);
+        downstreamLeg?.cancel(streamId);
+        upstreamLeg?.cancel(streamId);
+        sendUpstream(JSON.stringify({ type: 'cancel', streamId }));
+        sendDownstream(JSON.stringify({ type: 'error', streamId, error: {
+          code: 'gateway/overflow', message: 'Remote stream send queue full', details: {},
+        } }));
+      }
+      const sendDownstream = (value: string, streamId?: string) => {
+        if (closed) return;
+        const outcome = downstreamLeg?.send(value, streamId);
+        if (outcome !== undefined && outcome !== 'accepted' && outcome !== 'closed') {
+          if (streamId !== undefined) rejectLogicalStream(streamId);
+          else closeBoth(1013, 'Remote stream backpressure limit exceeded', 'queue-overflow');
+        }
       };
 
-      const sendUpstream = (value: string) => {
+      const sendUpstream = (value: string, streamId?: string) => {
         const active = upstreamWebSocket;
         if (closed || active === null) return;
         if (active.readyState === WebSocket.OPEN) {
-          active.send(value, (error) => {
-            if (error !== undefined && error !== null) closeBoth(1011, 'Remote stream relay failed');
-          });
+          const outgoing = JSON.parse(value) as { type: string; streamId: string };
+          if (outgoing.type === 'open') upstreamForwardedAt.set(outgoing.streamId, loadingTimeline.begin());
+          if (outgoing.type === 'cancel') upstreamForwardedAt.delete(outgoing.streamId);
+          const outcome = upstreamLeg?.send(value, streamId);
+          if (outcome !== undefined && outcome !== 'accepted' && outcome !== 'closed') {
+            if (streamId !== undefined) rejectLogicalStream(streamId);
+            else closeBoth(1013, 'Remote stream backpressure limit exceeded', 'queue-overflow');
+          }
           return;
         }
         pendingBytes += Buffer.byteLength(value);
-        if (pendingFrames.length >= 64 || pendingBytes > 1024 * 1024) {
-          closeBoth(1008, 'too many pending Remote stream frames');
+        if (pendingFrames.length >= 64 || pendingBytes > 2 * 1024 * 1024) {
+          closeBoth(1009, 'Remote stream queue too large');
           return;
         }
         pendingFrames.push(value);
@@ -11337,7 +11771,7 @@ export function createGatewayServer(
               streams.has(frame.streamId) ||
               cancelledStreamIds.has(frame.streamId) ||
               streams.size + cancelledStreamIds.size >= 256 ||
-              (frame.endpoint === '$events' && !isEmptyRemoteEventPayload(frame.payload))
+              (!ownerCarrier && frame.endpoint === '$events' && !isEmptyRemoteEventPayload(frame.payload))
             ) {
               throw new Error('Remote stream open is not allowed');
             }
@@ -11346,6 +11780,14 @@ export function createGatewayServer(
               sendDownstream(JSON.stringify({ type: 'error', streamId: frame.streamId,
                 error: { code, message, details: {} } }));
             };
+            if (ownerCarrier) {
+              streams.set(frame.streamId, { endpoint: frame.endpoint, events: null, authorizedSessionId: null, filtered: null });
+              sendUpstream(text);
+              return;
+            }
+            if (endpointAllowed(`/api/${frame.endpoint}`, endpointRules, { capability: 'owner-only' })) {
+              rejectStream('gateway/forbidden', 'Remote host capability is owner-only'); return;
+            }
             const officialTerminalStream = OFFICIAL_TERMINAL_REMOTE_ENDPOINTS.has(frame.endpoint);
             // Official terminal streams use the SSH grant and Session checks below,
             // matching their HTTP routes. All other blocked APIs remain denied.
@@ -11354,7 +11796,7 @@ export function createGatewayServer(
               rejectStream('gateway/forbidden', 'Remote endpoint is not available for this user'); return;
             }
             if (officialTerminalStream && !perms.allow_ssh) {
-              rejectStream('terminal/unavailable'); return;
+              rejectStream('terminal/unavailable', 'Remote terminal is not available for this user'); return;
             }
             const args = clientConnectionArgs({ type: 'client-request', method: frame.endpoint, payload: frame.payload });
             const request = args !== null && isPlainJsonRecord(args.request) ? args.request : null;
@@ -11402,24 +11844,26 @@ export function createGatewayServer(
             if (cancelledStreamIds.has(frame.streamId)) return;
             if (!streams.delete(frame.streamId)) throw new Error('unknown Remote stream cancellation');
             cancelledStreamIds.add(frame.streamId);
+            downstreamLeg?.cancel(frame.streamId);
+            upstreamLeg?.cancel(frame.streamId);
           } else {
             const stream = streams.get(frame.streamId);
             if (stream === undefined || stream.filtered !== null || stream.events !== null) return;
             if (stream.authorizedSessionId !== null && !subuserCanAccessSession(userId, perms, stream.authorizedSessionId)) { closeBoth(1008, 'Remote stream session access revoked'); return; }
-            if (OFFICIAL_TERMINAL_REMOTE_ENDPOINTS.has(stream.endpoint) && !perms.allow_ssh) { closeBoth(1008, 'terminal permission revoked'); return; }
+            if (!ownerCarrier && OFFICIAL_TERMINAL_REMOTE_ENDPOINTS.has(stream.endpoint) && !perms.allow_ssh) { closeBoth(1008, 'terminal permission revoked'); return; }
           }
-          sendUpstream(text);
+          sendUpstream(text, frame.type === 'item' ? frame.streamId : undefined);
         } catch {
           closeBoth(1008, 'invalid Remote stream request');
         }
       });
 
-      downstream.once('error', () => closeBoth(1011, 'Remote stream browser failed'));
-      downstream.once('close', () => closeBoth(1000, 'client closed'));
+      downstream.once('error', () => closeBoth(1011, 'Remote stream browser failed', 'client-error'));
+      downstream.once('close', () => closeBoth(1000, 'client closed', 'client-close'));
 
       const currentUser = db.getUserById(userId);
       const managedWorkspace = db.getManagedWorkspace(userId);
-      if (currentUser === null || currentUser.role === 'admin' || managedWorkspace === null) {
+      if (currentUser === null || (!ownerCarrier && managedWorkspace === null)) {
         closeBoth(1008, 'managed workspace unavailable');
         return;
       }
@@ -11431,7 +11875,7 @@ export function createGatewayServer(
       const wsProtocol = upstream.protocol === 'https:' ? 'wss:' : 'ws:';
       const active = new WebSocket(`${wsProtocol}//${upstreamAuthority}/api/remote.mux`, {
         perMessageDeflate: false,
-        maxPayload: 16 * 1024 * 1024,
+        maxPayload: TENANT_MUX_MAX_MESSAGE_BYTES,
         handshakeTimeout: 10_000,
         headers: {
           Host: upstreamAuthority,
@@ -11441,18 +11885,18 @@ export function createGatewayServer(
         },
       });
       upstreamWebSocket = active;
+      upstreamLeg = createTenantMuxLeg(active, true, tenantMuxConfig, tenantMuxBudget, closeBoth);
       active.once('open', () => {
         if (closed || active !== upstreamWebSocket) {
           active.terminate();
           return;
         }
+        upstreamLeg?.start();
         const queued = pendingFrames.splice(0);
         pendingBytes = 0;
         for (const queuedFrame of queued) {
           if (active.readyState !== WebSocket.OPEN || closed) break;
-          active.send(queuedFrame, (error) => {
-            if (error !== undefined && error !== null) closeBoth(1011, 'Remote stream relay failed');
-          });
+          sendUpstream(queuedFrame);
         }
       });
       active.on('message', (data, isBinary) => {
@@ -11469,6 +11913,11 @@ export function createGatewayServer(
           const text = remoteFrameText(data);
           const frame = parseTenantRemoteServerFrame(text);
           const stream = streams.get(frame.streamId);
+          const forwardedAt = upstreamForwardedAt.get(frame.streamId);
+          if (forwardedAt !== undefined && frame.type === 'item') {
+            loadingTimeline.elapsed('mux.upstream.snapshot.prepare', forwardedAt, { bytesIn: Buffer.byteLength(text) });
+          }
+          if (frame.type !== 'item' || forwardedAt !== undefined) upstreamForwardedAt.delete(frame.streamId);
           if (stream === undefined) {
             if (cancelledStreamIds.has(frame.streamId)) {
               // Keep bounded tombstones so late end/item frames cannot close other streams.
@@ -11490,7 +11939,7 @@ export function createGatewayServer(
               return;
             }
             const decision = stream.events.accept(frame.value, {
-              managedHome: managedWorkspace.path,
+              managedHome: managedWorkspace!.path,
               sessionAllowed: (sessionId) => subuserCanAccessSession(userId, perms, sessionId),
             });
             if (decision.kind === 'forward') {
@@ -11498,13 +11947,13 @@ export function createGatewayServer(
                 type: 'item',
                 streamId: frame.streamId,
                 value: decision.value,
-              }));
+              }), frame.streamId);
             }
             return;
           }
           if (frame.type === 'item' && stream.filtered !== null) {
             const value = filterRemoteMuxUserItem(userId, effectivePermissions(userId), stream.filtered, frame.value);
-            if (value !== null) sendDownstream(JSON.stringify({ type: 'item', streamId: frame.streamId, value }));
+            if (value !== null) sendDownstream(JSON.stringify({ type: 'item', streamId: frame.streamId, value }), frame.streamId);
             else if (stream.endpoint !== 'workspace/follow' && stream.endpoint !== 'workspaceFiles/changes' &&
               !(stream.endpoint === 'session/control' && isPlainJsonRecord(frame.value) &&
                 ['projection', 'queue', 'jobs'].includes(String(frame.value.type)))) {
@@ -11515,13 +11964,13 @@ export function createGatewayServer(
             return;
           }
           if (frame.type !== 'item') { streams.delete(frame.streamId); cancelledStreamIds.add(frame.streamId); }
-          sendDownstream(text);
+          sendDownstream(text, frame.type === 'item' ? frame.streamId : undefined);
         } catch {
           closeBoth(1011, 'invalid upstream Remote stream frame');
         }
       });
-      active.once('error', () => closeBoth(1011, 'upstream Remote stream failed'));
-      active.once('close', () => closeBoth(1011, 'upstream Remote stream closed'));
+      active.once('error', () => closeBoth(1011, 'upstream Remote stream failed', 'upstream-error'));
+      active.once('close', () => closeBoth(1011, 'upstream closed', 'upstream-close'));
     });
   }
 
@@ -11655,8 +12104,8 @@ export function createGatewayServer(
     if (token && !isTokenRevoked(token)) {
       try {
         const user = verifyGatewayToken(token);
-        const row = db.getUserByUsername(user.username);
-        if (row !== null && user.cv === row.credential_version) {
+        const row = db.getUserById(user.userId);
+        if (row !== null && row.username === user.username && user.cv === row.credential_version) {
           const perms = effectivePermissions(row.id);
           if (!perms.banned) {
             authed = true;
@@ -11787,7 +12236,6 @@ export function createGatewayServer(
     // Restricted browsers never receive a raw Remote mux: the gateway binds one
     // signed upstream principal to the socket and filters every global event item.
     if (
-      userRole !== 'admin' &&
       authedUserId !== null &&
       authedToken !== null &&
       authedCredentialVersion !== null &&
@@ -11800,8 +12248,10 @@ export function createGatewayServer(
       );
       socket.once('close', releasePendingConnection);
       void (async () => {
-        await ensureAlphaSessionOwnershipBootstrap();
-        await ensureWorkspaceAccessSnapshot();
+        if (userRole !== 'admin') {
+          await ensureAlphaSessionOwnershipBootstrap();
+          await ensureWorkspaceAccessSnapshot();
+        }
       })().then(() => {
         if (!socket.destroyed) {
           proxyTenantRemoteMuxWebSocket(

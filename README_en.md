@@ -17,7 +17,7 @@ Adds login, account management, and access controls to the DeepSeek Harness (dsh
   &nbsp;
   <a href="https://github.com/sdwhwzp/dsh-passwords/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/sdwhwzp/dsh-passwords/ci.yml?style=flat-square&label=CI" alt="CI"></a>
   &nbsp;
-  <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/DSH-0.2.1--alpha.1-4c6ef5?style=flat-square&labelColor=454a54" alt="DSH"></a>
+  <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/DSH-0.2.1--rc.2-4c6ef5?style=flat-square&labelColor=454a54" alt="DSH"></a>
   &nbsp;
   <img src="https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square" alt="License">
   &nbsp;
@@ -37,6 +37,7 @@ Native Android and iOS `dsh-mobile` account login, profile switching and authent
 Account gateways correlate admission receipts with durable user messages so supported clients can retain a send preview until that exact message reaches conversation history.
 
 dsh's web UI is designed for local use by default. Once a server address is shared, anyone with the URL can enter and consume the same model quota. dsh-passwords sits in front of dsh: users sign in first, then workspace, session, sandbox, and usage limits are applied per account.
+[When to use it](#when-to-use-it) · [Features](#features) · [Quick start](#quick-start) · [First-run setup](#first-run-setup) · [Uninstall](#uninstall) · [Automatic HTTPS](#automatic-https) · [Deployment topologies](#deployment-topologies) · [Configuration](#configuration-reference) · [FAQ](#faq) · [Security](#security-and-privacy) · [Contributing](#contributing)
 
 You do not need it for a local-only dsh setup. Install it when you need remote access, shared use, or managed subuser accounts.
 
@@ -44,7 +45,7 @@ See the [2026-09-11 update summary (Chinese)](docs/2026-09-11-changes-overview.m
 
 Listed in [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek-harness) (Infrastructure & Development) and [Awesome DSH Plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) (Development & Runtime).
 
-The Harness 0.2.1-alpha.1 gateway accepts workspace pin lists and validates each pinned session ID. Session and workspace access remains scoped to the signed-in account.
+The Harness 0.2.1-rc.2 gateway accepts workspace pin lists and validates each pinned session ID. Session and workspace access remains scoped to the signed-in account.
 
 The upstream HTTP pool uses `MCP_GATEWAY_UPSTREAM_IDLE_TIMEOUT_MS` for idle connections (default: 5000 ms), capped by shorter Host Keep-Alive hints. New and reused active requests, including SSE, do not inherit the idle deadline; caller request deadlines remain effective. Connection failures never replay requests automatically.
 
@@ -55,6 +56,12 @@ Official `terminal/follow` and `terminal/retain` Remote streams require the acco
 Choose **Development** in the sidebar to use workspaces, terminals and the editor. Choose **Chat** to ask questions without selecting a workspace. **New chat** reuses an unasked chat on the server per account, including concurrent requests from multiple windows. History shows only the selected blank chat. Messages, running work, queued input, archived chats and named chats are preserved. Subagent records remain accessible through their parent conversation and are not listed as new chats. History belongs to the signed-in account and can be resumed later.
 
 Chat keeps model selection, streamed replies and history. All tools authorized for the account are available, including knowledge retrieval, GenUI, files, shell commands and subagents. The account workspace is attached automatically; account permissions, sandbox rules and account isolation match development mode. See the [implementation and maintenance notes (Chinese)](docs/2026-09-14-conversation-mode.md).
+
+## When to use it
+
+- **A small team sharing a server**: give each person an account and assign the workspaces and sessions they can access.
+- **An owner sharing selected work**: grant access to chosen workspaces and sessions rather than exposing the entire DSH instance.
+- **Managed remote access**: set per-user usage limits, control file and terminal access, and review audit records.
 
 ## Features
 
@@ -128,20 +135,21 @@ External file services and their accounts, passwords and databases are managed b
 
 | Login page · light | Login page · dark | Login page · English |
 |:---:|:---:|:---:|
-| <img src="docs/screenshots/white-login.png" width="360"> | <img src="docs/screenshots/black-login.png" width="360"> | <img src="docs/screenshots/white-login-en.png" width="360"> |
+| <img src="https://raw.githubusercontent.com/sdwhwzp/dsh-passwords/dev/docs/screenshots/white-login.png" width="360"> | <img src="https://raw.githubusercontent.com/sdwhwzp/dsh-passwords/dev/docs/screenshots/black-login.png" width="360"> | <img src="https://raw.githubusercontent.com/sdwhwzp/dsh-passwords/dev/docs/screenshots/white-login-en.png" width="360"> |
 
 | dsh main UI (after login) | Chat / messages | Settings card · account management |
 |:---:|:---:|:---:|
-| <img src="docs/screenshots/main-ui.png" width="360"> | <img src="docs/screenshots/chat.png" width="360"> | <img src="docs/screenshots/card-front.png" width="360"> |
+| <img src="https://raw.githubusercontent.com/sdwhwzp/dsh-passwords/dev/docs/screenshots/main-ui.png" width="360"> | <img src="https://raw.githubusercontent.com/sdwhwzp/dsh-passwords/dev/docs/screenshots/chat.png" width="360"> | <img src="https://raw.githubusercontent.com/sdwhwzp/dsh-passwords/dev/docs/screenshots/card-front.png" width="360"> |
 
 | | Settings card · permissions & quotas | |
 |:---:|:---:|:---:|
-| | <img src="docs/screenshots/card-back.png" width="360"> | |
+| | <img src="https://raw.githubusercontent.com/sdwhwzp/dsh-passwords/dev/docs/screenshots/card-back.png" width="360"> | |
 ## Quick start
 
 ### 0. Prerequisites (three things)
 
-Host installs need Node.js 22.19+ or 24+, a working dsh installation, git, and pnpm (required by the manual `node scripts/register-plugin.mjs` registration step; the one-liner installer installs pnpm automatically). The compatibility gate accepts only the DSH `0.2.1` patch line, `>=0.2.1-alpha.1 <0.2.2-0` (prereleases from alpha.1 up plus stable 0.2.1); the current working tree pins development and bundled Docker to `0.2.1-alpha.1`. The retired `0.1.x` / `0.2.0` lines, `0.2.1-alpha.0`, and every `0.2.2+` identity are rejected. Docker installs only need Docker Engine or Docker Desktop and a DeepSeek API key.
+- **Docker**: Docker Engine or Docker Desktop and a DeepSeek API key. DSH and Node.js are bundled; host installations of them are not required.
+- **Host install**: Node.js 22.19+ within 22.x, or 24+, a working DSH installation, git and pnpm. Node.js 23 is not supported. The one-liner installer installs pnpm automatically; manual registration uses `node scripts/register-plugin.mjs`.
 
 ### 1. Install (by platform)
 
@@ -179,33 +187,103 @@ docker run -d \
   -p 127.0.0.1:3088:3088 \
   -v dsh-home:/data/dsh \
   -v dsh-passwords-state:/data/dsh-passwords \
-  skywalker237234/dsh-passwords:2.7.7
+  skywalker237234/dsh-passwords:2.7.8
 ```
 
-Open `http://127.0.0.1:3088` in a browser and finish first-run setup with the `SETUP_KEY` you set. If you omit `-e SETUP_KEY`, the container generates a random key and writes it to `setup-key.txt` in the volume; read it with `docker exec dsh-passwords cat /data/dsh-passwords/setup-key.txt` before completing setup (the file is deleted automatically after setup succeeds). `-e SETUP_KEY` is written into the volume's `.env` as the initial SETUP_KEY on first initialization, so it never diverges from a random value and restarting without that env will not lock you out (after setup succeeds the SETUP_KEY in `.env` is rotated by the existing hardening flow; from then on you sign in with the account you created and no longer need it).
+PowerShell equivalent (one line):
 
-For advanced configuration such as custom ports, domains, SSH endpoints or third-party endpoint registration, copy `docker/.env.example` to `docker/.env` and add `--env-file docker/.env` (for Docker Compose, `docker compose --env-file docker/.env -f docker/docker-compose.yml up -d`); it is optional advanced configuration, no longer an install prerequisite. Do not reuse the host template at the repository root (`.env.example`): it injects a placeholder `SETUP_KEY` (`change-me-…`), `MCP_GATEWAY_PORT=443`, and an empty `MCP_GATEWAY_AUTO_TLS=`, overriding the image's built-in port `3088` and `MCP_GATEWAY_AUTO_TLS=0` — the container then never listens on `3088` and the gateway refuses to start; its relative `MCP_DB_PATH=./data/platform.db` also drifts away from the container default `/data/dsh-passwords/platform.db`.
+```powershell
+docker run -d --name dsh-passwords --restart unless-stopped -e DEEPSEEK_API_KEY=sk-your-key -e SETUP_KEY=your-own-strong-random-string -p 127.0.0.1:3088:3088 -v dsh-home:/data/dsh -v dsh-passwords-state:/data/dsh-passwords skywalker237234/dsh-passwords:2.7.8
+```
 
-A Docker deployment needs `DEEPSEEK_API_KEY` at minimum. Set `MCP_GATEWAY_PUBLIC_HOST` to the domain you actually use. The host publishes port `127.0.0.1:3088` only while the container listens on `0.0.0.0:3088`; terminate TLS on nginx or Caddy for public access. The image bundles DSH `0.2.1-alpha.1` (the pinned release of the DSH 0.2.1 patch line; image runtime acceptance has not been performed for this pin); initialization is complete when healthz and readyz both return `ok:true`.
+Open `http://127.0.0.1:3088` **on the Docker host**, enter your `SETUP_KEY`, create the owner account, then sign in. If Docker runs on a remote server, use an SSH port forward to reach this local address or configure an HTTPS reverse proxy before accessing it remotely.
 
 `scripts/profile-plugins.json` is the versioned cross-machine deployment manifest. `dsh-passwords install` idempotently merges its NPM/Git sources, bundle order, Git build permissions, and required profile patches into `~/.dsh/profiles/web`, then runs one `pnpm install`. Existing local `link:` development sources and custom plugins outside the manifest are preserved; retired aggregate packages explicitly named by the manifest are migrated automatically.
 
-- Host installs default to `/opt/dsh-passwords`; override with `DSH_PASSWORDS_DIR`. A recognized existing dsh-passwords directory resumes the idempotent installer in place; another existing target aborts
-- SETUP_KEY: a host install prints it when the install finishes and writes it to `setup-key.txt` in the install directory; Docker users set it with `-e SETUP_KEY`, or let it be generated and written to `setup-key.txt` in the volume when omitted
-- The two Docker volumes hold the dsh profile and the `.env`, database and certificates; deleting them deletes your data
-- Emergency cleanup does not self-delete from inside Docker. For Compose deployments run `docker compose down -v`; for the documented `docker run` deployment, run `docker rm -f dsh-passwords` followed by `docker volume rm dsh-home dsh-passwords-state` (both permanently remove volume data)
-- For split-container deployments set `MCP_DSH_PATCH_ALLOW_BIND_ALL=1` on the dsh container so the gateway container can reach dsh web; `dsh-web-app` in `0.2.1-alpha.1` still rejects `--host 0.0.0.0` at startup, so this sub-patch is still required
-- npm global install (method 3): the first Unix install needs `sudo` (automatic HTTPS must bind 80/443); Node managed by `nvm` / Homebrew is often missing from root's or the system PATH, so the `dsh-passwords` command may not be found; the npm global directory is replaced on package updates and is a poor home for long-lived `.env` and `data/` — prefer a clone install, or point `DSH_PASSWORDS_ENV_FILE` at a stable directory
+```bash
+docker exec dsh-passwords cat /data/dsh-passwords/setup-key.txt
+```
+
+When initializing a new state volume, the container writes the provided `SETUP_KEY` into its `.env`. Changing this environment variable does not recreate existing accounts. Docker runtime environment values still take precedence over corresponding values in the volume's `.env`, so keep the deployment configuration consistent. After setup, sign in with the account you created.
+
+The [v2.7.8 release notes](https://github.com/sdwhwzp/dsh-passwords/releases/tag/v2.7.8) record first-run setup and login verification for this release. After setup, confirm `/gateway/healthz` and `/gateway/readyz` return `ok:true`, and check login and subuser permissions.
+
+<details>
+<summary><strong>Advanced Docker configuration and data</strong></summary>
+
+For custom ports, domains, SSH endpoints or third-party endpoint registration, copy [docker/.env.example](docker/.env.example) to `docker/.env` and add `--env-file docker/.env` to `docker run`. For Compose:
+
+```bash
+docker compose --env-file docker/.env -f docker/docker-compose.yml up -d
+```
+
+Use the Docker template rather than the host [.env.example](.env.example). Docker defaults to HTTP on port `3088`; the host template is intended for automatic HTTPS on `443` and uses different state paths. Mixing the templates can prevent startup or leave the published port disconnected from the gateway.
+
+For public access, terminate HTTPS at nginx, Caddy or another reverse proxy and forward to `http://127.0.0.1:3088`. Preserve the external Host header and forward WebSocket connections. Set `MCP_GATEWAY_PUBLIC_HOST` to the domain you use. The command above publishes only the host's loopback address; the container listens on `0.0.0.0:3088`.
+
+- The two named volumes hold the DSH profile and gateway configuration, database and certificates. Keep them persistent; see [Uninstall](#uninstall) for cleanup.
+- For split-container deployments, set `MCP_DSH_PATCH_ALLOW_BIND_ALL=1` on the DSH container so the gateway container can reach DSH web. The bundled `dsh-web-app` in `0.2.1-rc.2` still needs this patch for `--host 0.0.0.0`.
+
+</details>
+
+### Host installation
+
+Choose one of the following four paths. The installer installs dependencies, builds, generates or fills in missing keys, registers the plugin precisely, and applies the remote-settings patch. It preserves existing configuration on repeated runs, but may update managed keys and configuration entries.
+
+> Use the installer or `node scripts/register-plugin.mjs` for registration. Do not use `dsh plugin add`: it can register dependency bundles too and cause a duplicate loader entry.
+
+**1. Linux / macOS one-liner**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/slywalker2006/dsh-passwords/main/install.sh | sudo bash
+```
+
+This download-based installation defaults to `/opt/dsh-passwords` (a non-root user defaults to `$HOME/dsh-passwords` instead, since `/opt` needs root); override either with `DSH_PASSWORDS_DIR`. The installer resumes in a recognized existing dsh-passwords directory and aborts for an unrelated existing target.
+
+**2. Clone, then install**
+
+```bash
+git clone https://github.com/sdwhwzp/dsh-passwords && cd dsh-passwords
+sudo bash install.sh
+```
+
+This path installs in the current source directory, which can hold long-lived configuration and data.
+
+**3. Global npm install or upgrade**
+
+First install:
+
+```bash
+npm install -g dsh-passwords@2.7.8
+sudo dsh-passwords install
+```
+
+Omit `sudo` on Windows. To upgrade an earlier installation, update the global package and rerun `dsh-passwords install` to register the plugin and apply the patch; existing `.env` and database files are kept.
+
+A global npm directory is replaced during upgrades. Keep `DSH_PASSWORDS_ENV_FILE` in a stable location for long-lived deployments, or use the Git installation path. With `nvm` or Homebrew, Node may not be available in `sudo`'s PATH.
+
+**4. Windows installer**
+
+Download [install.bat](install.bat) from the repository and run it. This download-based installation defaults to `%USERPROFILE%\dsh-passwords`.
+
+When a host installer creates a new setup key or fills in a missing one, it prints the key and writes it to `setup-key.txt` in the installation directory. A repeated installation with existing keys does not print them again. Use the existing key or account for that deployment.
 
 `dsh-shandong-tizhi-brand` and `dsh-nas-webdav` are also recorded, but currently only have local source trees and no remotely fetchable branch. Before deploying them on another host, set `DSH_PLUGIN_BRAND_SPEC` and `DSH_PLUGIN_NAS_SPEC` to accessible NPM, Git, or `link:` sources. Without those variables the installer reports and skips those optional plugins while restoring the rest of the stack.
 
-1. Start dsh: `dsh web`. Docker users skip this; the container starts it automatically.
-2. Open `https://<server address>` in a browser; the first visit enters the setup page.
-3. Enter the SETUP_KEY to create the owner account. Every later visit to this address goes through the login page.
+1. **Host installs**: start DSH with `dsh web`. Docker starts DSH automatically.
+2. Open the address for your deployment:
 
-After setup completes, `setup-key.txt` is deleted automatically and the keys in `.env` are consolidated and rotated.
+   | Deployment | Address |
+   |---|---|
+   | Host with automatic HTTPS | The printed HTTPS URL using your domain or `<public IP>.sslip.io` |
+   | Docker on the same computer | `http://127.0.0.1:3088` |
+   | HTTPS reverse proxy | Your configured HTTPS domain |
+   | HTTP script | The address printed by `scripts/start-http.mjs` |
 
-Docker users open `http://127.0.0.1:3088` directly after the single command to complete first-run setup; for public access, proxy 80/443 to `http://127.0.0.1:3088` with nginx or Caddy yourself. The SETUP_KEY for setup is the value you passed to `-e SETUP_KEY`; when omitted, read it with `docker exec dsh-passwords cat /data/dsh-passwords/setup-key.txt`.
+3. Enter the setup key and create the owner account. Then sign in with that account.
+4. Create a subuser in the settings card, assign workspace and session access, and confirm the account sees only its granted resources.
+
+After successful first-run setup, the standard flow deletes `setup-key.txt` and rotates `SETUP_KEY` in `.env`. Existing session, internal API and database encryption settings are preserved. For custom deployments, ensure `.env` is writable and back it up together with the database.
 
 At the end it prints the `SETUP_KEY` for first-time setup and writes it to `setup-key.txt` in the install directory. The file is deleted after setup succeeds; the active keys are kept as independent values in `.env`.
 
@@ -280,11 +358,13 @@ dsh exits  → the gate stops with it (no orphan process holding ports)
 - Running older dsh builds without Host browser authentication may use `node dist/cli.js serve-gateway` or a systemd unit. Newer builds must let the plugin launch the gateway over internal IPC; standalone startup fails explicitly when the Host is unreachable or requires authentication.
 - Temporarily disable the auto-start (debugging): start dsh with `DSH_PASSWORDS_NO_AUTOSTART=1`.
 
+Emergency cleanup does not self-delete from inside Docker. To permanently clear all container data, Compose users can run `docker compose down -v`. For the documented `docker run` deployment, run `docker rm -f dsh-passwords`, then `docker volume rm dsh-home dsh-passwords-state`. These commands remove the data volumes; back up the data first.
+
 ## Automatic HTTPS
 
-- By default, the server's public IP is detected and a 90-day Let's Encrypt certificate is requested for `<IP>.sslip.io`. It renews 30 days before expiry; new certificates are used without restarting.
-- For your own domain, add `MCP_GATEWAY_DOMAIN=your.domain` to `.env` and point its A record at the server.
-- If the first issuance fails, the gate does not fall back to plaintext HTTP. If renewal fails while the old certificate remains valid, it keeps serving the old certificate and retries.
+Host installations enable automatic HTTPS by default. With public ports 80/443 reachable, the gateway detects the public IP and requests a Let's Encrypt certificate for `<IP>.sslip.io`. For your own domain, set `MCP_GATEWAY_DOMAIN` and point its DNS to the server. Docker defaults to HTTP behind an HTTPS reverse proxy; see [Deployment topologies](#deployment-topologies).
+
+Renewal follows the certificate's actual expiry date: the gateway checks daily and renews when no more than 30 days remain, then reloads the certificate. Initial issuance failure prevents startup rather than falling back to HTTP; renewal failure retains the existing certificate and retries in the background.
 
 | Error code | Meaning | What to do |
 |---|---|---|
@@ -373,14 +453,29 @@ After logging in to dsh, open **Settings → Plugins** to find the "dsh-password
 | `MCP_DSH_RESTART_SERVICE` | `dsh-web` | systemd service to restart after a patch reload; an explicit empty value disables auto-restart |
 | `DSH_PASSWORDS_ENV_FILE` | empty | Shared `.env` path for the Host and gateway. In production, set it in the Host launch environment to a durable file outside the package directory so replacing `node_modules` preserves configuration. Defaults to the package-local `.env`. |
 | `MCP_INTERNAL_SECRET` | Derived from SETUP_KEY | Gateway internal admin-API secret (used by the dsh plugin to notify the gateway), derived in a separate domain from the JWT; do not rotate it casually once set |
+| `MCP_DB_PATH` | Host `./data/platform.db`; Docker `/data/dsh-passwords/platform.db` | SQLite database path; a relative path is anchored to the directory of the `.env` (the `DSH_PASSWORDS_ENV_FILE` directory), not the process working directory |
+| `MCP_DB_ENC_KEY` | Generated by installers; when unset in a manual deployment, uses `SETUP_KEY` as the master secret for key derivation | Encrypts sensitive database fields. After standard setup, the effective value is preserved as an independent variable. Do not change it for an existing database without a migration; back up the database together with `.env` |
+| `MCP_GATEWAY_HOST` / `MCP_GATEWAY_PORT` | `0.0.0.0` / host automatic HTTPS `443`; HTTP script `127.0.0.1:8080`; Docker `0.0.0.0:3088` | Gateway listen address and port. Docker defaults can be overridden; keep the container port and published mapping consistent. The example maps Docker to host loopback `127.0.0.1:3088` |
+| `MCP_GATEWAY_UPSTREAM` | `http://127.0.0.1:3080` | dsh web address, pointed automatically |
 | `MCP_GATEWAY_UPSTREAM_TLS_VERIFY` | on | Verify the upstream dsh certificate when it is HTTPS/WSS; `0` disables it (debugging only, never in production) |
+| `MCP_GATEWAY_SSH_ENDPOINTS` | empty | Registers legacy HTTP/WS endpoints DSH does not surface. See [endpoint registration](docs/endpoint-registration.md) for syntax and access rules. |
+| `MCP_GATEWAY_REDIRECT_PORT` | `80` with automatic HTTPS; not listening when it is off | ACME validation and 301 redirect port; an explicit `0` disables it |
+| `MCP_GATEWAY_DOMAIN` | empty | Custom domain; empty uses `<public IP>.sslip.io` |
+| `MCP_GATEWAY_AUTO_TLS` | on for host installs; Docker defaults to `0` | `0` disables automatic HTTPS. Docker uses HTTP with an outer reverse proxy for HTTPS by default; overriding this requires the corresponding certificate and port configuration |
+| `MCP_GATEWAY_TLS_CERT` / `MCP_GATEWAY_TLS_KEY` | empty | Your own certificate, takes precedence over automatic HTTPS |
+| `MCP_GATEWAY_PUBLIC_HOST` | empty | Fixed redirect target, guards against Host spoofing |
+| `MCP_GATEWAY_ACME_EMAIL` / `MCP_GATEWAY_ACME_STAGING` | empty / off | Renewal contact email / LE staging |
+| Advanced tuning | Built-in defaults are validated for ordinary installations; operational overrides are documented in [`docs/advanced-tuning.md`](docs/advanced-tuning.md). Normal users do not need to set them |
+| `MCP_DSH_ROOT` | auto-detected | dsh installation directory |
 | `MCP_DSH_SETTINGS_FILE` | auto-detected | Path to the dsh `settings.yaml`; set it explicitly when the gateway and dsh are not on the same machine. Empty probes candidates such as `DSH_HOME/settings.yaml` |
 | `MCP_DSH_AUTO_UPDATE` | on | Deployment-level auto-update master switch |
 | `MCP_DSH_UPDATE_MAX_BPS` | 1MiB/s | Automatic download throttle; can only be lowered |
 | `MCP_DSH_DOCKER_SELF_UPDATE` / `_COMPOSE_DIR` / `_COMPOSE_FILE` / `_IMAGE` / `_SOCKET` | off / empty | Docker in-app update switch and Compose settings |
-| `MCP_DSH_PATCH_ALLOW_BIND_ALL` | off | Allows dsh web to bind 0.0.0.0 for split-container topologies (`dsh-web-app` in `0.2.1-alpha.1` still needs the sub-patch) |
+| `MCP_DSH_PATCH_ALLOW_BIND_ALL` | off | Allows dsh web to bind 0.0.0.0 for split-container topologies (`dsh-web-app` in `0.2.1-rc.2` still needs the sub-patch) |
 
-Environment-variable vs `.env` precedence differs by install method: in Docker the container environment (`--env-file docker/.env`) overrides the `.env` inside the volume; on a host install it is the opposite — managed keys in the deployment `.env` override same-named variables inherited by the process.
+Configuration precedence differs by install method: Docker environment settings, including `SETUP_KEY`, override corresponding settings in the volume's `.env`; on a host, managed keys in the deployment `.env` take precedence over inherited variables. Initializing a new Docker state volume writes the supplied setup key into `.env`; changing the environment variable does not recreate existing accounts or remove runtime environment precedence.
+
+Advanced Remote mux, gateway timeout, and inventory overrides, including compatibility parsing and restart behavior, are documented in [`docs/advanced-tuning.md`](docs/advanced-tuning.md). Normal users do not need to configure them; existing deployment overrides remain supported and are not changed automatically.
 
 ## Common commands
 
@@ -438,7 +533,7 @@ See the table under "Automatic HTTPS".
 <details>
 <summary><strong>Binding 443 fails as non-root</strong></summary>
 
-Ports below 1024 require root on Linux; switch to a high `MCP_GATEWAY_PORT` and forward as needed.
+Ports below 1024 require root on Linux; switch to a high `MCP_GATEWAY_PORT` and forward as needed. A non-root first install also has to disable automatic HTTPS explicitly (`MCP_GATEWAY_AUTO_TLS=0`) or supply your own certificate, otherwise the installer asks for root. The download-based default directory moves from `/opt` to `$HOME/dsh-passwords`; point `DSH_PASSWORDS_DIR` at another writable path if you prefer.
 
 </details>
 
@@ -449,47 +544,37 @@ Ports below 1024 require root on Linux; switch to a high `MCP_GATEWAY_PORT` and 
 
 </details>
 
-<details>
-<summary><strong>npm install of dsh fails on node-pty builds</strong></summary>
-
-Allow install scripts and reinstall:
-
-```bash
-npm config set allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user
-```
-
-</details>
 
 <details>
 <summary><strong>Is a stolen database file a problem</strong></summary>
 
-No. Sensitive fields are encrypted or hashed, passwords exist only as bcrypt hashes, and decryption requires the `.env` keys.
+Yes. Sensitive fields are encrypted and passwords are stored as bcrypt hashes, but an attacker can still attempt offline password guessing and read unencrypted database metadata. Encryption also depends on protecting the effective key, normally stored in `.env`. Keep database backups and key files private, and treat theft of both as a compromise.
 
 </details>
 
 <details>
 <summary><strong>Can MCP_DB_ENC_KEY be rotated</strong></summary>
 
-No; changing it makes all existing data undecryptable.
+There is no built-in key migration. Do not directly change the effective key for an existing database: previously encrypted fields would become unreadable. In a manual deployment before first-run setup, if `MCP_DB_ENC_KEY` is unset, `SETUP_KEY` is also the database's master secret; do not change it once encrypted data exists. A rotation would require decrypting and re-encrypting those fields through a separately verified migration. Back up the database and its current key before any such work.
 
 </details>
 
 <details>
 <summary><strong>Plugin loading is slow / access feels slow</strong></summary>
 
-The gateway force-caches content-hashed static assets for one year; the first visit after an upgrade downloads fully once, later loads are instant. The gateway adds about 1-2ms per request; check the TLS handshake first:
+The gateway gives content-hashed static assets a one-year cache lifetime. A first visit or upgrade may download new assets; later visits can reuse the cache, depending on the browser and proxy. Actual response time depends on the network, TLS, gateway, DSH and model provider. Measure your deployment before identifying the bottleneck; for example, check the TLS handshake:
 
 ```bash
 curl -so /dev/null -w "TLS:%{time_appconnect}s\n" https://address/gateway/login
 ```
 
-The bottleneck is usually the network path to the server.
+Compare this with total request time and the time taken by DSH or the model provider.
 
 </details>
 
 ## Manual install
 
-> Release 2.7.7 supports only the DSH `0.2.1` patch line (`>=0.2.1-alpha.1 <0.2.2-0`), with development and bundled Docker pinned to `0.2.1-alpha.1`. The retired `0.1.x` / `0.2.0` lines, `0.2.1-alpha.0`, and every `0.2.2+` identity are rejected by the version gate. The installer requires Node.js `22.19+` or `24+`, registers the plugin, detects dsh, and applies the compatibility patch.
+Use Node.js `22.19+` within 22.x, or `24+`, with an existing DSH installation in the accepted `0.2.1` range. Node.js 23 is not supported. Registration requires pnpm. See [Version compatibility](#version-compatibility) for the pinned runtime and the scope of release verification.
 
 1. `git clone https://github.com/sdwhwzp/dsh-passwords && cd dsh-passwords`
 2. `npm install && npm run build`
@@ -524,7 +609,7 @@ The UI is bilingual (Chinese/English) and follows dsh's language setting:
 - **CLI**: follows the `LANG` / `LC_ALL` environment variables (`en` prefix = English).
 
 ## Release notes
-This fork targets the private Harness `0.2.1-alpha.1` checkout with linked development packages. Runtime identity checks accept `>=0.2.1-alpha.1 <0.2.2-0`; deployment records separately track combined acceptance and production release. Upstream test results do not establish fork acceptance.
+This fork targets the private Harness `0.2.1-rc.2` checkout with linked development packages. Runtime identity checks accept `>=0.2.1-rc.2 <0.2.2-0`; deployment records separately track combined acceptance and production release. Upstream test results do not establish fork acceptance.
 
 ### v2.6.20 (2026-09-08)
 
@@ -587,9 +672,9 @@ Restricted sidebar terminals mount only the authenticated account's managed work
 
 On Linux, install `scripts/tenant-terminal-launcher.py` as the root-owned, non-user-writable `/usr/local/libexec/dsh-tenant-terminal`. Its account and managed root must match the deployment. Grant sudo access only to that fixed launcher, never arbitrary `sudo bwrap`. Enable it with `MCP_TENANT_TERMINAL_LAUNCHER`; `MCP_TENANT_TERMINAL_LIMIT` and `MCP_TENANT_TERMINAL_GRACE_MS` default to 8 terminals per account and 30000 milliseconds.
 
-Enable `MCP_TENANT_AGENT_SHELL=true` to give managed-workspace agents and subagents a `bash` tool with terminal-card results. Each call rechecks the account and write permission. Only the current project and personal HOME are writable; other accounts remain inaccessible. HOME is shared with the web terminal and editor, so user-level Node and pnpm installations persist. Cancellation and timeout terminate the command. Deploy the updated launcher and its sudoers digest together; see the [execution and validation rules](docs/plans/2026-09-11-tenant-agent-shell.md).
+Enable `MCP_TENANT_AGENT_SHELL=true` to give managed-workspace agents and subagents a `bash` tool with terminal-card results. Each call rechecks the account and write permission. Only the current project and personal HOME are writable; other accounts remain inaccessible. HOME is shared with the web terminal and editor, so user-level Node and pnpm installations persist. Cancellation and timeout terminate the command. Deploy the updated launcher and its sudoers digest together; see the [execution and validation rules](https://github.com/sdwhwzp/dsh-passwords/blob/dev/docs/plans/2026-09-11-tenant-agent-shell.md).
 
-Enable `MCP_TENANT_TASK_BOARD=true` only with the aggregate's global `web-ui-task-board` Host disabled and its client retained. Separate ledgers live under `MCP_TENANT_TASK_BOARD_DIR` and restore schedules after reload. All execution and history RPCs use the local `MCP_TENANT_TASK_BOARD_GATEWAY`, preserving current workspace, model, sandbox and quota checks. Deleted, banned or mismatched owners cannot execute tasks. Legacy global ledgers are retained and are not automatically imported into personal boards. Each account arms one timer for its nearest cron deadline; creating or importing an enabled schedule arms it immediately. Changing, disabling, deleting or archiving a schedule cancels its obsolete deadline. Restart and resume schedule future occurrences without replaying work missed while offline.
+Enable `MCP_TENANT_TASK_BOARD=true` with the `web-ui-task-board` row pointing to this package's `integrations/task-board/client-shell/index.js` by an absolute or config-relative path; this retains the source Config and browser bundle without mounting a second global Host ledger. Separate ledgers live under `MCP_TENANT_TASK_BOARD_DIR` and restore schedules after reload. All execution and history RPCs use the local `MCP_TENANT_TASK_BOARD_GATEWAY`, preserving current workspace, model, sandbox and quota checks. Deleted, banned or mismatched owners cannot execute tasks. Legacy global ledgers are retained and are not automatically imported into personal boards. Each account arms one timer for its nearest cron deadline; creating or importing an enabled schedule arms it immediately. Changing, disabling, deleting or archiving a schedule cancels its obsolete deadline. Restart and resume schedule future occurrences without replaying work missed while offline.
 
 Tasks enable goal runs by default: the runner submits the task prompt, then sets `/goal` through the current account gateway so the session continues until the goal ends. Disabling this option runs one turn. Existing tasks without the field keep the default; an explicit opt-out persists in the schema 5 ledger. The board keeps active goals running and reports blocked goals as failures. A refused command retains the already-submitted single turn.
 
@@ -631,13 +716,13 @@ See the [compatibility matrix](docs/compatibility-matrix.md) for native interfac
 
 Session exports can include unclaimed Host subagents through their persisted parent lineage. Every traversed Session must remain inside the account’s allowed directories and must not be disabled. Explicit ownership by another account, ordinary forks, missing ancestors and cyclic lineage do not inherit access.
 
-With `MCP_TENANT_SERVICE_LAUNCHER` configured, Agents use `dev_server` to start, inspect, read logs and stop persistent development services in the current project. Services survive conversations, Harness restarts and host reboots. Agents stop them only at the user’s request; background jobs in ordinary `bash` calls remain temporary. See the [deployment and network guide](docs/plans/2026-09-11-persistent-development-services.md).
+With `MCP_TENANT_SERVICE_LAUNCHER` configured, Agents use `dev_server` to start, inspect, read logs and stop persistent development services in the current project. Services survive conversations, Harness restarts and host reboots. Agents stop them only at the user’s request; background jobs in ordinary `bash` calls remain temporary. See the [deployment and network guide](https://github.com/sdwhwzp/dsh-passwords/blob/dev/docs/plans/2026-09-11-persistent-development-services.md).
 
 Administrators can list and stop child-account services with `dev_server_admin`. A stop is audited and disables the service’s automatic startup.
 
 Open **Running services** in the sidebar to view the list inside the current app, retaining the sidebar and selected conversation without opening another tab. **Back to conversation** restores that conversation. Regular accounts manage their own projects; administrators manage all accounts. Stopping disables automatic restart and startup on boot. Direct access to `/gateway/services` remains available.
 
-Folder management opens in the center of the app, retaining the sidebar and selected conversation. Drag a file or folder onto a destination folder or **Up** to move it. Move/Paste and upload controls remain available; name conflicts return an error. See the [folder page and drag-move guide](docs/plans/2026-09-11-managed-files-page.md).
+Folder management opens in the center of the app, retaining the sidebar and selected conversation. Drag a file or folder onto a destination folder or **Up** to move it. Move/Paste and upload controls remain available; name conflicts return an error. See the [folder page and drag-move guide](https://github.com/sdwhwzp/dsh-passwords/blob/dev/docs/plans/2026-09-11-managed-files-page.md).
 ## Desktop installer downloads
 
 Set `MCP_DESKTOP_DOWNLOADS_DIR` to an independent, read-only installer release directory to add downloads to the login page and web sidebar. Signed-in users view the catalog in the existing main panel and return to their conversation. Installers and their catalog are public; business data and existing file-download permissions retain their authorization checks. The Windows one-click assistant retains its existing entry and reads the connection address supplied during pairing.
@@ -654,19 +739,23 @@ Desktop terminal restoration through `terminal/retain` checks session ownership,
 
 Host login exchange accepts root redirects `/` and `./` without following them; external destinations and query-bearing targets are rejected.
 
-The verified Harness 0.2.1-alpha.1 runtime starts the gateway through native permission APIs without rewriting installed bundles. Unreviewed future versions remain rejected at startup.
+The current candidate uses native Harness 0.2.1-rc.2 Peer and account permission APIs without rewriting installed bundles. The startup version gate matches the peer range; deployment records track composition acceptance.
 
 Session ownership validation accepts legacy projections and current `cached`/`sequenced` projections with the `agentAvailable` flag, while retaining strict type and field validation.
 ## Harness 0.2 deployment
 
-This fork accepts Harness `0.2.1-alpha.1` in addition to its existing runtime peer ranges. Deploy all Harness peers from one runtime release; account authorization, settings persistence, and browser/desktop behavior remain owned by the existing integrations.
+This fork accepts Harness `0.2.1-rc.2` in addition to its existing runtime peer ranges. Deploy all Harness peers from one runtime release; account authorization, settings persistence, and browser/desktop behavior remain owned by the existing integrations.
 
 Manual task-board column changes support backlog, todo, running, done and failed. They do not launch a session or create an execution record. Cards with an open execution cannot be moved; each account can move only its own cards.
 
 Per-account boards do not inherit Host GitHub credentials or repositories. GitHub refresh and PR actions return a not-configured error; existing private cards remain available.
 
-Goal acceptance reads the administrator-owned task-board switch, judge model and reasoning effort and freezes them when each execution starts. Every judge request checks the executing account’s model catalog and quotas and records its usage. Completion checks the session owner and current access; failures and anomalies never become passes. Workspace inheritance only selects that account’s readable workspaces and sessions. Tag rename and delete affect its own ledger. Schema 2–4 ledgers migrate to 5 with existing tasks and executions preserved.
+Goal acceptance reads the administrator-owned task-board switch, judge model and reasoning effort and freezes them when each execution starts. Every judge request checks the executing account’s model catalog and quotas and records its usage. Completion checks the session owner and current access; failures and anomalies never become passes. Workspace inheritance only selects that account’s readable workspaces and sessions. Tag rename and delete affect its own ledger. Schema 2–5 ledgers migrate to 6 with existing tasks and executions preserved.
 
 This fork uses native Host principals for account isolation, managed terminals, local folders and persistent services. An unavailable terminal rejects its logical stream without closing workspace subscriptions.
 
 This fork confines workspace creation to the account’s authorized private roots; the directory picker does not grant temporary server-folder access. Other accounts’ workspace subtrees remain unreadable even under a shared allowlisted parent. Host authentication exchanges the native authenticatedUrl; internal Cookie refresh requires a loopback peer, the internal secret, and the expected Host authority. Both HTTP and HTTPS upstream pools apply their expiry only to idle connections.
+
+This upgrade requires Harness `>=0.2.1-rc.2 <0.2.2-0` and the exact task-board client peer version. See the [tenant-board migration](docs/upgrade-guide/v2.7.8-dsh.20261021.1/tenant-board/guide.md) for profile wiring and ledger backups. Subscription Fetch speed queries and updates enforce account session ownership. A denied terminal stream does not close the shared connection that carries workspace grouping.
+
+Restricted accounts require private sandbox confirmation before prompts run; policy changes during that wait reject the request. Newly granted owned Sessions also require confirmation; failure revokes the grant and closes stale subscriptions. Directory creation and workspace registration recheck current permissions, private roots and ownership when the response arrives and record audit results with sensitive path summaries redacted. Optional loading timelines measure history parsing, filtering, encoding and the first Remote item without recording conversation content or credentials.

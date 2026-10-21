@@ -187,20 +187,9 @@ function stripBuildMetadata(version: string): string {
 /** 严格 SemVer 版本形状：清单里带空白、v 前缀或任意垃圾值都不是可信 DSH 身份。 */
 const SEMVER_VERSION_RE = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
-/**
- * Supported DSH runtime window: the single patch line `>=0.2.1-alpha.1 <0.2.2-0`.
- *
- * `0.2.1-alpha.1` is the reviewed pin (the npm `alpha` dist-tag and the only DSH
- * tree the lockfile resolves). Later `0.2.1` prereleases (alpha.2, beta, rc) and the
- * stable `0.2.1` release are the same wire/bundle contract and stay inside the patch
- * line. This is an identity boundary, not a claim that every build received
- * profile-level acceptance: the retired 0.1.x and 0.2.0 lines, the pre-pin
- * `0.2.1-alpha.0`, and every 0.2.2+/0.3 identity must not receive source patches or a
- * public listener. Every accepted identity is still subject to the settings-host-mode
- * and authenticated Cookie-bridge gate below; no prerelease is silently exempted.
- */
+/** Runtime identity gate for the Peer-aware private Harness integration. */
 const DSH_SUPPORTED_CORE = '0.2.1';
-const DSH_SUPPORTED_PRERELEASE_FLOOR = ['alpha', '1'] as const;
+const DSH_SUPPORTED_PRERELEASE_FLOOR = ['rc', '2'] as const;
 
 /**
  * SemVer 2.0.0 prerelease precedence: numeric identifiers rank below alphanumeric
@@ -289,7 +278,7 @@ function runPatch(argv: string[]): void {
   if (action === undefined || action === 'on' || action === 'reload') {
     const dshVersion = readDshVersion(root);
     if (!isSupportedDshRuntime(dshVersion)) {
-      console.error(`[dsh-passwords] Unsupported or invalid DSH version ${dshVersion ?? '(missing/corrupt)'}; refusing to patch (supported runtime: >=0.2.1-alpha.1 <0.2.2-0)`);
+      console.error(`[dsh-passwords] Unsupported or invalid DSH version ${dshVersion ?? '(missing/corrupt)'}; refusing to patch (supported runtime: >=0.2.1-rc.2 <0.2.2-0)`);
       process.exit(EXIT_DSH_VERSION_UNSUPPORTED);
     }
     const result = applyRemotePatch(root);
@@ -396,7 +385,7 @@ async function boot() {
   // bridge regex”被静默放行：它可能拥有不同的 bundle / Remote wire contract。
   const dshVersion = readDshVersion(root);
   if (!isSupportedDshRuntime(dshVersion)) {
-    console.error(`[dsh-passwords] Unsupported or invalid DSH version ${dshVersion ?? '(missing/corrupt)'}; refusing to patch or start the public gateway (supported runtime: >=0.2.1-alpha.1 <0.2.2-0)`);
+    console.error(`[dsh-passwords] Unsupported or invalid DSH version ${dshVersion ?? '(missing/corrupt)'}; refusing to patch or start the public gateway (supported runtime: >=0.2.1-rc.2 <0.2.2-0)`);
     process.exit(EXIT_DSH_VERSION_UNSUPPORTED);
   }
   try {
@@ -580,7 +569,6 @@ async function boot() {
       } catch {
         console.error(`[dsh-passwords] ${tr('cli.parentGone')}`);
         process.exit(0);
-        return;
       }
       // PID 仍在但启动时刻变了 → 原父进程已死，PID 被复用 → 退出
       if (parentStart !== null) {

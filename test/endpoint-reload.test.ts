@@ -1,6 +1,8 @@
 // 端点登记表热更新（改 .env 无需重启网关）回归测试：
 //   1) 写入部署 .env 的登记表规则后，运行中的网关在轮询周期内自动生效；
-//   2) 两把钥匙语义不变：未登记 / 未勾选 SSH 都是 403；
+//   2) 登记在 MCP_GATEWAY_SSH_ENDPOINTS 的 SSH/owner 路由：owner: 规则对子用户
+//      始终拒绝；其余规则由子用户 allowSsh 开关控制（关闭拒绝、开启放行，HTTP 与
+//      WS 共用一个开关），主用户正常；
 //   3) 规则被清空后立即收紧，并断开已授权 WebSocket（撤销语义）；
 //   4) 非法规则保留上一次有效快照（不静默放宽，也不打断已有授权）。
 import { after, before, test } from 'node:test';
@@ -135,9 +137,8 @@ after(() => {
   try { rmSync(tempDir, { recursive: true, force: true }); } catch { /* Windows 清理尽力而为 */ }
 });
 
-test('热更新：未登记时 fail-closed，写入 .env 后无需重启即生效（两把钥匙都验证）', async () => {
-  // 本 fork：未登记的第三方路径由账号隔离 Host 按签名 principal 处理，网关不 fail-closed。
-  assert.equal(await request('/api/plugin/terminal', subCookie), 200, '未登记：子用户由 Host 侧处理');
+test('热更新：普通插件未登记直通，写入 SSH 表后子用户按 allowSsh 放行/拒绝', async () => {
+  assert.equal(await request('/api/plugin/terminal', subCookie), 200, '普通插件未登记时直通');
   assert.equal(await request('/api/plugin/terminal', adminCookie), 200, '未登记：主用户不受登记表限制');
 
   writeEnv('/api/plugin/terminal');
@@ -146,7 +147,7 @@ test('热更新：未登记时 fail-closed，写入 .env 后无需重启即生�
 
   // 钥匙二：取消勾选后立即 403（无需等待热更新，权限本身就实时生效）
   setSubPermissions(false);
-  assert.equal(await request('/api/plugin/terminal', subCookie), 403, '未勾选 SSH：拒绝');
+  assert.equal(await request('/api/plugin/terminal', subCookie), 403, '热更新生效：未勾选 SSH 时已登记路由拒绝');
   setSubPermissions(true);
   assert.equal(await request('/api/plugin/terminal', subCookie), 200, '重新勾选：放行');
 });

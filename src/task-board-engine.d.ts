@@ -1,4 +1,6 @@
 /** Runtime-only vendored engine, built from the pinned source under integrations/task-board. */
+import type { Context } from '@deepseek-ai/cordis';
+import type { InvokeRemoteRequest } from '@deepseek-ai/dsh-api-gateway';
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver';
 import type { PreToolDecision } from '@deepseek-ai/dsh-tools';
 import type { Workspace } from '@deepseek-ai/dsh-workspace/types';
@@ -20,6 +22,9 @@ export interface HostTimerFace {
 export class TaskBoardHostService {
   constructor(gateway: BoardGateway, options: {
     ledger: HostTaskLedger;
+    ownerPeer?: InvokeRemoteRequest['peer'];
+    goalRunEnabled?: () => boolean;
+    runLaunchWidth?: () => number;
     timers?: HostTimerFace;
     workspaceRegistry?: { list(): readonly Workspace[] };
     verificationSettings?: () => BoardVerificationSettings;
@@ -71,3 +76,5 @@ export function createGoalVerificationGate(options: {
   goals: () => BoardGoalFace | undefined;
   logger: { warn(message: string, ...rest: unknown[]): void };
 }): (exec: BoardGateExecution) => Promise<PreToolDecision | undefined>;
+/** Lifecycle-bound sender identity; tenant execution RPCs are reauthenticated by the signed gateway. */
+export function createOwnerPeer(ctx: Context): InvokeRemoteRequest['peer'];

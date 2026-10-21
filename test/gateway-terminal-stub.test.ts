@@ -1,9 +1,10 @@
-// 子用户 terminal UX 桩 + SSH 端点权限控制。
+// 子用户 terminal UX 桩 + allowSsh 官方 terminal / SSH 端点权限控制。
 //
-// 官方客户端会调用 terminal/list、environment、shells、close；子用户未获 SSH 权限时
-// 这四者回「不放开能力」的 server-response，避免 restore/setup 进入常驻重试；其余
-// terminal RPC 保持 fail-closed 403。主用户或已获 SSH 权限的子用户则透传官方 terminal
-// 的已知 HTTP RPC。terminal 仍保持硬拒绝分类，防止登记表绕过 gateway 的显式开关。
+// 官方客户端会调用 terminal/list、environment、shells、close。allowSsh 关闭时，子用户
+// 没有宿主 terminal 能力：这四者回「不放开能力」的 server-response，避免 restore/setup
+// 进入常驻重试；其余 terminal RPC 保持 fail-closed 403。allowSsh 开启时，官方已知
+// terminal HTTP unary RPC 原样透传到上游（与已登记第三方 SSH 共用同一个开关）。
+// 主用户不受影响，官方 terminal 与登记路由原样透传。
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -252,23 +253,37 @@ test('allowSsh 关闭时，子用户 terminal/close（点号/斜杠）→ 200 ok
   }
 });
 
-test('allowSsh 开启后，子用户全部官方 terminal HTTP unary RPC 透传到上游', async () => {
+test('allowSsh 开启时，子用户官方 terminal 已知 HTTP unary RPC 原样透传到上游', async () => {
   db.setPermissions(subuserId, {
     allowedFolders: [], hourlyTokenLimit: null, dailyMinutesLimit: null,
     allowUpload: false, allowGitDownload: false, allowWorkspaceCreate: false,
     allowSsh: true, banned: false, sandboxMode: null,
   });
   try {
-    const methods = ['environment', 'shells', 'list', 'create', 'write', 'resize', 'rename', 'close'] as const;
+    // allowSsh 开启后，四个恢复/清理方法与四个真实能力方法都进入官方 terminal
+    // 透传分支：不再回无能力桩，也不再 403。
+    const methods = ['list', 'environment', 'shells', 'close', 'create', 'write', 'resize', 'rename'] as const;
     for (const method of methods) {
       upstreamHits = [];
       upstreamBodies = [];
-      const body = envelope(`rpc-sub-${method}`, `terminal/${method}`, { agentId: 'agent-sub', id: 'term-sub' });
+      const body = envelope(`rpc-ssh-on-${method}`, `terminal/${method}`, { sessionId: 'session-x', agentId: 'a' });
       const res = await post(`/api/terminal/${method}`, body, subuserCookie);
       assert.equal(res.status, 200, `allowSsh 开启后 terminal/${method} 必须透传：${res.body.slice(0, 160)}`);
-      assert.equal((res.json.result as { ok?: unknown } | undefined)?.ok, true);
-      assert.deepEqual(upstreamHits, [`/api/terminal/${method}`]);
-      assert.equal(upstreamBodies[0]?.body, JSON.stringify(body));
+      assert.equal(res.json.type, 'server-response');
+      const result = res.json.result as { ok?: unknown } | undefined;
+      assert.equal(result?.ok, true, `terminal/${method} 必须拿到上游成功响应，而不是本地无能力桩`);
+      assert.equal(upstreamHits.length, 1, `allowSsh 开启后 terminal/${method} 必须恰好到达上游一次`);
+      assert.equal(upstreamBodies[0]?.url, `/api/terminal/${method}`);
+      assert.equal(upstreamBodies[0]?.body, JSON.stringify(body), `terminal/${method} body 必须逐字透传`);
+    }
+
+    // follow/retain 是 Remote mux 端点，不是官方 terminal HTTP unary RPC；即使
+    // allowSsh 开启，这两个 HTTP 形状仍命中硬拒绝分类，保持 fail-closed 403。
+    for (const method of ['follow', 'retain'] as const) {
+      upstreamHits = [];
+      const res = await post(`/api/terminal/${method}`, envelope(`rpc-ssh-on-${method}`, `terminal/${method}`, { agentId: 'a' }), subuserCookie);
+      assert.equal(res.status, 403, `terminal/${method} 不是官方 HTTP unary RPC，必须 403`);
+      assert.equal(upstreamHits.length, 0, `terminal/${method} 不得到达上游`);
     }
   } finally {
     db.setPermissions(subuserId, {

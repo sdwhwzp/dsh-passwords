@@ -14,6 +14,14 @@ import { DEFAULT_VERIFICATION_BUDGET_MS } from '../core/verification-budget.ts'
 import {
   CODING_CRITERIA,
   EMPTY_WORK_BASELINE,
+  workSlotOfRound,
+  VERIFICATION_DETAIL_MAX_FINDINGS,
+  VERIFICATION_DETAIL_MAX_PROBLEM_CHARS,
+  VERIFICATION_DETAIL_MAX_QUOTE_CHARS,
+  assessAcceptanceValidity,
+  type AcceptanceEvidenceText,
+  type VerificationCriterionFinding,
+  type VerificationInvalidReason,
   VERIFICATION_ROUNDS,
   VERIFICATION_THRESHOLD,
   acceptancePassed,
@@ -39,9 +47,13 @@ export const VERIFICATION_MAX_TRACE_CHARS = 80_000
 export const VERIFICATION_MAX_ENTRY_CHARS = 4_000
 /** Largest per-finding text kept from one judge answer. */
 export const VERIFICATION_MAX_FINDING_CHARS = 400
-/** Findings kept per judge answer and per acceptance. */
+/** Largest verbatim citation kept from one finding. */
+export const VERIFICATION_MAX_QUOTE_CHARS = VERIFICATION_DETAIL_MAX_QUOTE_CHARS
+/** Largest requirement/observation/gap statement kept from one finding. */
+export const VERIFICATION_MAX_PROBLEM_CHARS = VERIFICATION_DETAIL_MAX_PROBLEM_CHARS
+/** Structured findings kept per judge answer and per acceptance. */
 export const VERIFICATION_MAX_FINDINGS_PER_CALL = 3
-export const VERIFICATION_MAX_FINDINGS = 6
+export const VERIFICATION_MAX_FINDINGS = VERIFICATION_DETAIL_MAX_FINDINGS
 /**
  * Default ceiling of ONE judge request. The effective ceiling is a row setting
  * (`goalVerificationCallTimeoutSeconds`), read live by the gate, because 120s was
@@ -264,16 +276,54 @@ interface JudgeAnswer {
   usage: VerificationUsage
 }
 
-/** One finding the judge located, before it is rendered. */
+/**
+ * One finding the judge reported, before its citation is resolved against the
+ * evidence the judge actually saw.
+ */
 interface RawFinding {
-  criterion?: string
-  evidence: string
+  /** The criterion id this finding is attached to (always the caller's id). */
+  criterionId: string
+  /** The criterion name as the prompt offered it. */
+  criterionName: string
+  /** Which evidence block the citation claims to come from. */
+  location: VerificationCriterionFinding['location']
+  quote: string
+  requirement: string
+  observation: string
+  gap: string
   body: string
   action?: string
 }
 
-/** Parse the optional `<finding ...>` lines out of one judge answer. */
-function parseFindings(text: string, criterion: VerificationCriterion): RawFinding[] {
+/** How one cited slot maps onto the caller's own evidence under a swapped round. */
+function locationOfSlot(slot: 'A' | 'B', round: number): VerificationCriterionFinding['location'] {
+  // The odd round swaps the two slots: citing the slot the work occupies is a
+  // citation of the work's own trajectory, and citing the other one is a
+  // citation of the empty-work baseline, which can never veto the work.
+  return slot === workSlotOfRound(round) ? 'trajectory' : 'baseline'
+}
+
+/** Resolve one `location` (or legacy `evidence`) attribute into an evidence location. */
+function readLocation(raw: string, round: number): VerificationCriterionFinding['location'] | undefined {
+  const value = raw.trim().toUpperCase()
+  if (value === 'TASK') return 'task'
+  if (value === 'CONTEXT' || value === 'WORKSPACE') return 'workspace'
+  if (value === 'TRAJECTORY_A' || value === 'A') return locationOfSlot('A', round)
+  if (value === 'TRAJECTORY_B' || value === 'B') return locationOfSlot('B', round)
+  return undefined
+}
+
+/**
+ * Parse the `<finding ...>` elements out of one judge answer.
+ *
+ * A finding must name the criterion this prompt offered and cite an evidence
+ * location the prompt actually rendered; a finding for another criterion, a
+ * citation of a location that was never offered, and an empty body are dropped
+ * here rather than echoed back as if the judge had located something. The
+ * quote is carried verbatim: whether it really occurs in the evidence it names
+ * is decided by the caller, which is the only side holding the evidence text.
+ */
+function parseFindings(text: string, criterion: VerificationCriterion, round: number): RawFinding[] {
   const pattern = /<finding\s+([^>]*)>([\s\S]*?)<\/finding>/giu
   const attributes = /([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"([^"]*)"/gu
   const found: RawFinding[] = []
@@ -281,30 +331,47 @@ function parseFindings(text: string, criterion: VerificationCriterion): RawFindi
   for (let match = pattern.exec(text); match !== null && found.length < VERIFICATION_MAX_FINDINGS_PER_CALL; match = pattern.exec(text)) {
     const attrs = new Map<string, string>()
     for (let attribute = attributes.exec(match[1] ?? ''); attribute !== null; attribute = attributes.exec(match[1] ?? '')) {
-      if (['criterion', 'evidence', 'action'].includes(attribute[1] ?? '')) attrs.set(attribute[1] ?? '', attribute[2] ?? '')
+      if (['criterion', 'evidence', 'location', 'requirement', 'observation', 'gap', 'quote', 'action'].includes(attribute[1] ?? '')) {
+        attrs.set(attribute[1] ?? '', attribute[2] ?? '')
+      }
     }
     const named = attrs.get('criterion') ?? ''
-    // A finding must name the criterion this prompt offered and cite an evidence
-    // token the prompt actually rendered; anything else is dropped, never echoed.
+    // A finding must name the criterion this prompt offered; anything else is
+    // dropped, never echoed.
     if (named !== '' && named.toLowerCase() !== criterion.name.toLowerCase() && named.toLowerCase() !== criterion.id.toLowerCase()) continue
-    const evidence = (attrs.get('evidence') ?? '').trim().toUpperCase()
-    if (!['TASK', 'A', 'B'].includes(evidence)) continue
+    const location = readLocation(attrs.get('location') ?? attrs.get('evidence') ?? '', round)
+    if (location === undefined) continue
+    const quote = (attrs.get('quote') ?? '').trim().slice(0, VERIFICATION_MAX_QUOTE_CHARS)
+    const requirement = (attrs.get('requirement') ?? '').trim().slice(0, VERIFICATION_MAX_PROBLEM_CHARS)
+    const observation = (attrs.get('observation') ?? '').trim().slice(0, VERIFICATION_MAX_PROBLEM_CHARS)
+    const gap = (attrs.get('gap') ?? '').trim().slice(0, VERIFICATION_MAX_PROBLEM_CHARS)
     const body = (match[2] ?? '').trim().slice(0, VERIFICATION_MAX_FINDING_CHARS)
-    if (body === '') continue
+    if (body === '' && quote === '') continue
     const action = (attrs.get('action') ?? '').trim().slice(0, 300)
-    const key = named + '|' + evidence + '|' + body
+    const key = criterion.id + '|' + location + '|' + quote + '|' + body
     if (seen.has(key)) continue
     seen.add(key)
-    found.push({ criterion: criterion.name, evidence, body, ...(action === '' ? {} : { action }) })
+    found.push({
+      criterionId: criterion.id,
+      criterionName: criterion.name,
+      location,
+      quote,
+      requirement,
+      observation,
+      gap,
+      body,
+      ...(action === '' ? {} : { action }),
+    })
   }
   return found
 }
 
 /** Render one finding as the single feedback line the agent reads. */
 function renderFinding(finding: RawFinding): string {
-  const locator = '[' + (finding.criterion ?? 'finding') + ' evidence=' + finding.evidence + ']'
+  const locator = '[' + finding.criterionName + ' ' + finding.location + ']'
   const action = finding.action === undefined ? '' : ' → 建议核实：' + finding.action
-  return locator + ' ' + finding.body + action
+  const detail = finding.body !== '' ? finding.body : finding.quote
+  return locator + ' ' + detail + action
 }
 
 /**
@@ -466,6 +533,15 @@ export async function runAcceptance(input: {
   }
   const findings: string[] = []
   const seenFindings = new Set<string>()
+  const structured: VerificationCriterionFinding[] = []
+  const seenStructured = new Set<string>()
+  // The exact evidence texts this acceptance handed to the judge, retained so
+  // the validity check can verify every citation against what was really shown.
+  const evidenceText: AcceptanceEvidenceText = {
+    task: input.evidence.problem,
+    trajectory: input.evidence.trace,
+    workspace: input.context ?? '',
+  }
   try {
     const perCriterion = new Map<string, { criterion: VerificationCriterion; work: number[]; baseline: number[] }>()
     for (const criterion of CODING_CRITERIA) perCriterion.set(criterion.id, { criterion, work: [], baseline: [] })
@@ -474,7 +550,7 @@ export async function runAcceptance(input: {
         const swapped = repeat % 2 === 1
         const candidateA = swapped ? EMPTY_WORK_BASELINE : input.evidence.trace
         const candidateB = swapped ? input.evidence.trace : EMPTY_WORK_BASELINE
-        const prompt = buildAcceptancePrompt(input.evidence.problem, candidateA, candidateB, criterion, undefined, input.context)
+        const prompt = buildAcceptancePrompt(input.evidence.problem, candidateA, candidateB, criterion, undefined, input.context, workSlotOfRound(repeat))
         const answer = await judgeOnce(input.llm, input.route, prompt, input.signal, budget)
         const scoreA = extractScore(answer.text, 'score_A')
         const scoreB = extractScore(answer.text, 'score_B')
@@ -486,13 +562,23 @@ export async function runAcceptance(input: {
         const bucket = perCriterion.get(criterion.id)!
         bucket.work.push(swapped ? scoreB : scoreA)
         bucket.baseline.push(swapped ? scoreA : scoreB)
-        for (const finding of parseFindings(answer.text, criterion)) {
-          // The prompt rendered the swapped slots; the finding must cite the
-          // caller's slots, or it would point the agent at the wrong object.
-          const located: RawFinding = swapped && (finding.evidence === 'A' || finding.evidence === 'B')
-            ? { ...finding, evidence: finding.evidence === 'A' ? 'B' : 'A' }
-            : finding
-          const line = renderFinding(located)
+        for (const finding of parseFindings(answer.text, criterion, repeat)) {
+          if (structured.length < VERIFICATION_MAX_FINDINGS) {
+            const key = finding.criterionId + '|' + finding.location + '|' + finding.quote + '|' + finding.body
+            if (!seenStructured.has(key)) {
+              seenStructured.add(key)
+              structured.push({
+                criterionId: finding.criterionId,
+                requirement: finding.requirement !== '' ? finding.requirement : finding.criterionName,
+                observation: finding.observation !== '' ? finding.observation : finding.body,
+                gap: finding.gap !== '' ? finding.gap : finding.body,
+                quote: finding.quote,
+                location: finding.location,
+                ...(finding.action === undefined ? {} : { action: finding.action }),
+              })
+            }
+          }
+          const line = renderFinding(finding)
           if (seenFindings.has(line)) continue
           seenFindings.add(line)
           if (findings.length < VERIFICATION_MAX_FINDINGS) findings.push(line)
@@ -508,12 +594,23 @@ export async function runAcceptance(input: {
     const score = average(criteria.map(criterion => criterion.score))
     const baseline = average(criteria.map(criterion => criterion.baseline))
     const passed = acceptancePassed(score, baseline, criteria, input.threshold)
+    // A veto is only bookable when its evidence holds up; a rejecting attempt
+    // that cannot substantiate the rejection is recorded as INVALID so it can
+    // never consume the quality budget or fail the card.
+    const validity = passed
+      ? { valid: true as const }
+      : assessAcceptanceValidity({
+        criteria,
+        findings: structured,
+        evidence: evidenceText,
+        omittedCharacters: input.evidence.omittedCharacters,
+      })
     return {
       attempt: {
         index: input.index,
         at: startedAt,
-        stage: 'quality',
-        passed,
+        stage: validity.valid ? 'quality' : 'invalid',
+        passed: validity.valid ? passed : false,
         score,
         baseline,
         criteria,
@@ -523,6 +620,11 @@ export async function runAcceptance(input: {
         route: input.route,
         channel: 'explicit-tag',
         rounds: VERIFICATION_ROUNDS,
+        ...(structured.length === 0 ? {} : { criterionFindings: structured }),
+        ...(validity.valid ? {} : {
+          invalidReason: (validity as { reason: VerificationInvalidReason }).reason,
+          error: classifyInvalid(validity as { reason: VerificationInvalidReason; detail: string }),
+        }),
       },
     }
   } catch (error) {
@@ -568,6 +670,18 @@ function mergeUsage(target: VerificationUsage, source: VerificationUsage): Verif
     reasoningTokens: target.reasoningTokens + source.reasoningTokens,
     ...(target.usageIncomplete === true || source.usageIncomplete === true ? { usageIncomplete: true } : {}),
   }
+}
+
+/** Prefix one invalid-acceptance message with its class so the report stays actionable. */
+function classifyInvalid(validity: { reason: VerificationInvalidReason; detail: string }): string {
+  const labels: Record<VerificationInvalidReason, string> = {
+    'missing-finding': '验收无效（未达标判据没有对应的结构化问题反馈）',
+    'unlocatable-quote': '验收无效（问题反馈引用不存在于本次裁判所见的证据中）',
+    'baseline-finding': '验收无效（问题反馈指向空工作基线而非本次工作）',
+    'vacuous-finding': '验收无效（问题反馈空泛，未说明实际观测与差异）',
+    'insufficient-evidence': '验收无效（裁判所见证据不足，无法支撑否决）',
+  }
+  return labels[validity.reason] + ': ' + validity.detail
 }
 
 /** Prefix one anomaly message with its class so the report stays actionable. */

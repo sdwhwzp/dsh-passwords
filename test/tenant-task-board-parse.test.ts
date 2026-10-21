@@ -344,7 +344,7 @@ test('current task-board child creation, attach and detach survive tenant ledger
   assert.equal(f.calls.length, 0, 'creating and linking tasks does not invoke a model');
 });
 
-test('tenant goal opt-out persists in schema 4 and rejects invalid or foreign-account updates', async t => {
+test('tenant goal opt-in persists in schema 6 and rejects invalid or foreign-account updates', async t => {
   const f = await fixture(t);
   const action = async (id: number, value: object, expected = 200) => {
     const response = await fetch(f.origin + '/api/task-board/action', {
@@ -354,29 +354,29 @@ test('tenant goal opt-out persists in schema 4 and rejects invalid or foreign-ac
     assert.equal(response.status, expected, JSON.stringify(body));
     return body;
   };
-  for (const [id, goalRun] of [['default-goal', undefined], ['plain-turn', false]] as const) {
+  for (const [id, goalRun] of [['default-goal', undefined], ['plain-turn', false], ['explicit-goal', true]] as const) {
     const created = await action(2, { kind: 'create', id, input: { title: id, description: '', prompt: id, goalRun } });
-    assert.equal(created.tasks.find((task: { id: string }) => task.id === id).goalRun, goalRun);
+    assert.equal(created.tasks.find((task: { id: string }) => task.id === id).goalRun, goalRun === true ? true : undefined);
   }
   await action(2, { kind: 'create', id: 'invalid-goal', input: { title: 'Invalid', description: '', prompt: '', goalRun: 'false' } }, 400);
   await action(3, { kind: 'update', taskId: 'plain-turn', patch: { goalRun: true } }, 400);
   await action(2, { kind: 'update', taskId: 'plain-turn', patch: { goalRun: 0 } }, 400);
   const disk = JSON.parse(await readFile(path.join(f.directory, 'u2', 'ledger-v2.json'), 'utf8'));
-  assert.equal(disk.schemaVersion, 5);
-  assert.equal(disk.tasks.find((task: { id: string }) => task.id === 'plain-turn').goalRun, false);
+  assert.equal(disk.schemaVersion, 6);
+  assert.equal(disk.tasks.find((task: { id: string }) => task.id === 'plain-turn').goalRun, undefined);
   assert.equal('goalRun' in disk.tasks.find((task: { id: string }) => task.id === 'default-goal'), false);
   f.reload();
   const response = await fetch(f.origin + '/api/task-board/state', { headers: f.headers(2) });
   const restored = await response.json();
-  assert.equal(restored.tasks.find((task: { id: string }) => task.id === 'plain-turn').goalRun, false);
+  assert.equal(restored.tasks.find((task: { id: string }) => task.id === 'plain-turn').goalRun, undefined);
   for (const goalRun of [true, false, null]) {
     const updated = await action(2, { kind: 'update', taskId: 'plain-turn', patch: { goalRun } });
-    assert.equal(updated.tasks.find((task: { id: string }) => task.id === 'plain-turn').goalRun, goalRun === false ? false : undefined);
+    assert.equal(updated.tasks.find((task: { id: string }) => task.id === 'plain-turn').goalRun, goalRun === true ? true : undefined);
   }
   const imported = await action(3, { kind: 'import', sourceId: 'own-import', tasks: [
     { id: 'import-plain', title: 'Imported', description: '', prompt: '', goalRun: false, status: 'todo', executions: [], createdAt: 1, updatedAt: 1 },
   ] });
-  assert.equal(imported.tasks[0].goalRun, false);
+  assert.equal(imported.tasks[0].goalRun, undefined);
   assert.equal(f.calls.length, 0);
 });
 
@@ -440,19 +440,18 @@ for (const creation of ['create', 'import'] as const) {
         const response = await fetch(f.origin + '/api/task-board/state', { headers: f.headers(id) });
         const board = await response.json();
         assert.deepEqual(board.tasks.map((task: { id: string }) => task.id), [`task-${id}`]);
-        if (board.tasks[0].executions[0]?.sessionId && f.taskCalls.some(call => call.id === id && call.method === 'commands/execute')) {
+        if (board.tasks[0].executions[0]?.sessionId && f.taskCalls.some(call => call.id === id && call.method === 'session/prompt')) {
           assert.match(board.tasks[0].executions[0].sessionId, new RegExp(`^scheduled-${id}-`));
           break;
         }
         assert.ok(performance.now() < deadline, 'scheduled execution did not finish gateway admission');
       }
       const calls = f.taskCalls.filter(call => call.id === id);
-      assert.deepEqual(calls.map(call => call.method), ['session/create', 'session/rename', 'session/prompt', 'commands/execute']);
+      assert.deepEqual(calls.map(call => call.method), ['session/create', 'session/rename', 'session/prompt']);
       const prompt = calls[2].args.request as { sessionId: string; content: Array<{ type: string; text: string }> };
       assert.match(prompt.sessionId, new RegExp(`^scheduled-${id}-`));
       assert.match(JSON.stringify(prompt.content), new RegExp(`Only account ${id}`));
-      assert.equal(calls[3].args.agentId, prompt.sessionId);
-      assert.equal(calls[3].args.line, `/goal ${prompt.content[0].text}`);
+      assert.equal(calls.some(call => call.method === 'commands/execute'), false, 'unconfigured boards never start goals');
       assert.match(prompt.content[0].text, /规则时区/);
       assert.ok(prompt.content[0].text.includes(new Date(start + 30_000).toISOString()));
     }
@@ -526,7 +525,7 @@ test('a revoked tenant cannot execute an already armed cron occurrence', { timeo
   assert.match(board.tasks[0].executions[0].error, /task owner unavailable/);
 });
 
-test('schema 3 tenant ledgers migrate to schema 4 without losing task history or account partitions', async t => {
+test('schema 3 tenant ledgers migrate to schema 6 without losing task history or account partitions', async t => {
   const expected = new Map<number, object[]>();
   const f = await fixture(t, boardTimers().timer, async directory => {
     for (const id of [2, 3]) {
@@ -555,12 +554,15 @@ test('schema 3 tenant ledgers migrate to schema 4 without losing task history or
     const response = await fetch(f.origin + '/api/task-board/state', { headers: f.headers(id) });
     const board = await response.json();
     assert.equal(response.status, 200);
-    assert.equal(board.schemaVersion, 5);
-    const tasks = structuredClone(expected.get(id)!) as Array<{ schedule?: { timeZone?: string } }>;
+    assert.equal(board.schemaVersion, 6);
+    const tasks = structuredClone(expected.get(id)!) as Array<{ schedule?: { timeZone?: string; mode?: string; runCount?: number } }>;
+    for (const task of tasks) if ('goalRun' in task && task.goalRun !== true) delete task.goalRun;
     tasks[0].schedule!.timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    tasks[0].schedule!.mode = 'cron';
+    tasks[0].schedule!.runCount = 0;
     assert.deepEqual(board.tasks, tasks);
     const disk = JSON.parse(await readFile(path.join(f.directory, `u${id}`, 'ledger-v2.json'), 'utf8'));
-    assert.equal(disk.schemaVersion, 5);
+    assert.equal(disk.schemaVersion, 6);
     assert.deepEqual(disk.tasks, tasks);
     assert.equal(disk.scheduler.ledgerId, `ledger-${id}`);
     assert.deepEqual(disk.scheduler.importedSources, [`import-${id}`]);
@@ -610,7 +612,7 @@ test('tenant schedule zones persist independently and trigger with only the owne
   for (;;) {
     const response = await fetch(f.origin + '/api/task-board/state', { headers: f.headers(3) });
     const board = await response.json();
-    if (board.tasks[0].executions[0]?.sessionId && f.taskCalls.some(call => call.id === 3 && call.method === 'commands/execute')) break;
+    if (board.tasks[0].executions[0]?.sessionId && f.taskCalls.some(call => call.id === 3 && call.method === 'session/prompt')) break;
     assert.ok(performance.now() < deadline, 'zoned schedule did not finish gateway admission');
   }
   assert.ok(f.taskCalls.every(call => call.id === 3));
@@ -637,7 +639,7 @@ test('settle cancels only the signed account ledger and cannot control another a
     for (;;) {
       const response = await fetch(f.origin + '/api/task-board/state', { headers: f.headers(id) });
       const board = await response.json();
-      if (board.tasks[0].executions[0]?.sessionId && f.taskCalls.some(call => call.id === id && call.method === 'commands/execute')) {
+      if (board.tasks[0].executions[0]?.sessionId && f.taskCalls.some(call => call.id === id && call.method === 'session/prompt')) {
         assert.match(board.tasks[0].executions[0].sessionId, new RegExp(`^scheduled-${id}-`));
         break;
       }
@@ -699,7 +701,7 @@ test('tenant boards refuse shared GitHub operations while retaining private card
 
 /** Creates a goal execution through the account's real HTTP route. */
 async function goalExecution(f: Awaited<ReturnType<typeof fixture>>, id: number) {
-  f.state.settings = { goalVerification: true, goalVerificationModel: `test/model-${id}` };
+  f.state.settings = { goalRun: true, goalVerification: true, goalVerificationModel: `test/model-${id}` };
   for (const action of [
     { kind: 'create', id: `goal-${id}`, input: { title: 'Goal', description: '', prompt: 'Deliver a tested implementation', goalRun: true } },
     { kind: 'run', taskId: `goal-${id}` },

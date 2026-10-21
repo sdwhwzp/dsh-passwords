@@ -43,7 +43,7 @@ Do not paste `.env`, `setup-key.txt`, JWTs, cookies, API keys, SSH passwords, pr
 Supported development baseline:
 
 - Node.js `22.19+` or `24+`
-- Private Harness `0.2.1-alpha.1` provides the native account extensions. Development packages link to that checkout; the runtime gate accepts `>=0.2.1-alpha.1 <0.2.2-0`. Candidate acceptance is recorded separately from upstream release results.
+- Private Harness `0.2.1-rc.2` provides the native account extensions. Development packages link to that checkout; the runtime gate accepts `>=0.2.1-rc.2 <0.2.2-0`. Candidate acceptance is recorded separately from upstream release results.
 - npm and git
 
 Clone and install:
@@ -79,10 +79,10 @@ Run the same checks as CI:
 ```bash
 npm ci --include=optional
 npm run build
-npm test
+node --import tsx --test "test/**/*.test.ts"
 ```
 
-Tests use Node's built-in test runner through `tsx`. Add a focused regression test before or with a bug fix. Include malformed input, unauthorized access, failure, and reconnect/race cases when the changed path handles them. For browser or deployment behavior, add a manual verification note with the tested topology; do not claim a real end-to-end result from a unit test.
+Run `npm run build` before the test command; the test step does not build on its own. Tests use Node's built-in test runner through `tsx`. Add a focused regression test before or with a bug fix. Include malformed input, unauthorized access, failure, and reconnect/race cases when the changed path handles them. For browser or deployment behavior, add a manual verification note with the tested topology; do not claim a real end-to-end result from a unit test.
 
 The CI matrix currently tests Node 22 and Node 24 on Ubuntu. A local pass does not replace testing the relevant DSH runtime, reverse proxy, or third-party plugin when the change crosses that boundary.
 

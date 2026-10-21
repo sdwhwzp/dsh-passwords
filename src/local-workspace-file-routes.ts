@@ -1,6 +1,6 @@
 /** Preserve the standard file-picker and preview RPCs while routing paired folders to their owner. */
 import type { Context } from '@deepseek-ai/cordis';
-import type {} from '@deepseek-ai/dsh-api-gateway';
+import type { InvokeRemoteRequest } from '@deepseek-ai/dsh-api-gateway';
 import type {} from '@deepseek-ai/dsh-client-connection';
 import type {} from '@deepseek-ai/dsh-session-query';
 import type { SessionId } from '@deepseek-ai/dsh-session/types';
@@ -36,8 +36,11 @@ function relative(root: string, input: string): string {
 /** Standard unary methods supported without activating an Agent or executing a shell command. */
 export class LocalWorkspaceFileRoutes {
   private readonly access: DshPasswordsPrincipalAccessProvider;
+  private readonly peer: InvokeRemoteRequest['peer'];
   constructor(private readonly ctx: Context, db: Database, private readonly hub: LocalWorkspaceHub, private readonly config: PlatformConfig['localWorkspace']) {
     this.access = new DshPasswordsPrincipalAccessProvider(ctx, db);
+    this.peer = ctx.connection.createPeer({ principal: { kind: 'owner' }, interactions: 'none' });
+    ctx.effect(() => () => { void this.peer.dispose(); }, 'dsh-passwords: paired file RPC peer');
   }
 
   /** Adapt the sidebar's file vocabulary; undefined delegates an ordinary server workspace. */
@@ -124,14 +127,14 @@ export class LocalWorkspaceFileRoutes {
     const record = (await this.ctx.sessionQuery.listSessions(signal)).find(row => row.header.id === sessionId);
     const cwd = record?.header.cwd;
     const workspace = cwd === undefined ? null : this.hub.browserWorkspace(cwd);
-    if (workspace === null) return this.ctx.typertGateway.invoke({ namespace, method, args, principal, signal });
+    if (workspace === null) return this.ctx.typertGateway.invoke({ namespace, method, args, principal, signal, peer: this.peer });
     const allowed = new Set(isIndex ? [idKey] : [idKey, 'path', ...(['read', 'readBytes'].includes(method) ? ['range'] : method === 'readRelated' ? ['relativePath'] : [])]);
     if (Object.keys(args).some(key => !allowed.has(key))) throw new Error('Unexpected file arguments');
     const root = workspace.placeholder_path;
     const input = isIndex ? '.' : relative(root, text(args.path));
     const browse = async (values: Record<string, unknown>) => object(await this.hub.browse(workspace.id, principal, values, signal));
     if (isIndex) {
-      const settings = object(await this.ctx.typertGateway.invoke({ namespace: 'atFile', method: 'getSettings', args: {}, principal, signal }));
+      const settings = object(await this.ctx.typertGateway.invoke({ namespace: 'atFile', method: 'getSettings', args: {}, principal, signal, peer: this.peer }));
       if (settings.enabled !== true) throw new Error('at-file is disabled in Settings');
       const result = await browse({ action: 'index', path: '.', limit: this.config.browserMaxEntries, ignoreDirs: this.config.browserIgnoreDirs });
       const rules = [...(Array.isArray(settings.ignoreFiles) ? settings.ignoreFiles : []), ...(Array.isArray(settings.workspaceIgnoreFiles) ? settings.workspaceIgnoreFiles.flatMap(value => {

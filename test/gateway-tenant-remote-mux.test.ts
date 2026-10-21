@@ -47,7 +47,7 @@ function muxItem(streamId: string, value: unknown): string {
   return JSON.stringify({ type: 'item', streamId, value });
 }
 
-async function setup(mobile = false) {
+async function setup(mobile = false, heartbeatTimeout = false) {
   const temporary = await mkdtemp(path.join(os.tmpdir(), 'dshpw-tenant-remote-'));
   const dbPath = path.join(temporary, 'platform.db');
   const db = new Database(dbPath, createFieldCrypto('enc', 'setup'));
@@ -100,6 +100,7 @@ async function setup(mobile = false) {
   await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
   const upstreamPort = (upstream.address() as { port: number }).port;
   const config: PlatformConfig = {
+    ...(heartbeatTimeout ? { mux: { fragmentBytes: 16384, pingIntervalMs: 250, pongTimeoutMs: 2000, writeStallMs: 5000 } } : {}),
     setupKey: 'setup', dbPath, dbEncKey: 'enc', database: { driver: 'sqlite', path: dbPath },
     gateway: {
       host: '127.0.0.1', port: 0, upstream: `http://127.0.0.1:${String(upstreamPort)}`,
@@ -127,6 +128,7 @@ async function setup(mobile = false) {
     const upstreamAccepted = new Promise<WebSocket>((resolve) => waiters.push(resolve));
     const downstream = new WebSocket(`${mobile ? 'wss' : 'ws'}://127.0.0.1:${String(gatewayPort)}/api/remote.mux`, {
       rejectUnauthorized: !mobile,
+      autoPong: !heartbeatTimeout,
       headers: mobile ? { authorization: `Bearer ${mobileToken}`, 'x-dsh-mobile': '1' } : { cookie },
     });
     await new Promise<void>((resolve, reject) => {
@@ -442,4 +444,37 @@ tenantTest('malformed terminal retention still closes the carrier without forwar
       assert.deepEqual(forwarded, []);
     }
   } finally { await env.cleanup(); }
+});
+
+
+tenantTest('tenant mux fragments large Unicode items without changing messages or sibling streams', async mobile => {
+  const env = await setup(mobile);
+  const { downstream, upstream } = await env.connect();
+  try {
+    const opened = nextMessage(upstream);
+    downstream.send(JSON.stringify({ type: 'open', streamId: 'terminal', endpoint: 'terminal/retain', payload: { args: { sessionId: 'own-session', id: 'saved-terminal' } } }));
+    await opened;
+    const value = { text: '汉🙂'.repeat(200000) };
+    const received = nextMessage(downstream);
+    upstream.send(muxItem('terminal', value));
+    assert.deepEqual(await received, { type: 'item', streamId: 'terminal', value });
+    assert.equal(downstream.readyState, WebSocket.OPEN);
+    const next = nextMessage(downstream);
+    upstream.send(muxItem('terminal', { retained: true }));
+    assert.deepEqual(await next, { type: 'item', streamId: 'terminal', value: { retained: true } });
+  } finally { downstream.terminate(); upstream.terminate(); await env.cleanup(); }
+});
+
+test('tenant mux closes both legs when a browser stops answering nonce heartbeats', { timeout: 10000 }, async () => {
+  const env = await setup(false, true);
+  const { downstream, upstream } = await env.connect();
+  try {
+    const closed = new Promise<number>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('heartbeat failed to close silent browser')), 5000);
+      downstream.once('close', code => { clearTimeout(timer); resolve(code); });
+    });
+    assert.equal(await closed, 1011);
+    if (upstream.readyState !== WebSocket.CLOSED) await nextClose(upstream);
+    assert.equal(upstream.readyState, WebSocket.CLOSED);
+  } finally { downstream.terminate(); upstream.terminate(); await env.cleanup(); }
 });

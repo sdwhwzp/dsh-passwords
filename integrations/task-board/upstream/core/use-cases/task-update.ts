@@ -16,7 +16,7 @@ import type { TaskHandoverInput } from '../handover.ts'
  * Editable fields on a task (the update patch surface). `freeze` replaces the
  * continuation-card snapshot (restamping frozenAt); an explicit null clears it.
  */
-export type TaskUpdatePatch = Partial<Pick<TaskRecord, 'title' | 'description' | 'prompt' | 'workspaceId' | 'mode' | 'permission' | 'model' | 'reuseSession' | 'teamRun' | 'goalRun' | 'skipVerification'>> & {
+export type TaskUpdatePatch = Partial<Pick<TaskRecord, 'title' | 'description' | 'prompt' | 'workspaceId' | 'mode' | 'permission' | 'model' | 'reasoningEffort' | 'reuseSession' | 'teamRun' | 'goalRun' | 'skipVerification'>> & {
   freeze?: FreezeSnapshot & { redacted?: boolean } | null
   /** Replaces the handover bundle (restamping bundledAt); an explicit null clears it. */
   handover?: TaskHandoverInput | null
@@ -82,6 +82,7 @@ export function applyUpdateTask(
     const mode = 'mode' in patch ? normalizeTargetId(patch.mode) : undefined
     const permission = 'permission' in patch ? normalizePermission(task.permission, patch.permission) : undefined
     const model = 'model' in patch ? normalizeTargetId(patch.model) : undefined
+    const reasoningEffort = 'reasoningEffort' in patch ? normalizeTargetId(patch.reasoningEffort) : undefined
     const next: TaskRecord = { ...task, ...rest, updatedAt: now }
     // Content fields normalize like creation does (trimmed); an explicit
     // undefined keeps the current value — content cannot be cleared.
@@ -110,9 +111,9 @@ export function applyUpdateTask(
     if ('reuseSession' in patch) next.reuseSession = patch.reuseSession === true ? true : undefined
     // Team execution is a boolean opt-in with the same clear-by-false rule.
     if ('teamRun' in patch) next.teamRun = patch.teamRun === true ? true : undefined
-    // The /goal opt-in is default-ON: true (or an explicit null) returns the
-    // card to the default and stores nothing, only false pins a plain turn.
-    if ('goalRun' in patch) next.goalRun = patch.goalRun === false ? false : undefined
+    // The /goal opt-in is default-OFF: true joins the goal run, while false
+    // (or an explicit null) returns the card to the default and stores nothing.
+    if ('goalRun' in patch) next.goalRun = patch.goalRun === true ? true : undefined
     // The acceptance opt-out is the mirror image: default OFF, so only true
     // pins a card out of the gate; false (or an explicit null) returns it to
     // inheriting the board-wide switch and stores nothing.
@@ -121,6 +122,10 @@ export function applyUpdateTask(
     if (mode !== undefined || 'mode' in patch) next.mode = mode
     if (permission !== undefined || 'permission' in patch) next.permission = permission
     if (model !== undefined || 'model' in patch) next.model = model
+    // The effort is bound to the model route above it: blank text (or an
+    // explicit undefined) returns the card to the model's own default level,
+    // and only the launch decides whether the value can be sent at all.
+    if (reasoningEffort !== undefined || 'reasoningEffort' in patch) next.reasoningEffort = reasoningEffort
     return next
   })
 }

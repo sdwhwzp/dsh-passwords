@@ -121,3 +121,20 @@ test('Linux procfs recovers the dsh entrypoint after a plugin loader rewrites Ja
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('native rc.2 does not rewrite bind guards when the environment requests wildcard hosts', () => {
+  const root = nativeRoot('0.2.1-rc.2');
+  const target = path.join(root, 'host.js');
+  const before = 'throw new Error("wildcard host is forbidden");\n';
+  const previous = process.env.MCP_DSH_BIND_ALL;
+  try {
+    writeFileSync(target, before);
+    process.env.MCP_DSH_BIND_ALL = '1';
+    assert.equal(applyRemotePatch(root), 'unchanged');
+    assert.equal(readFileSync(target, 'utf8'), before);
+  } finally {
+    if (previous === undefined) delete process.env.MCP_DSH_BIND_ALL;
+    else process.env.MCP_DSH_BIND_ALL = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+});

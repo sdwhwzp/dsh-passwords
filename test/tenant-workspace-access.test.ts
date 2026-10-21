@@ -90,7 +90,7 @@ test('task-board HTTP state and mutations are isolated by signed principal and p
     effect(register: Function) { disposers.push(register()); },
   };
   const executionCalls: Array<{ method: string; args: unknown; cookie?: string }> = [];
-  let goalReached: (() => void) | undefined;
+  let promptReached: (() => void) | undefined;
   const rpcServer = http.createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks).toString());
@@ -98,7 +98,7 @@ test('task-board HTTP state and mutations are isolated by signed principal and p
     executionCalls.push({ method: body.method, args: body.payload.args, cookie: req.headers.cookie });
     const value = body.method === 'session/create' ? { sessionId: 'execution-owned' } : body.method === 'commands/execute' ? { kind: 'success', text: 'ok' } : body.method === 'session/list' ? { items: [] } : {};
     res.end(JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: { ok: true, value } }));
-    if (body.method === 'commands/execute' && body.payload.args.line.startsWith('/goal ')) goalReached?.();
+    if (body.method === 'session/prompt') promptReached?.();
   });
   await new Promise<void>(resolve => rpcServer.listen(0, '127.0.0.1', resolve));
   const config = { internalSecret: 'secret', jwtSecret: 'jwt-secret', tenantTaskBoard: { enabled: true, directory, gatewayOrigin: `http://127.0.0.1:${(rpcServer.address() as { port: number }).port}` } };
@@ -128,13 +128,13 @@ test('task-board HTTP state and mutations are isolated by signed principal and p
     }
     assert.deepEqual(executionCalls.filter(call => call.method !== 'session/list'), []);
     assert.equal((await call('2')).tasks[0].title, 'owner-2');
-    const submitted = new Promise<void>((resolve, reject) => { const timer = setTimeout(() => reject(new Error('task goal was not submitted')), 3000); goalReached = () => { clearTimeout(timer); resolve(); }; });
+    const submitted = new Promise<void>((resolve, reject) => { const timer = setTimeout(() => reject(new Error('task prompt was not submitted')), 3000); promptReached = () => { clearTimeout(timer); resolve(); }; });
     await call('2', { kind: 'run', taskId: 'shared-id' });
     await submitted;
     await call('2', { kind: 'move', taskId: 'shared-id', status: 'done' }, 400);
     const mutations = executionCalls.filter(call => call.method !== 'session/list');
-    assert.deepEqual(mutations.map(call => call.method), ['session/modelCatalog', 'session/create', 'session/rename', 'commands/execute', 'session/prompt', 'commands/execute']);
-    assert.deepEqual(mutations[5].args, { agentId: 'execution-owned', line: '/goal only mine', submittedAttachments: [] });
+    assert.deepEqual(mutations.map(call => call.method), ['session/modelCatalog', 'session/create', 'session/rename', 'commands/execute', 'session/prompt']);
+    assert.equal(mutations.some(call => call.method === 'commands/execute' && String((call.args as { line: string }).line).startsWith('/goal ')), false);
     const jwt = (await import('jsonwebtoken')).default;
     for (const call of mutations) { const token = call.cookie!.slice('dsh_gateway_token='.length); assert.equal((jwt.verify(token, 'jwt-secret') as { sub: string }).sub, '2'); }
     assert.deepEqual(mutations[1].args, { request: { workspaceId: 'ws-owned' } });
@@ -151,7 +151,7 @@ test('task-board HTTP state and mutations are isolated by signed principal and p
     assert.equal(restored.find(task => task.id === 'shared-id')?.title, 'owner-2');
     assert.equal(restored.find(task => task.id === 'shared-id')?.reuseSession, true);
     assert.equal(restored.find(task => task.id === 'shared-id')?.goalRun, undefined);
-    assert.equal(restored.find(task => task.id === 'other-project')?.goalRun, false);
+    assert.equal(restored.find(task => task.id === 'other-project')?.goalRun, undefined);
     assert.equal(restored.find(task => task.id === 'other-project')?.status, 'running');
     assert.deepEqual(restored.find(task => task.id === 'other-project')?.executions, []);
     await call('2', { kind: 'move', taskId: 'other-project', status: 'done' });

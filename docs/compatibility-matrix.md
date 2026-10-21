@@ -2,7 +2,7 @@
 
 ## Runtime requirements
 
-The private candidate targets Harness `0.2.1-alpha.1` with native account principal extensions. Node.js must be 22.19+ or 24+. The runtime identity gate accepts `>=0.2.1-alpha.1 <0.2.2-0`, rejects retired and future patch lines before startup, and verifies settings host mode and browser authentication. Development dependencies link the private checkout; public installers and bundled Docker pin `0.2.1-alpha.1` but do not replace private candidate acceptance.
+The private candidate targets Harness `0.2.1-rc.2` with native account principal extensions. Node.js must be 22.19+ or 24+. The runtime identity gate accepts `>=0.2.1-rc.2 <0.2.2-0`, rejects retired and future patch lines before startup, and verifies settings host mode and browser authentication. Development dependencies link the private checkout; public installers and bundled Docker pin `0.2.1-rc.2` but do not replace private candidate acceptance.
 
 Browser authentication exchanges the official authenticated URL over process IPC and retains the resulting Host cookie in memory. Installed Host bundles are not rewritten. Loopback-only internal refresh and health endpoints require the independent internal secret; refreshed cookies must match the configured upstream authority. Missing native Host support or credentials prevents public startup. Later accepted release identities are not a claim of runtime acceptance.
 
@@ -26,7 +26,7 @@ The source media and message route factories own their state and cleanup. The so
 
 The v2.7.5 proxy fixes apply to the private gateway: schedule catalogs contain only authorized Session entries, stale workspace responses cannot replace archive markers, shared preset mutations require an administrator, and an upstream response-header deadline starts after request-body completion without limiting streamed response bodies. Ordinary accounts use the authenticated WebSocket/Remote event streams; retired HTTP event routes are rejected before forwarding. Existing administrator HTTP event subscriptions close on logout and credential changes. Media quotas count unfinished and unbound assets, and aborted media reads close their file descriptors.
 
-The private task-board Host engine is pinned to the matching dsh-web dependency closure recorded in `integrations/task-board/source.json`. Parent-child creation, linking and ledger reloads use the same protocol as the current client; every account retains a separate ledger and execution gateway. The current engine migrates schema 2/3 to schema 4, preserving task records and assigning the Host time zone to schedules without an explicit zone. Storage filenames remain `ledger-v2.json` and `scheduler-v2.json`; the task-board storage directory is `MCP_TENANT_TASK_BOARD_DIR` (default `~/.dsh/tenant-task-boards`), with an `owner.json` and ledger files under each `u<accountId>` directory. Deployment backups include that entire directory.
+The private task-board Host engine is pinned to the matching dsh-web dependency closure recorded in `integrations/task-board/source.json`. Parent-child creation, linking and ledger reloads use the same protocol as the current client; every account retains a separate ledger and execution gateway. The current engine migrates schemas 2–5 to schema 6, preserving task records and assigning the Host time zone to schedules without an explicit zone. Storage filenames remain `ledger-v2.json` and `scheduler-v2.json`; the task-board storage directory is `MCP_TENANT_TASK_BOARD_DIR` (default `~/.dsh/tenant-task-boards`), with an `owner.json` and ledger files under each `u<accountId>` directory. Deployment backups include that entire directory.
 
 ## Release policy
 
@@ -45,4 +45,6 @@ The gateway child reads the deployment environment file before startup and refus
 
 ## Current validation
 
-The candidate is based on upstream 2.7.7. Local checks, built-package and browser acceptance, deployment and rollback evidence are recorded per release. The combined candidate has not yet been deployed. Terminal `retain` and `follow` failures affect only that logical stream; malformed wire frames still close the carrier. The previously released grouping fix must survive this update.
+The candidate is based on upstream 2.7.8. Local checks, built-package and browser acceptance, deployment and rollback evidence are recorded per release. The combined candidate has not yet been deployed. Terminal `retain` and `follow` failures affect only that logical stream; malformed wire frames still close the carrier. The previously released grouping fix must survive this update.
+
+The rc.2 adapter supplies a lifecycle-owned Peer at every direct `typertGateway.invoke` call. Signed HTTP requests retain the existing `AuthPrincipal` and `principalAccess` checks. The tenant task-board browser registration is path-mounted from `dsh-passwords/integrations/task-board/client-shell/index.js`; its Host is empty, so only the account adapter owns ledgers. The standalone remote bridge stays disabled.

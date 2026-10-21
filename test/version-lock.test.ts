@@ -6,21 +6,9 @@ import path from 'node:path';
 const projectRoot = path.resolve(import.meta.dirname, '..');
 const read = (...parts: string[]) => readFileSync(path.join(projectRoot, ...parts), 'utf8');
 
-// The DSH 0.2.1 patch line is the current compatibility target, expressed as the
-// declared dev range `>=0.2.1-alpha.1 <0.2.2-0`. The resolved development /
-// bundled-Docker pin is `0.2.1-alpha.1`: the npm `alpha` dist-tag and the only DSH tree
-// the shrinkwrap resolves. Accepting the later 0.2.1 prereleases and the stable release
-// is a declared-range fact, not a machine-verified runtime: no 0.2.1 build has been run
-// through full gateway acceptance. Bump these constants together with package.json, the
-// lockfile, the installers, and Docker defaults.
-const DSH_PIN = '0.2.1-alpha.1';
-// The declared dev range is the single patch line `>=0.2.1-alpha.1 <0.2.2-0`: the
-// reviewed 0.2.1 prereleases from alpha.1 up (alpha.2, beta, rc) plus the stable 0.2.1
-// release. It excludes the retired 0.2.0 line and 0.1.x head, the pre-pin
-// `0.2.1-alpha.0`, and every 0.2.2+ identity. node-semver admits the `0.2.1-alpha.1`
-// prereleases because the lower comparator carries the same `[0, 2, 1]` tuple with a
-// prerelease; a bare `^0.2.1` would admit none.
-const DSH_DEV_RANGE = '>=0.2.1-alpha.1 <0.2.2-0';
+// The private candidate requires Peer-aware Harness rc.2 packages.
+const DSH_PIN = '0.2.1-rc.2';
+const DSH_DEV_RANGE = '>=0.2.1-rc.2 <0.2.2-0';
 // Pinned target shipped and validated by the last dsh-passwords release (v2.7.5). It
 // survives only as history (CHANGELOG release notes, release/verification prose) and
 // must never reappear as a current source pin.
@@ -31,7 +19,7 @@ const RELEASED_PIN = '0.1.7-rc.2';
 const RELEASED_PIN_RE = new RegExp(`0\\.1\\.7-{1,2}rc\\.2(?!\\d)`);
 
 type LockEntry = { version?: string; resolved?: string; [key: string]: unknown };
-type Lockfile = { lockfileVersion: number; packages: Record<string, LockEntry> };
+type Lockfile = { name: string; version: string; lockfileVersion: number; packages: Record<string, LockEntry> };
 type ParsedVersion = { major: number; minor: number; patch: number; prerelease: string[] };
 
 const lockPackageName = (key: string) => key.split('node_modules/').pop() ?? '';
@@ -124,17 +112,17 @@ test('the released-pin detector matches the previous pin exactly and never a lon
 });
 
 test('the declared dev range is the 0.2.1 patch line and rejects 0.1.x, 0.2.0, 0.2.1-alpha.0, and 0.2.2+', () => {
-  // Accepted: the resolved 0.2.1-alpha.1 pin, later 0.2.1 prereleases, stable 0.2.1, and
+  // Accepted: the resolved 0.2.1-alpha.2 pin, later 0.2.1 prereleases, stable 0.2.1, and
   // build metadata. Cross-checked against node_modules/semver@7.8.5, which agrees on
   // every identity below.
-  for (const version of ['0.2.1-alpha.1', '0.2.1-alpha.2', '0.2.1-alpha.20', '0.2.1-beta.1', '0.2.1-rc.1', '0.2.1-rc.10', '0.2.1', '0.2.1+build.7', '0.2.1-alpha.1+build.3', '0.2.1-alpha.3.1']) {
+  for (const version of ['0.2.1-rc.2', '0.2.1-rc.10', '0.2.1', '0.2.1+build.7', '0.2.1-rc.2+build.3']) {
     assert.ok(satisfiesPinnedRange(version, DSH_DEV_RANGE), `${version} must satisfy ${DSH_DEV_RANGE}`);
   }
   // Rejected: the retired 0.1.x head and 0.2.0 line (stable and prerelease), the pre-pin
   // `0.2.1-alpha.0` and bare `0.2.1-alpha` (both below the floor), numeric-only 0.2.1
   // prereleases (they sort below alphanumeric identifiers), later 0.2.x patches including
   // their prereleases, and the next minor.
-  for (const version of ['0.1.7', '0.1.7-rc.2', '0.2.0', '0.2.0-rc.2', '0.2.0-alpha.1', '0.2.1-alpha', '0.2.1-alpha.0', '0.2.1-0', '0.2.1-1', '0.2.2', '0.2.2-alpha.1', '0.3.0']) {
+  for (const version of ['0.2.1-alpha.1', '0.2.1-alpha.2', '0.2.1-beta.1', '0.2.1-rc.1', '0.1.7', '0.1.7-rc.2', '0.2.0', '0.2.0-rc.2', '0.2.0-alpha.1', '0.2.1-alpha', '0.2.1-alpha.0', '0.2.1-0', '0.2.1-1', '0.2.2', '0.2.2-alpha.1', '0.3.0']) {
     assert.ok(!satisfiesPinnedRange(version, DSH_DEV_RANGE), `${version} must not satisfy ${DSH_DEV_RANGE}`);
   }
   // The resolved pin must always sit inside the range that declares it.
@@ -209,12 +197,12 @@ test('npm-shrinkwrap.json preserves every private Harness development link', () 
 test('installers and bundled Docker default to the current pinned target', () => {
   for (const file of ['install.sh', 'install.bat', 'scripts/install.mjs']) {
     const source = read(file);
-    assert.match(source, /@deepseek-ai\/dsh@0\.2\.1-alpha\.1/, `${file} must install @deepseek-ai/dsh@${DSH_PIN}`);
+    assert.match(source, /@deepseek-ai\/dsh@0\.2\.1-rc\.2/, `${file} must install @deepseek-ai/dsh@${DSH_PIN}`);
     assert.doesNotMatch(source, /@deepseek-ai\/dsh@0\.1\.7-alpha\.2(?!\d)/, `${file} must not prescribe the released alpha.2 install command`);
   }
-  assert.match(read('docker', 'Dockerfile.bundled'), /ARG DSH_VERSION=0\.2\.1-alpha\.1/);
-  assert.match(read('docker', 'docker-compose.yml'), /DSH_VERSION:-0\.2\.1-alpha\.1/);
-  assert.match(read('docker', '.env.example'), /#DSH_VERSION=0\.2\.1-alpha\.1/);
+  assert.match(read('docker', 'Dockerfile.bundled'), /ARG DSH_VERSION=0\.2\.1-rc\.2/);
+  assert.match(read('docker', 'docker-compose.yml'), /DSH_VERSION:-0\.2\.1-rc\.2/);
+  assert.match(read('docker', '.env.example'), /#DSH_VERSION=0\.2\.1-rc\.2/);
 });
 
 test('dsh-passwords bundle pins the official workspace picker to browse on every host platform', () => {
@@ -259,9 +247,9 @@ test('CHANGELOG.md keeps the released 2.7.6 / 2.7.4 / 2.7.3 compatibility histor
   assert.match(released273Match[1], /0\.1\.6-alpha\.2/, 'the released 2.7.3 section must keep its historical alpha.2 pin');
 });
 
-// The 2.7.7 section records the Issue #35 and hardening fixes, and its compatibility
-// prose now matches the single 0.2.1 patch line pinned by package.json, the installers,
-// the Docker defaults, and the shrinkwrap.
+// The 2.7.7 section is a released historical record: it keeps the 0.2.1-alpha.1 pin it
+// shipped with (2.7.7 predates the alpha.2 bump) plus the Issue #35 and hardening fixes,
+// and it declares the same single 0.2.1 patch line that package.json still keeps.
 test('CHANGELOG.md 2.7.7 records the Issue #35 and hardening fixes', () => {
   const changelog = read('CHANGELOG.md');
   const released277Match = /## 2\.7\.7[^\r\n]*\r?\n([\s\S]*?)(?:\r?\n## |$)/.exec(changelog);
@@ -275,16 +263,16 @@ test('CHANGELOG.md 2.7.7 records the Issue #35 and hardening fixes', () => {
   assert.match(section, /SSE|Unicode/i, 'the 2.7.7 section must record SSE filtering hardening');
   assert.match(section, /Remote mux|backpressure/i, 'the 2.7.7 section must record bounded mux buffering');
   assert.match(section, /plugin disposal|lifecycle/i, 'the 2.7.7 section must record plugin lifecycle fixes');
-  assert.match(section, /0\.2\.1-alpha\.1/, 'the 2.7.7 section must record the current 0.2.1-alpha.1 pin');
-  assert.ok(section.includes(DSH_DEV_RANGE), `the 2.7.7 section must state the declared range ${DSH_DEV_RANGE}`);
+  assert.match(section, /0\.2\.1-alpha\.1/, 'the 2.7.7 section must keep the 0.2.1-alpha.1 pin it shipped with');
+  assert.ok(section.includes('>=0.2.1-alpha.1 <0.2.2-0'), `the 2.7.7 section must state the declared range ${DSH_DEV_RANGE}`);
   assert.doesNotMatch(section, /0\.2\.0-rc\.[0-9]/, 'the 2.7.7 section must not present a retired 0.2.0 rc as current');
 });
 
 // Public prose docs (README/README_en/CONTRIBUTING/docs) track the same single patch-line
-// contract as package.json: the pin is `0.2.1-alpha.1`, the declared range is DSH_DEV_RANGE,
+// contract as package.json: the pin is `0.2.1-alpha.2`, the declared range is DSH_DEV_RANGE,
 // and the retired 0.2.0 / 0.1.x baselines must no longer be presented as current.
 // CHANGELOG.md keeps its released history, so it is checked separately above.
-test('public docs describe the current 0.2.1-alpha.1 patch line, not the retired rc.2 baseline', () => {
+test('public docs describe the current 0.2.1-alpha.2 patch line, not the retired rc.2 baseline', () => {
   const docs = ['README.md', 'README_en.md', 'CONTRIBUTING.md', 'docs/compatibility-matrix.md'];
   for (const file of docs) {
     const source = read(...file.split('/'));
@@ -292,5 +280,6 @@ test('public docs describe the current 0.2.1-alpha.1 patch line, not the retired
     assert.ok(source.includes(DSH_DEV_RANGE), `${file} must state the declared range ${DSH_DEV_RANGE}`);
     assert.doesNotMatch(source, /0\.2\.0-rc\.[0-9]/, `${file} must not present a retired 0.2.0 rc as current`);
     assert.doesNotMatch(source, /0\.1\.7/, `${file} must not present the retired 0.1.7 line as supported`);
+    assert.doesNotMatch(source, /2\.7\.8-pre/, `${file} must not advertise the retired prerelease spelling`);
   }
 });

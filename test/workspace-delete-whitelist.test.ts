@@ -76,16 +76,16 @@ test('自建能力不扩大授权根，也不能删除非私有工作区登记',
       allowedAgentPresets: null, banned: false, sandboxMode: null, disabledSessions: [],
     });
 
-    // 场景 A：__deny__ 起点（无预分配根），靠目录选择器自建工作区。
+    // 场景 A：管理员分配授权根 HOME，子用户在根内用目录选择器自建子工作区。
     const denyCreator = db.createUser('wsdel-deny-creator', DUMMY_HASH, 'user');
     db.setPermissions(denyCreator.id, restricted(['__deny__'], true));
     // 场景 B：管理员分配了父目录 /assigned 与另一个目录 /other。
     const assignedOwner = db.createUser('wsdel-assigned-owner', DUMMY_HASH, 'user');
     db.setPermissions(assignedOwner.id, restricted([`${SYNTH_ROOT}/assigned`, `${SYNTH_ROOT}/other`], true));
-    // 场景 C：管理员把白名单精确设成一个尚不存在的目录；用户随后创建并登记它。
+    // 场景 C：管理员同时分配授权根与一个尚未存在的精确目录；用户随后在根内创建并登记它。
     const exactPath = `${HOME}/dshpw-wsdel-exact`;
     const exactOwner = db.createUser('wsdel-exact-owner', DUMMY_HASH, 'user');
-    db.setPermissions(exactOwner.id, restricted([exactPath], true));
+    db.setPermissions(exactOwner.id, restricted([HOME, exactPath], true));
 
     let workspaceSeq = 0;
     upstream = await new Promise<http.Server>((resolve) => {
@@ -161,7 +161,7 @@ test('自建能力不扩大授权根，也不能删除非私有工作区登记',
     const createSessionByPath = (cookie: string, target: string, rpcId: string) =>
       jsonBody('POST', gatewayPort, '/api/session.create', {
         type: 'client-request', rpcId, method: 'session/create',
-        payload: { args: { request: { path: target } } },
+        payload: { args: { request: { cwd: target } } },
       }, cookie);
     const createSessionById = (cookie: string, workspaceId: string, rpcId: string) =>
       jsonBody('POST', gatewayPort, '/api/session.create', {
@@ -183,7 +183,7 @@ test('自建能力不扩大授权根，也不能删除非私有工作区登记',
     assert.equal((await createDirectory(exactCookie, HOME, 'dshpw-wsdel-exact', 'c-mkdir')).status, 403);
     const removed = await deleteWorkspace(exactCookie, 'foreign-workspace', 'c-delete');
     assert.equal(removed.status, 502, 'unavailable Host registry cannot authorize deletion');
-    assert.deepEqual(db.getPermissions(exactOwner.id)?.allowed_folders, [exactPath]);
+    assert.deepEqual(db.getPermissions(exactOwner.id)?.allowed_folders, [HOME, exactPath]);
     assert.deepEqual(db.listUserWorkspacePaths(exactOwner.id), []);
     assert.equal(workspaceSeq, 0, 'unauthorized registration never reaches the Host');
   } finally {

@@ -59,6 +59,7 @@ async function runScenario(
   }) => Promise<void>,
 ): Promise<void> {
   const tempDir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-managed-browser-'));
+  const appDir = mkdtempSync(path.join(os.tmpdir(), 'dshpw-managed-browser-app-'));
   const rootPath = path.join(tempDir, 'managed', 'u2');
   const outsidePath = path.join(tempDir, 'outside');
   const sharedPath = path.join(tempDir, 'shared');
@@ -78,7 +79,7 @@ async function runScenario(
   const escapedLink = process.platform === 'win32' ? null : path.join(root, 'escaped-link');
   if (escapedLink !== null) symlinkSync(outside, escapedLink, 'dir');
 
-  const dbPath = path.join(tempDir, 'data', 'platform.db');
+  const dbPath = path.join(appDir, 'data', 'platform.db');
   const db = new Database(dbPath, createFieldCrypto('test-key', 'test-key'));
   db.init();
   const admin = db.createUser('admin', '$2a$10$dummyhashdummyhashdummyhashdu', 'admin');
@@ -91,6 +92,7 @@ async function runScenario(
     dailyMinutesLimit: null,
     monthlyBudgetMicros: 0,
     allowUpload: true,
+    allowWorkspaceCreate: true,
     allowGitDownload: false,
     banned: false,
     sandboxMode: 'workspace-write',
@@ -348,6 +350,7 @@ async function runScenario(
     await close(upstream);
     db.close();
     rmSync(tempDir, { recursive: true, force: true });
+    rmSync(appDir, { recursive: true, force: true });
   }
 }
 

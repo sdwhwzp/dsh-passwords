@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createOwnerPeer } from '../dist/task-board-engine.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 const exec = promisify(execFile);
@@ -45,7 +46,7 @@ for (const shellEnabled of [false, true]) test(`paired file and Git routes use t
   ctx.provide('sessionQuery', { listSessions: async () => [{ header }] } as never);
   let registry = ctx.provide('workspaceRegistry', { list: () => [{ id: 'workspace', path: placeholder }] } as never);
   let requestPrincipal = principal;
-  ctx.provide('connection', { authenticateRequest: async () => requestPrincipal } as never);
+  ctx.provide('connection', { authenticateRequest: async () => requestPrincipal, createPeer: () => createOwnerPeer(ctx) } as never);
   ctx.provide('typertGateway', { invoke: async () => ({ enabled: true, ignoreFiles: [], workspaceIgnoreFiles: [] }) } as never);
   const config = { gateway: { tls: null }, localWorkspace: { host: '127.0.0.1', port: 0, publicUrl: '', placeholderRoot: path.join(temp, 'paired'), browserMaxEntries: 5000, browserMaxFileBytes: 32 * 1024 * 1024, browserIgnoreDirs: ['node_modules', '.git'] } } as PlatformConfig;
   const hub = new LocalWorkspaceHub(ctx, db, config);

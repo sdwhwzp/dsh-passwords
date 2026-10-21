@@ -11,7 +11,7 @@ import type { LlmRuntime, TokenUsage } from '@deepseek-ai/dsh-llm';
 import type { Database } from './db.js';
 import type { PlatformConfig } from './config.js';
 import { verifyPrincipalHeaders, type AuthenticatedPrincipal } from './principal.js';
-import { TaskBoardHostService, HostTaskLedger, makeTaskBoardRoutes, parseTaskDraft, openOneShotStream, splitModelRoute, TaskParseError, createGoalVerificationGate, normalizeCatalog, type BoardGoalFace, type BoardVerificationSettings, type BoardGateExecution, type BoardGatewayRequest, type BoardParseRequest, type HostTimerFace } from './task-board-engine.js';
+import { TaskBoardHostService, HostTaskLedger, createOwnerPeer, makeTaskBoardRoutes, parseTaskDraft, openOneShotStream, splitModelRoute, TaskParseError, createGoalVerificationGate, normalizeCatalog, type BoardGoalFace, type BoardVerificationSettings, type BoardGateExecution, type BoardGatewayRequest, type BoardParseRequest, type HostTimerFace } from './task-board-engine.js';
 import { customerModelAllowed } from './model-policy.js';
 import { todayLocal } from './permissions.js';
 import { dailyTimeQuotaError, hourlyTokenQuotaError, monthlySpendQuotaError, spendCheckUnavailableError } from './quota-notice.js';
@@ -95,6 +95,7 @@ export function registerTenantTaskBoard(ctx: Context, db: Database, config: Plat
   const directory = settings.directory;
   const timer = ctx.get('timer') as HostTimerFace | undefined;
   mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const ownerPeer = createOwnerPeer(ctx);
   const boards = new Map<string, { principal: AuthenticatedPrincipal; service: TaskBoardHostService; routes: ReturnType<typeof makeTaskBoardRoutes>; refreshWorkspaces: () => Promise<void>; ledger: HostTaskLedger; gate: ReturnType<typeof createGoalVerificationGate> }>();
   const validate = (principal: AuthenticatedPrincipal) => {
     if (principal.source !== 'dsh-passwords' || !/^[1-9][0-9]*$/.test(principal.id)) throw Object.assign(new Error('invalid task owner'), { code: 'PRINCIPAL_ACCESS_DENIED' });
@@ -127,15 +128,19 @@ export function registerTenantTaskBoard(ctx: Context, db: Database, config: Plat
     if (status.exhausted) throw monthlySpendQuotaError(status.usedMicros, permissions.monthly_budget_micros ?? 0);
   };
   /** The aggregate shell owns the same live fields as the task-board settings card. */
-  const verificationSettings = (): BoardVerificationSettings => {
+  const boardConfig = (): Record<string, unknown> => {
     const face = ctx.get('settings') as { describe(options: { redactSecrets: boolean }): Array<{ ns: string; value: unknown }> } | undefined;
     const entry = face?.describe({ redactSecrets: true }).find(row => ['web-ui-task-board', 'task-board'].includes(row.ns));
-    if (entry === undefined) return { enabled: false, model: '', reasoningEffort: '' };
+    if (entry === undefined) return {};
     if (entry.value === null || typeof entry.value !== 'object') throw new Error('task-board settings must be a mapping');
     const row = entry.value as Record<string, unknown>;
     const legacy = row.config;
     const fields = legacy !== null && typeof legacy === 'object' ? { ...legacy, ...row } : row;
-    const enabled = fields.goalVerification ?? true;
+    return fields;
+  };
+  const verificationSettings = (): BoardVerificationSettings => {
+    const fields = boardConfig();
+    const enabled = fields.goalVerification ?? false;
     const model = fields.goalVerificationModel ?? '';
     const reasoningEffort = fields.goalVerificationReasoningEffort ?? '';
     if (typeof enabled !== 'boolean' || typeof model !== 'string' || typeof reasoningEffort !== 'string') throw new Error('invalid task-board acceptance settings');
@@ -217,7 +222,8 @@ export function registerTenantTaskBoard(ctx: Context, db: Database, config: Plat
     } });
     const ledger = new HostTaskLedger(ledgerPath);
     const service = new TaskBoardHostService(gateway, {
-      ledger,
+      ledger, ownerPeer,
+      goalRunEnabled: () => boardConfig().goalRun === true,
       workspaceRegistry: registry === undefined ? undefined : { list: () => { validate(principal); return workspaces; } },
       verificationSettings,
       verificationCatalog: async () => {
