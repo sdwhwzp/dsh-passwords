@@ -3711,16 +3711,23 @@ window.__ModuleLoader__.load({
 			"settings.enabled": "启用任务看板",
 			"settings.enabledCardHint": "总开关、播报、睡眠保护与子任务层级。",
 			"settings.enabledHint": "关闭后隐藏侧边栏入口与看板视图，并注销 task_board_* agent 工具；开启时任何会话都可以通过这些工具读写看板、子任务与定时计划。",
+			"settings.enabledHintBrief": "默认开启。关闭后隐藏入口与看板视图，并注销 task_board_* 工具。",
 			"settings.announceToAgent": "向 agent 播报任务看板",
 			"settings.announceToAgentHint": "开启：每条 agent 系统提示都会包含本看板的说明；关闭：不播报，agent 仅在用户主动提及时了解看板。",
+			"settings.announceToAgentHintBrief": "默认关闭。开启后每条 agent 系统提示都会带上本看板说明。",
 			"settings.preventIdleSleep": "阻止系统空闲睡眠",
 			"settings.preventIdleSleepHint": "默认关闭。开启后，只要存在运行中的 DSH 会话、已启用的定时任务或会话状态尚未确认，Host 就阻止整机因空闲睡眠；屏幕仍可自动关闭。",
+			"settings.preventIdleSleepHintBrief": "默认关闭。开启后只要有会话在跑或计划已启用，就阻止整机空闲睡眠。",
 			"settings.trustForwardedProxy": "信任自己反代或隧道转发的请求",
 			"settings.trustForwardedProxyHint": "默认关闭。关闭时行为与没有这项设置完全一致：带 CF-Connecting-IP 或 X-Forwarded-For 的请求一律不当作本机请求。只有反代或隧道由你自己（运维）运行、并且它拨的是本机回环上游（127.0.0.1:<端口>）时才打开：此时这类请求仍必须带浏览器同源标记，显式跨站请求照旧拒绝。第三方托管的反向代理不要打开——它可以替你伪造这些标记。",
-			"settings.powerStatus": "平台：{platform}；保护状态：{phase}；运行会话：{running}；已启用计划：{schedules}",
+			"settings.trustForwardedProxyHintBrief": "默认关闭。仅在自己的反代或隧道指向本机回环时才开启。",
 			"settings.powerBoundary": "这可能增加电池消耗。合盖、手动睡眠、休眠、关机、低电量或企业策略不在保证范围内，也不会唤醒已经睡眠的机器。",
-			"settings.powerUnknown": "未知",
 			"settings.powerError": "最近一次电源保护错误：{error}",
+			"settings.powerPhase": "保护状态",
+			"settings.powerPlatform": "平台",
+			"settings.powerRunning": "运行会话",
+			"settings.powerSchedules": "已启用计划",
+			"settings.powerUnknown": "未知",
 			"settings.inherit": "继承",
 			"settings.on": "开",
 			"settings.off": "关",
@@ -3738,28 +3745,36 @@ window.__ModuleLoader__.load({
 			"settings.invalidNumber": "请输入数字，留空则使用默认值。",
 			"settings.sessionPollSeconds": "会话轮询间隔（秒）",
 			"settings.sessionPollSecondsHint": "默认 5 秒。仅在看板有需要核对的事情——运行中的卡片或未结算的执行——时才读取会话名册；两者都没有时不再轮询，Host 不会持续扫描持久化会话目录。取值 1–300 秒：间隔越短结算越快、Host 负载越高。",
+			"settings.sessionPollSecondsHintBrief": "默认 5 秒，可设 1 到 300：间隔越短结算越快，Host 负载越高。",
 			"settings.maxSubtaskDepth": "子任务深度上限",
 			"settings.maxSubtaskDepthHint": "默认 1：一个任务只允许一层子任务，子任务不能再创建或关联子任务。最大 3。执行父任务会并发执行它的整棵子任务树，层级越深，一次执行开启的会话越多。",
+			"settings.maxSubtaskDepthHintBrief": "默认 1 层，最多 3：层级越深，一次执行开启的会话越多。",
 			"settings.maxSubtaskDepthOption": "{depth} 层",
 			"settings.runLaunchWidth": "并发启动上限",
 			"settings.runLaunchWidthHint": "默认 3。一次执行会开启整棵子任务树，但同一刻最多只有这么多个成员在创建会话并入队 Prompt，其余成员排队等待——全部都会启动，只是分批进入运行列。默认值取自本仓「重型实施子代理并发 ≤ 3」的实测纪律。取值 1–16：越大启动越快，Host 的内存与 swap 压力越高。执行中修改只影响尚未入列的启动。",
+			"settings.runLaunchWidthHintBrief": "默认 3，可设 1 到 16：同一刻最多这么多个成员创建会话，其余排队。",
 			"settings.spendBudgetTokens": "每日 token 上限",
 			"settings.spendBudgetTokensHint": "默认 0，表示不设闸，行为与没有这项设置时完全一致（不读账本、不计数）。设为正整数后，今日已用 token 达到该值时：手动执行与重新执行被拒绝，调用方看到的拒绝文本就是原因；到点的定时执行把原因写进调度错误并跳过本次触发，不消耗计划次数，因此调高上限或跨过本地零点后下一次触发照常执行。计量单位是 token 而不是金额：使用账本只对 DeepSeek 官方路由计价，其他路由恒为 0。今日已用取自该账本按本地日期分桶的输入、缓存读写与输出之和，与「使用统计」面板的口径一致。",
+			"settings.spendBudgetTokensHintBrief": "默认 0 不设闸。设成正值后今日用量到顶，手动执行被拒绝，定时触发跳过。",
 			"settings.runBehaviorTitle": "运行行为",
 			"settings.runBehaviorCardHint": "全局原生 /goal 执行开关（总开关，默认关闭）。",
 			"settings.goalRunGlobal": "全局启用 DSH 原生 /goal 执行",
 			"settings.goalRunGlobalHint": "默认关闭。关闭时所有任务都按普通单回合执行，不调用 dsh 内置的 /goal；只有这里开启、且任务级「以 /goal 开始执行」被勾选时，才执行原生 /goal。任务级勾选始终可操作、也不会被这里的开关改写，总开关只决定它是否生效。开关按执行启动时冻结，只影响之后新开的执行。",
+			"settings.goalRunGlobalHintBrief": "默认关闭。只有它与卡片级选项都开启，执行才使用原生 /goal。",
 			"settings.goalRunGlobalDisabledTaskOption": "全局「原生 /goal 执行」总开关已关闭：任务级选项仍可随时勾选或取消，但暂不生效，你保存的偏好也不会被改写；开启总开关后即按该偏好执行。本次执行按普通单回合进行，未执行 goal 验收。",
 			"settings.goalVerificationTitle": "任务验收",
 			"settings.goalVerification": "启用任务验收",
 			"settings.goalVerificationCardHint": "验收开关、裁判模型与判据阈值。",
 			"settings.goalVerificationHint": "默认打开：以 goal 形式执行的任务在 update_goal 标记完成前必须先通过一次验收（三项 coding 判据（本分区面向工程任务）、阈值 0.65、每项两轮且交换 A/B 位置，实际工作须胜过空工作基线）。首次不通过会把总分、逐项分数与可定位问题反馈给 agent 修复，同一执行最多两次验收；第二次仍不通过则本次执行判失败。仅作用于本插件以 goal 形式执行的任务，不影响普通聊天，也不影响显式 goalRun:false 的单回合任务。每次验收都会真实调用裁判模型并消耗额度。",
+			"settings.goalVerificationHintBrief": "默认开启。每项判据两轮，阈值 0.65，每次验收都会调用裁判模型。",
 			"settings.goalVerificationModel": "验收模型",
 			"settings.goalVerificationModelHint": "留空即继承宿主：使用宿主模型目录的默认路由，而不是任务卡钉住的执行模型。",
+			"settings.goalVerificationModelHintBrief": "留空继承宿主默认路由，不跟随卡片钉住的执行模型。",
 			"settings.goalVerificationModelInherit": "继承宿主（{model}）",
 			"settings.goalVerificationModelInheritUnknown": "继承宿主（宿主未提供模型目录）",
 			"settings.goalVerificationEffort": "推理强度",
 			"settings.goalVerificationEffortHint": "留空即继承宿主默认档位。目标模型不支持所选档位时不会盲传：验收改用该模型自己的默认档位，并在下方标注回退。",
+			"settings.goalVerificationEffortHintBrief": "留空继承宿主默认档位。目标模型不支持的档位会自动回退。",
 			"settings.goalVerificationEffortInherit": "继承宿主（{effort}）",
 			"settings.goalVerificationEffortInheritUnknown": "继承宿主（模型默认档位）",
 			"settings.goalVerificationResolved": "实际解析后的验收配置",
@@ -3776,9 +3791,13 @@ window.__ModuleLoader__.load({
 			"settings.goalVerificationModelInvalid": "配置的验收模型不是 provider/model 形式，已回退宿主默认。",
 			"settings.cardDefaultsTitle": "新建卡片默认值",
 			"settings.cardDefaultsCardHint": "新建对话框打开时预填的 Agent 预设、权限、模型与思考档位；留空即不设置，创建卡片的行为与未配置时完全一致。它们只是预填，不改变任何既有语义，新建的卡片仍可随时修改；思考档位默认值只在卡片最终钉住的模型就是这里的默认模型时才生效。",
+			"settings.cardDefaultsCardBrief": "新建卡片预填的预设、权限、模型与思考档位。",
 			"settings.cardDefaultModeHint": "留空不钉住任何值，新建卡片照旧继承部署默认预设。取值优先级为：新建对话框里的显式选择 > 复制源卡或父任务已钉住的值 > 这里的默认值；子任务沿用父卡已钉住的值。",
+			"settings.cardDefaultModeHintBrief": "留空不预填，新建卡片照旧跟随部署默认预设。",
 			"settings.cardDefaultPermissionHint": "留空为不设置（用会话默认）。高于会话默认权限基线的默认值仍只是预填：卡片执行前照旧需要人工确认。子任务从不沿用父卡的权限，只在父卡未钉住、且这里设置了默认值时才预填。",
+			"settings.cardDefaultPermissionHintBrief": "留空为不设置。高于会话基线的默认值执行前仍需人工确认。",
 			"settings.cardDefaultModelHint": "留空为宿主默认（agent-default-model）。对话框里的显式选择优先于源卡/父卡已钉住的值，后者优先于这里的默认值；自己选了模型的调用方不借用任何默认档位。",
+			"settings.cardDefaultModelHintBrief": "留空即宿主默认模型，对话框里的显式选择始终优先。",
 			"running.executing": "执行中",
 			"running.verifying": "验收中",
 			"running.repairing": "验收未通过修复中",
@@ -4177,16 +4196,23 @@ window.__ModuleLoader__.load({
 			"settings.enabled": "Enable the task board",
 			"settings.enabledCardHint": "Master switch, announcement, sleep protection and subtask depth.",
 			"settings.enabledHint": "When off, the sidebar entry and board view are hidden and the task_board_* agent tools are unregistered; while on, any session can read and drive the board, its subtasks and its schedules through those tools.",
+			"settings.enabledHintBrief": "On by default. Off hides the entry and board view and unregisters the task_board_* tools.",
 			"settings.announceToAgent": "Announce the task board to agents",
 			"settings.announceToAgentHint": "On: every agent system prompt includes a note about this board. Off: no announcement; agents learn about the board only when you mention it.",
+			"settings.announceToAgentHintBrief": "Off by default. On adds a note about this board to every agent system prompt.",
 			"settings.preventIdleSleep": "Prevent idle system sleep",
 			"settings.preventIdleSleepHint": "Off by default. When enabled, the Host prevents idle system sleep while any DSH session runs, any schedule is enabled, or session state is not yet known. The display may still turn off.",
+			"settings.preventIdleSleepHintBrief": "Off by default. On blocks idle system sleep while a session runs or a schedule is enabled.",
 			"settings.trustForwardedProxy": "Trust requests forwarded by my own proxy or tunnel",
 			"settings.trustForwardedProxyHint": "Off by default. While it is off the fence behaves exactly as if the setting did not exist: a request carrying CF-Connecting-IP or X-Forwarded-For is never treated as local. Turn it on only when the reverse proxy or tunnel is one you (the operator) run yourself and it dials this machine loopback upstream (127.0.0.1:<port>): even then such a request must still carry a browser same-origin marker, and an explicit cross-site request stays refused. Do not enable it for a reverse proxy hosted by a third party, which can forge those markers on your behalf.",
-			"settings.powerStatus": "Platform: {platform}; protection: {phase}; running sessions: {running}; enabled schedules: {schedules}",
+			"settings.trustForwardedProxyHintBrief": "Off by default. Turn on only for a proxy or tunnel you run that dials this machine loopback.",
 			"settings.powerBoundary": "This may use more battery. Lid close, manual sleep, hibernation, shutdown, low-battery actions, and enterprise policy are outside the guarantee; an already sleeping computer is not woken.",
-			"settings.powerUnknown": "unknown",
 			"settings.powerError": "Latest power-protection error: {error}",
+			"settings.powerPhase": "Protection",
+			"settings.powerPlatform": "Platform",
+			"settings.powerRunning": "Running sessions",
+			"settings.powerSchedules": "Enabled schedules",
+			"settings.powerUnknown": "unknown",
 			"settings.inherit": "Inherit",
 			"settings.on": "On",
 			"settings.off": "Off",
@@ -4204,28 +4230,36 @@ window.__ModuleLoader__.load({
 			"settings.invalidNumber": "Enter a number, or leave blank to use the default.",
 			"settings.sessionPollSeconds": "Session poll interval (seconds)",
 			"settings.sessionPollSecondsHint": "Default 5. The Host reads the DSH session roster only while the board has something to reconcile: a running card or an open execution. With neither it stops polling and never re-scans the persisted session directory. Range 1 to 300 seconds: a shorter interval settles runs sooner and costs the Host more.",
+			"settings.sessionPollSecondsHintBrief": "Default 5 seconds, range 1 to 300: a shorter interval settles runs sooner and costs the Host more.",
 			"settings.maxSubtaskDepth": "Subtask depth limit",
 			"settings.maxSubtaskDepthHint": "Default 1: a task may carry one level of subtasks, and a subtask cannot create or link further subtasks. Maximum 3. Running a task also runs its whole subtask tree concurrently, and every extra level opens more sessions per run.",
+			"settings.maxSubtaskDepthHintBrief": "Default 1, maximum 3: every extra level opens more sessions per run.",
 			"settings.maxSubtaskDepthOption": "{depth} levels",
 			"settings.runLaunchWidth": "Concurrent run launches",
 			"settings.runLaunchWidthHint": "Default 3. A run opens its whole subtree, but only this many members create their session and queue their prompt at the same time; the rest wait their turn. Every member still starts, entering the running column in batches. The default comes from this repository's measured guidance for heavy implementation subagents (at most three). Range 1 to 16: a larger width starts runs sooner and costs the Host more memory and swap. Edited during a run, it bounds the launches that have not been admitted yet.",
+			"settings.runLaunchWidthHintBrief": "Default 3, range 1 to 16: this many members start at once and the rest wait their turn.",
 			"settings.spendBudgetTokens": "Daily token cap",
 			"settings.spendBudgetTokensHint": "Default 0 means no gate: behavior is exactly what it was before this setting existed, with no ledger read and no counting. With a positive cap, once today's measured spend reaches it a manual run or re-run is refused and the caller sees that message as the refusal, while a due schedule writes the reason to the scheduler error and skips that occurrence without spending a planned run — raising the cap, or the local day rolling over, lets the next trigger run as usual. The unit is tokens rather than money: the usage ledger prices only DeepSeek's own routes and stays 0 on every other route. Today's spend is that ledger's local-date bucket summed over input, cache read/write and output, the same measure the usage panel shows.",
+			"settings.spendBudgetTokensHintBrief": "Default 0 gates nothing. Past a positive cap, manual runs are refused and due schedules skip.",
 			"settings.runBehaviorTitle": "Run behavior",
 			"settings.runBehaviorCardHint": "The global native /goal switch (master control, off by default).",
 			"settings.goalRunGlobal": "Global: run tasks with dsh native /goal",
 			"settings.goalRunGlobalHint": "Off by default. While off, every task runs one plain turn and never calls dsh built-in /goal; a run uses native /goal only when this is on AND the task-level option is checked (see the task option below). The task-level checkbox always stays operable and this switch never rewrites it: the master switch only decides whether that choice takes effect. The switch is frozen when an execution starts, so it only affects runs opened afterwards.",
+			"settings.goalRunGlobalHintBrief": "Off by default. A run uses native /goal only when this and the card option are both on.",
 			"settings.goalRunGlobalDisabledTaskOption": "The global native /goal switch is off: the task-level option can still be checked or cleared, but it has no effect right now and the preference you save is never rewritten; turning the global switch back on applies it. This execution runs one plain turn and performs no goal acceptance.",
 			"settings.goalVerificationTitle": "Task acceptance",
 			"settings.goalVerification": "Enable task acceptance",
 			"settings.goalVerificationCardHint": "The switch, the judge model and the criteria threshold.",
 			"settings.goalVerificationHint": "On by default: a task executed in goal form must pass one acceptance before update_goal may mark it complete (the three coding criteria, aimed at engineering tasks, a 0.65 threshold, two rounds per criterion with the A/B slots swapped, and the work must beat the empty-work baseline). A first failure returns the total, the per-criterion scores and the located findings to the fixing agent, and one execution may accept at most twice; a second failure fails that execution. It affects only this board goal-form executions, never plain chat and never a task pinned to goalRun: false. Every acceptance really calls the judge model and spends quota.",
+			"settings.goalVerificationHintBrief": "On by default. Two rounds per criterion at 0.65, and each acceptance calls the judge model.",
 			"settings.goalVerificationModel": "Judge model",
 			"settings.goalVerificationModelHint": "Blank inherits the host: the default route of the host model catalog, never the card pinned execution model.",
+			"settings.goalVerificationModelHintBrief": "Blank inherits the host default route, never the model pinned on the card.",
 			"settings.goalVerificationModelInherit": "Inherit host ({model})",
 			"settings.goalVerificationModelInheritUnknown": "Inherit host (no model catalog)",
 			"settings.goalVerificationEffort": "Reasoning effort",
 			"settings.goalVerificationEffortHint": "Blank inherits the host default level. A level the target model does not declare is never sent blindly: the acceptance falls back to that model own default level, and the fallback is reported below.",
+			"settings.goalVerificationEffortHintBrief": "Blank inherits the host default level. A level the model lacks falls back automatically.",
 			"settings.goalVerificationEffortInherit": "Inherit host ({effort})",
 			"settings.goalVerificationEffortInheritUnknown": "Inherit host (model default level)",
 			"settings.goalVerificationResolved": "Resolved acceptance configuration",
@@ -4241,9 +4275,13 @@ window.__ModuleLoader__.load({
 			"settings.goalVerificationEffortFallbackNone": "The selected reasoning effort {requested} is not supported by the target model; it falls back to that model default level (not sent explicitly).",
 			"settings.cardDefaultsTitle": "New-card defaults",
 			"settings.cardDefaultsCardHint": "What the new-task dialog opens with: agent preset, permission, model and reasoning effort. Blank sets nothing, so creating a card behaves exactly as it does unconfigured. They are only prefills and change no existing meaning, and every new card stays editable; the default reasoning effort applies only while a card ends up on the configured default model.",
+			"settings.cardDefaultsCardBrief": "What a new card opens with: preset, permission, model and effort.",
 			"settings.cardDefaultModeHint": "Blank pins nothing: a new card keeps following the deployment default preset. A target resolves as the explicit choice in the new-task dialog, then the value carried over from the source card or parent, then this default; a subtask keeps what its parent already pinned.",
+			"settings.cardDefaultModeHintBrief": "Blank prefills nothing, so a new card keeps the deployment default preset.",
 			"settings.cardDefaultPermissionHint": "Blank sets nothing (the session default applies). A default above the session permission baseline is still only a prefill: the card still needs a human confirmation before it may run. A subtask never carries its parent permission; this default fills in only where the parent pinned none.",
+			"settings.cardDefaultPermissionHintBrief": "Blank sets nothing. A default above the session baseline still needs a human confirmation.",
 			"settings.cardDefaultModelHint": "Blank is the host default (agent-default-model). An explicit choice in the dialog wins over the value carried over from the source card or parent, which wins over this default; a caller that pins a model of its own borrows no default reasoning level.",
+			"settings.cardDefaultModelHintBrief": "Blank is the host default model, and an explicit dialog choice always wins over it.",
 			"settings.goalVerificationModelInvalid": "The configured judge model is not a provider/model route; the host default is used instead.",
 			"running.executing": "Executing",
 			"running.verifying": "Verifying",
@@ -12435,7 +12473,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 		}
 		//#endregion
 		//#region \0dsh-css:packages/dsh-task-board/src/client/settings-card.module.css.mjs
-		const css$1 = ".Jh0q7G_card{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:12px;list-style:none;transition:border-color .16s,background .16s}.Jh0q7G_card:hover{border-color:var(--dsw-alias-label-dimmed)}.Jh0q7G_cardOpen{background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-label-dimmed)}.Jh0q7G_header{appearance:none;box-sizing:border-box;width:100%;font:inherit;color:inherit;text-align:left;cursor:pointer;background:0 0;border:0;border-radius:12px;align-items:center;gap:13px;padding:16px;display:flex}.Jh0q7G_header:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}.Jh0q7G_headerStatic{box-sizing:border-box;border-radius:12px;align-items:center;gap:13px;width:100%;padding:16px;display:flex}.Jh0q7G_headText{flex-direction:column;flex:1;gap:4px;min-width:0;display:flex}.Jh0q7G_mark{background:var(--dsw-alias-bg-module-platform);width:34px;height:34px;color:var(--dsw-alias-label-secondary);border-radius:10px;flex:none;place-items:center;transition:color .16s;display:grid}.Jh0q7G_header:hover .Jh0q7G_mark,.Jh0q7G_cardOpen .Jh0q7G_mark{color:var(--dsw-alias-label-primary)}.Jh0q7G_name{color:var(--dsw-alias-label-primary);font-size:15px;font-weight:600;line-height:1.4}.Jh0q7G_description{color:var(--dsw-alias-label-secondary);font-size:13px;line-height:1.5}.Jh0q7G_pending{white-space:nowrap;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);border-radius:999px;flex:none;padding:1px 8px;font-size:11px;font-weight:500;line-height:17px}.Jh0q7G_headerAction{flex:none;align-items:center;display:inline-flex}.Jh0q7G_chevron{color:var(--dsw-alias-label-tertiary);flex:none;width:16px;height:16px;transition:transform .16s,color .16s}.Jh0q7G_header:hover .Jh0q7G_chevron{color:var(--dsw-alias-label-secondary)}.Jh0q7G_chevronOpen{transform:rotate(180deg)}.Jh0q7G_body{border-top:1px solid var(--dsw-alias-border-l2);margin:0 16px;padding-bottom:8px}.Jh0q7G_readOnly{color:var(--dsw-alias-label-secondary);margin:12px 0 0;font-size:12px;line-height:1.5}.Jh0q7G_notExposed{color:var(--dsw-alias-state-warn-primary);margin:12px 0 0;font-size:12px;line-height:1.5}.Jh0q7G_footer{border-top:1px solid var(--dsw-alias-border-l2);justify-content:flex-end;align-items:center;gap:8px;padding:12px 0 4px;display:flex}.Jh0q7G_failed{min-width:0;color:var(--dsw-alias-state-error-primary,#b42318);text-overflow:ellipsis;white-space:nowrap;flex:1;margin:0;font-size:12px;line-height:1.5;overflow:hidden}.Jh0q7G_discard,.Jh0q7G_save{appearance:none;font:inherit;cursor:pointer;border:1px solid #0000;border-radius:8px;padding:5px 14px;font-size:13px;line-height:1.5}.Jh0q7G_discard{border-color:var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);background:0 0}.Jh0q7G_discard:hover:not(:disabled){color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-label-dimmed)}.Jh0q7G_save{background:var(--dsw-alias-label-primary);color:var(--dsw-alias-bg-layer-3)}.Jh0q7G_discard:disabled,.Jh0q7G_save:disabled{opacity:.4;cursor:default}.Jh0q7G_discard:focus-visible,.Jh0q7G_save:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}.Jh0q7G_field{flex-direction:column;gap:6px;padding:12px 0;display:flex}.Jh0q7G_field+.Jh0q7G_field{border-top:1px solid var(--dsw-alias-border-l2)}.Jh0q7G_head{align-items:center;gap:8px;display:flex}.Jh0q7G_label{min-width:0;color:var(--dsw-alias-label-primary);flex:1;font-size:13px;font-weight:500;line-height:1.5}.Jh0q7G_badges{align-items:center;gap:8px;display:inline-flex}.Jh0q7G_badge{white-space:nowrap;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);border-radius:999px;padding:1px 8px;font-size:11px;font-weight:500;line-height:17px}.Jh0q7G_reset{font:inherit;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:none;padding:0;font-size:12px;line-height:1.5}.Jh0q7G_reset:hover:not(:disabled){color:var(--dsw-alias-label-primary)}.Jh0q7G_reset:disabled{cursor:default}.Jh0q7G_reset:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px;outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}.Jh0q7G_input,.Jh0q7G_select{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);height:34px;font:inherit;color:var(--dsw-alias-label-primary);border-radius:8px;padding:0 12px;font-size:13px;line-height:1.5}.Jh0q7G_input:focus-visible,.Jh0q7G_select:focus-visible{border-color:var(--dsw-alias-brand-primary);outline:none}.Jh0q7G_input:disabled,.Jh0q7G_select:disabled{color:var(--dsw-alias-label-tertiary);cursor:default}.Jh0q7G_inputInvalid{border:1px solid var(--dsw-alias-state-error-primary,#b42318);background:var(--dsw-alias-bg-layer-3);height:34px;font:inherit;color:var(--dsw-alias-label-primary);border-radius:8px;padding:0 12px;font-size:13px;line-height:1.5}.Jh0q7G_inputInvalid:focus-visible{outline:2px solid var(--dsw-alias-state-error-primary,#b42318);outline-offset:1px;border-color:var(--dsw-alias-state-error-primary,#b42318)}.Jh0q7G_selectWrap{position:relative}.Jh0q7G_selectButton{appearance:none;text-align:left;cursor:pointer;justify-content:space-between;align-items:center;gap:8px;width:100%;display:flex}.Jh0q7G_selectLabel{text-overflow:ellipsis;white-space:nowrap;min-width:0;overflow:hidden}.Jh0q7G_selectChevron{color:var(--dsw-alias-label-tertiary);flex:none;transition:transform .16s}.Jh0q7G_selectChevronOpen{transform:rotate(180deg)}.Jh0q7G_selectPopup{z-index:40;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);max-height:240px;box-shadow:0 8px 24px var(--dsw-alias-bg-mask-2);opacity:0;border-radius:8px;flex-direction:column;padding:4px;transition:opacity .1s,transform .1s;display:flex;position:absolute;top:calc(100% + 4px);left:0;right:0;overflow-y:auto;transform:translateY(-4px)}.Jh0q7G_selectPopupOpen{opacity:1;transform:none}.Jh0q7G_selectPopupClose{opacity:0;pointer-events:none;transform:translateY(-4px)}.Jh0q7G_selectOption{color:var(--dsw-alias-label-primary);cursor:pointer;white-space:nowrap;text-overflow:ellipsis;border-radius:6px;flex-shrink:0;padding:6px 10px;font-size:13px;line-height:1.5;overflow:hidden}.Jh0q7G_selectOption:hover,.Jh0q7G_selectOptionActive{background:var(--dsw-alias-interactive-bg-hover)}.Jh0q7G_selectOptionSelected{color:var(--dsw-alias-brand-primary);background:color-mix(in srgb, var(--dsw-alias-brand-primary-new-colorprimary-new-color) 10%, transparent);font-weight:500}.Jh0q7G_invalid{color:var(--dsw-alias-state-error-primary,#b42318);margin:0;font-size:12px;line-height:1.5}.Jh0q7G_hint{color:var(--dsw-alias-label-secondary);margin:0;font-size:12px;line-height:1.5}.Jh0q7G_toggle{appearance:none;cursor:pointer;font:inherit;background:0 0;border:0;border-radius:999px;align-items:center;margin:0;padding:0;display:inline-flex}.Jh0q7G_toggleTrack{background:var(--dsw-alias-label-dimmed);border-radius:999px;flex:none;width:30px;height:16px;transition:background .18s;position:relative}.Jh0q7G_toggleThumb{background:var(--dsw-alias-bg-layer-3);border-radius:50%;width:12px;height:12px;transition:left .18s;position:absolute;top:2px;left:2px}.Jh0q7G_toggle[aria-checked=true] .Jh0q7G_toggleTrack{background:var(--dsw-alias-button-primary-fill,var(--dsw-alias-label-primary))}.Jh0q7G_toggle[aria-checked=true] .Jh0q7G_toggleThumb{background:var(--dsw-alias-label-primary-foreground,var(--dsw-alias-bg-layer-3));left:16px}.Jh0q7G_toggle:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}.Jh0q7G_toggle:disabled{opacity:.45;cursor:default}@media (prefers-reduced-motion:reduce){.Jh0q7G_card,.Jh0q7G_header,.Jh0q7G_mark,.Jh0q7G_chevron,.Jh0q7G_chevronOpen,.Jh0q7G_discard,.Jh0q7G_save,.Jh0q7G_selectChevron,.Jh0q7G_selectChevronOpen,.Jh0q7G_selectPopup,.Jh0q7G_toggleTrack,.Jh0q7G_toggleThumb{transition:none}}";
+		const css$1 = ".Jh0q7G_card{--settings-card-radius:12px;--settings-card-header-pad:16px;--settings-card-header-gap:13px;--settings-card-title-size:15px;--settings-card-description-size:13px;--settings-card-body-inset:16px;--settings-card-motion:.18s;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:var(--settings-card-radius);list-style:none;transition:border-color .16s,background .16s}.Jh0q7G_card:hover{border-color:var(--dsw-alias-label-dimmed)}.Jh0q7G_cardOpen{background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-label-dimmed)}.Jh0q7G_cardNested{--settings-card-radius:10px;--settings-card-header-pad:10px 12px;--settings-card-header-gap:10px;--settings-card-title-size:13px;--settings-card-description-size:12px;--settings-card-body-inset:12px}.Jh0q7G_cardNested .Jh0q7G_description{white-space:nowrap;text-overflow:ellipsis;overflow:hidden}.Jh0q7G_header{appearance:none;box-sizing:border-box;width:100%;font:inherit;color:inherit;text-align:left;cursor:pointer;border-radius:var(--settings-card-radius);align-items:center;gap:var(--settings-card-header-gap);padding:var(--settings-card-header-pad);background:0 0;border:0;display:flex}.Jh0q7G_header:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}.Jh0q7G_headerStatic{box-sizing:border-box;border-radius:var(--settings-card-radius);align-items:center;gap:var(--settings-card-header-gap);width:100%;padding:var(--settings-card-header-pad);display:flex}.Jh0q7G_headText{flex-direction:column;flex:1;gap:4px;min-width:0;display:flex}.Jh0q7G_mark{background:var(--dsw-alias-bg-module-platform);width:34px;height:34px;color:var(--dsw-alias-label-secondary);border-radius:10px;flex:none;place-items:center;transition:color .16s;display:grid}.Jh0q7G_header:hover .Jh0q7G_mark,.Jh0q7G_cardOpen .Jh0q7G_mark{color:var(--dsw-alias-label-primary)}.Jh0q7G_name{color:var(--dsw-alias-label-primary);font-size:var(--settings-card-title-size);font-weight:600;line-height:1.4}.Jh0q7G_description{color:var(--dsw-alias-label-secondary);font-size:var(--settings-card-description-size);line-height:1.5}.Jh0q7G_pending{white-space:nowrap;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);border-radius:999px;flex:none;padding:1px 8px;font-size:11px;font-weight:500;line-height:17px}.Jh0q7G_headerAction{flex:none;align-items:center;display:inline-flex}.Jh0q7G_chevron{color:var(--dsw-alias-label-tertiary);flex:none;width:16px;height:16px;transition:transform .16s,color .16s}.Jh0q7G_header:hover .Jh0q7G_chevron{color:var(--dsw-alias-label-secondary)}.Jh0q7G_chevronOpen{transform:rotate(180deg)}.Jh0q7G_disclosure{opacity:0;transition:grid-template-rows var(--settings-card-motion) ease, opacity var(--settings-card-motion) ease;grid-template-rows:0fr;display:grid}.Jh0q7G_disclosure[data-state=collapsed],.Jh0q7G_disclosure[data-state=entering],.Jh0q7G_disclosure[data-state=closing]{overflow:hidden}.Jh0q7G_disclosure[data-state=entering],.Jh0q7G_disclosure[data-state=shown]{opacity:1;grid-template-rows:1fr}.Jh0q7G_disclosure>.Jh0q7G_body{min-height:0}.Jh0q7G_body{border-top:1px solid var(--dsw-alias-border-l2);margin:0 var(--settings-card-body-inset);padding-bottom:8px}.Jh0q7G_readOnly{color:var(--dsw-alias-label-secondary);margin:12px 0 0;font-size:12px;line-height:1.5}.Jh0q7G_notExposed{color:var(--dsw-alias-state-warn-primary);margin:12px 0 0;font-size:12px;line-height:1.5}.Jh0q7G_footer{border-top:1px solid var(--dsw-alias-border-l2);justify-content:flex-end;align-items:center;gap:8px;padding:12px 0 4px;display:flex}.Jh0q7G_failed{min-width:0;color:var(--dsw-alias-state-error-primary,#b42318);text-overflow:ellipsis;white-space:nowrap;flex:1;margin:0;font-size:12px;line-height:1.5;overflow:hidden}.Jh0q7G_discard,.Jh0q7G_save{appearance:none;font:inherit;cursor:pointer;border:1px solid #0000;border-radius:8px;padding:5px 14px;font-size:13px;line-height:1.5}.Jh0q7G_discard{border-color:var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);background:0 0}.Jh0q7G_discard:hover:not(:disabled){color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-label-dimmed)}.Jh0q7G_save{background:var(--dsw-alias-label-primary);color:var(--dsw-alias-bg-layer-3)}.Jh0q7G_discard:disabled,.Jh0q7G_save:disabled{opacity:.4;cursor:default}.Jh0q7G_discard:focus-visible,.Jh0q7G_save:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}.Jh0q7G_field{flex-direction:column;gap:6px;padding:12px 0;display:flex}.Jh0q7G_field+.Jh0q7G_field{border-top:1px solid var(--dsw-alias-border-l2)}.Jh0q7G_head{align-items:center;gap:8px;display:flex}.Jh0q7G_label{min-width:0;color:var(--dsw-alias-label-primary);flex:1;font-size:13px;font-weight:500;line-height:1.5}.Jh0q7G_badges{align-items:center;gap:8px;display:inline-flex}.Jh0q7G_badge{white-space:nowrap;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);border-radius:999px;padding:1px 8px;font-size:11px;font-weight:500;line-height:17px}.Jh0q7G_reset{font:inherit;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:none;padding:0;font-size:12px;line-height:1.5}.Jh0q7G_reset:hover:not(:disabled){color:var(--dsw-alias-label-primary)}.Jh0q7G_reset:disabled{cursor:default}.Jh0q7G_reset:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px;outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}.Jh0q7G_input,.Jh0q7G_select{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);height:34px;font:inherit;color:var(--dsw-alias-label-primary);border-radius:8px;padding:0 12px;font-size:13px;line-height:1.5}.Jh0q7G_input:focus-visible,.Jh0q7G_select:focus-visible{border-color:var(--dsw-alias-brand-primary);outline:none}.Jh0q7G_input:disabled,.Jh0q7G_select:disabled{color:var(--dsw-alias-label-tertiary);cursor:default}.Jh0q7G_inputInvalid{border:1px solid var(--dsw-alias-state-error-primary,#b42318);background:var(--dsw-alias-bg-layer-3);height:34px;font:inherit;color:var(--dsw-alias-label-primary);border-radius:8px;padding:0 12px;font-size:13px;line-height:1.5}.Jh0q7G_inputInvalid:focus-visible{outline:2px solid var(--dsw-alias-state-error-primary,#b42318);outline-offset:1px;border-color:var(--dsw-alias-state-error-primary,#b42318)}.Jh0q7G_selectWrap{position:relative}.Jh0q7G_selectButton{appearance:none;text-align:left;cursor:pointer;justify-content:space-between;align-items:center;gap:8px;width:100%;display:flex}.Jh0q7G_selectLabel{text-overflow:ellipsis;white-space:nowrap;min-width:0;overflow:hidden}.Jh0q7G_selectChevron{color:var(--dsw-alias-label-tertiary);flex:none;transition:transform .16s}.Jh0q7G_selectChevronOpen{transform:rotate(180deg)}.Jh0q7G_selectPopup{z-index:40;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);max-height:240px;box-shadow:0 8px 24px var(--dsw-alias-bg-mask-2);opacity:0;border-radius:8px;flex-direction:column;padding:4px;transition:opacity .1s,transform .1s;display:flex;position:absolute;top:calc(100% + 4px);left:0;right:0;overflow-y:auto;transform:translateY(-4px)}.Jh0q7G_selectPopupOpen{opacity:1;transform:none}.Jh0q7G_selectPopupClose{opacity:0;pointer-events:none;transform:translateY(-4px)}.Jh0q7G_selectOption{color:var(--dsw-alias-label-primary);cursor:pointer;white-space:nowrap;text-overflow:ellipsis;border-radius:6px;flex-shrink:0;padding:6px 10px;font-size:13px;line-height:1.5;overflow:hidden}.Jh0q7G_selectOption:hover,.Jh0q7G_selectOptionActive{background:var(--dsw-alias-interactive-bg-hover)}.Jh0q7G_selectOptionSelected{color:var(--dsw-alias-brand-primary);background:color-mix(in srgb, var(--dsw-alias-brand-primary-new-colorprimary-new-color) 10%, transparent);font-weight:500}.Jh0q7G_invalid{color:var(--dsw-alias-state-error-primary,#b42318);margin:0;font-size:12px;line-height:1.5}.Jh0q7G_hint{color:var(--dsw-alias-label-secondary);margin:0;font-size:12px;line-height:1.5}.Jh0q7G_toggle{appearance:none;cursor:pointer;font:inherit;background:0 0;border:0;border-radius:999px;align-items:center;margin:0;padding:0;display:inline-flex}.Jh0q7G_toggleTrack{background:var(--dsw-alias-label-dimmed);border-radius:999px;flex:none;width:30px;height:16px;transition:background .18s;position:relative}.Jh0q7G_toggleThumb{background:var(--dsw-alias-bg-layer-3);border-radius:50%;width:12px;height:12px;transition:left .18s;position:absolute;top:2px;left:2px}.Jh0q7G_toggle[aria-checked=true] .Jh0q7G_toggleTrack{background:var(--dsw-alias-button-primary-fill,var(--dsw-alias-label-primary))}.Jh0q7G_toggle[aria-checked=true] .Jh0q7G_toggleThumb{background:var(--dsw-alias-label-primary-foreground,var(--dsw-alias-bg-layer-3));left:16px}.Jh0q7G_toggle:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}.Jh0q7G_toggle:disabled{opacity:.45;cursor:default}@media (prefers-reduced-motion:reduce){.Jh0q7G_card,.Jh0q7G_header,.Jh0q7G_mark,.Jh0q7G_chevron,.Jh0q7G_chevronOpen,.Jh0q7G_discard,.Jh0q7G_save,.Jh0q7G_selectChevron,.Jh0q7G_selectChevronOpen,.Jh0q7G_selectPopup,.Jh0q7G_toggleTrack,.Jh0q7G_toggleThumb{transition:none}.Jh0q7G_disclosure{transition-property:opacity}}";
 		const tagId$1 = "@linxin666/dsh-client-ui-task-board/packages/dsh-task-board/src/client/settings-card.module.css";
 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId$1) + "]") === null) {
 			const tag = document.createElement("style");
@@ -12449,11 +12487,13 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 			"badges": "Jh0q7G_badges",
 			"body": "Jh0q7G_body",
 			"card": "Jh0q7G_card",
+			"cardNested": "Jh0q7G_cardNested",
 			"cardOpen": "Jh0q7G_cardOpen",
 			"chevron": "Jh0q7G_chevron",
 			"chevronOpen": "Jh0q7G_chevronOpen",
 			"description": "Jh0q7G_description",
 			"discard": "Jh0q7G_discard",
+			"disclosure": "Jh0q7G_disclosure",
 			"failed": "Jh0q7G_failed",
 			"field": "Jh0q7G_field",
 			"footer": "Jh0q7G_footer",
@@ -12562,6 +12602,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 					}),
 					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
 						className: props.invalid ? settings_card_module_css_default.invalid : settings_card_module_css_default.hint,
+						title: props.hintTitle,
 						children: props.invalid ? props.invalidLabel : props.hint
 					})
 				]
@@ -12577,6 +12618,8 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 		* it. Inlined into each consumer's client bundle; mirrors the official
 		* ui-plugin-config PluginCard in a self-contained slice.
 		*/
+		/** Length of the body's disclosure motion; it matches `--settings-card-motion` on the card root. */
+		const BODY_MOTION_MS = 180;
 		/**
 		* Render one plugin settings card.
 		* @param props - the plugin's copy keys, its form state, and its controls.
@@ -12585,12 +12628,48 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 		function PluginSettingsCard(props) {
 			const [open, setOpen] = (0, react.useState)(props.defaultOpen ?? true);
 			const { state, alwaysOpen } = props;
+			const expanded = alwaysOpen === true || open;
+			const [bodyPhase, setBodyPhase] = (0, react.useState)(expanded ? "shown" : "hidden");
+			const bodyRef = (0, react.useRef)(null);
+			(0, react.useLayoutEffect)(() => {
+				if (expanded) {
+					if (bodyPhase === "hidden") setBodyPhase("collapsed");
+					else if (bodyPhase === "collapsed") {
+						const node = bodyRef.current;
+						if (node !== null) node.offsetHeight;
+						setBodyPhase("entering");
+					} else if (bodyPhase === "closing") setBodyPhase("entering");
+					return;
+				}
+				if (bodyPhase === "collapsed") setBodyPhase("hidden");
+				else if (bodyPhase === "entering" || bodyPhase === "shown") setBodyPhase("closing");
+			}, [expanded, bodyPhase]);
+			(0, react.useEffect)(() => {
+				if (bodyPhase !== "entering" && bodyPhase !== "closing") return;
+				const timer = setTimeout(() => {
+					setBodyPhase(bodyPhase === "entering" ? "shown" : "hidden");
+				}, BODY_MOTION_MS);
+				return () => {
+					clearTimeout(timer);
+				};
+			}, [bodyPhase]);
 			if (!state.available) return null;
 			const title = props.t(props.titleKey);
 			const description = props.t(props.descriptionKey);
+			const descriptionTitle = props.descriptionTitleKey === void 0 ? description : props.t(props.descriptionTitleKey);
 			const blocked = !state.dirty || state.invalid || state.saving;
-			const expanded = alwaysOpen === true || open;
-			const cardClass = expanded ? `${settings_card_module_css_default.cardOpen} ${settings_card_module_css_default.card}` : settings_card_module_css_default.card;
+			const baseClass = expanded ? `${settings_card_module_css_default.cardOpen} ${settings_card_module_css_default.card}` : settings_card_module_css_default.card;
+			const cardClass = props.density === "nested" ? `${baseClass} ${settings_card_module_css_default.cardNested}` : baseClass;
+			/** The body region both legs share; a hidden phase renders nothing at all. */
+			const bodyRegion = (content) => bodyPhase === "hidden" ? null : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+				className: settings_card_module_css_default.disclosure,
+				"data-state": bodyPhase,
+				ref: bodyRef,
+				children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+					className: settings_card_module_css_default.body,
+					children: content
+				})
+			});
 			const header = alwaysOpen === true ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				className: settings_card_module_css_default.headerStatic,
 				children: [
@@ -12608,7 +12687,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 							children: title
 						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 							className: settings_card_module_css_default.description,
-							title: description,
+							title: descriptionTitle,
 							children: props.descriptionNode ?? description
 						})]
 					}),
@@ -12645,7 +12724,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 							children: title
 						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 							className: settings_card_module_css_default.description,
-							title: description,
+							title: descriptionTitle,
 							children: props.descriptionNode ?? description
 						})]
 					}),
@@ -12672,57 +12751,48 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 					})
 				]
 			});
-			if (!state.exposed && props.renderChildrenWhenNotExposed !== true) {
-				const showNotice = props.hideNotExposedNotice !== true;
-				return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("li", {
-					className: cardClass,
-					children: [header, expanded ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-						className: settings_card_module_css_default.body,
-						children: showNotice ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
-							className: settings_card_module_css_default.notExposed,
-							role: "status",
-							children: props.t("settings.notExposed")
-						}) : null
-					}) : null]
-				});
-			}
+			if (!state.exposed && props.renderChildrenWhenNotExposed !== true) return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("li", {
+				className: cardClass,
+				children: [header, bodyRegion(props.hideNotExposedNotice !== true ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+					className: settings_card_module_css_default.notExposed,
+					role: "status",
+					children: props.t("settings.notExposed")
+				}) : null)]
+			});
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("li", {
 				className: cardClass,
-				children: [header, expanded && props.headerOnly !== true ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-					className: settings_card_module_css_default.body,
-					children: [
-						!state.writable ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
-							className: settings_card_module_css_default.readOnly,
-							role: "status",
-							children: props.t("settings.readOnly")
-						}) : null,
-						props.children,
-						props.hideFooter === true ? null : /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-							className: settings_card_module_css_default.footer,
-							children: [
-								state.failed ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("p", {
-									className: settings_card_module_css_default.failed,
-									role: "status",
-									children: [props.t("settings.saveFailed"), state.failedReason ? " - " + state.failedReason : ""]
-								}) : null,
-								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-									type: "button",
-									className: settings_card_module_css_default.discard,
-									disabled: !state.dirty || state.saving,
-									onClick: props.onDiscard,
-									children: props.t("settings.discard")
-								}),
-								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-									type: "button",
-									className: settings_card_module_css_default.save,
-									disabled: blocked,
-									onClick: props.onSave,
-									children: props.t(!state.saving ? "settings.save" : "settings.saving")
-								})
-							]
-						})
-					]
-				}) : null]
+				children: [header, props.headerOnly !== true ? bodyRegion(/* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [
+					!state.writable ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+						className: settings_card_module_css_default.readOnly,
+						role: "status",
+						children: props.t("settings.readOnly")
+					}) : null,
+					props.children,
+					props.hideFooter === true ? null : /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						className: settings_card_module_css_default.footer,
+						children: [
+							state.failed ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("p", {
+								className: settings_card_module_css_default.failed,
+								role: "status",
+								children: [props.t("settings.saveFailed"), state.failedReason ? " - " + state.failedReason : ""]
+							}) : null,
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+								type: "button",
+								className: settings_card_module_css_default.discard,
+								disabled: !state.dirty || state.saving,
+								onClick: props.onDiscard,
+								children: props.t("settings.discard")
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+								type: "button",
+								className: settings_card_module_css_default.save,
+								disabled: blocked,
+								onClick: props.onSave,
+								children: props.t(!state.saving ? "settings.save" : "settings.saving")
+							})
+						]
+					})
+				] })) : null]
 			});
 		}
 		/** A staged value field. `numeric` only hints the keypad: which drafts a field accepts is decided by its spec. */
@@ -12765,6 +12835,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 					}),
 					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
 						className: props.invalid ? settings_card_module_css_default.invalid : settings_card_module_css_default.hint,
+						title: props.hintTitle,
 						children: props.invalid ? props.invalidLabel : props.hint
 					})
 				]
@@ -12987,6 +13058,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 					}),
 					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
 						className: settings_card_module_css_default.hint,
+						title: props.hintTitle,
 						children: props.hint
 					})
 				]
@@ -13030,6 +13102,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 					}),
 					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
 						className: props.invalid ? settings_card_module_css_default.invalid : settings_card_module_css_default.hint,
+						title: props.hintTitle,
 						children: props.invalid ? props.invalidLabel : props.hint
 					})
 				]
@@ -13351,7 +13424,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 		};
 		//#endregion
 		//#region \0dsh-css:packages/dsh-task-board/src/client/board-settings.module.css.mjs
-		const css = ".bQNdXW_note{color:var(--dsw-alias-label-secondary);margin:4px 0;font-size:12px}.bQNdXW_error{color:var(--dsw-alias-state-error-primary);margin:4px 0;font-size:12px}.bQNdXW_resolvedList{color:var(--dsw-alias-label-secondary);margin:4px 0 8px;padding-left:16px;font-size:12px}.bQNdXW_power{flex-direction:column;gap:2px;margin-top:14px;display:flex}.bQNdXW_powerLine{color:var(--dsw-alias-label-secondary);margin:0;font-size:12px;line-height:1.5}.bQNdXW_powerError{color:var(--dsw-alias-state-error-primary);margin:0;font-size:12px;line-height:1.5}.bQNdXW_nestedCards{flex-direction:column;gap:8px;margin:0;padding:0;list-style:none;display:flex}";
+		const css = ".bQNdXW_note{color:var(--dsw-alias-label-secondary);margin:4px 0;font-size:12px}.bQNdXW_error{color:var(--dsw-alias-state-error-primary);margin:4px 0;font-size:12px}.bQNdXW_resolvedList{color:var(--dsw-alias-label-secondary);margin:4px 0 8px;padding-left:16px;font-size:12px}.bQNdXW_nestedCards,.bQNdXW_power{--task-board-settings-gap:8px}.bQNdXW_power{gap:var(--task-board-settings-gap);margin-top:calc(var(--task-board-settings-gap) * 2);flex-direction:column;display:flex}.bQNdXW_powerFacts{column-gap:calc(var(--task-board-settings-gap) * 2);color:var(--dsw-alias-label-secondary);grid-template-columns:max-content 1fr;row-gap:2px;margin:0;font-size:12px;line-height:1.5;display:grid}.bQNdXW_powerTerm,.bQNdXW_powerValue{margin:0}.bQNdXW_powerTerm{color:var(--dsw-alias-label-tertiary)}.bQNdXW_powerLine{color:var(--dsw-alias-label-secondary);margin:0;font-size:12px;line-height:1.5}.bQNdXW_powerError{color:var(--dsw-alias-state-error-primary);margin:0;font-size:12px;line-height:1.5}.bQNdXW_nestedCards{gap:var(--task-board-settings-gap);flex-direction:column;margin:0;padding:0;list-style:none;display:flex}";
 		const tagId = "@linxin666/dsh-client-ui-task-board/packages/dsh-task-board/src/client/board-settings.module.css";
 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId) + "]") === null) {
 			const tag = document.createElement("style");
@@ -13366,7 +13439,10 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 			"note": "bQNdXW_note",
 			"power": "bQNdXW_power",
 			"powerError": "bQNdXW_powerError",
+			"powerFacts": "bQNdXW_powerFacts",
 			"powerLine": "bQNdXW_powerLine",
+			"powerTerm": "bQNdXW_powerTerm",
+			"powerValue": "bQNdXW_powerValue",
 			"resolvedList": "bQNdXW_resolvedList"
 		};
 		//#endregion
@@ -13700,6 +13776,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 					children: [
 						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)(PluginSettingsCard, {
 							t,
+							density: "nested",
 							titleKey: "settings.enabled",
 							descriptionKey: "settings.enabledCardHint",
 							defaultOpen: false,
@@ -13711,7 +13788,8 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 								/* @__PURE__ */ (0, react_jsx_runtime.jsx)(BooleanField, {
 									id: "settings-task-board-enabled",
 									label: t("settings.enabled"),
-									hint: t("settings.enabledHint"),
+									hint: t("settings.enabledHintBrief"),
+									hintTitle: t("settings.enabledHint"),
 									inheritLabel: t("settings.inherit"),
 									onLabel: t("settings.on"),
 									offLabel: t("settings.off"),
@@ -13727,7 +13805,8 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 								/* @__PURE__ */ (0, react_jsx_runtime.jsx)(BooleanField, {
 									id: "settings-task-board-announce",
 									label: t("settings.announceToAgent"),
-									hint: t("settings.announceToAgentHint"),
+									hint: t("settings.announceToAgentHintBrief"),
+									hintTitle: t("settings.announceToAgentHint"),
 									inheritLabel: t("settings.inherit"),
 									onLabel: t("settings.on"),
 									offLabel: t("settings.off"),
@@ -13743,7 +13822,8 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 								/* @__PURE__ */ (0, react_jsx_runtime.jsx)(BooleanField, {
 									id: "settings-task-board-prevent-idle-sleep",
 									label: t("settings.preventIdleSleep"),
-									hint: t("settings.preventIdleSleepHint"),
+									hint: t("settings.preventIdleSleepHintBrief"),
+									hintTitle: t("settings.preventIdleSleepHint"),
 									inheritLabel: t("settings.inherit"),
 									onLabel: t("settings.on"),
 									offLabel: t("settings.off"),
@@ -13759,7 +13839,8 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 								/* @__PURE__ */ (0, react_jsx_runtime.jsx)(BooleanField, {
 									id: "settings-task-board-trust-forwarded-proxy",
 									label: t("settings.trustForwardedProxy"),
-									hint: t("settings.trustForwardedProxyHint"),
+									hint: t("settings.trustForwardedProxyHintBrief"),
+									hintTitle: t("settings.trustForwardedProxyHint"),
 									inheritLabel: t("settings.inherit"),
 									onLabel: t("settings.on"),
 									offLabel: t("settings.off"),
@@ -13775,7 +13856,8 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 								/* @__PURE__ */ (0, react_jsx_runtime.jsx)(ValueField, {
 									id: "settings-task-board-session-poll",
 									label: t("settings.sessionPollSeconds"),
-									hint: t("settings.sessionPollSecondsHint"),
+									hint: t("settings.sessionPollSecondsHintBrief"),
+									hintTitle: t("settings.sessionPollSecondsHint"),
 									numeric: true,
 									...fieldProps,
 									...state.sessionPollSeconds,
@@ -13789,7 +13871,8 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 								/* @__PURE__ */ (0, react_jsx_runtime.jsx)(ChoiceField, {
 									id: "settings-task-board-subtask-depth",
 									label: t("settings.maxSubtaskDepth"),
-									hint: t("settings.maxSubtaskDepthHint"),
+									hint: t("settings.maxSubtaskDepthHintBrief"),
+									hintTitle: t("settings.maxSubtaskDepthHint"),
 									inheritLabel: t("settings.inherit"),
 									choices: SUBTASK_DEPTH_CHOICES.map((value) => ({
 										value,
@@ -13807,7 +13890,8 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 								/* @__PURE__ */ (0, react_jsx_runtime.jsx)(ValueField, {
 									id: "settings-task-board-run-launch-width",
 									label: t("settings.runLaunchWidth"),
-									hint: t("settings.runLaunchWidthHint"),
+									hint: t("settings.runLaunchWidthHintBrief"),
+									hintTitle: t("settings.runLaunchWidthHint"),
 									numeric: true,
 									...fieldProps,
 									...state.runLaunchWidth,
@@ -13821,7 +13905,8 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 								/* @__PURE__ */ (0, react_jsx_runtime.jsx)(ValueField, {
 									id: "settings-task-board-spend-budget",
 									label: t("settings.spendBudgetTokens"),
-									hint: t("settings.spendBudgetTokensHint"),
+									hint: t("settings.spendBudgetTokensHintBrief"),
+									hintTitle: t("settings.spendBudgetTokensHint"),
 									numeric: true,
 									...fieldProps,
 									...state.spendBudgetTokens,
@@ -13836,6 +13921,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 						}),
 						/* @__PURE__ */ (0, react_jsx_runtime.jsx)(PluginSettingsCard, {
 							t,
+							density: "nested",
 							titleKey: "settings.runBehaviorTitle",
 							descriptionKey: "settings.runBehaviorCardHint",
 							defaultOpen: false,
@@ -13846,7 +13932,8 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 							children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(BooleanField, {
 								id: "settings-task-board-goal-run",
 								label: t("settings.goalRunGlobal"),
-								hint: t("settings.goalRunGlobalHint"),
+								hint: t("settings.goalRunGlobalHintBrief"),
+								hintTitle: t("settings.goalRunGlobalHint"),
 								inheritLabel: t("settings.inherit"),
 								onLabel: t("settings.on"),
 								offLabel: t("settings.off"),
@@ -13862,6 +13949,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 						}),
 						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)(PluginSettingsCard, {
 							t,
+							density: "nested",
 							titleKey: "settings.goalVerificationTitle",
 							descriptionKey: "settings.goalVerificationCardHint",
 							defaultOpen: false,
@@ -13873,7 +13961,8 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 								/* @__PURE__ */ (0, react_jsx_runtime.jsx)(BooleanField, {
 									id: "settings-task-board-goal-verification",
 									label: t("settings.goalVerification"),
-									hint: t("settings.goalVerificationHint"),
+									hint: t("settings.goalVerificationHintBrief"),
+									hintTitle: t("settings.goalVerificationHint"),
 									inheritLabel: t("settings.inherit"),
 									onLabel: t("settings.on"),
 									offLabel: t("settings.off"),
@@ -13889,7 +13978,8 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 								/* @__PURE__ */ (0, react_jsx_runtime.jsx)(ChoiceField, {
 									id: "settings-task-board-goal-verification-model",
 									label: t("settings.goalVerificationModel"),
-									hint: t("settings.goalVerificationModelHint"),
+									hint: t("settings.goalVerificationModelHintBrief"),
+									hintTitle: t("settings.goalVerificationModelHint"),
 									inheritLabel: t("settings.inherit"),
 									choices: modelChoices,
 									...fieldProps,
@@ -13904,7 +13994,8 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 								/* @__PURE__ */ (0, react_jsx_runtime.jsx)(ChoiceField, {
 									id: "settings-task-board-goal-verification-effort",
 									label: t("settings.goalVerificationEffort"),
-									hint: t("settings.goalVerificationEffortHint"),
+									hint: t("settings.goalVerificationEffortHintBrief"),
+									hintTitle: t("settings.goalVerificationEffortHint"),
 									inheritLabel: t("settings.inherit"),
 									choices: effortChoices,
 									...fieldProps,
@@ -13947,8 +14038,10 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 						}),
 						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)(PluginSettingsCard, {
 							t,
+							density: "nested",
 							titleKey: "settings.cardDefaultsTitle",
-							descriptionKey: "settings.cardDefaultsCardHint",
+							descriptionKey: "settings.cardDefaultsCardBrief",
+							descriptionTitleKey: "settings.cardDefaultsCardHint",
 							defaultOpen: false,
 							hideFooter: true,
 							state: nestedShell,
@@ -13958,7 +14051,8 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 								/* @__PURE__ */ (0, react_jsx_runtime.jsx)(CardDefaultPresetField, {
 									id: "settings-task-board-card-default-mode",
 									label: t("new.agentPreset"),
-									hint: t("settings.cardDefaultModeHint"),
+									hint: t("settings.cardDefaultModeHintBrief"),
+									hintTitle: t("settings.cardDefaultModeHint"),
 									presets: state.presets,
 									...fieldProps,
 									...state.cardDefaultMode,
@@ -13972,7 +14066,8 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 								/* @__PURE__ */ (0, react_jsx_runtime.jsx)(ChoiceField, {
 									id: "settings-task-board-card-default-permission",
 									label: t("new.permission"),
-									hint: t("settings.cardDefaultPermissionHint"),
+									hint: t("settings.cardDefaultPermissionHintBrief"),
+									hintTitle: t("settings.cardDefaultPermissionHint"),
 									inheritLabel: t("exec.permission.default"),
 									choices: TASK_PERMISSIONS.map((id) => ({
 										value: id,
@@ -13990,7 +14085,8 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 								/* @__PURE__ */ (0, react_jsx_runtime.jsx)(ChoiceField, {
 									id: "settings-task-board-card-default-model",
 									label: t("new.model"),
-									hint: t("settings.cardDefaultModelHint"),
+									hint: t("settings.cardDefaultModelHintBrief"),
+									hintTitle: t("settings.cardDefaultModelHint"),
 									inheritLabel: t("exec.model.default"),
 									choices: modelChoiceRows(defaultModels),
 									...fieldProps,
@@ -14027,14 +14123,42 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 				}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 					className: board_settings_module_css_default.power,
 					children: [
-						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
-							className: board_settings_module_css_default.powerLine,
-							children: t("settings.powerStatus", {
-								platform: power?.platform ?? t("settings.powerUnknown"),
-								phase: power?.phase ?? t("settings.powerUnknown"),
-								running: String(power?.runningSessions ?? 0),
-								schedules: String(power?.armedSchedules ?? 0)
-							})
+						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("dl", {
+							className: board_settings_module_css_default.powerFacts,
+							children: [
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("dt", {
+									className: board_settings_module_css_default.powerTerm,
+									children: t("settings.powerPlatform")
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("dd", {
+									className: board_settings_module_css_default.powerValue,
+									children: power?.platform ?? t("settings.powerUnknown")
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("dt", {
+									className: board_settings_module_css_default.powerTerm,
+									children: t("settings.powerPhase")
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("dd", {
+									className: board_settings_module_css_default.powerValue,
+									children: power?.phase ?? t("settings.powerUnknown")
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("dt", {
+									className: board_settings_module_css_default.powerTerm,
+									children: t("settings.powerRunning")
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("dd", {
+									className: board_settings_module_css_default.powerValue,
+									children: String(power?.runningSessions ?? 0)
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("dt", {
+									className: board_settings_module_css_default.powerTerm,
+									children: t("settings.powerSchedules")
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("dd", {
+									className: board_settings_module_css_default.powerValue,
+									children: String(power?.armedSchedules ?? 0)
+								})
+							]
 						}),
 						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
 							className: board_settings_module_css_default.powerLine,
@@ -14411,7 +14535,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 		/** The building package's version, when the bundle carries it. */
 		function bakedVersion() {
 			try {
-				return "0.4.8-dsh.20261021.3";
+				return "0.4.8-dsh.20261022.1";
 			} catch {
 				return;
 			}
