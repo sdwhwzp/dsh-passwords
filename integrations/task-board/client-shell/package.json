@@ -1,6 +1,6 @@
 {
   "name": "@linxin666/dsh-client-ui-task-board",
-  "version": "0.4.8-dsh.20261024.3",
+  "version": "0.4.8-dsh.20261024.4",
   "type": "module",
   "main": "./index.js",
   "exports": {

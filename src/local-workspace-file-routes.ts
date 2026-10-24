@@ -107,6 +107,18 @@ export class LocalWorkspaceFileRoutes {
       if (envelope.type !== 'client-request' || envelope.method !== endpoint) throw new Error('Invalid RPC envelope');
       const args = object(object(envelope.payload).args);
       const value = await this.invoke(endpoint, args, principal, request.signal);
+      if (endpoint === 'workspaceFiles/readBytes') {
+        const file = object(value);
+        if (file.data instanceof Uint8Array) {
+          const parts = new FormData();
+          parts.set('bytes-0', new Blob([new Uint8Array(file.data)]));
+          parts.set('metadata', JSON.stringify({ type: 'server-response', rpcId,
+            result: { ok: true, value: { ...file, data: null } },
+            attachments: [{ path: ['data'], codec: 'bytes', part: 'bytes-0' }],
+          }));
+          return new Response(parts);
+        }
+      }
       return Response.json({ type: 'server-response', rpcId, result: { ok: true, value } });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -128,10 +140,14 @@ export class LocalWorkspaceFileRoutes {
     const cwd = record?.header.cwd;
     const workspace = cwd === undefined ? null : this.hub.browserWorkspace(cwd);
     if (workspace === null) return this.ctx.typertGateway.invoke({ namespace, method, args, principal, signal, peer: this.peer });
-    const allowed = new Set(isIndex ? [idKey] : [idKey, 'path', ...(['read', 'readBytes'].includes(method) ? ['range'] : method === 'readRelated' ? ['relativePath'] : [])]);
+    const allowed = new Set(isIndex ? [idKey] : [idKey, 'path', ...(method === 'read' ? ['range'] : method === 'readBytes' ? ['options'] : method === 'readRelated' ? ['relativePath'] : [])]);
     if (Object.keys(args).some(key => !allowed.has(key))) throw new Error('Unexpected file arguments');
     const root = workspace.placeholder_path;
-    const input = isIndex ? '.' : relative(root, text(args.path));
+    const options = method === 'readBytes' ? object(args.options) : {};
+    if (Object.keys(options).some(key => key !== 'range' && key !== 'baseFile')) throw new Error('Unexpected byte read options');
+    const baseFile = options.baseFile === undefined ? undefined : relative(root, text(options.baseFile));
+    const target = baseFile === undefined ? args.path : path.resolve(root, path.dirname(baseFile), text(args.path));
+    const input = isIndex ? '.' : relative(root, text(target));
     const browse = async (values: Record<string, unknown>) => object(await this.hub.browse(workspace.id, principal, values, signal));
     if (isIndex) {
       const settings = object(await this.ctx.typertGateway.invoke({ namespace: 'atFile', method: 'getSettings', args: {}, principal, signal, peer: this.peer }));
@@ -158,9 +174,11 @@ export class LocalWorkspaceFileRoutes {
     if (metadata.type !== 'file') throw new Error('The selected path is not a regular file');
     const stat = { absolutePath: path.join(root, text(metadata.relative)), version: text(metadata.version), bytes: number(metadata.bytes, 0, 0, Number.MAX_SAFE_INTEGER) };
     if (method === 'stat') return stat;
-    const range = args.range === undefined ? {} : object(args.range);
+    const requestedRange = method === 'readBytes' ? options.range : args.range;
+    const range = requestedRange === undefined ? {} : object(requestedRange);
+    if (Object.keys(range).some(key => key !== 'offset' && key !== (method === 'readBytes' ? 'length' : 'limit'))) throw new Error('Unexpected file range');
     const offset = method === 'readBytes' ? number(range.offset, 0, 0, Number.MAX_SAFE_INTEGER) : 0;
-    const length = method === 'readBytes' ? number(range.length, LOCAL_FILE_WINDOW, 1, 2 * LOCAL_FILE_WINDOW) : stat.bytes;
+    const length = method === 'readBytes' && requestedRange !== undefined ? number(range.length, LOCAL_FILE_WINDOW, 1, 2 * LOCAL_FILE_WINDOW) : stat.bytes;
     if (length > this.config.browserMaxFileBytes) throw new Error('File exceeds the configured preview size limit');
     const buffers: Buffer[] = [];
     let position = offset;
@@ -173,6 +191,7 @@ export class LocalWorkspaceFileRoutes {
       buffers.push(buffer); position += buffer.length; eof = chunk.eof === true;
     }
     const bytes = Buffer.concat(buffers);
+    if (method === 'readBytes') return { ...stat, offset, data: new Uint8Array(bytes), eof };
     if (method !== 'read') return { ...stat, offset, data: bytes.toString('base64'), eof };
     const content = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
     if (content.includes('\0')) throw new Error('File is not UTF-8 text');

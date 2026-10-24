@@ -763,3 +763,5 @@ Restricted accounts require private sandbox confirmation before prompts run; pol
 The shared Host Agent Teams routes (`/dsh-agents/api/*`) are administrator-only. Endpoint registration or a dynamic manifest cannot grant them to ordinary accounts. The new family row is disabled by default and upgrades do not activate it.
 
 The ownership scan accepts the Host format states `current` and `migration-required`, while validating identity fields and rejecting unknown fields. Tenant lists and historical ownership remain isolated.
+
+Binary workspace previews use Connection multipart byte responses for both server and paired folders; PDF, image and Office contents remain native bytes instead of JSON byte objects. `readBytes` accepts `options.range` and `options.baseFile`.

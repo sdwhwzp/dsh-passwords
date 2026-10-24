@@ -8,6 +8,7 @@ import { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt';
 import Tools, { type ToolRunContext } from '@deepseek-ai/dsh-tools';
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native';
 import { WebSocket } from 'ws';
 import type { PlatformConfig } from '../src/config.js';
 import { Database } from '../src/db.js';
@@ -44,6 +45,7 @@ test('existing agents receive current Shell capability after reconnect, disable 
   });
   await ctx.plugin(SystemPrompt);
   await ctx.plugin(Tools);
+  await ctx.plugin(NativeToolExecutor);
   await hub.start();
   const agent = { ctx, session: { header: { cwd: workspace.placeholder_path } } } as unknown as Agent;
   ctx.emit('agent/created', { agent });

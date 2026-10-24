@@ -16,6 +16,7 @@ import { LocalWorkspaceHub } from '../src/local-workspace-hub.js';
 import { Database } from '../src/db.js';
 import { createFieldCrypto } from '../src/encrypt.js';
 import type { PlatformConfig } from '../src/config.js';
+import { createWebConnectionRpc } from '@deepseek-ai/dsh-client-connection/src/client/rpc.ts';
 
 for (const shellEnabled of [false, true]) test(`paired file and Git routes use the companion (Shell ${shellEnabled})`, { timeout: 20_000 }, async t => {
   const temp = await realpath(await mkdtemp(path.join(os.tmpdir(), 'dsh-file-browser-')));
@@ -97,6 +98,40 @@ for (const shellEnabled of [false, true]) test(`paired file and Git routes use t
   assert.deepEqual(Buffer.from(pdf.data, 'base64'), binary);
   assert.equal(pdf.eof, true);
   assert.equal((await file('readRelated', { path: 'src/中文 文件.md', relativePath: '../image.pdf' }) as { data: string }).data, pdf.data);
+  const binaryRpc = createWebConnectionRpc(async (url, init) => {
+    const request = new Request(new URL(url, 'http://localhost/'), init);
+    return routes.fetch('workspaceFiles/readBytes', request, principal);
+  });
+  const bytes = (options: Record<string, unknown>, filePath = 'image.pdf') => binaryRpc.call('/api', 'workspaceFiles/readBytes', {
+    args: { workspaceFileScopeId: header.id, path: filePath, options },
+  }, new AbortController().signal);
+  const complete = await bytes({});
+  assert.equal(complete.ok, true);
+  if (!complete.ok) throw new Error(complete.error.message);
+  assert.deepEqual((complete.value as { data: Uint8Array }).data, new Uint8Array(binary));
+  assert.equal((complete.value as { eof: boolean }).eof, true);
+  const window = await bytes({ baseFile: 'src/中文 文件.md', range: { offset: binary.length - 3, length: 20 } }, '../image.pdf');
+  assert.equal(window.ok, true);
+  if (!window.ok) throw new Error(window.error.message);
+  assert.deepEqual(window.value, { ...await file('stat', { path: 'image.pdf' }) as object, offset: binary.length - 3, data: new Uint8Array(binary.subarray(-3)), eof: true });
+  await writeFile(path.join(root, 'empty.bin'), '');
+  const empty = await bytes({ range: { offset: 3 } }, 'empty.bin');
+  assert.equal(empty.ok, true);
+  if (!empty.ok) throw new Error(empty.error.message);
+  assert.deepEqual((empty.value as { data: Uint8Array }).data, new Uint8Array());
+  assert.equal((await bytes({ baseFile: '../outside.md' })).ok, false);
+  assert.equal((await bytes({ range: { length: 0 } })).ok, false);
+  assert.equal((await bytes({ range: { offset: -1 } })).ok, false);
+  assert.equal((await bytes({ unexpected: true })).ok, false);
+  const routeToServer = t.mock.method(hub, 'browserWorkspace', () => null);
+  const serverFile = { absolutePath: '/server/file.bin', version: 'server-v1', bytes: 3, offset: 0, data: Buffer.from([0, 128, 255]), eof: true };
+  const gatewayInvoke = t.mock.method(ctx.typertGateway, 'invoke', async () => serverFile);
+  const serverBytes = await bytes({});
+  assert.equal(serverBytes.ok, true);
+  if (!serverBytes.ok) throw new Error(serverBytes.error.message);
+  assert.deepEqual(serverBytes.value, { ...serverFile, data: new Uint8Array([0, 128, 255]) });
+  gatewayInvoke.mock.restore();
+  routeToServer.mock.restore();
   await assert.rejects(file('read', { path: '../outside.txt' }), /outside/);
   await assert.rejects(file('readAll', { path: 'image.pdf', ownerId: other.id }), /Unexpected/);
   const sidebar = await routes.sidebar('fs.tree', { sessionId: header.id, path: placeholder }, { headers: {} }, new AbortController().signal);
@@ -115,6 +150,11 @@ for (const shellEnabled of [false, true]) test(`paired file and Git routes use t
   }
   const before = operations;
   requestPrincipal = { ...principal, id: String(other.id), username: other.username };
+  const deniedBytes = await routes.fetch('workspaceFiles/readBytes', new Request('http://localhost/api/workspaceFiles/readBytes', {
+    method: 'POST', body: JSON.stringify({ type: 'client-request', rpcId: 'foreign-bytes', method: 'workspaceFiles/readBytes',
+      payload: { args: { workspaceFileScopeId: header.id, path: 'image.pdf', options: {} } } }),
+  }), requestPrincipal);
+  assert.equal((await deniedBytes.json()).result.ok, false);
   await assert.rejects(routes.sidebar('git.status', { sessionId: header.id }, { headers: {} }, new AbortController().signal), /unavailable/);
   assert.equal(operations, before);
   requestPrincipal = principal;

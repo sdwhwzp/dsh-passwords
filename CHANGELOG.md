@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.7.8-dsh.20261024.3
+
+修复工作区二进制预览：服务器文件与配对本机文件均使用 Connection multipart 字节响应；本机字节读取对齐 `options.range` / `options.baseFile`，保留账号和路径校验。
+
+Restore binary workspace previews with Connection multipart byte responses for server and paired local files. Paired reads accept `options.range` / `options.baseFile` and retain account and path authorization.
+
 ## 2.7.8 - 2026-10-10
 
 ### 中文
