@@ -37,6 +37,8 @@ async function resolveConversation(ctx: Context, db: Database, principal: Authen
   const workspace = await ctx.workspaceRegistry.resolveByPath(root)
     ?? await ctx.workspaceRegistry.create(root, principal.username);
   const { items } = await ctx.sessionController.list({}, new AbortController().signal);
+  const parentsWithSubagents = new Set(items.filter(session => session.origin === 'subagent')
+    .map(session => session.parentSessionId));
   const reusable = items.find(session => {
     const values = session.projections?.values;
     if (values === undefined) return false;
@@ -45,7 +47,7 @@ async function resolveConversation(ctx: Context, db: Database, principal: Authen
       && db.getSessionOwner(session.sessionId) === Number(principal.id)
       && isConversationSession(db, session.sessionId)
       && !ctx.workspaceRegistry.archivedSessionIds.includes(session.sessionId)
-      && !values.title && !values.subagent && (values.subagentCatalog === undefined || (Array.isArray(values.subagentCatalog) && values.subagentCatalog.length === 0))
+      && !values.title && session.origin !== 'subagent' && !parentsWithSubagents.has(session.sessionId)
       && (!inbox || Object.values(inbox).every(queue => queue.length === 0));
   });
   if (reusable !== undefined) return { sessionId: reusable.sessionId, cwd: root };

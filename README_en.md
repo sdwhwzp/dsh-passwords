@@ -53,7 +53,7 @@ Official `terminal/follow` and `terminal/retain` Remote streams require the acco
 
 ## Development and chat modes
 
-Choose **Development** in the sidebar to use workspaces, terminals and the editor. Choose **Chat** to ask questions without selecting a workspace. **New chat** reuses an unasked chat on the server per account, including concurrent requests from multiple windows. History shows only the selected blank chat. Messages, running work, queued input, archived chats and named chats are preserved. Subagent records remain accessible through their parent conversation and are not listed as new chats. History belongs to the signed-in account and can be resumed later.
+Choose **Development** in the sidebar to use workspaces, terminals and the editor. Choose **Chat** to ask questions without selecting a workspace. **New chat** reuses an unasked chat on the server per account, including concurrent requests from multiple windows. Chats with subagents and subagent sessions are excluded from reuse. History shows only the selected blank chat. Messages, running work, queued input, archived chats and named chats are preserved. Subagent records remain accessible through their parent conversation and are not listed as new chats. History belongs to the signed-in account and can be resumed later.
 
 Chat keeps model selection, streamed replies and history. All tools authorized for the account are available, including knowledge retrieval, GenUI, files, shell commands and subagents. The account workspace is attached automatically; account permissions, sandbox rules and account isolation match development mode. See the [implementation and maintenance notes (Chinese)](docs/2026-09-14-conversation-mode.md).
 

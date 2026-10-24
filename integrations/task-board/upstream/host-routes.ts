@@ -21,12 +21,26 @@ const HEARTBEAT_MS = 15_000
 /** Header replaced by an authenticated same-host reverse proxy. */
 export const TASK_BOARD_PROXY_TOKEN_HEADER = 'x-dsh-task-board-proxy-token'
 
+/**
+ * The composition's Host connection service, narrowed to the one check the
+ * board bridges: `requestRejection` runs the Host/Origin fence and verifies
+ * the authority-bound `dsh-auth-*` browser session minted by the Host. It
+ * answers `undefined` only for a request it admits and 401/403 otherwise.
+ * Declared structurally, like the official open-in-app routes do, because the
+ * service's package is a browser-side dependency this Host half does not
+ * import.
+ */
+export interface TaskBoardConnectionTrust {
+  requestRejection(request: { readonly headers: IncomingMessage['headers'] }): 401 | 403 | undefined
+}
+
 /** Optional authenticated reverse-proxy access layered over the loopback default. */
 export interface TaskBoardRouteAccess {
   trustedProxyHosts?: readonly string[]
   proxyToken?: string
   authenticate?: (req: IncomingMessage) => Promise<TaskBoardPrincipal | undefined>
   assertPrincipal?: (principal: TaskBoardPrincipal | undefined) => void
+  /**
   /**
    * Whether the operator's own reverse proxy or tunnel may speak for the
    * browser: a forwarded request that landed on this machine's loopback
@@ -36,6 +50,13 @@ export interface TaskBoardRouteAccess {
    * keeps the pre-existing fence exactly as it was (issue #1906).
    */
   trustForwardedProxy?: () => boolean
+  /**
+   * Resolves the Host's `connection` service when a request arrives, so a
+   * deployment that mounts it after these routes still gains the bridge and a
+   * composition that never mounts it keeps the pre-existing fence. Absent means
+   * no bridge (issue #1930).
+   */
+  connection?: () => TaskBoardConnectionTrust | undefined
 }
 
 /**
@@ -52,6 +73,7 @@ interface ResolvedRouteAccess {
   trustedProxyHosts: ReadonlySet<string>
   proxyToken?: string
   trustForwardedProxy: () => boolean
+  connection?: () => TaskBoardConnectionTrust | undefined
 }
 
 function parseAuthority(authority: string): { canonical: string; url: URL } | undefined {
@@ -87,6 +109,7 @@ function resolveAccess(access: TaskBoardRouteAccess): ResolvedRouteAccess {
     trustedProxyHosts,
     trustForwardedProxy: access.trustForwardedProxy ?? ((): boolean => false),
     ...(access.proxyToken === undefined ? {} : { proxyToken: access.proxyToken }),
+    ...(access.connection === undefined ? {} : { connection: access.connection }),
   }
 }
 
@@ -170,8 +193,19 @@ function matchesToken(candidate: string | string[] | undefined, expected: string
  * (loopback socket AND loopback Host) is then admitted on the same browser
  * marker alone. The switch defaults off, so an unconfigured board keeps
  * refusing every forwarded request (issue #1906).
+ *
+ * A deployment behind a reverse proxy or ingress that DSH itself serves
+ * (`--trusted-host`, TLS terminated at the edge) is admitted by the Host's
+ * `connection` service instead: a request whose Host/Origin fence and signed
+ * browser session it accepts needs no board-specific allowlist, which is why
+ * the check runs first when the service is mounted (issue #1930). The fence
+ * below stays untouched as the fallback, so a deployment without the service,
+ * and every direct client the service does not admit, keeps exactly the
+ * pre-existing decision.
  */
 export function isTrustedTaskBoardRequest(req: IncomingMessage, access: ResolvedRouteAccess): boolean {
+  const connection = access.connection?.()
+  if (connection !== undefined && connection.requestRejection(req) === undefined) return true
   if (!browserSameOriginMarker(req)) return false
   if (isLoopbackRequest(req)) return true
   // The tunnel makes the socket and the Host describe the proxy, so the

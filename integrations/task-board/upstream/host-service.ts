@@ -6,8 +6,8 @@ import { DEFAULT_SESSION_POLL_SECONDS, normalizeSessionPollSeconds, sessionPollM
 import { reusableSessionId } from './core/session-reuse.ts'
 import { LaunchAdmissionQueue, type QueuedLaunch } from './host/launch-admission.ts'
 import { HostTaskLedger, type OpenedRun, type OpenExecutionReference } from './host-ledger.ts'
-import { HostExecutionRunner, SessionLaunchError, promptText, type GatewayPeer, type SessionCommandDispatcher, type SessionSummary, type TaskBoardWorkspaceRegistry } from './host-runner.ts'
-import { teammateName } from './core/subtask.ts'
+import { HostExecutionRunner, SessionLaunchError, type GatewayPeer, type SessionCommandDispatcher, type SessionSummary, type TaskBoardWorkspaceRegistry } from './host-runner.ts'
+import { LIANGSHEN_PRESET_ID } from './core/subtask.ts'
 import { workspaceOwningSession } from './core/workspace-target.ts'
 import { PowerInhibitor } from './power-inhibitor.ts'
 import { TASK_BOARD_SCHEMA_VERSION, type TaskBoardAction, type TaskBoardEventPayload, type TaskBoardSnapshot } from './protocol.ts'
@@ -18,36 +18,6 @@ import { isTaskPermission, normalizeTargetId, type ExecutionOutcome, type Execut
 import { passedAttempt, resolveContract, verificationNeverInvoked, verificationOnlyInvalid, verificationRequired, withAcceptanceDetailCleared, type ExecutionVerification, type ModelCatalogView, type VerificationContract, type VerificationSettings } from './core/verification.ts'
 import type { TaskPermission } from './core/handover.ts'
 import { principalKey, type TaskBoardAccounts, type TaskBoardPrincipal } from './host-accounts.ts'
-
-/** One teammate the Host asks the Agent Teams service to spawn for a team run. */
-export interface TeamSpawnInput {
-  /** Session id of the run's Team Lead (the root task's execution session). */
-  leadSessionId: string
-  /** Immutable lower-kebab-case teammate name, unique inside the Team. */
-  name: string
-  /** Short description of the delegated responsibility. */
-  description: string
-  /** The subtask's execution prompt. */
-  prompt: string
-}
-
-/** Result of one teammate spawn attempt. */
-export interface TeamSpawnResult {
-  /** The teammate's session id when it reached the active edge. */
-  sessionId?: string
-  /** Why the spawn failed: a thrown call, or a member that settled as failed. */
-  error?: string
-}
-
-/**
- * The Agent Teams capability the Host needs for team-mode runs. The plugin
- * builds it from the optional `agentTeams` service; it is absent when this
- * deployment does not serve that service, in which case a team run is refused
- * instead of silently degrading into a plain cascade.
- */
-export interface TaskBoardTeamDispatcher {
-  spawn(input: TeamSpawnInput): Promise<TeamSpawnResult>
-}
 
 /** Ceiling for the roster-poll failure backoff: a broken session tree is retried at most once a minute. */
 const POLL_FAILURE_MAX_BACKOFF_MS = 60_000
@@ -126,7 +96,7 @@ export const NEVER_INVOKED_VERIFICATION_REASON = 'goal 验收未触发：本次�
 export const INVALID_ONLY_VERIFICATION_REASON = 'goal 验收无效：本次执行只记录了无效验收（裁判未能给出与任务要求对应、且可定位到本次证据的否决依据），看板已停止调用裁判。这**不是**有证据的质量判负：验收本身不可用，本次运行因没有匹配的通过记录而结束。请检查验收环境与证据可见性，或用 task_board_manage(action=reset-verification) 清除记录的无效验收后重新完成目标。'
 
 /**
- * Provenance of one cron-triggered cascade: when the rule fired and the zone
+ * Provenance of one cron-triggered run: when the rule fired and the zone
  * its wall clock was read in. Passed into every launched prompt of that run so
  * a scheduled job knows its own clock rather than inferring one.
  */
@@ -272,7 +242,6 @@ export class TaskBoardHostService {
   private preventIdleSleep = false
   private readonly verificationSettings: () => VerificationSettings
   private readonly verificationCatalog: (principal?: TaskBoardPrincipal) => Promise<ModelCatalogView | undefined>
-  private readonly team: TaskBoardTeamDispatcher | undefined
   private readonly timers: HostTimerFace
   /** Live reader of the global native-/goal switch; frozen per execution. */
   private readonly goalRunEnabled: () => boolean
@@ -329,7 +298,6 @@ export class TaskBoardHostService {
      * without remounting the row. Absent means the deployment configures none.
      */
     cardDefaults?: () => CardDefaults
-    team?: TaskBoardTeamDispatcher
     timers?: HostTimerFace
     /**
      * Live GLOBAL native /goal switch (a volatile config read). Read ONCE per
@@ -377,7 +345,6 @@ export class TaskBoardHostService {
     this.accounts = options.accounts
     this.runner = new HostExecutionRunner(gateway, options.commandDispatcher, options.workspaceRegistry, undefined, principal => this.accounts?.assert(principal), options.ownerPeer)
     this.workspaceRegistry = options.workspaceRegistry
-    this.team = options.team
     this.timers = options.timers ?? PROCESS_TIMERS
     this.power = options.power ?? new PowerInhibitor()
     this.now = options.now ?? Date.now
@@ -487,7 +454,6 @@ export class TaskBoardHostService {
       power: this.power.snapshot(),
       sessionDefaultPermission: this.ledger.sessionDefaultPermission,
       maxSubtaskDepth: this.ledger.maxSubtaskDepth,
-      teamRunAvailable: this.team !== undefined,
       // The GLOBAL native-/goal switch is published live for the UI, but the
       // service freezes its own read at launch: this mirror is for the FORM
       // (enable/disable + explanation), never for a run already in flight.
@@ -608,13 +574,6 @@ export class TaskBoardHostService {
    */
   private applyBoardAction(requestId: string, action: Exclude<TaskBoardAction, { kind: 'extension-action' }>, initiator?: string, principal?: TaskBoardPrincipal): TaskBoardSnapshot {
     const before = this.statusMap()
-    // Fail closed before the ledger opens anything: a card opted into team
-    // execution cannot run in a deployment that serves no Agent Teams service,
-    // and silently degrading it to a plain cascade would misreport the work.
-    if (this.team === undefined && (action.kind === 'run' || action.kind === 'rerun')) {
-      const task = this.ledger.state().tasks.find(item => item.id === action.taskId)
-      if (task?.teamRun === true) throw new Error('Agent Teams is unavailable in this deployment')
-    }
     if (action.kind === 'run' || action.kind === 'rerun') this.assertSpendCap()
     const result = this.ledger.applyRequest(requestId, this.withInheritedWorkspace(action, initiator), initiator, principal)
     if (result.runs !== undefined) this.dispatchRuns(result.runs)
@@ -704,27 +663,31 @@ export class TaskBoardHostService {
     this.listeners.clear()
   }
 
-  private async launch(opened: OpenedRun, others: readonly OpenedRun[] = [], schedule?: ScheduledRunContext, freezeContract?: RunContractFreezer): Promise<void> {
+  private async launch(opened: OpenedRun, schedule?: ScheduledRunContext, freezeContract?: RunContractFreezer): Promise<void> {
     /** The session this launch attached to the execution, once it exists. */
     let attached: string | undefined
     try {
-      // A team run always mints a fresh Lead session: teammates are immutable
-      // children of that session, so reusing an older one would collide on
-      // their names and orphan the previous team.
-      const team = opened.task.teamRun === true
-      const reuseSessionId = team ? undefined : await this.reuseSessionFor(opened.task, opened.principal)
-      // Both modes tell the launched agent what else this run opens; only a team
-      // run names teammates, because only then does this session own them.
-      const peers = others.length === 0 ? undefined : others.map(other => ({
-        id: other.task.id,
-        title: other.task.title,
-        ...(team ? { name: teammateName(other.task.title, other.execution.runGroupId ?? other.task.id, other.task.id) } : {}),
-      }))
+      // One run opens ONE session: the card's own. Its unfinished subtasks are
+      // dispatched from inside that session, so a card that carries them is
+      // forced under the dispatcher preset and told which cards to pick up. The
+      // force is applied here, per execution; the card's stored `mode` is
+      // never rewritten by it.
+      const forcedPreset = this.ledger.hasOutstandingDescendants(opened.task.id) ? LIANGSHEN_PRESET_ID : undefined
+      const descendants = forcedPreset === undefined ? [] : this.ledger.outstandingDescendants(opened.task.id)
+      // A forced preset is not the card's own composition, so continuing a
+      // session composed from another preset would be refused anyway: mint a
+      // fresh one and run the tree the way this execution requires.
+      const reuseSessionId = forcedPreset === undefined ? await this.reuseSessionFor(opened.task, opened.principal) : undefined
       // A cron-triggered run additionally states its own firing instant and
       // rule zone, so a scheduled job can resolve "today" without guessing.
-      const promptContext = peers === undefined && schedule === undefined ? undefined : {
-        ...(peers === undefined ? {} : { peers }),
-        ...(team ? { team: true } : {}),
+      const promptContext = descendants.length === 0 && schedule === undefined ? undefined : {
+        ...(descendants.length === 0 ? {} : {
+          descendants: descendants.map(descendant => ({
+            id: descendant.id,
+            title: descendant.title,
+            status: descendant.status,
+          })),
+        }),
         ...(schedule === undefined ? {} : { schedule }),
       }
       // Freeze this execution's acceptance contract BEFORE the session is
@@ -765,12 +728,13 @@ export class TaskBoardHostService {
       const initial: ExecutionVerification = {
         contract,
         attempts: [],
-        applicability: team ? 'team-member' : !contract.enabled ? skippedBy : notArmed,
+        applicability: !contract.enabled ? skippedBy : notArmed,
       }
       this.ledger.setVerification(opened.task.id, opened.execution.id, initial)
       const sessionId = await this.runner.launch(opened.task, {
         ...(opened.principal === undefined ? {} : { principal: opened.principal }),
         ...(reuseSessionId === undefined ? {} : { reuseSessionId }),
+        ...(forcedPreset === undefined ? {} : { agentPreset: forcedPreset }),
         ...(promptContext === undefined ? {} : { promptContext }),
         // The frozen global switch travels with the launch, so the runner's
         // arming decision is exactly the one made above.
@@ -784,13 +748,10 @@ export class TaskBoardHostService {
           this.ledger.attachSession(opened.task.id, opened.execution.id, id)
         },
         onGoalArmed: (armed) => {
-          this.setApplicability(opened.task.id, opened.execution.id, team
-            ? 'team-member'
-            : !contract.enabled ? skippedBy : armed ? 'enforced' : notArmed)
+          this.setApplicability(opened.task.id, opened.execution.id, !contract.enabled ? skippedBy : armed ? 'enforced' : notArmed)
         },
       })
       if (attached === undefined) this.ledger.attachSession(opened.task.id, opened.execution.id, sessionId)
-      if (team) for (const teammate of others) this.scheduleTeammate(teammate, sessionId)
     } catch (error) {
       const launchedSession = error instanceof SessionLaunchError ? error.sessionId : undefined
       if (launchedSession !== undefined) {
@@ -850,43 +811,6 @@ export class TaskBoardHostService {
     // that spent its last run). Re-arm so the restored occurrence is served
     // at its own instant rather than lost until some unrelated write.
     this.refreshSchedule()
-  }
-
-  private scheduleTeammate(opened: OpenedRun, leadSessionId: string): void {
-    this.enqueueLaunch(opened, () => this.spawnTeammate(opened, leadSessionId).catch(error => {
-      safeConsoleError('[dsh-task-board] teammate spawn settlement failed', error)
-    }))
-  }
-
-  /**
-   * Spawn one teammate inside the Lead session and attach the teammate's
-   * session to the subtask execution, so the existing session monitor settles
-   * it from the teammate's own turn like any other execution. A spawn that
-   * fails settles the subtask as failed immediately, which then folds into the
-   * Lead's cascade verdict.
-   */
-  private async spawnTeammate(opened: OpenedRun, leadSessionId: string): Promise<void> {
-    const team = this.team
-    if (team === undefined) {
-      this.settleAndNotify(opened.task.id, opened.execution.id, 'failed', 'Agent Teams is unavailable in this deployment')
-      return
-    }
-    try {
-      this.accounts?.assert(opened.principal)
-      const member = await team.spawn({
-        leadSessionId,
-        name: teammateName(opened.task.title, opened.execution.runGroupId ?? opened.task.id, opened.task.id),
-        description: opened.task.title,
-        prompt: promptText(opened.task),
-      })
-      if (member.sessionId === undefined || member.sessionId === '') {
-        this.settleAndNotify(opened.task.id, opened.execution.id, 'failed', member.error ?? 'teammate provisioning failed')
-        return
-      }
-      this.ledger.attachSession(opened.task.id, opened.execution.id, member.sessionId)
-    } catch (error) {
-      this.settleAndNotify(opened.task.id, opened.execution.id, 'failed', error instanceof Error ? error.message : String(error))
-    }
   }
 
   /**
@@ -1062,12 +986,12 @@ export class TaskBoardHostService {
       this.ledger.settle(taskId, executionId, outcome, error, summary)
       return
     }
-    const previousStatus = before?.status
+    // One settlement can move more than the settled card: a run whose own card
+    // is terminal also writes the inherited verdict onto the subtasks it never
+    // dispatched. Compare the whole board so the provider events cover those too.
+    const statuses = this.statusMap()
     this.ledger.settle(taskId, executionId, outcome, error, summary)
-    const task = this.ledger.getTask(taskId)
-    if (task !== undefined && previousStatus !== undefined && previousStatus !== task.status) {
-      this.extensions.emitStatusChanged({ taskId, status: task.status, previous: previousStatus })
-    }
+    this.emitStatusChanges(statuses)
     this.extensions.emitExecutionSettled({
       taskId,
       executionId,
@@ -1245,28 +1169,18 @@ export class TaskBoardHostService {
   }
 
   /**
-   * Launch one run set. The root goes first and receives the run shape in its
-   * prompt (which members this run opens, and how they run); every plain-cascade
-   * member then launches on its own so one refused participant cannot hold the
-   * others back. A team run's members are spawned inside the root's Lead
-   * session instead, once that session exists.
+   * Launch the one run a run request opened. A run request names one card and
+   * opens one execution for it; the card's own session dispatches its subtasks
+   * as subagents, so nothing else is enqueued here.
    *
-   * Every launch of one run set goes through the admission queue, which admits
-   * at most `runLaunchWidth` of them at a time — the whole subtree still opens,
-   * members just enter the running column in batches. Order inside the group is
-   * the order they are enqueued here, so the root's session always exists before
-   * any member's, and one member's launch settling (or failing) is what admits
-   * the next. All members share the one contract this group freezes.
+   * The launch still goes through the admission queue, which admits at most
+   * `runLaunchWidth` launches at a time — that bound now applies across
+   * concurrent runs rather than across the members of one run.
    */
   private dispatchRuns(runs: readonly OpenedRun[], schedule?: ScheduledRunContext): void {
-    if (runs.length === 0) return
-    const root = runs.find(run => run.dispatch !== 'teammate') ?? runs[0]
-    const others = runs.filter(run => run !== root)
-    const freezeContract = this.contractFreezerForRunGroup(root.principal)
-    this.scheduleLaunch(root, others, schedule, freezeContract)
-    for (const run of others) {
-      if (run.dispatch !== 'teammate') this.scheduleLaunch(run, [], schedule, freezeContract)
-    }
+    const root = runs[0]
+    if (root === undefined) return
+    this.scheduleLaunch(root, schedule, this.contractFreezerForRunGroup(root.principal))
   }
 
   /**
@@ -1279,8 +1193,8 @@ export class TaskBoardHostService {
     this.ledger.setVerification(taskId, executionId, { ...verification, applicability })
   }
 
-  private scheduleLaunch(opened: OpenedRun, others: readonly OpenedRun[] = [], schedule?: ScheduledRunContext, freezeContract?: RunContractFreezer): void {
-    this.enqueueLaunch(opened, () => this.launch(opened, others, schedule, freezeContract).catch(error => {
+  private scheduleLaunch(opened: OpenedRun, schedule?: ScheduledRunContext, freezeContract?: RunContractFreezer): void {
+    this.enqueueLaunch(opened, () => this.launch(opened, schedule, freezeContract).catch(error => {
       safeConsoleError('[dsh-task-board] execution launch settlement failed', error)
     }), schedule)
   }

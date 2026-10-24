@@ -16,7 +16,7 @@ import type { TaskHandoverInput } from '../handover.ts'
  * Editable fields on a task (the update patch surface). `freeze` replaces the
  * continuation-card snapshot (restamping frozenAt); an explicit null clears it.
  */
-export type TaskUpdatePatch = Partial<Pick<TaskRecord, 'title' | 'description' | 'prompt' | 'workspaceId' | 'mode' | 'permission' | 'model' | 'reasoningEffort' | 'reuseSession' | 'teamRun' | 'goalRun' | 'skipVerification'>> & {
+export type TaskUpdatePatch = Partial<Pick<TaskRecord, 'title' | 'description' | 'prompt' | 'workspaceId' | 'mode' | 'permission' | 'model' | 'reasoningEffort' | 'reuseSession' | 'goalRun' | 'skipVerification'>> & {
   freeze?: FreezeSnapshot & { redacted?: boolean } | null
   /** Replaces the handover bundle (restamping bundledAt); an explicit null clears it. */
   handover?: TaskHandoverInput | null
@@ -109,8 +109,6 @@ export function applyUpdateTask(
     // Session reuse is a boolean opt-in; false (or an explicit null from a
     // caller that needs to clear it) returns the task to one session per run.
     if ('reuseSession' in patch) next.reuseSession = patch.reuseSession === true ? true : undefined
-    // Team execution is a boolean opt-in with the same clear-by-false rule.
-    if ('teamRun' in patch) next.teamRun = patch.teamRun === true ? true : undefined
     // The /goal opt-in is default-OFF: true joins the goal run, while false
     // (or an explicit null) returns the card to the default and stores nothing.
     if ('goalRun' in patch) next.goalRun = patch.goalRun === true ? true : undefined

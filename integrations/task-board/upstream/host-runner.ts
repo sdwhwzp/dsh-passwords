@@ -4,7 +4,7 @@ import type { SessionAddress, SessionHistoryRecord, SessionListValue, SessionPag
 import type { CommandResult } from '@deepseek-ai/dsh-commands/types'
 import type { Workspace } from '@deepseek-ai/dsh-workspace/types'
 import type { TaskBoardPrincipal } from './host-accounts.ts'
-import { teammateName } from './core/subtask.ts'
+import { LIANGSHEN_PRESET_ID } from './core/subtask.ts'
 import { MISSING_WORKSPACE_REASON, mostRecentWorkspaceId } from './core/workspace-target.ts'
 import { declaredRoute, normalizeReasoningEffort, resolveReasoningEffort, type ReasoningRoute } from './core/reasoning-effort.ts'
 import type { ModelCatalogView } from './core/verification.ts'
@@ -214,22 +214,24 @@ function escapeProvenanceDelimiter(value: string): string {
  * first, the provenance wrap then encloses the instruction. Plain tasks (no
  * freeze) keep the bare handover preamble + prompt.
  */
-/** One other execution member of a run, as named in the launched task's prompt. */
-export interface PromptPeer {
-  /** Task id of the member. */
+/** One unfinished subtask the launched card's own agent has to dispatch. */
+export interface PromptDescendant {
+  /** Task id of the subtask card. */
   id: string
-  /** Member title. */
+  /** Subtask title. */
   title: string
-  /** Teammate name when this member runs as a teammate. */
-  name?: string
+  /** Its column, so the run can tell a fresh card from one already failed before. */
+  status: string
 }
 
 /** Execution-shape context appended to the launched task's prompt. */
 export interface PromptContext {
-  /** The other members this run opens, excluding the launched task itself. */
-  peers?: readonly PromptPeer[]
-  /** True when those members run as teammates inside this session (Team Lead). */
-  team?: boolean
+  /**
+   * The card's outstanding descendants. Present exactly when this run is an
+   * autonomous dispatch: the Host opens no session for them, so this session
+   * reads them and dispatches subagents itself.
+   */
+  descendants?: readonly PromptDescendant[]
   /**
    * Scheduled-run provenance: the instant the rule actually fired, its kind,
    * and the IANA zone its wall clock was read in. Present only for a
@@ -240,19 +242,18 @@ export interface PromptContext {
 }
 
 /**
- * The execution-shape section: what else this run opens. A plain cascade opens
- * one independent session per member; a team run starts every other member as a
- * teammate inside THIS session, so the prompt names the Team tools instead.
+ * The dispatch section: this run is the card's own session, and the card still
+ * has unfinished subtasks. The Host opens no session for them, so the prompt
+ * states what the session must do itself — read each card, dispatch subagents
+ * in dependency order, and write the conclusions back before finishing. A card
+ * with no outstanding descendant gets no section at all.
  */
-function peerPromptPreamble(context: PromptContext): string | undefined {
-  const peers = context.peers ?? []
-  if (peers.length === 0) return undefined
-  if (context.team === true) {
-    const lines = peers.map(peer => `- ${escapeProvenanceDelimiter(peer.title)}（teammate: ${peer.name ?? teammateName(peer.title, peer.id, peer.id)}）`)
-    return `本任务是 Agent Team 的 Lead：本次运行不额外开启独立会话，以下 ${peers.length} 个子任务成员已在本会话中作为 teammate 启动。用 list_agents / send_message / wait_agent 协调它们，用任务看板工具读写它们在看板上的卡片：\n${lines.join('\n')}`
-  }
-  const lines = peers.map(peer => `- ${escapeProvenanceDelimiter(peer.title)}（任务 ${peer.id}）`)
-  return `本次运行同时并发开启 ${peers.length} 个独立 DSH 会话执行下列子任务成员（可用 task_board_* 工具查看它们的进度）：\n${lines.join('\n')}`
+function dispatchPromptPreamble(context: PromptContext): string | undefined {
+  const descendants = context.descendants ?? []
+  if (descendants.length === 0) return undefined
+  const lines = descendants.map(descendant =>
+    `- ${escapeProvenanceDelimiter(descendant.title)}（任务 ${descendant.id}，状态 ${descendant.status}）`)
+  return `本卡还有 ${descendants.length} 个未完成的子任务，本次执行不会为它们额外开启会话，由你在本会话内自行派发：\n${lines.join('\n')}\n先用 task_board_get 读取每张子卡的内容与执行目标，再用 subagent 按依赖顺序派发（互不依赖的可以并发），完工前用 task_board_manage({action:'record-external-outcome', result, initiatedBy, summary}) 一次性回填各子卡的结论。`
 }
 
 /**
@@ -291,7 +292,7 @@ export function promptText(task: TaskRecord, context: PromptContext = {}): strin
   const tagPreamble = tagPromptPreamble(task)
   const handoverSection = handoverPreamble
   const schedulePreamble = schedulePromptPreamble(context)
-  const runPreamble = peerPromptPreamble(context)
+  const runPreamble = dispatchPromptPreamble(context)
   const preambles = [tagPreamble, handoverSection, schedulePreamble, runPreamble]
     .filter((part): part is string => part !== undefined)
   const preamble = preambles.length === 0 ? undefined : preambles.join('\n\n')
@@ -452,6 +453,14 @@ export class HostExecutionRunner {
     reuseSessionId?: string
     principal?: TaskBoardPrincipal
     promptContext?: PromptContext
+    /**
+     * Agent preset this execution is FORCED under, overriding the card's own
+     * `mode` pin (and a handover bundle's): the caller decides it from the run's
+     * shape (a card with unfinished subtasks runs as the autonomous dispatcher),
+     * and the override is never written into the card. A preset the deployment
+     * does not register fails the launch before any session exists.
+     */
+    agentPreset?: string
     onSession?: (sessionId: string) => void
     onGoalArmed?: (armed: boolean) => void
     /**
@@ -485,7 +494,7 @@ export class HostExecutionRunner {
     // never the project the user was in when the card was written. A deployment
     // with no workspace to offer gets a refusal below, not that fallback.
     const workspaceId = task.handover?.workspaceId ?? task.workspaceId ?? this.recentWorkspaceId()
-    const mode = task.handover?.mode ?? task.mode
+    const mode = options.agentPreset ?? task.handover?.mode ?? task.mode
     const permission = task.handover?.permission ?? task.permission
 
     if (workspaceId !== undefined && this.workspaceRegistry !== undefined) {
@@ -496,6 +505,14 @@ export class HostExecutionRunner {
     if (mode !== undefined) {
       const presets = await this.invoke('agentPresets', 'list', {}, principal) as { presets?: readonly { id: string; broken?: string }[] }
       const preset = presets.presets?.find(item => item.id === mode)
+      // A forced preset is the run's shape, not a stored preference: a
+      // deployment that does not serve it (the `liangshen` dispatcher preset is
+      // shipped by packages/dsh-liangshen) cannot run this card the way its tree
+      // requires, so the run fails closed with the reason readable on the card.
+      if (preset === undefined && options.agentPreset !== undefined) {
+        throw new Error('agent preset not found: ' + mode + ' (a card with unfinished subtasks runs under the '
+          + LIANGSHEN_PRESET_ID + ' preset, which this deployment does not serve)')
+      }
       if (preset === undefined) throw new Error('agent preset not found: ' + mode)
       if (preset.broken !== undefined) throw new Error('agent preset is unavailable: ' + preset.broken)
     }

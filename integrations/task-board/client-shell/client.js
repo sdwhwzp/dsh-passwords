@@ -304,7 +304,6 @@ window.__ModuleLoader__.load({
 				model: normalizeTargetId(input.model),
 				reasoningEffort: normalizeTargetId(input.reasoningEffort),
 				reuseSession: input.reuseSession === true ? true : void 0,
-				teamRun: input.teamRun === true ? true : void 0,
 				goalRun: input.goalRun === true ? true : void 0,
 				skipVerification: input.skipVerification === true ? true : void 0,
 				...input.freeze === void 0 ? {} : { freeze: freezeOf(input.freeze, now) },
@@ -517,24 +516,24 @@ window.__ModuleLoader__.load({
 			return { ok: true };
 		}
 		/**
-		* Whether a cascade member takes part in a new run.
-		*
-		* The task the user ran is always a member: the request names that card, and
-		* the operator asked for it to run whatever its column says. A descendant does
-		* not join once it sits in the `done` column — its work is finished, so running
-		* the parent again is a run of the parent, never a second execution of work
-		* that is already done. The rule keys on the column alone, so it covers both a
-		* subtask that ran and one an operator moved to done by hand, and it holds for
-		* every trigger: a manual run, a re-run, and a due occurrence of a schedule.
-		* A card whose own schedule is enabled settles back into `todo`, so a scheduled
-		* subtask stays a participant; to make a finished one run again, move it back
-		* to `todo` or run it on its own.
-		* @param task - the candidate member.
+		* Whether a card still has work outstanding: anything outside the `done`
+		* column. It keys on the column alone, so it covers both a subtask that ran
+		* and one an operator moved to done by hand.
+		*/
+		function isOutstanding(task) {
+			return task.status !== "done";
+		}
+		/**
+		* Whether a card belongs to a run's dispatch set: the card the request named,
+		* or a card whose work is still outstanding. Kept for the browser's subtask
+		* preview; the Host run itself opens the clicked card alone
+		* ({@link cascadeTargets}).
+		* @param task - the candidate card.
 		* @param rootId - the task the run request named.
-		* @returns false when this member is left alone by the run.
+		* @returns false when this card is finished and left alone.
 		*/
 		function joinsCascadeRun(task, rootId) {
-			return task.id === rootId || task.status !== "done";
+			return task.id === rootId || isOutstanding(task);
 		}
 		/**
 		* The permission a task would actually run under: its handover bundle's pin
@@ -1492,7 +1491,6 @@ window.__ModuleLoader__.load({
 				if ("tags" in patch) next.tags = tagsPatch == null ? void 0 : normalizeTags(tagsPatch);
 				if ("permission" in patch && patch.permission !== void 0 && patch.permission !== task.permission || "handover" in patch) next.permissionConfirmedAt = void 0;
 				if ("reuseSession" in patch) next.reuseSession = patch.reuseSession === true ? true : void 0;
-				if ("teamRun" in patch) next.teamRun = patch.teamRun === true ? true : void 0;
 				if ("goalRun" in patch) next.goalRun = patch.goalRun === true ? true : void 0;
 				if ("skipVerification" in patch) next.skipVerification = patch.skipVerification === true ? true : void 0;
 				if (workspaceId !== void 0 || "workspaceId" in patch) next.workspaceId = workspaceId;
@@ -2132,7 +2130,6 @@ window.__ModuleLoader__.load({
 			mirrorOf(snapshot) {
 				const sessionDefaultPermission = snapshot.sessionDefaultPermission ?? this.hostState?.sessionDefaultPermission;
 				const maxSubtaskDepth = snapshot.maxSubtaskDepth ?? this.hostState?.maxSubtaskDepth;
-				const teamRunAvailable = snapshot.teamRunAvailable ?? this.hostState?.teamRunAvailable;
 				const goalRunEnabled = snapshot.goalRunEnabled ?? this.hostState?.goalRunEnabled;
 				const cardDefaults = snapshot.cardDefaults;
 				const extensions = snapshot.extensions ?? this.hostState?.extensions;
@@ -2142,7 +2139,6 @@ window.__ModuleLoader__.load({
 					power: snapshot.power,
 					...sessionDefaultPermission === void 0 ? {} : { sessionDefaultPermission },
 					...maxSubtaskDepth === void 0 ? {} : { maxSubtaskDepth },
-					...teamRunAvailable === void 0 ? {} : { teamRunAvailable },
 					...goalRunEnabled === void 0 ? {} : { goalRunEnabled },
 					...cardDefaults === void 0 ? {} : { cardDefaults },
 					...extensions === void 0 ? {} : { extensions }
@@ -3681,13 +3677,7 @@ window.__ModuleLoader__.load({
 			"exec.reasoning.hint.unknownModel": "无法从当前名册确认该模型的可选档位；已保存的值原样保留。",
 			"exec.reasoning.hint.noEfforts": "该模型没有可选的思考档位，始终沿用模型/宿主的默认值。",
 			"exec.reasoning.hint.inherit": "留空即沿用该模型/宿主的默认档位。",
-			"exec.teamRunAutoHint": "创建或关联子任务成功后，父任务会自动开启 Agent Team 执行（可随时手动关闭）。",
 			"exec.reuseSession": "在同一对话继续",
-			"exec.teamRun": "用 Agent Team 执行（Leader/teammate）",
-			"exec.teamRunHint": "开启后：执行本任务只启动一个 Leader 会话，每个子任务由它派生为 teammate 并在该会话内并行工作（子任务自身的权限钉住不适用）。关闭则每个成员各开独立会话。",
-			"exec.teamRunUnavailable": "当前部署未提供 Agent Teams 服务，无法启用。",
-			"exec.teamRunHint.short": "一个 Leader 会话派生全部子任务",
-			"exec.teamRunUnavailable.short": "当前部署未提供 Agent Teams",
 			"exec.reuseSessionHint": "开启后，本任务的后续执行在上一次会话里继续（该会话空闲且仍存在时），不再每次新建对话；每次复用时都会重新应用上面钉住的权限与模型。",
 			"exec.reuseSessionHint.short": "后续执行复用上一次的空闲会话",
 			"exec.goalRun": "以 dsh 内置的 /goal 开始执行任务",
@@ -3703,7 +3693,6 @@ window.__ModuleLoader__.load({
 			"detail.settings.summary.reuseSession": "同一对话继续",
 			"detail.settings.summary.goal": "/goal 执行",
 			"detail.settings.summary.skipVerification": "跳过验收",
-			"detail.settings.summary.teamRun": "Team 执行",
 			"exec.hint": "执行时生效：工作区决定执行会话落在哪个工作区；Agent 预设决定会话的组合（工具面与提示词段）；权限经 /permission 命令应用到会话。留空则继承部署默认。",
 			"exec.hint.short": "留空继承部署默认，执行时生效",
 			"settings.title": "任务看板",
@@ -3747,12 +3736,12 @@ window.__ModuleLoader__.load({
 			"settings.sessionPollSecondsHint": "默认 5 秒。仅在看板有需要核对的事情——运行中的卡片或未结算的执行——时才读取会话名册；两者都没有时不再轮询，Host 不会持续扫描持久化会话目录。取值 1–300 秒：间隔越短结算越快、Host 负载越高。",
 			"settings.sessionPollSecondsHintBrief": "默认 5 秒，可设 1 到 300：间隔越短结算越快，Host 负载越高。",
 			"settings.maxSubtaskDepth": "子任务深度上限",
-			"settings.maxSubtaskDepthHint": "默认 1：一个任务只允许一层子任务，子任务不能再创建或关联子任务。最大 3。执行父任务会并发执行它的整棵子任务树，层级越深，一次执行开启的会话越多。",
-			"settings.maxSubtaskDepthHintBrief": "默认 1 层，最多 3：层级越深，一次执行开启的会话越多。",
+			"settings.maxSubtaskDepthHint": "默认 1：一个任务只允许一层子任务，子任务不能再创建或关联子任务。最大 3。它只决定一张卡下面能挂多深的子任务：执行一张卡始终只开它自己的一个会话，子任务由它自己按依赖顺序派发，所以层级深浅不改变一次执行开几个会话。",
+			"settings.maxSubtaskDepthHintBrief": "默认 1 层，最多 3：只限制子任务能挂多深，不改变一次执行开几个会话。",
 			"settings.maxSubtaskDepthOption": "{depth} 层",
 			"settings.runLaunchWidth": "并发启动上限",
-			"settings.runLaunchWidthHint": "默认 3。一次执行会开启整棵子任务树，但同一刻最多只有这么多个成员在创建会话并入队 Prompt，其余成员排队等待——全部都会启动，只是分批进入运行列。默认值取自本仓「重型实施子代理并发 ≤ 3」的实测纪律。取值 1–16：越大启动越快，Host 的内存与 swap 压力越高。执行中修改只影响尚未入列的启动。",
-			"settings.runLaunchWidthHintBrief": "默认 3，可设 1 到 16：同一刻最多这么多个成员创建会话，其余排队。",
+			"settings.runLaunchWidthHint": "默认 3。多张卡片同时要执行时（手动执行、重新执行与到点定时一样），同一刻最多有这么多个执行被准入、创建会话并入队 Prompt，其余排队等待；每张卡的一次执行只开它自己一个会话，所以这个值不改变单卡的执行形态。默认值取自本仓「重型实施子代理并发 ≤ 3」的实测纪律。取值 1–16：越大启动越快，Host 的内存与 swap 压力越高。执行中修改只影响尚未入列的启动。",
+			"settings.runLaunchWidthHintBrief": "默认 3，可设 1 到 16：多张卡同时要执行时，同一刻最多这么多个开始建会话，其余排队；单卡执行仍只开一个会话。",
 			"settings.spendBudgetTokens": "每日 token 上限",
 			"settings.spendBudgetTokensHint": "默认 0，表示不设闸，行为与没有这项设置时完全一致（不读账本、不计数）。设为正整数后，今日已用 token 达到该值时：手动执行与重新执行被拒绝，调用方看到的拒绝文本就是原因；到点的定时执行把原因写进调度错误并跳过本次触发，不消耗计划次数，因此调高上限或跨过本地零点后下一次触发照常执行。计量单位是 token 而不是金额：使用账本只对 DeepSeek 官方路由计价，其他路由恒为 0。今日已用取自该账本按本地日期分桶的输入、缓存读写与输出之和，与「使用统计」面板的口径一致。",
 			"settings.spendBudgetTokensHintBrief": "默认 0 不设闸。设成正值后今日用量到顶，手动执行被拒绝，定时触发跳过。",
@@ -3871,8 +3860,8 @@ window.__ModuleLoader__.load({
 			"detail.subtasks.link": "关联现有任务",
 			"detail.subtasks.detach": "解除关联",
 			"detail.subtasks.runningLock": "子任务正在执行，结算后才能解除关联或改挂父任务",
-			"detail.subtasks.runHint": "执行本任务会同时并发执行它 {count} 个未完成的子任务；已在完成列的子任务不会重复执行，子任务失败不影响其它子任务继续执行。",
-			"detail.subtasks.runHintSettled": "这个任务的子任务都已在完成列；执行本任务不会重复执行它们，要让某个子任务再跑一次，把它移回待办列或单独执行它。",
+			"detail.subtasks.runHint": "执行本卡只会开本卡一个会话：它自己读取下面 {count} 个还没做完的子任务，按依赖顺序派发，完工后把子卡结论回填。还有未完成子任务时，执行会用梁神模式（liangshen）；预设缺失会直接拒绝执行。",
+			"detail.subtasks.runHintSettled": "子任务都已做完，本次执行只会开本卡一个会话，不会再跑它们；想让哪张子卡再跑一次，把它移回待办列或单独执行。",
 			"detail.subtasks.waiting": "等待子任务结算",
 			"detail.subtasks.depthLimit": "当前子任务深度上限为 {depth} 层，子任务不能再创建或关联子任务。",
 			"detail.subtasks.hostOnly": "连接 Host 后才能创建或关联子任务。",
@@ -4166,13 +4155,7 @@ window.__ModuleLoader__.load({
 			"exec.reasoning.hint.unknownModel": "The current roster cannot confirm this model's effort levels; the stored value is kept as it is.",
 			"exec.reasoning.hint.noEfforts": "This model offers no selectable reasoning effort, so the model or Host default always applies.",
 			"exec.reasoning.hint.inherit": "Leave it empty to follow the model or Host default.",
-			"exec.teamRunAutoHint": "Once a subtask is created or linked, the parent task turns on Agent Team execution automatically (you can switch it off at any time).",
 			"exec.reuseSession": "Continue in the same conversation",
-			"exec.teamRun": "Run with an Agent Team (Lead + teammates)",
-			"exec.teamRunHint": "On: running this task starts one Lead session and spawns a teammate per subtask inside it, working in parallel (a subtask permission pin does not apply). Off: every member gets its own independent session.",
-			"exec.teamRunUnavailable": "This deployment serves no Agent Teams service, so team runs cannot be enabled.",
-			"exec.teamRunHint.short": "One Lead session spawns every subtask",
-			"exec.teamRunUnavailable.short": "This deployment serves no Agent Teams",
 			"exec.reuseSessionHint": "When on, later runs continue in the previous session (when that session is idle and still exists) instead of starting a new conversation each time; the pinned permission and model above are re-applied on every reuse.",
 			"exec.reuseSessionHint.short": "Later runs reuse the previous idle session",
 			"exec.goalRun": "Start the run with dsh's built-in /goal",
@@ -4188,7 +4171,6 @@ window.__ModuleLoader__.load({
 			"detail.settings.summary.reuseSession": "Same conversation",
 			"detail.settings.summary.goal": "/goal run",
 			"detail.settings.summary.skipVerification": "Acceptance skipped",
-			"detail.settings.summary.teamRun": "Team run",
 			"exec.hint": "Applied when the task runs: the workspace decides where the execution session lands; the agent preset composes the session (tool face and prompt sections); the permission is applied through the /permission command. Blank inherits the deployment default.",
 			"exec.hint.short": "Blank inherits the deployment default; applied at run time",
 			"settings.title": "Task Board",
@@ -4232,12 +4214,12 @@ window.__ModuleLoader__.load({
 			"settings.sessionPollSecondsHint": "Default 5. The Host reads the DSH session roster only while the board has something to reconcile: a running card or an open execution. With neither it stops polling and never re-scans the persisted session directory. Range 1 to 300 seconds: a shorter interval settles runs sooner and costs the Host more.",
 			"settings.sessionPollSecondsHintBrief": "Default 5 seconds, range 1 to 300: a shorter interval settles runs sooner and costs the Host more.",
 			"settings.maxSubtaskDepth": "Subtask depth limit",
-			"settings.maxSubtaskDepthHint": "Default 1: a task may carry one level of subtasks, and a subtask cannot create or link further subtasks. Maximum 3. Running a task also runs its whole subtask tree concurrently, and every extra level opens more sessions per run.",
-			"settings.maxSubtaskDepthHintBrief": "Default 1, maximum 3: every extra level opens more sessions per run.",
+			"settings.maxSubtaskDepthHint": "Default 1: a task may carry one level of subtasks, and a subtask cannot create or link further subtasks. Maximum 3. The limit only decides how deep the tree under one card can go: a run still opens that card's own single session and dispatches its subtasks itself, so the depth never changes how many sessions a run opens.",
+			"settings.maxSubtaskDepthHintBrief": "Default 1, maximum 3: it caps only how deep subtasks can go, not how many sessions a run opens.",
 			"settings.maxSubtaskDepthOption": "{depth} levels",
 			"settings.runLaunchWidth": "Concurrent run launches",
-			"settings.runLaunchWidthHint": "Default 3. A run opens its whole subtree, but only this many members create their session and queue their prompt at the same time; the rest wait their turn. Every member still starts, entering the running column in batches. The default comes from this repository's measured guidance for heavy implementation subagents (at most three). Range 1 to 16: a larger width starts runs sooner and costs the Host more memory and swap. Edited during a run, it bounds the launches that have not been admitted yet.",
-			"settings.runLaunchWidthHintBrief": "Default 3, range 1 to 16: this many members start at once and the rest wait their turn.",
+			"settings.runLaunchWidthHint": "Default 3. When several cards want to run at the same time, a manual run, a re-run and a due schedule alike, only this many runs are admitted at once: each creates its session and queues its prompt, and the rest wait their turn. Running one card always opens just that card's own session, so this value never changes the shape of a single-card run. The default comes from this repository's measured guidance for heavy implementation subagents (at most three). Range 1 to 16: a larger width starts runs sooner and costs the Host more memory and swap. Edited during a run, it bounds the launches that have not been admitted yet.",
+			"settings.runLaunchWidthHintBrief": "Default 3, range 1 to 16: when several cards want to run, this many are admitted at once and the rest wait; a single card still opens one session.",
 			"settings.spendBudgetTokens": "Daily token cap",
 			"settings.spendBudgetTokensHint": "Default 0 means no gate: behavior is exactly what it was before this setting existed, with no ledger read and no counting. With a positive cap, once today's measured spend reaches it a manual run or re-run is refused and the caller sees that message as the refusal, while a due schedule writes the reason to the scheduler error and skips that occurrence without spending a planned run — raising the cap, or the local day rolling over, lets the next trigger run as usual. The unit is tokens rather than money: the usage ledger prices only DeepSeek's own routes and stays 0 on every other route. Today's spend is that ledger's local-date bucket summed over input, cache read/write and output, the same measure the usage panel shows.",
 			"settings.spendBudgetTokensHintBrief": "Default 0 gates nothing. Past a positive cap, manual runs are refused and due schedules skip.",
@@ -4356,8 +4338,8 @@ window.__ModuleLoader__.load({
 			"detail.subtasks.link": "Link existing task",
 			"detail.subtasks.detach": "Detach",
 			"detail.subtasks.runningLock": "This subtask is running; it can be detached or re-linked once it settles",
-			"detail.subtasks.runHint": "Running this task also runs its {count} unfinished subtasks concurrently; a subtask already in the done column is not run again, and one subtask failing does not stop the others.",
-			"detail.subtasks.runHintSettled": "Every subtask of this task is already in the done column; running this task does not repeat them. To run one again, move it back to the todo column or run it on its own.",
+			"detail.subtasks.runHint": "Running this card opens one session, this card's own: it reads the {count} unfinished subtasks below, dispatches them in dependency order, and writes each subtask conclusion back once they finish. While any subtask is still unfinished, the run uses the liangshen preset; if that preset is missing, the run is refused outright.",
+			"detail.subtasks.runHintSettled": "Every subtask already sits in the done column, so this run opens only this card's own session and leaves them alone. To run one again, move it back to the todo column or run it on its own.",
 			"detail.subtasks.waiting": "Waiting for subtasks",
 			"detail.subtasks.depthLimit": "The subtask depth limit is {depth}; a subtask cannot create or link further subtasks.",
 			"detail.subtasks.hostOnly": "Connect to the Host to create or link subtasks.",
@@ -8509,29 +8491,6 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 			})] });
 		}
 		//#endregion
-		//#region src/client/board/team-run-promotion.ts
-		/**
-		* Whether a join would promote this parent: the deployment serves Agent Teams
-		* and the parent has not opted in yet.
-		* @param controller - the board controller (the snapshot carries both facts).
-		* @param parent - the task that gained a subtask, if there is one.
-		*/
-		function parentAwaitsTeamRunPromotion(controller, parent) {
-			if (parent === void 0) return false;
-			const snapshot = controller.getSnapshot();
-			if (snapshot.host?.teamRunAvailable !== true) return false;
-			return (snapshot.tasks.find((task) => task.id === parent.id) ?? parent).teamRun !== true;
-		}
-		/**
-		* Opt the parent in after the Host confirmed the join.
-		* @returns true when the opt-in was written; false when it did not apply.
-		*/
-		async function promoteParentForTeamRun(controller, parent) {
-			if (parent === void 0) return false;
-			if (!parentAwaitsTeamRunPromotion(controller, parent)) return false;
-			return await controller.updateTask(parent.id, { teamRun: true });
-		}
-		//#endregion
 		//#region src/client/board/NewTaskModal.tsx
 		/**
 		* New-task modal: title + description + the prompt that execution will send.
@@ -8707,7 +8666,6 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 					setError(controller.getSnapshot().transportError ?? t("new.required"));
 					return;
 				}
-				await promoteParentForTeamRun(controller, parentTask);
 				if (isDuplicate && archiveOriginal && initialTask !== void 0) if (onDuplicateSuccess !== void 0) await onDuplicateSuccess(initialTask.id);
 				else await controller.archiveTask(initialTask.id);
 				if (runAfterCreate) {
@@ -8825,7 +8783,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 							]
 						})
 					}),
-					parentTask !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("p", {
+					parentTask !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(react_jsx_runtime.Fragment, { children: /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("p", {
 						className: board_module_css_default.detailText,
 						"data-dsh-part": "subtask-inherit",
 						children: [
@@ -8835,10 +8793,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 							" · ",
 							t("new.subtaskInherit")
 						]
-					}), parentAwaitsTeamRunPromotion(controller, parentTask) && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
-						className: board_module_css_default.detailText,
-						children: t("exec.teamRunAutoHint")
-					})] }),
+					}) }),
 					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)(CollapsibleSection, {
 						title: t("new.section.content"),
 						defaultOpen: true,
@@ -9653,7 +9608,6 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 				setPending(true);
 				setError(void 0);
 				if (await controller.setParent(taskId, parent.id)) {
-					await promoteParentForTeamRun(controller, parent);
 					onClose();
 					return;
 				}
@@ -9679,10 +9633,6 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
 							className: board_module_css_default.fieldHint,
 							children: t("link.subtask.hint")
-						}),
-						parentAwaitsTeamRunPromotion(controller, parent) && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
-							className: board_module_css_default.fieldHint,
-							children: t("exec.teamRunAutoHint")
 						}),
 						candidates.length === 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
 							className: board_module_css_default.detailText,
@@ -10393,7 +10343,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 			});
 		}
 		/** The execution-target editor: workspace / mode / permission pickers. */
-		function ExecutionSettingsSection({ controller, task, pending, executionOptions, teamRunAvailable, goalRunEnabled }) {
+		function ExecutionSettingsSection({ controller, task, pending, executionOptions, goalRunEnabled }) {
 			const options = executionOptions;
 			const models = options.models ?? [];
 			const workspaceId = task.workspaceId ?? "";
@@ -10408,7 +10358,6 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 			if (task.reuseSession === true) advancedOn.push(t("detail.settings.summary.reuseSession"));
 			if (task.goalRun === true) advancedOn.push(t("detail.settings.summary.goal"));
 			if (task.skipVerification === true) advancedOn.push(t("detail.settings.summary.skipVerification"));
-			if (task.teamRun === true && teamRunAvailable) advancedOn.push(t("detail.settings.summary.teamRun"));
 			const advancedSummary = advancedOn.length === 0 ? t("detail.settings.summary.none") : advancedOn.join(" · ");
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("section", {
 				className: board_module_css_default.detailSection,
@@ -10599,22 +10548,6 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
 								className: board_module_css_default.detailMeta,
 								children: t("exec.skipVerificationHint.short")
-							}),
-							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("label", {
-								className: board_module_css_default.scheduleToggle,
-								title: teamRunAvailable ? t("exec.teamRunHint") : t("exec.teamRunUnavailable"),
-								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
-									type: "checkbox",
-									checked: task.teamRun === true,
-									disabled: pending || !teamRunAvailable,
-									onChange: (event) => {
-										controller.updateTask(task.id, { teamRun: event.target.checked });
-									}
-								}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: t("exec.teamRun") })]
-							}),
-							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
-								className: board_module_css_default.detailMeta,
-								children: teamRunAvailable ? t("exec.teamRunHint.short") : t("exec.teamRunUnavailable.short")
 							})
 						]
 					})
@@ -11014,13 +10947,16 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 			});
 		}
 		/**
-		* The run hint of one card: how many subtasks a run opens, counting the same
-		* members the Host will launch (`joinsCascadeRun` leaves a finished subtask
-		* alone), or why it opens none even though the card has subtasks.
+		* The read-only note under the subtask list. A card with unfinished descendants
+		* runs as ONE session — that card's own — which reads the subtasks and hands
+		* them off in dependency order, so the note states what the run does instead of
+		* promising a session per member. It counts the same members the run hands off
+		* (`joinsCascadeRun` leaves a finished subtask alone, and an archived card never
+		* runs at all), and stays a sentence: nothing here is a card field.
 		*/
-		function subtaskRunHint(parentId, children) {
-			const runnable = children.filter((child) => joinsCascadeRun(child, parentId));
-			return runnable.length > 0 ? t("detail.subtasks.runHint", { count: String(runnable.length) }) : t("detail.subtasks.runHintSettled");
+		function subtaskDispatchNote(task, tasks, maxSubtaskDepth) {
+			const pending = descendantTasks(tasks, task.id, maxSubtaskDepth).filter((descendant) => descendant.archivedAt === void 0 && joinsCascadeRun(descendant, task.id));
+			return pending.length > 0 ? t("detail.subtasks.runHint", { count: String(pending.length) }) : t("detail.subtasks.runHintSettled");
 		}
 		/**
 		* The subtask block: the parent link, the direct subtasks with their status,
@@ -11096,7 +11032,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 					}),
 					children.length > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
 						className: board_module_css_default.detailText,
-						children: subtaskRunHint(task.id, children)
+						children: subtaskDispatchNote(task, tasks, limit)
 					}),
 					!archived && (canAddChild ? controller.isHostBacked() ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 						className: board_module_css_default.subtaskAddRow,
@@ -11169,6 +11105,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 			const timeZone = snapshot.host?.scheduler.timeZone;
 			const permissionPending = requiresPermissionConfirmation(current, snapshot.host?.sessionDefaultPermission);
 			const subtaskChildren = directSubtasks(snapshot.tasks, current.id);
+			const subtaskDepthLimit = snapshot.host?.maxSubtaskDepth ?? 1;
 			const dialog = useDialog(() => {
 				controller.closeTask();
 			}, phase);
@@ -11416,7 +11353,6 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 													task: current,
 													pending,
 													executionOptions: snapshot.executionOptions,
-													teamRunAvailable: snapshot.host?.teamRunAvailable === true,
 													goalRunEnabled: snapshot.host?.goalRunEnabled === true
 												}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ScheduleSection, {
 													controller,
@@ -11485,7 +11421,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 										type: "button",
 										className: board_module_css_default.primaryButton,
 										disabled: busy || pending,
-										title: subtaskChildren.length > 0 ? subtaskRunHint(current.id, subtaskChildren) : void 0,
+										title: subtaskChildren.length > 0 ? subtaskDispatchNote(current, snapshot.tasks, subtaskDepthLimit) : void 0,
 										onClick: () => {
 											controller.rerunTask(current.id).then(() => {
 												if (controller.getSnapshot().transportError === void 0) controller.closeTask();
@@ -12473,7 +12409,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 		}
 		//#endregion
 		//#region \0dsh-css:packages/dsh-task-board/src/client/settings-card.module.css.mjs
-		const css$1 = ".Jh0q7G_card{--settings-card-radius:12px;--settings-card-header-pad:16px;--settings-card-header-gap:13px;--settings-card-title-size:15px;--settings-card-description-size:13px;--settings-card-body-inset:16px;--settings-card-motion:.18s;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:var(--settings-card-radius);list-style:none;transition:border-color .16s,background .16s}.Jh0q7G_card:hover{border-color:var(--dsw-alias-label-dimmed)}.Jh0q7G_cardOpen{background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-label-dimmed)}.Jh0q7G_cardNested{--settings-card-radius:10px;--settings-card-header-pad:10px 12px;--settings-card-header-gap:10px;--settings-card-title-size:13px;--settings-card-description-size:12px;--settings-card-body-inset:12px}.Jh0q7G_cardNested .Jh0q7G_description{white-space:nowrap;text-overflow:ellipsis;overflow:hidden}.Jh0q7G_header{appearance:none;box-sizing:border-box;width:100%;font:inherit;color:inherit;text-align:left;cursor:pointer;border-radius:var(--settings-card-radius);align-items:center;gap:var(--settings-card-header-gap);padding:var(--settings-card-header-pad);background:0 0;border:0;display:flex}.Jh0q7G_header:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}.Jh0q7G_headerStatic{box-sizing:border-box;border-radius:var(--settings-card-radius);align-items:center;gap:var(--settings-card-header-gap);width:100%;padding:var(--settings-card-header-pad);display:flex}.Jh0q7G_headText{flex-direction:column;flex:1;gap:4px;min-width:0;display:flex}.Jh0q7G_mark{background:var(--dsw-alias-bg-module-platform);width:34px;height:34px;color:var(--dsw-alias-label-secondary);border-radius:10px;flex:none;place-items:center;transition:color .16s;display:grid}.Jh0q7G_header:hover .Jh0q7G_mark,.Jh0q7G_cardOpen .Jh0q7G_mark{color:var(--dsw-alias-label-primary)}.Jh0q7G_name{color:var(--dsw-alias-label-primary);font-size:var(--settings-card-title-size);font-weight:600;line-height:1.4}.Jh0q7G_description{color:var(--dsw-alias-label-secondary);font-size:var(--settings-card-description-size);line-height:1.5}.Jh0q7G_pending{white-space:nowrap;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);border-radius:999px;flex:none;padding:1px 8px;font-size:11px;font-weight:500;line-height:17px}.Jh0q7G_headerAction{flex:none;align-items:center;display:inline-flex}.Jh0q7G_chevron{color:var(--dsw-alias-label-tertiary);flex:none;width:16px;height:16px;transition:transform .16s,color .16s}.Jh0q7G_header:hover .Jh0q7G_chevron{color:var(--dsw-alias-label-secondary)}.Jh0q7G_chevronOpen{transform:rotate(180deg)}.Jh0q7G_disclosure{opacity:0;transition:grid-template-rows var(--settings-card-motion) ease, opacity var(--settings-card-motion) ease;grid-template-rows:0fr;display:grid}.Jh0q7G_disclosure[data-state=collapsed],.Jh0q7G_disclosure[data-state=entering],.Jh0q7G_disclosure[data-state=closing]{overflow:hidden}.Jh0q7G_disclosure[data-state=entering],.Jh0q7G_disclosure[data-state=shown]{opacity:1;grid-template-rows:1fr}.Jh0q7G_disclosure>.Jh0q7G_body{min-height:0}.Jh0q7G_body{border-top:1px solid var(--dsw-alias-border-l2);margin:0 var(--settings-card-body-inset);padding-bottom:8px}.Jh0q7G_readOnly{color:var(--dsw-alias-label-secondary);margin:12px 0 0;font-size:12px;line-height:1.5}.Jh0q7G_notExposed{color:var(--dsw-alias-state-warn-primary);margin:12px 0 0;font-size:12px;line-height:1.5}.Jh0q7G_footer{border-top:1px solid var(--dsw-alias-border-l2);justify-content:flex-end;align-items:center;gap:8px;padding:12px 0 4px;display:flex}.Jh0q7G_failed{min-width:0;color:var(--dsw-alias-state-error-primary,#b42318);text-overflow:ellipsis;white-space:nowrap;flex:1;margin:0;font-size:12px;line-height:1.5;overflow:hidden}.Jh0q7G_discard,.Jh0q7G_save{appearance:none;font:inherit;cursor:pointer;border:1px solid #0000;border-radius:8px;padding:5px 14px;font-size:13px;line-height:1.5}.Jh0q7G_discard{border-color:var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);background:0 0}.Jh0q7G_discard:hover:not(:disabled){color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-label-dimmed)}.Jh0q7G_save{background:var(--dsw-alias-label-primary);color:var(--dsw-alias-bg-layer-3)}.Jh0q7G_discard:disabled,.Jh0q7G_save:disabled{opacity:.4;cursor:default}.Jh0q7G_discard:focus-visible,.Jh0q7G_save:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}.Jh0q7G_field{flex-direction:column;gap:6px;padding:12px 0;display:flex}.Jh0q7G_field+.Jh0q7G_field{border-top:1px solid var(--dsw-alias-border-l2)}.Jh0q7G_head{align-items:center;gap:8px;display:flex}.Jh0q7G_label{min-width:0;color:var(--dsw-alias-label-primary);flex:1;font-size:13px;font-weight:500;line-height:1.5}.Jh0q7G_badges{align-items:center;gap:8px;display:inline-flex}.Jh0q7G_badge{white-space:nowrap;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);border-radius:999px;padding:1px 8px;font-size:11px;font-weight:500;line-height:17px}.Jh0q7G_reset{font:inherit;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:none;padding:0;font-size:12px;line-height:1.5}.Jh0q7G_reset:hover:not(:disabled){color:var(--dsw-alias-label-primary)}.Jh0q7G_reset:disabled{cursor:default}.Jh0q7G_reset:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px;outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}.Jh0q7G_input,.Jh0q7G_select{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);height:34px;font:inherit;color:var(--dsw-alias-label-primary);border-radius:8px;padding:0 12px;font-size:13px;line-height:1.5}.Jh0q7G_input:focus-visible,.Jh0q7G_select:focus-visible{border-color:var(--dsw-alias-brand-primary);outline:none}.Jh0q7G_input:disabled,.Jh0q7G_select:disabled{color:var(--dsw-alias-label-tertiary);cursor:default}.Jh0q7G_inputInvalid{border:1px solid var(--dsw-alias-state-error-primary,#b42318);background:var(--dsw-alias-bg-layer-3);height:34px;font:inherit;color:var(--dsw-alias-label-primary);border-radius:8px;padding:0 12px;font-size:13px;line-height:1.5}.Jh0q7G_inputInvalid:focus-visible{outline:2px solid var(--dsw-alias-state-error-primary,#b42318);outline-offset:1px;border-color:var(--dsw-alias-state-error-primary,#b42318)}.Jh0q7G_selectWrap{position:relative}.Jh0q7G_selectButton{appearance:none;text-align:left;cursor:pointer;justify-content:space-between;align-items:center;gap:8px;width:100%;display:flex}.Jh0q7G_selectLabel{text-overflow:ellipsis;white-space:nowrap;min-width:0;overflow:hidden}.Jh0q7G_selectChevron{color:var(--dsw-alias-label-tertiary);flex:none;transition:transform .16s}.Jh0q7G_selectChevronOpen{transform:rotate(180deg)}.Jh0q7G_selectPopup{z-index:40;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);max-height:240px;box-shadow:0 8px 24px var(--dsw-alias-bg-mask-2);opacity:0;border-radius:8px;flex-direction:column;padding:4px;transition:opacity .1s,transform .1s;display:flex;position:absolute;top:calc(100% + 4px);left:0;right:0;overflow-y:auto;transform:translateY(-4px)}.Jh0q7G_selectPopupOpen{opacity:1;transform:none}.Jh0q7G_selectPopupClose{opacity:0;pointer-events:none;transform:translateY(-4px)}.Jh0q7G_selectOption{color:var(--dsw-alias-label-primary);cursor:pointer;white-space:nowrap;text-overflow:ellipsis;border-radius:6px;flex-shrink:0;padding:6px 10px;font-size:13px;line-height:1.5;overflow:hidden}.Jh0q7G_selectOption:hover,.Jh0q7G_selectOptionActive{background:var(--dsw-alias-interactive-bg-hover)}.Jh0q7G_selectOptionSelected{color:var(--dsw-alias-brand-primary);background:color-mix(in srgb, var(--dsw-alias-brand-primary-new-colorprimary-new-color) 10%, transparent);font-weight:500}.Jh0q7G_invalid{color:var(--dsw-alias-state-error-primary,#b42318);margin:0;font-size:12px;line-height:1.5}.Jh0q7G_hint{color:var(--dsw-alias-label-secondary);margin:0;font-size:12px;line-height:1.5}.Jh0q7G_toggle{appearance:none;cursor:pointer;font:inherit;background:0 0;border:0;border-radius:999px;align-items:center;margin:0;padding:0;display:inline-flex}.Jh0q7G_toggleTrack{background:var(--dsw-alias-label-dimmed);border-radius:999px;flex:none;width:30px;height:16px;transition:background .18s;position:relative}.Jh0q7G_toggleThumb{background:var(--dsw-alias-bg-layer-3);border-radius:50%;width:12px;height:12px;transition:left .18s;position:absolute;top:2px;left:2px}.Jh0q7G_toggle[aria-checked=true] .Jh0q7G_toggleTrack{background:var(--dsw-alias-button-primary-fill,var(--dsw-alias-label-primary))}.Jh0q7G_toggle[aria-checked=true] .Jh0q7G_toggleThumb{background:var(--dsw-alias-label-primary-foreground,var(--dsw-alias-bg-layer-3));left:16px}.Jh0q7G_toggle:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}.Jh0q7G_toggle:disabled{opacity:.45;cursor:default}@media (prefers-reduced-motion:reduce){.Jh0q7G_card,.Jh0q7G_header,.Jh0q7G_mark,.Jh0q7G_chevron,.Jh0q7G_chevronOpen,.Jh0q7G_discard,.Jh0q7G_save,.Jh0q7G_selectChevron,.Jh0q7G_selectChevronOpen,.Jh0q7G_selectPopup,.Jh0q7G_toggleTrack,.Jh0q7G_toggleThumb{transition:none}.Jh0q7G_disclosure{transition-property:opacity}}";
+		const css$1 = ".Jh0q7G_card{--settings-card-radius:12px;--settings-card-header-pad:16px;--settings-card-header-gap:13px;--settings-card-title-size:15px;--settings-card-description-size:13px;--settings-card-body-inset:16px;--settings-card-motion:.18s;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:var(--settings-card-radius);list-style:none;transition:border-color .16s,background .16s}.Jh0q7G_card:hover{border-color:var(--dsw-alias-label-dimmed)}.Jh0q7G_cardOpen{background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-label-dimmed)}.Jh0q7G_cardNested{--settings-card-radius:10px;--settings-card-header-pad:10px 12px;--settings-card-header-gap:10px;--settings-card-title-size:13px;--settings-card-description-size:12px;--settings-card-body-inset:12px}.Jh0q7G_cardNested .Jh0q7G_description{white-space:nowrap;text-overflow:ellipsis;overflow:hidden}.Jh0q7G_header{appearance:none;box-sizing:border-box;width:100%;font:inherit;color:inherit;text-align:left;cursor:pointer;border-radius:var(--settings-card-radius);align-items:center;gap:var(--settings-card-header-gap);padding:var(--settings-card-header-pad);background:0 0;border:0;display:flex}.Jh0q7G_header:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}.Jh0q7G_headerStatic{box-sizing:border-box;border-radius:var(--settings-card-radius);align-items:center;gap:var(--settings-card-header-gap);width:100%;padding:var(--settings-card-header-pad);display:flex}.Jh0q7G_headText{flex-direction:column;flex:1;gap:4px;min-width:0;display:flex}.Jh0q7G_mark{background:var(--dsw-alias-bg-module-platform);width:34px;height:34px;color:var(--dsw-alias-label-secondary);border-radius:10px;flex:none;place-items:center;transition:color .16s;display:grid}.Jh0q7G_header:hover .Jh0q7G_mark,.Jh0q7G_cardOpen .Jh0q7G_mark{color:var(--dsw-alias-label-primary)}.Jh0q7G_name{color:var(--dsw-alias-label-primary);font-size:var(--settings-card-title-size);font-weight:600;line-height:1.4}.Jh0q7G_description{color:var(--dsw-alias-label-secondary);font-size:var(--settings-card-description-size);line-height:1.5}.Jh0q7G_pending{white-space:nowrap;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);border-radius:999px;flex:none;padding:1px 8px;font-size:11px;font-weight:500;line-height:17px}.Jh0q7G_headerAction{flex:none;align-items:center;display:inline-flex}.Jh0q7G_chevron{color:var(--dsw-alias-label-tertiary);flex:none;width:16px;height:16px;transition:transform .16s,color .16s}.Jh0q7G_header:hover .Jh0q7G_chevron{color:var(--dsw-alias-label-secondary)}.Jh0q7G_chevronOpen{transform:rotate(180deg)}.Jh0q7G_disclosure{opacity:0;transition:grid-template-rows var(--settings-card-motion) ease, opacity var(--settings-card-motion) ease;grid-template-rows:0fr;display:grid}.Jh0q7G_disclosure[data-state=collapsed],.Jh0q7G_disclosure[data-state=entering],.Jh0q7G_disclosure[data-state=closing]{overflow:hidden}.Jh0q7G_disclosure[data-state=entering],.Jh0q7G_disclosure[data-state=shown]{opacity:1;grid-template-rows:1fr}.Jh0q7G_disclosure>.Jh0q7G_body{min-width:0;min-height:0}.Jh0q7G_body{border-top:1px solid var(--dsw-alias-border-l2);margin:0 var(--settings-card-body-inset);padding-bottom:8px}.Jh0q7G_readOnly{color:var(--dsw-alias-label-secondary);margin:12px 0 0;font-size:12px;line-height:1.5}.Jh0q7G_notExposed{color:var(--dsw-alias-state-warn-primary);margin:12px 0 0;font-size:12px;line-height:1.5}.Jh0q7G_footer{border-top:1px solid var(--dsw-alias-border-l2);justify-content:flex-end;align-items:center;gap:8px;padding:12px 0 4px;display:flex}.Jh0q7G_failed{min-width:0;color:var(--dsw-alias-state-error-primary,#b42318);text-overflow:ellipsis;white-space:nowrap;flex:1;margin:0;font-size:12px;line-height:1.5;overflow:hidden}.Jh0q7G_discard,.Jh0q7G_save{appearance:none;font:inherit;cursor:pointer;border:1px solid #0000;border-radius:8px;padding:5px 14px;font-size:13px;line-height:1.5}.Jh0q7G_discard{border-color:var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);background:0 0}.Jh0q7G_discard:hover:not(:disabled){color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-label-dimmed)}.Jh0q7G_save{background:var(--dsw-alias-label-primary);color:var(--dsw-alias-bg-layer-3)}.Jh0q7G_discard:disabled,.Jh0q7G_save:disabled{opacity:.4;cursor:default}.Jh0q7G_discard:focus-visible,.Jh0q7G_save:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}.Jh0q7G_field{flex-direction:column;gap:6px;padding:12px 0;display:flex}.Jh0q7G_field+.Jh0q7G_field{border-top:1px solid var(--dsw-alias-border-l2)}.Jh0q7G_head{align-items:center;gap:8px;display:flex}.Jh0q7G_label{min-width:0;color:var(--dsw-alias-label-primary);flex:1;font-size:13px;font-weight:500;line-height:1.5}.Jh0q7G_badges{align-items:center;gap:8px;display:inline-flex}.Jh0q7G_badge{white-space:nowrap;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);border-radius:999px;padding:1px 8px;font-size:11px;font-weight:500;line-height:17px}.Jh0q7G_reset{font:inherit;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:none;padding:0;font-size:12px;line-height:1.5}.Jh0q7G_reset:hover:not(:disabled){color:var(--dsw-alias-label-primary)}.Jh0q7G_reset:disabled{cursor:default}.Jh0q7G_reset:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px;outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}.Jh0q7G_input,.Jh0q7G_select{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);height:34px;font:inherit;color:var(--dsw-alias-label-primary);border-radius:8px;padding:0 12px;font-size:13px;line-height:1.5}.Jh0q7G_input:focus-visible,.Jh0q7G_select:focus-visible{border-color:var(--dsw-alias-brand-primary);outline:none}.Jh0q7G_input:disabled,.Jh0q7G_select:disabled{color:var(--dsw-alias-label-tertiary);cursor:default}.Jh0q7G_inputInvalid{border:1px solid var(--dsw-alias-state-error-primary,#b42318);background:var(--dsw-alias-bg-layer-3);height:34px;font:inherit;color:var(--dsw-alias-label-primary);border-radius:8px;padding:0 12px;font-size:13px;line-height:1.5}.Jh0q7G_inputInvalid:focus-visible{outline:2px solid var(--dsw-alias-state-error-primary,#b42318);outline-offset:1px;border-color:var(--dsw-alias-state-error-primary,#b42318)}.Jh0q7G_selectWrap{position:relative}.Jh0q7G_selectButton{appearance:none;text-align:left;cursor:pointer;justify-content:space-between;align-items:center;gap:8px;width:100%;display:flex}.Jh0q7G_selectLabel{text-overflow:ellipsis;white-space:nowrap;min-width:0;overflow:hidden}.Jh0q7G_selectChevron{color:var(--dsw-alias-label-tertiary);flex:none;transition:transform .16s}.Jh0q7G_selectChevronOpen{transform:rotate(180deg)}.Jh0q7G_selectPopup{z-index:40;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);max-height:240px;box-shadow:0 8px 24px var(--dsw-alias-bg-mask-2);opacity:0;border-radius:8px;flex-direction:column;padding:4px;transition:opacity .1s,transform .1s;display:flex;position:absolute;top:calc(100% + 4px);left:0;right:0;overflow-y:auto;transform:translateY(-4px)}.Jh0q7G_selectPopupOpen{opacity:1;transform:none}.Jh0q7G_selectPopupClose{opacity:0;pointer-events:none;transform:translateY(-4px)}.Jh0q7G_selectOption{color:var(--dsw-alias-label-primary);cursor:pointer;white-space:nowrap;text-overflow:ellipsis;border-radius:6px;flex-shrink:0;padding:6px 10px;font-size:13px;line-height:1.5;overflow:hidden}.Jh0q7G_selectOption:hover,.Jh0q7G_selectOptionActive{background:var(--dsw-alias-interactive-bg-hover)}.Jh0q7G_selectOptionSelected{color:var(--dsw-alias-brand-primary);background:color-mix(in srgb, var(--dsw-alias-brand-primary-new-colorprimary-new-color) 10%, transparent);font-weight:500}.Jh0q7G_invalid{color:var(--dsw-alias-state-error-primary,#b42318);margin:0;font-size:12px;line-height:1.5}.Jh0q7G_hint{color:var(--dsw-alias-label-secondary);margin:0;font-size:12px;line-height:1.5}.Jh0q7G_toggle{appearance:none;cursor:pointer;font:inherit;background:0 0;border:0;border-radius:999px;align-items:center;margin:0;padding:0;display:inline-flex}.Jh0q7G_toggleTrack{background:var(--dsw-alias-label-dimmed);border-radius:999px;flex:none;width:30px;height:16px;transition:background .18s;position:relative}.Jh0q7G_toggleThumb{background:var(--dsw-alias-bg-layer-3);border-radius:50%;width:12px;height:12px;transition:left .18s;position:absolute;top:2px;left:2px}.Jh0q7G_toggle[aria-checked=true] .Jh0q7G_toggleTrack{background:var(--dsw-alias-button-primary-fill,var(--dsw-alias-label-primary))}.Jh0q7G_toggle[aria-checked=true] .Jh0q7G_toggleThumb{background:var(--dsw-alias-label-primary-foreground,var(--dsw-alias-bg-layer-3));left:16px}.Jh0q7G_toggle:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}.Jh0q7G_toggle:disabled{opacity:.45;cursor:default}@media (prefers-reduced-motion:reduce){.Jh0q7G_card,.Jh0q7G_header,.Jh0q7G_mark,.Jh0q7G_chevron,.Jh0q7G_chevronOpen,.Jh0q7G_discard,.Jh0q7G_save,.Jh0q7G_selectChevron,.Jh0q7G_selectChevronOpen,.Jh0q7G_selectPopup,.Jh0q7G_toggleTrack,.Jh0q7G_toggleThumb{transition:none}.Jh0q7G_disclosure{transition-property:opacity}}";
 		const tagId$1 = "@linxin666/dsh-client-ui-task-board/packages/dsh-task-board/src/client/settings-card.module.css";
 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId$1) + "]") === null) {
 			const tag = document.createElement("style");
@@ -14535,7 +14471,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 		/** The building package's version, when the bundle carries it. */
 		function bakedVersion() {
 			try {
-				return "0.4.8-dsh.20261022.2";
+				return "0.4.8-dsh.20261024.3";
 			} catch {
 				return;
 			}

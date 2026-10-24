@@ -83,12 +83,14 @@ test('chat exposes inherited and late scoped tools while preserving an existing 
   const { createScope } = await import('@deepseek-ai/dsh-scope');
   const { default: Tools } = await import('@deepseek-ai/dsh-tools');
   const { default: SystemPrompt } = await import('@deepseek-ai/dsh-system-prompt');
+  const NativeExecutor = await import('@deepseek-ai/dsh-tool-executor-native');
   const { ToolCallId } = await import('@deepseek-ai/dsh-llm');
   const f = await fixture(t);
   const ctx = new Context();
   t.after(async () => ctx.fiber.dispose());
   await ctx.plugin(SystemPrompt);
   await ctx.plugin(Tools);
+  await ctx.plugin(NativeExecutor);
   let executions = 0;
   const tool = (name: string) => ({ name, description: name, parameters: { type: 'object' as const, properties: {} },
     output: { schema: { type: 'string' as const }, render: (_args: unknown, result: unknown) => [{ type: 'text' as const, text: String(result) }] },
@@ -103,7 +105,11 @@ test('chat exposes inherited and late scoped tools while preserving an existing 
   for (const name of ['validate_dsh_ui', 'render_ui', 'subagent', 'new_future_tool']) agent.ctx.tools.register(tool(name));
   const names = (await ctx.systemPrompt.assemble({ scope: agent })).tools.map(tool => tool.name);
   for (const name of ['bash', 'weknora_search', 'validate_dsh_ui', 'render_ui', 'subagent', 'new_future_tool']) assert.ok(names.includes(name), name);
-  const run = (name: string) => ctx.tools.execute({ name, agent, callId: ToolCallId('chat-test'), arguments: {}, signal: new AbortController().signal });
+  const run = async (name: string) => {
+    const batch = await ctx.tools.execute({ agent, calls: [{ type: 'tool-call', name, id: ToolCallId('chat-test'), arguments: '{}' }], signal: new AbortController().signal });
+    assert.equal(batch.results.length, 1);
+    return batch.results[0]!.result;
+  };
   for (const name of ['bash', 'weknora_search', 'validate_dsh_ui', 'render_ui', 'subagent', 'new_future_tool']) assert.equal((await run(name)).isError, false, name);
   assert.equal(executions, 6);
   agent.ctx.tools.guard(exec => exec.name === 'bash' ? 'account policy denies shell' : undefined);
@@ -116,7 +122,7 @@ test('chat exposes inherited and late scoped tools while preserving an existing 
 
 test('concurrent chat creation and later requests reuse the same account blank, but preserve occupied and archived chats', async t => {
   const f = await fixture(t);
-  const rows: { sessionId: string; cwd: string; blank: boolean; running: boolean; projections: { values: { inbox: { 'next-turn': unknown[] }; title?: string } } }[] = [];
+  const rows: { sessionId: string; cwd: string; blank: boolean; running: boolean; origin?: 'subagent'; parentSessionId?: string; projections: { values: { inbox: { 'next-turn': unknown[] }; title?: string } } }[] = [];
   const archived: string[] = [];
   let created = 0;
   const ctx = { managedUserWorkspace: f.provider,
@@ -152,4 +158,15 @@ test('concurrent chat creation and later requests reuse the same account blank, 
   assert.notEqual(seventh.sessionId, sixth.sessionId);
   assert.notEqual(seventh.sessionId, 'foreign-chat');
   assert.equal(created, 7);
+  rows.find(row => row.sessionId === seventh.sessionId)!.origin = 'subagent';
+  const eighth = await createConversation(ctx, f.db, f.principal);
+  assert.notEqual(eighth.sessionId, seventh.sessionId);
+  rows.push({ sessionId: 'child', parentSessionId: eighth.sessionId, origin: 'subagent', cwd: f.directory,
+    blank: false, running: false, projections: { values: { inbox: { 'next-turn': [] } } } });
+  const ninth = await createConversation(ctx, f.db, f.principal);
+  assert.notEqual(ninth.sessionId, eighth.sessionId);
+  rows.push({ sessionId: 'fork', parentSessionId: ninth.sessionId, cwd: f.directory,
+    blank: false, running: false, projections: { values: { inbox: { 'next-turn': [] } } } });
+  assert.equal((await createConversation(ctx, f.db, f.principal)).sessionId, ninth.sessionId);
+  assert.equal(created, 9);
 });

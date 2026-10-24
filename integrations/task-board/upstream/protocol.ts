@@ -81,11 +81,6 @@ export interface TaskBoardSnapshot {
    */
   maxSubtaskDepth?: number
   /**
-   * Whether this deployment serves the Agent Teams service, so a task may opt
-   * into team execution (Team Lead session plus one teammate per subtask).
-   */
-  teamRunAvailable?: boolean
-  /**
    * Live GLOBAL native-/goal switch. The browser uses it to disable the
    * task-level option (and explain that the global switch must be turned on
    * first) WITHOUT rewriting anyone's stored per-task preference; the Host
@@ -391,7 +386,7 @@ function handoverPayload(value: unknown): TaskHandoverInput | undefined {
 
 function createInput(value: unknown): value is NewTaskInput {
   const input = record(value)
-  if (input === undefined || !exactKeys(input, ['title', 'description', 'prompt', 'parentId', 'workspaceId', 'mode', 'permission', 'schedule', 'freeze', 'handover', 'model', 'reasoningEffort', 'applyCardDefaults', 'reuseSession', 'teamRun', 'goalRun', 'skipVerification', 'tags', 'integrations'])) return false
+  if (input === undefined || !exactKeys(input, ['title', 'description', 'prompt', 'parentId', 'workspaceId', 'mode', 'permission', 'schedule', 'freeze', 'handover', 'model', 'reasoningEffort', 'applyCardDefaults', 'reuseSession', 'goalRun', 'skipVerification', 'tags', 'integrations'])) return false
   if (input.parentId !== undefined && (typeof input.parentId !== 'string' || input.parentId.trim() === '')) return false
   if (typeof input.title !== 'string' || typeof input.description !== 'string' || typeof input.prompt !== 'string') return false
   // The reasoning effort is an adapter-owned id the Host resolves against the
@@ -401,7 +396,6 @@ function createInput(value: unknown): value is NewTaskInput {
   if (!optionalString(input.workspaceId) || !optionalString(input.mode) || !optionalString(input.model) || !optionalString(input.reasoningEffort)) return false
   if (input.applyCardDefaults !== undefined && typeof input.applyCardDefaults !== 'boolean') return false
   if (input.reuseSession !== undefined && typeof input.reuseSession !== 'boolean') return false
-  if (input.teamRun !== undefined && typeof input.teamRun !== 'boolean') return false
   if (input.goalRun !== undefined && typeof input.goalRun !== 'boolean') return false
   if (input.skipVerification !== undefined && typeof input.skipVerification !== 'boolean') return false
   if (input.permission !== undefined && !isTaskPermission(input.permission)) return false
@@ -426,10 +420,9 @@ function createInput(value: unknown): value is NewTaskInput {
 
 function updatePatch(value: unknown): boolean {
   const patch = record(value)
-  if (patch === undefined || !exactKeys(patch, ['title', 'description', 'prompt', 'workspaceId', 'mode', 'permission', 'freeze', 'handover', 'model', 'reasoningEffort', 'reuseSession', 'teamRun', 'goalRun', 'skipVerification', 'tags'])) return false
+  if (patch === undefined || !exactKeys(patch, ['title', 'description', 'prompt', 'workspaceId', 'mode', 'permission', 'freeze', 'handover', 'model', 'reasoningEffort', 'reuseSession', 'goalRun', 'skipVerification', 'tags'])) return false
   // null (or false) clears the reuse opt-in; only a real boolean is accepted.
   if (patch.reuseSession !== undefined && patch.reuseSession !== null && typeof patch.reuseSession !== 'boolean') return false
-  if (patch.teamRun !== undefined && patch.teamRun !== null && typeof patch.teamRun !== 'boolean') return false
   // The goal opt-in is tri-state: null/true return the card to its default
   // (goal run), false pins a single plain turn.
   if (patch.goalRun !== undefined && patch.goalRun !== null && typeof patch.goalRun !== 'boolean') return false

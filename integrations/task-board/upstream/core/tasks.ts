@@ -457,12 +457,11 @@ export interface TaskRecord {
    */
   reuseSession?: boolean
   /**
-   * Run this task's subtree as an Agent Team instead of one Host-launched
-   * session per participant: the root becomes the Team Lead session and the
-   * Host spawns one teammate for each direct subtask inside it. Absent or false
-   * keeps the plain concurrent cascade. A deployment that does not serve the
-   * Agent Teams service refuses a team run instead of silently falling back,
-   * and a subtask's own permission pin cannot be honored in this mode.
+   * Historical Agent Team opt-in. New runs never write it and the Host never
+   * reads it to decide how to run: a run with unfinished subtasks opens one
+   * session whose own agent dispatches subagents. The field is kept so cards
+   * already on disk keep their record, and so the ledger can still fold a team
+   * run group it opened before this behavior changed.
    */
   teamRun?: boolean
   /**
@@ -589,8 +588,6 @@ export interface NewTaskInput {
   applyCardDefaults?: boolean
   /** Reuse the previous execution's session for later runs (issue #1419). */
   reuseSession?: boolean
-  /** Run the subtree as an Agent Team (Team Lead session plus one teammate per direct subtask). */
-  teamRun?: boolean
   /**
    * Start the execution with dsh's built-in `/goal`. Absent means the default
    * (one plain turn); only an explicit true joins the goal run.
@@ -753,7 +750,6 @@ export function createTask(input: NewTaskInput, now: number, id: string): TaskRe
     model: normalizeTargetId(input.model),
     reasoningEffort: normalizeTargetId(input.reasoningEffort),
     reuseSession: input.reuseSession === true ? true : undefined,
-    teamRun: input.teamRun === true ? true : undefined,
     // Default OFF: only an explicit true is stored, so a card that never
     // touched the option (and every card written before the field existed)
     // keeps running one plain turn.

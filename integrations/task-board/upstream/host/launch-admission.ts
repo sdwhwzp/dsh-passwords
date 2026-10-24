@@ -1,19 +1,18 @@
 /**
  * Admission control for the session-creating half of a run.
  *
- * One board action can open a whole subtree, and a team run hands every member
- * of it to the Lead at once. Both paths used to fire every launch in the same
- * tick, so the Host asked DSH for N sessions at once — the burst the repository's
- * measured guidance caps at three heavy implementation subagents
- * (docs/multi-agent-resources.md), with no mechanism enforcing it.
+ * A run opens one session, so the burst this bounds is several runs starting at
+ * once — several cards run from different tabs, or a due schedule firing while
+ * a manual run is still launching. Unbounded, the Host asks DSH for N sessions
+ * in the same tick: the burst the repository's measured guidance caps at three
+ * heavy implementation subagents (docs/multi-agent-resources.md), with no
+ * mechanism enforcing it.
  *
  * The queue is SERVICE-wide, not per run group: the pressure it bounds is the
  * machine's (the Host process's memory and the swap it drives), and two run
  * groups opened from two tabs share one Host. Admission is round-robin across
- * run groups — FIFO inside a group, so a group's first run (the Lead, which
- * carries the run shape and the teammate namespace) always starts before its
- * members — so a large subtree cannot starve a run opened after it, and no
- * entry can be starved.
+ * run groups — FIFO inside a group — so one run cannot starve another opened
+ * after it, and no entry can be starved.
  *
  * The width is read through a live callback, so a settings edit takes effect on
  * the next admission without remounting anything.
