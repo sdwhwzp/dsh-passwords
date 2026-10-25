@@ -6,8 +6,8 @@ import path from 'node:path';
 const projectRoot = path.resolve(import.meta.dirname, '..');
 const read = (...parts: string[]) => readFileSync(path.join(projectRoot, ...parts), 'utf8');
 
-// The private candidate requires Peer-aware Harness rc.2 packages.
 const DSH_PIN = '0.2.1-rc.2';
+const DSH_COMPILER_PIN = '0.2.1-rc.3';
 const DSH_DEV_RANGE = '>=0.2.1-rc.2 <0.2.2-0';
 // Pinned target shipped and validated by the last dsh-passwords release (v2.7.5). It
 // survives only as history (CHANGELOG release notes, release/verification prose) and
@@ -127,6 +127,7 @@ test('the declared dev range is the 0.2.1 patch line and rejects 0.1.x, 0.2.0, 0
   }
   // The resolved pin must always sit inside the range that declares it.
   assert.ok(satisfiesPinnedRange(DSH_PIN, DSH_DEV_RANGE), `${DSH_PIN} must satisfy ${DSH_DEV_RANGE}`);
+  assert.ok(satisfiesPinnedRange(DSH_COMPILER_PIN, DSH_DEV_RANGE));
 });
 
 test('development dependencies link the matching private Harness and peers use the supported line', () => {
@@ -136,7 +137,7 @@ test('development dependencies link the matching private Harness and peers use t
     assert.ok(String(spec).startsWith('file:../../deepseek-harness/'), name);
     const linked = JSON.parse(readFileSync(path.resolve(projectRoot, String(spec).slice(5), 'package.json'), 'utf8'));
     assert.equal(linked.name, name);
-    assert.equal(linked.version, DSH_PIN);
+    assert.equal(linked.version, DSH_COMPILER_PIN);
   }
   for (const [name, spec] of Object.entries(pkg.peerDependencies)) {
     if (isDshPackage(name)) assert.equal(spec, DSH_DEV_RANGE, name);
@@ -268,15 +269,12 @@ test('CHANGELOG.md 2.7.7 records the Issue #35 and hardening fixes', () => {
   assert.doesNotMatch(section, /0\.2\.0-rc\.[0-9]/, 'the 2.7.7 section must not present a retired 0.2.0 rc as current');
 });
 
-// Public prose docs (README/README_en/CONTRIBUTING/docs) track the same single patch-line
-// contract as package.json: the pin is `0.2.1-alpha.2`, the declared range is DSH_DEV_RANGE,
-// and the retired 0.2.0 / 0.1.x baselines must no longer be presented as current.
-// CHANGELOG.md keeps its released history, so it is checked separately above.
-test('public docs describe the current 0.2.1-alpha.2 patch line, not the retired rc.2 baseline', () => {
+test('public docs distinguish the rc.2 installer pin and rc.3 compiler within the supported range', () => {
   const docs = ['README.md', 'README_en.md', 'CONTRIBUTING.md', 'docs/compatibility-matrix.md'];
   for (const file of docs) {
     const source = read(...file.split('/'));
     assert.ok(source.includes(DSH_PIN), `${file} must carry the current ${DSH_PIN} pin`);
+    assert.ok(source.includes(DSH_COMPILER_PIN), `${file} must carry the private compiler pin`);
     assert.ok(source.includes(DSH_DEV_RANGE), `${file} must state the declared range ${DSH_DEV_RANGE}`);
     assert.doesNotMatch(source, /0\.2\.0-rc\.[0-9]/, `${file} must not present a retired 0.2.0 rc as current`);
     assert.doesNotMatch(source, /0\.1\.7/, `${file} must not present the retired 0.1.7 line as supported`);

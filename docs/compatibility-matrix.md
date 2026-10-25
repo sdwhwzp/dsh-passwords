@@ -2,7 +2,9 @@
 
 ## Runtime requirements
 
-The private candidate targets Harness `0.2.1-rc.2` with native account principal extensions. Node.js must be 22.19+ or 24+. The runtime identity gate accepts `>=0.2.1-rc.2 <0.2.2-0`, rejects retired and future patch lines before startup, and verifies settings host mode and browser authentication. Development dependencies link the private checkout; public installers and bundled Docker pin `0.2.1-rc.2` but do not replace private candidate acceptance.
+The private candidate targets Harness `0.2.1-rc.3` with native account principal extensions. That checkout requires Node.js 24.9+. The runtime identity gate accepts `>=0.2.1-rc.2 <0.2.2-0`, rejects retired and future patch lines before startup, and verifies settings host mode and browser authentication. Development dependencies link the private checkout; public installers and bundled Docker pin `0.2.1-rc.2` but do not replace private candidate acceptance.
+
+Native tool fixtures compose the executor before assembling prompts. Task-board client and Host source pins move together through the manifest recorded below.
 
 Browser authentication exchanges the official authenticated URL over process IPC and retains the resulting Host cookie in memory. Installed Host bundles are not rewritten. Loopback-only internal refresh and health endpoints require the independent internal secret; refreshed cookies must match the configured upstream authority. Missing native Host support or credentials prevents public startup. Later accepted release identities are not a claim of runtime acceptance.
 

@@ -8,6 +8,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent';
 import { createScope, type Scope } from '@deepseek-ai/dsh-scope';
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt';
 import Tools from '@deepseek-ai/dsh-tools';
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native';
 import type { PlatformConfig } from '../src/config.js';
 import { Database } from '../src/db.js';
 import { createFieldCrypto } from '../src/encrypt.js';
@@ -65,6 +66,7 @@ async function startHarness(t: { after(fn: () => void | Promise<void>): void }):
   });
   await ctx.plugin(SystemPrompt);
   await ctx.plugin(Tools);
+  await ctx.plugin(NativeToolExecutor);
   await hub.start();
 
   // The Agent is its own scope key in production, and `agent/created` is

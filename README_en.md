@@ -609,7 +609,7 @@ The UI is bilingual (Chinese/English) and follows dsh's language setting:
 - **CLI**: follows the `LANG` / `LC_ALL` environment variables (`en` prefix = English).
 
 ## Release notes
-This fork targets the private Harness `0.2.1-rc.2` checkout with linked development packages. Runtime identity checks accept `>=0.2.1-rc.2 <0.2.2-0`; deployment records separately track combined acceptance and production release. Upstream test results do not establish fork acceptance.
+This fork compiles against the private Harness `0.2.1-rc.3` checkout with linked development packages. Public installers and Docker retain the `0.2.1-rc.2` pin. Runtime identity checks accept `>=0.2.1-rc.2 <0.2.2-0`; deployment records separately track combined acceptance and production release. Upstream test results do not establish fork acceptance.
 
 ### v2.6.20 (2026-09-08)
 
@@ -739,7 +739,7 @@ Desktop terminal restoration through `terminal/retain` checks session ownership,
 
 Host login exchange accepts root redirects `/` and `./` without following them; external destinations and query-bearing targets are rejected.
 
-The current candidate uses native Harness 0.2.1-rc.2 Peer and account permission APIs without rewriting installed bundles. The startup version gate matches the peer range; deployment records track composition acceptance.
+The current candidate uses native Harness 0.2.1-rc.3 Peer and account permission APIs without rewriting installed bundles. The startup version gate matches the peer range; deployment records track composition acceptance.
 
 Session ownership validation accepts legacy projections and current `cached`/`sequenced` projections with the `agentAvailable` flag, while retaining strict type and field validation.
 ## Harness 0.2 deployment
