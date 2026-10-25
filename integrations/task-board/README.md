@@ -1,6 +1,6 @@
 # Task board Host engine
 
-Pinned from [sdwhwzp/dsh-web](https://github.com/sdwhwzp/dsh-web) commit `9423ecce0acf9b10493d78aa8dc566223eb4b7e2`, package `@linxin666/dsh-client-ui-task-board` version `0.4.8-dsh.20261025.1` (Apache-2.0). [source.json](source.json) records the 46 files in the Host dependency closure with their Git blob hashes. Files under `upstream/` are unchanged copies of that commit.
+Pinned from [sdwhwzp/dsh-web](https://github.com/sdwhwzp/dsh-web) commit `37b758480d2836c69a73ce70dc19c73769b427fa`, package `@linxin666/dsh-client-ui-task-board` version `0.4.8-dsh.20261025.2` (Apache-2.0). [source.json](source.json) records the 46 files in the Host dependency closure with their Git blob hashes. Files under `upstream/` are unchanged copies of that commit.
 
 The tenant adapter authenticates requests, isolates ledgers by account and sends every execution RPC through the passwords gateway. Parent-child links, workspace IDs, tags and session-reuse preferences survive ledger reloads; the matching dsh-web client uses those workspace IDs for project partitions. Parent links can reference only tasks in the same account ledger; absent parents and cycles are rejected. Workspace creation and session reuse retain the gateway's account permissions and session ownership checks.
 
