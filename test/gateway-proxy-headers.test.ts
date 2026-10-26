@@ -597,7 +597,16 @@ function startMockUpstream(): Promise<http.Server> {
       if (/^\/api\/session[./]prompt(?:[?]|$)/.test(req.url ?? '')) promptUpstreamCount += 1;
       const testMode = req.headers['x-test-mode'];
       const badJson = testMode === 'bad-json';
-      if ((req.url ?? '').startsWith('/html')) {
+      if (req.url === '/sidebar/api/git.models' || req.url === '/sidebar/api/git.commit-model') {
+        res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'public, max-age=600' });
+        const route = { provider: 'codex', model: 'gpt-5.5' };
+        res.end(JSON.stringify(testMode === 'bad-git-metadata' ? { ok: true, value: {} } : {
+          ok: true, value: req.url.endsWith('/git.models') ? {
+            llm: true, providers: [{ provider: 'codex', models: [{ id: 'gpt-5.5' }, { id: 'gpt-6-astra' }] }],
+            recent: [route], default: route,
+          } : { route, pinned: true },
+        }));
+      } else if ((req.url ?? '').startsWith('/html')) {
         res.writeHead(200, { 'content-type': 'text/html' });
         res.write(HTML_BODY.slice(0, 20)); // 无 CL 的多次 write → chunked
         res.end(HTML_BODY.slice(20));
@@ -5214,6 +5223,46 @@ test('sidebar file and Git requests require an owned session and authorized targ
   assert.equal((await post('fs.tree', { ...own, path: sidebarWorkspace })).status, 200);
   assert.equal((await post('fs.trees', { ...own, paths: [sidebarWorkspace, 'reports'] })).status, 200);
   assert.equal((await post('git.status', own)).status, 200);
+  for (const method of ['git.graph', 'git.diff-head', 'git.blame', 'git.models', 'git.commit-model']) {
+    const response = await post(method, own);
+    assert.equal(response.status, 200, method);
+    assert.equal((await post(method, { ...own, sessionId: 's-other' })).status, 403, method);
+    assert.equal((await post(method, { ...own, repoRoot: '/workspaces/b' })).status, 403, method);
+    if (method === 'git.models' || method === 'git.commit-model') {
+      assert.ok(!response.body.includes('gpt-5.5'), method);
+      assert.match(rawHeader(response.rawHeaders, 'cache-control'), /no-store/, method);
+      assert.equal((await gatewayReq('POST', '/sidebar/api/' + method, {
+        cookie: customerCookie, 'content-type': 'application/json', 'x-test-mode': 'bad-git-metadata',
+      }, JSON.stringify(own))).status, 502, method);
+    }
+  }
+  assert.equal((await post('git.suggest-message', own)).status, 403, 'model generation needs account invocation and quota handling');
+  const originalPermissions = db.getPermissions(customerId)!;
+  const setUpload = (allowUpload: boolean): void => db.setPermissions(customerId, {
+    allowedFolders: originalPermissions.allowed_folders,
+    hourlyTokenLimit: originalPermissions.hourly_token_limit,
+    dailyMinutesLimit: originalPermissions.daily_minutes_limit,
+    monthlyBudgetMicros: originalPermissions.monthly_budget_micros,
+    allowUpload, allowGitDownload: originalPermissions.allow_git_download,
+    allowWorkspaceCreate: originalPermissions.allow_workspace_create,
+    allowedModels: originalPermissions.allowed_models,
+    banned: originalPermissions.banned,
+    sandboxMode: originalPermissions.sandbox_mode,
+    disabledSessions: originalPermissions.disabled_sessions,
+  });
+  for (const method of ['git.commit', 'git.push', 'git.pull']) {
+    assert.equal((await post(method, own)).status, 403, method);
+  }
+  setUpload(true);
+  try {
+    for (const method of ['git.commit', 'git.push', 'git.pull']) {
+      assert.equal((await post(method, own)).status, 200, method);
+      assert.equal((await post(method, { ...own, sessionId: 's-other' })).status, 403, method);
+      assert.equal((await post(method, { ...own, worktree: '/workspaces/b' })).status, 403, method);
+    }
+  } finally {
+    setUpload(originalPermissions.allow_upload);
+  }
   for (const fields of [
     { ...own, sessionId: 's-other' },
     { ...own, cwd: '/workspaces/b' },

@@ -3,8 +3,41 @@ import assert from 'node:assert/strict';
 
 import {
   customerModelAllowed,
+  filterCustomerGitModelResponse,
   filterCustomerModelCatalogResponse,
 } from '../src/model-policy.js';
+
+test('sidebar Git model metadata intersects account grants, including defaults, recents and pinned routes', () => {
+  const allowed = { provider: 'codex', model: 'gpt-6-astra' };
+  const denied = { provider: 'codex', model: 'gpt-5.5' };
+  const other = { provider: 'private', model: 'secret' };
+  const input = { ok: true, value: { llm: true, providers: [
+    { provider: 'codex', name: 'Codex', models: [{ id: allowed.model }, { id: denied.model }] },
+    { provider: other.provider, name: 'Private', models: [{ id: other.model }] },
+  ], recent: [allowed, denied, other], default: other } };
+  const snapshot = structuredClone(input);
+  assert.deepEqual(filterCustomerGitModelResponse('git.models', input, ['codex/gpt-6-astra']), {
+    ok: true, value: { llm: true, providers: [
+      { provider: 'codex', name: 'Codex', models: [{ id: allowed.model }] },
+    ], recent: [allowed] },
+  });
+  assert.deepEqual(input, snapshot);
+  assert.deepEqual(filterCustomerGitModelResponse('git.models', input, []), {
+    ok: true, value: { llm: true, providers: [], recent: [] },
+  });
+  assert.deepEqual(filterCustomerGitModelResponse('git.commit-model', { ok: true, value: { route: allowed, pinned: true } }, ['codex/gpt-6-astra']), {
+    ok: true, value: { route: allowed, pinned: true },
+  });
+  for (const route of [denied, other]) {
+    assert.deepEqual(filterCustomerGitModelResponse('git.commit-model', { ok: true, value: { route, pinned: true } }, ['codex/gpt-6-astra']), {
+      ok: true, value: { pinned: false },
+    });
+  }
+  const failure = { ok: false, error: { code: 'unavailable' } };
+  assert.equal(filterCustomerGitModelResponse('git.models', failure, null), failure);
+  assert.equal(filterCustomerGitModelResponse('git.models', { ok: true, value: { providers: [] } }, null), null);
+  assert.equal(filterCustomerGitModelResponse('git.commit-model', { ok: true, value: { pinned: 'yes' } }, null), null);
+});
 
 const response = {
   type: 'server-response',

@@ -242,7 +242,7 @@ import {
 import { findDshRoot, applyRemotePatch, restartDshWeb } from './patch.js';
 import { t, resolveGatewayLang, type Lang } from './i18n.js';
 import { signedPrincipalHeaders } from './principal.js';
-import { customerModelAllowed, filterCustomerModelCatalogResponse } from './model-policy.js';
+import { customerModelAllowed, filterCustomerGitModelResponse, filterCustomerModelCatalogResponse } from './model-policy.js';
 import { filterTenantEventEnvelope } from './tenant-events.js';
 import {
   TENANT_REMOTE_STREAM_ENDPOINTS,
@@ -566,6 +566,7 @@ function forceRejectRemoteEventOutcome(value: unknown): boolean {
   return changed;
 }
 const MODEL_CATALOG_RE = /^\/api\/(?:(?:llm|session)[.\/]models|session[.\/]modelCatalog)$/;
+const SIDEBAR_GIT_MODEL_RE = /^\/sidebar\/api\/git\.(?:models|commit-model)$/;
 
 const AGENT_PRESET_SELECT_RE = /^\/api\/agentPresets?[.\/]select$/;
 const SESSION_OPEN_WORKSPACE_PATH_RE = /^\/api\/session[.\/]openWorkspacePath$/;
@@ -9249,7 +9250,7 @@ export function createGatewayServer(
           (
             contentType.includes('text/html') ||
             PRINCIPAL_SCOPED_RESPONSE_RE.test(proxyPath) ||
-            SIDEBAR_FILE_RE.test(proxyPath) || SIDEBAR_HTML_RE.test(proxyPath)
+            SIDEBAR_FILE_RE.test(proxyPath) || SIDEBAR_HTML_RE.test(proxyPath) || SIDEBAR_GIT_MODEL_RE.test(proxyPath)
           )
         ) {
           isolatePrincipalResponse(upstreamRes.headers);
@@ -9271,12 +9272,15 @@ export function createGatewayServer(
         if (
           reqAs.dshpwPerms !== undefined &&
           req.method === 'POST' &&
-          MODEL_CATALOG_RE.test(proxyPath)
+          (MODEL_CATALOG_RE.test(proxyPath) || SIDEBAR_GIT_MODEL_RE.test(proxyPath))
         ) {
           bufferUpstream(upstreamRes, res, (raw) => {
             try {
               const decoded = encoding.includes('gzip') ? gunzipBounded(raw) : raw;
-              const filtered = filterCustomerModelCatalogResponse(JSON.parse(decoded.toString('utf8')), reqAs.dshpwPerms!.allowed_models);
+              const parsed: unknown = JSON.parse(decoded.toString('utf8'));
+              const filtered = SIDEBAR_GIT_MODEL_RE.test(proxyPath)
+                ? filterCustomerGitModelResponse(proxyPath.endsWith('/git.models') ? 'git.models' : 'git.commit-model', parsed, reqAs.dshpwPerms!.allowed_models)
+                : filterCustomerModelCatalogResponse(parsed, reqAs.dshpwPerms!.allowed_models);
               if (filtered === null) {
                 res.status(502).type('text/plain').send('502 Upstream response unprocessable');
                 return;
@@ -10653,9 +10657,11 @@ export function createGatewayServer(
           catch { upstreamReq.destroy(); sendApiError(res, 502, 'UPSTREAM_UNAVAILABLE', 'workspace registry is unavailable'); return; }
           const root = authorizedSubuserSessionRoot(reqAs.dshpwUser!, id, reqAs.dshpwPerms!);
           const readable = new Set(['session.cwd', 'fs.tree', 'fs.trees', 'fs.search', 'fs.read',
-            'git.worktrees', 'git.status', 'git.diff', 'git.branch', 'git.log', 'git.commit-diff', 'git.show']);
+            'git.worktrees', 'git.status', 'git.diff', 'git.branch', 'git.log', 'git.commit-diff', 'git.show',
+            'git.graph', 'git.diff-head', 'git.blame', 'git.models', 'git.commit-model']);
           const writable = new Set(['fs.write', 'fs.rename', 'fs.mkdir', 'fs.remove',
-            'git.stage', 'git.unstage', 'git.commit', 'git.checkout', 'git.discard', 'git.revert', 'git.cherry-pick']);
+            'git.stage', 'git.unstage', 'git.commit', 'git.checkout', 'git.discard', 'git.revert', 'git.cherry-pick',
+            'git.push', 'git.pull']);
           // The plugin accepts absolute targets outside cwd; account permission remains the gateway's responsibility.
           const targetAllowed = (value: unknown): boolean => {
             if (root === null || typeof value !== 'string' || value.includes('\0') || value === '') return false;

@@ -1,6 +1,6 @@
 # dsh-passwords
 
-Sidebar file and Git requests require session ownership and authorized paths; ordinary accounts also need file-write permission for mutations. Paired local folders support batched directory reads.
+Sidebar file and Git requests require session ownership and authorized paths; ordinary accounts also need file-write permission for mutations. Git commits, pushes and pulls use the same file-write permission; commit model catalogs and routes expose only models granted to the account. Generated commit messages require account model invocation and quota support, which ordinary accounts cannot bypass through the sidebar. Paired local folders support batched directory reads.
 
 [简体中文](README.md) | English
 
