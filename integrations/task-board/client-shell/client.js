@@ -14471,7 +14471,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 		/** The building package's version, when the bundle carries it. */
 		function bakedVersion() {
 			try {
-				return "0.4.8-dsh.20261025.2";
+				return "0.4.8-dsh.20261026.1";
 			} catch {
 				return;
 			}

@@ -25,6 +25,51 @@ function recordOf(value: unknown): Record<string, unknown> | null {
 }
 
 /**
+ * Filter the sidebar's session-scoped Git model metadata using the account grants.
+ * Upstream failures remain failures; malformed successes never expose a raw catalog.
+ * @param method - sidebar metadata method; neither method invokes a model.
+ * @param response - JSON response from the sidebar Host.
+ * @param allowedModels - account model allowlist, or null for unrestricted routes.
+ * @returns filtered response, or null when the success payload is invalid.
+ */
+export function filterCustomerGitModelResponse(
+  method: 'git.models' | 'git.commit-model',
+  response: unknown,
+  allowedModels: readonly string[] | null,
+): unknown | null {
+  const envelope = recordOf(response);
+  if (envelope?.ok === false) return response;
+  if (envelope?.ok !== true) return null;
+  const value = recordOf(envelope.value);
+  if (value === null) return null;
+  const routeAllowed = (candidate: unknown): boolean => {
+    const route = recordOf(candidate);
+    return route !== null && typeof route.provider === 'string' && typeof route.model === 'string' &&
+      customerModelAllowed(route.provider, route.model, allowedModels);
+  };
+  if (method === 'git.commit-model') {
+    if (typeof value.pinned !== 'boolean') return null;
+    const allowed = routeAllowed(value.route);
+    return { ok: true, value: { ...(allowed ? { route: value.route } : {}), pinned: allowed && value.pinned } };
+  }
+  if (typeof value.llm !== 'boolean' || !Array.isArray(value.providers) || !Array.isArray(value.recent)) return null;
+  const providers = value.providers.flatMap(candidate => {
+    const provider = recordOf(candidate);
+    if (provider === null || typeof provider.provider !== 'string' || !Array.isArray(provider.models)) return [];
+    const models = provider.models.filter(candidateModel => {
+      const model = recordOf(candidateModel);
+      return model !== null && typeof model.id === 'string' &&
+        customerModelAllowed(String(provider.provider), model.id, allowedModels);
+    });
+    return models.length === 0 ? [] : [{ ...provider, models }];
+  });
+  return { ok: true, value: {
+    llm: value.llm, providers, recent: value.recent.filter(routeAllowed),
+    ...(routeAllowed(value.default) ? { default: value.default } : {}),
+  } };
+}
+
+/**
  * Filter a successful llm.models or session.models response for a customer.
  * Upstream error responses remain unchanged; malformed success responses fail
  * closed so the gateway never returns an unfiltered catalog.
