@@ -289,6 +289,8 @@ Office RPC 使用本机助手协议 v2。Excel 与 PowerPoint 只是该协议内
 
 网页一键入口签发 256 位随机启动票据：绑定当前登录用户、两分钟失效、只能消费一次，且不会写入助手配置或日志。真正的高强度设备令牌通过 WebSocket 自动下发，只保存在用户电脑，服务器仅保存不可逆散列。文件操作只接受授权目录内的路径，并会解析符号链接后再次检查。`--allow-shell` 是高权限开关；Windows 打包 EXE 会为新连接和已有配置自动启用。Shell 以当前系统用户身份运行，可能访问授权目录之外的文件。`--allow-desktop` 是另一个更高权限的开关，**任何运行方式都不会自动开启**：授权检查放在能力模块自身，桌面端 worker 与命令行助手共用同一条判定，未授权时 `screenshot`/`input` 在参数校验之前就被拒绝。明文 `ws://` 仅限可信局域网；跨不可信网络必须使用 HTTPS/WSS。
 
+手动配置向导（`--setup`）的服务器地址可以自己填写：`192.168.1.10`、`192.168.1.10:3082`、域名或完整 `ws://`/`wss://` 地址均可；只填 IP 或域名时沿用默认地址的协议与端口。直接回车使用默认地址 `wss://gr.gr-iot.cn:3082`；构建时设置 `DSH_LOCAL_WORKSPACE_DEFAULT_SERVER` 可替换 EXE 内置的默认地址，运行时设置同名环境变量可临时覆盖。
+
 维护者可运行 `npm run build:windows-assistant` 生成 `release/山东梯智物联AI本机助手.exe`。仓库中的 `Build Windows Local Workspace Assistant` 工作流也会在 Windows runner 上构建并上传同名 artifact。
 
 Windows CI 使用 `tools/windows-assistant` 的锁定工具链构建助手，仅安装 esbuild、pkg 和 ws 及其依赖；不会安装服务端插件或依赖本机构建机上的 Harness 源码目录。

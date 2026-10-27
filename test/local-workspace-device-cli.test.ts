@@ -117,7 +117,7 @@ test('Windows --setup 备用向导依次询问服务器、目录、Shell 与桌�
   let step = 0;
   const answerWizard = () => {
     const output = cli.output();
-    if (step === 0 && output.includes('输入服务器 ws://')) {
+    if (step === 0 && output.includes('输入服务器 IP 或地址')) {
       step = 1;
       cli.child.stdin?.write(`ws://127.0.0.1:${String(address.port)}\n`);
     } else if (step === 1 && output.includes('输入或拖入要授权的本机文件夹')) {
@@ -154,6 +154,85 @@ test('Windows --setup 备用向导依次询问服务器、目录、Shell 与桌�
   assert.doesNotMatch(cli.output(), /粘贴网页生成的完整配对命令（或配对码）/);
   socket.terminate();
 });
+
+for (const scenario of [
+  { name: '直接回车使用默认地址', answers: (_port: number) => [''], useDefault: true },
+  { name: '只填 IP:端口', answers: (port: number) => [`127.0.0.1:${String(port)}`], useDefault: false },
+  { name: '只填 IP 时沿用默认端口', answers: (_port: number) => ['127.0.0.1'], useDefault: false, defaultHost: 'example.invalid' },
+  { name: '无效地址会重新询问', answers: (port: number) => ['http://127.0.0.1/', `127.0.0.1:${String(port)}`], useDefault: false },
+]) {
+  test(`--setup 向导服务器地址：${scenario.name}`, async (context) => {
+    const temp = mkdtempSync(path.join(tmpdir(), 'dsh-local-device-default-server-'));
+    const root = path.join(temp, 'workspace');
+    mkdirSync(root);
+
+    const server = new WebSocketServer({ host: '127.0.0.1', port: 0, perMessageDeflate: false });
+    await once(server, 'listening');
+    const address = server.address();
+    if (typeof address === 'string' || address === null) throw new Error('WebSocket server did not expose a TCP port');
+    const expectedServer = `ws://127.0.0.1:${String(address.port)}/`;
+    const defaultServer = scenario.useDefault
+      ? expectedServer
+      : `ws://${scenario.defaultHost ?? '127.0.0.1'}:${scenario.defaultHost === undefined ? '1' : String(address.port)}`;
+
+    const pendingHello = nextHello(server);
+    const cli = startCli(['--setup'], {
+      HOME: temp,
+      USERPROFILE: temp,
+      DSH_LOCAL_WORKSPACE_FORCE_WIZARD: '1',
+      DSH_LOCAL_WORKSPACE_DEFAULT_SERVER: defaultServer,
+    });
+    context.after(async () => {
+      await stopCli(cli.child);
+      await closeServer(server);
+      rmSync(temp, { recursive: true, force: true });
+    });
+    const answers = scenario.answers(address.port);
+    let prompts = 0;
+    let folderAnswered = false;
+    let shellAnswered = false;
+    let desktopAnswered = false;
+    const answerWizard = () => {
+      const output = cli.output();
+      const serverPrompts = output.split('输入服务器 IP 或地址').length - 1;
+      while (prompts < serverPrompts && prompts < answers.length) {
+        cli.child.stdin?.write(`${answers[prompts] ?? ''}\n`);
+        prompts++;
+      }
+      if (!folderAnswered && output.includes('输入或拖入要授权的本机文件夹')) {
+        folderAnswered = true;
+        cli.child.stdin?.write(`${root}\n`);
+      } else if (!shellAnswered && output.includes('允许 AI 在本机执行')) {
+        shellAnswered = true;
+        cli.child.stdin?.write('n\n');
+      } else if (!desktopAnswered && output.includes('允许 AI 截取本机屏幕')) {
+        desktopAnswered = true;
+        cli.child.stdin?.write('n\n');
+      }
+    };
+    cli.child.stdout?.on('data', answerWizard);
+    answerWizard();
+
+    const { socket, hello } = await pendingHello;
+    assert.equal(hello.type, 'device');
+    assert.equal(prompts, answers.length);
+    if (answers.length > 1) assert.match(cli.output(), /地址无效/);
+    assert.match(cli.output(), new RegExp(`使用服务器：${expectedServer.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+    if (scenario.useDefault) assert.match(cli.output(), /直接回车使用默认地址 ws:\/\/127\.0\.0\.1:/);
+    socket.send(JSON.stringify({
+      type: 'ready',
+      workspaceId: hello.workspaceId,
+      workspacePath: '/host/placeholder',
+      token: 'D'.repeat(43),
+    }));
+    await waitUntil(() => cli.output().includes('已连接'), 5_000, '向导批准后未连接');
+    const saved = JSON.parse(
+      readFileSync(path.join(temp, '.dsh-local-workspace', 'config.json'), 'utf8'),
+    ) as { server?: string };
+    assert.equal(saved.server, expectedServer);
+    socket.terminate();
+  });
+}
 
 test('Windows 网页 URI 自动启用 Shell、兼容规范化尾斜杠并使用独立 profile', async (context) => {
   const temp = mkdtempSync(path.join(tmpdir(), 'dsh-local-launch-uri-'));

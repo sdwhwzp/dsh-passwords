@@ -54,6 +54,11 @@ const WINDOWS_PROTOCOL_PREFIXES = [
 ] as const;
 const MAX_LAUNCH_URI_LENGTH = 4_096;
 const MAX_SERVER_URL_LENGTH = 2_048;
+/** Server offered by the setup wizard when the user presses Enter without typing an address. */
+const BUILT_IN_DEFAULT_SERVER = 'wss://gr.gr-iot.cn:3082';
+
+/** Optional build-time default injected by `scripts/build-local-workspace.mjs`. */
+declare const __DSH_LOCAL_WORKSPACE_DEFAULT_SERVER__: string | undefined;
 
 /** Resolved companion configuration, including both agent-facing grants. */
 export interface CompanionConfig {
@@ -2569,6 +2574,7 @@ async function runFirstPairingWizard(defaults: CliOptions): Promise<CliOptions> 
   if (!forceWizard && (!process.stdin.isTTY || !process.stdout.isTTY)) {
     throw new Error('首次连接需要提供 --server 和 --folder；旧版长配对码可继续使用 --pair');
   }
+  const defaultServer = wizardDefaultServer();
   const terminal = createInterface({ input: process.stdin, output: process.stdout });
   try {
     console.log('');
@@ -2578,15 +2584,24 @@ async function runFirstPairingWizard(defaults: CliOptions): Promise<CliOptions> 
     console.log('首次配置一次，之后双击本程序即可自动连接。');
     console.log('连接后会显示 6 位确认码，请在已登录的 DSH 网页中批准。');
     console.log('');
-    const serverInput = await terminal.question(
-      '1. 输入服务器 ws:// 或 wss:// 地址（也可粘贴旧版完整配对命令）：\n> ',
-    );
-    const legacy = parsePairingInput(serverInput);
-    const server = legacy.server ?? (
-      legacy.pairCode === undefined
-        ? stripOuterQuotes(serverInput)
-        : stripOuterQuotes(await terminal.question('   旧命令中没有服务器地址，请输入 ws:// 或 wss:// 地址：\n> '))
-    );
+    let server: string | undefined;
+    let pairCode: string | undefined;
+    while (server === undefined) {
+      const serverInput = await terminal.question(
+        `1. 输入服务器 IP 或地址，直接回车使用默认地址 ${defaultServer}\n`
+        + '   支持 192.168.1.10、192.168.1.10:3082、ws:// 或 wss:// 地址，也可粘贴旧版完整配对命令：\n> ',
+      );
+      const legacy = parsePairingInput(serverInput);
+      pairCode = legacy.pairCode;
+      const candidate = legacy.server ?? (
+        pairCode === undefined
+          ? serverInput
+          : await terminal.question('   旧命令中没有服务器地址，请输入服务器 IP 或地址（直接回车使用默认地址）：\n> ')
+      );
+      server = normalizeServerInput(candidate, defaultServer);
+      if (server === undefined) console.log('   地址无效，请输入 IP、IP:端口、域名，或完整的 ws:// / wss:// 地址。');
+    }
+    console.log(`   使用服务器：${server}`);
     const folder = stripOuterQuotes(await terminal.question('2. 输入或拖入要授权的本机文件夹：\n> '));
     const shellAnswer = (await terminal.question('3. 允许 AI 在本机执行 PowerShell 命令？风险较高 [y/N]：\n> ')).trim();
     const desktopAnswer = (await terminal.question(
@@ -2596,7 +2611,7 @@ async function runFirstPairingWizard(defaults: CliOptions): Promise<CliOptions> 
     return {
       ...defaults,
       server,
-      pairCode: legacy.pairCode,
+      pairCode,
       folder,
       allowShell: /^(?:y|yes|是)$/i.test(shellAnswer),
       allowDesktop: /^(?:y|yes|是)$/i.test(desktopAnswer),
@@ -2604,6 +2619,55 @@ async function runFirstPairingWizard(defaults: CliOptions): Promise<CliOptions> 
   } finally {
     terminal.close();
   }
+}
+
+/** Default wizard server: runtime env override, then build-time injection, then the built-in address. */
+function wizardDefaultServer(): string {
+  const runtime = process.env.DSH_LOCAL_WORKSPACE_DEFAULT_SERVER?.trim();
+  const buildTime = typeof __DSH_LOCAL_WORKSPACE_DEFAULT_SERVER__ === 'string'
+    ? __DSH_LOCAL_WORKSPACE_DEFAULT_SERVER__.trim()
+    : '';
+  const configured = runtime !== undefined && runtime !== '' ? runtime : buildTime !== '' ? buildTime : BUILT_IN_DEFAULT_SERVER;
+  const server = normalizeServerInput(configured, BUILT_IN_DEFAULT_SERVER);
+  if (server === undefined) throw new Error(`默认服务器地址无效：${configured}`);
+  return server;
+}
+
+/**
+ * Turns wizard input into a WebSocket URL. Empty input selects `defaultServer`;
+ * a bare host, IP, or `host:port` takes the default server's scheme and, without a port, its port.
+ *
+ * @param input Raw text typed by the user.
+ * @param defaultServer Absolute `ws://` or `wss://` URL used for empty input and the implicit port.
+ * @returns The normalized URL, or `undefined` when the input is not a usable server address.
+ */
+function normalizeServerInput(input: string, defaultServer: string): string | undefined {
+  const value = stripOuterQuotes(input);
+  if (value === '') return defaultServer;
+  if (value.length > MAX_SERVER_URL_LENGTH || /[\u0000-\u0020\u007f]/u.test(value)) return undefined;
+  const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//iu.test(value);
+  const fallback = new URL(defaultServer);
+  let parsed: URL;
+  try {
+    parsed = new URL(hasScheme ? value : `${fallback.protocol}//${value}`);
+  } catch {
+    // Malformed host text is reported to the user and prompted again.
+    return undefined;
+  }
+  if (
+    (parsed.protocol !== 'ws:' && parsed.protocol !== 'wss:')
+    || parsed.hostname === ''
+    || parsed.username !== ''
+    || parsed.password !== ''
+    || parsed.hash !== ''
+  ) {
+    return undefined;
+  }
+  if (!hasScheme) {
+    if (parsed.pathname !== '/' || parsed.search !== '') return undefined;
+    if (parsed.port === '') parsed.port = fallback.port;
+  }
+  return parsed.toString();
 }
 
 function parsePairingInput(input: string): { server?: string; pairCode?: string } {
@@ -2962,6 +3026,7 @@ Windows EXE 会自动启用 PowerShell（包括已有工作区），并以当前
 
 手动配置向导（6 位确认码备用流程）：
   dsh-local-workspace --setup
+  服务器地址可填 IP、IP:端口、域名或 ws:// / wss:// 地址；直接回车使用默认地址 ${wizardDefaultServer()}
 
 无交互手动连接（连接后在网页输入助手显示的 6 位码）：
   dsh-local-workspace --server ws://服务器:3082 --folder <目录> [--name 名称]
