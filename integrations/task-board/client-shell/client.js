@@ -12925,17 +12925,19 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 					})
 				]
 			});
+			const notExposedNotice = state.exposed || props.hideNotExposedNotice === true ? null : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+				className: settings_card_module_css_default.notExposed,
+				role: "status",
+				children: props.t("settings.notExposed")
+			});
 			if (!state.exposed && props.renderChildrenWhenNotExposed !== true) return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("li", {
 				className: cardClass,
-				children: [header, bodyRegion(props.hideNotExposedNotice !== true ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
-					className: settings_card_module_css_default.notExposed,
-					role: "status",
-					children: props.t("settings.notExposed")
-				}) : null)]
+				children: [header, bodyRegion(notExposedNotice)]
 			});
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("li", {
 				className: cardClass,
 				children: [header, props.headerOnly !== true ? bodyRegion(/* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [
+					notExposedNotice,
 					!state.writable ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
 						className: settings_card_module_css_default.readOnly,
 						role: "status",
@@ -12965,9 +12967,11 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 		*/
 		function ValueField(props) {
 			const apply = (0, react.useContext)(CardApply);
+			const settledByKey = (0, react.useRef)(false);
 			const onKeyDown = (event) => {
 				if (apply === null || event.key !== "Enter" && event.key !== "Escape") return;
 				event.preventDefault();
+				settledByKey.current = true;
 				if (event.key === "Enter") apply.commit();
 				else apply.revert();
 				event.currentTarget.blur();
@@ -12985,7 +12989,14 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 					props.onEdit(event.target.value);
 				},
 				onKeyDown,
+				onFocus: () => {
+					settledByKey.current = false;
+				},
 				onBlur: () => {
+					if (settledByKey.current) {
+						settledByKey.current = false;
+						return;
+					}
 					apply?.commit();
 				}
 			});
@@ -14854,7 +14865,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 		/** The building package's version, when the bundle carries it. */
 		function bakedVersion() {
 			try {
-				return "0.4.11-dsh.20261027.1";
+				return "0.4.11-dsh.20261027.2";
 			} catch {
 				return;
 			}
