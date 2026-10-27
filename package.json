@@ -1,6 +1,6 @@
 {
   "name": "dsh-passwords",
-  "version": "2.7.8-dsh.20261027.2",
+  "version": "2.7.8-dsh.20261027.3",
   "description": "dsh-passwords: a server-grade gateway that turns DeepSeek Harness into a multi-tenant platform \u2014 remote access + automatic HTTPS, per-subuser permissions & quotas, sandbox enforcement, first-run setup, SQLite/MySQL auth with at-rest encryption, rate-limit and audit log (bilingual zh/en UI)",
   "type": "module",
   "main": "dist/index.js",
@@ -125,7 +125,7 @@
     "@deepseek-ai/dsh-tools": ">=0.2.1-rc.2 <0.2.2-0",
     "@deepseek-ai/dsh-typert-protocol": ">=0.2.1-rc.2 <0.2.2-0",
     "@deepseek-ai/dsh-workspace": ">=0.2.1-rc.2 <0.2.2-0",
-    "@linxin666/dsh-client-ui-task-board": "0.4.11-dsh.20261027.2"
+    "@linxin666/dsh-client-ui-task-board": "0.4.11-dsh.20261027.3"
   },
   "overrides": {
     "qs": "^6.16.0"
