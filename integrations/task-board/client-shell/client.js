@@ -3697,20 +3697,20 @@ window.__ModuleLoader__.load({
 			"exec.hint.short": "留空继承部署默认，执行时生效",
 			"settings.title": "任务看板",
 			"settings.description": "任务编排、agent 播报与目标验收。",
-			"settings.enabled": "启用任务看板",
-			"settings.enabledCardHint": "总开关、播报、睡眠保护与子任务层级。",
+			"settings.enabled": "总开关",
+			"settings.enabledCardHint": "播报、睡眠保护与子任务层级。",
 			"settings.enabledHint": "关闭后隐藏侧边栏入口与看板视图，并注销 task_board_* agent 工具；开启时任何会话都可以通过这些工具读写看板、子任务与定时计划。",
-			"settings.enabledHintBrief": "默认开启。关闭后隐藏入口与看板视图，并注销 task_board_* 工具。",
-			"settings.announceToAgent": "向 agent 播报任务看板",
+			"settings.enabledHintBrief": "关掉后隐藏入口与看板视图，并注销 task_board_* 工具。",
+			"settings.announceToAgent": "播报给 agent",
 			"settings.announceToAgentHint": "开启：每条 agent 系统提示都会包含本看板的说明；关闭：不播报，agent 仅在用户主动提及时了解看板。",
-			"settings.announceToAgentHintBrief": "默认关闭。开启后每条 agent 系统提示都会带上本看板说明。",
+			"settings.announceToAgentHintBrief": "每条系统提示都带上本看板说明。",
 			"settings.preventIdleSleep": "阻止系统空闲睡眠",
 			"settings.preventIdleSleepHint": "默认关闭。开启后，只要存在运行中的 DSH 会话、已启用的定时任务或会话状态尚未确认，Host 就阻止整机因空闲睡眠；屏幕仍可自动关闭。",
-			"settings.preventIdleSleepHintBrief": "默认关闭。开启后只要有会话在跑或计划已启用，就阻止整机空闲睡眠。",
-			"settings.trustForwardedProxy": "信任自己反代或隧道转发的请求",
+			"settings.preventIdleSleepHintBrief": "有会话在跑或计划已启用时，阻止整机空闲睡眠。",
+			"settings.trustForwardedProxy": "信任反代转发的请求",
 			"settings.trustForwardedProxyHint": "默认关闭。关闭时行为与没有这项设置完全一致：带 CF-Connecting-IP 或 X-Forwarded-For 的请求一律不当作本机请求。只有反代或隧道由你自己（运维）运行、并且它拨的是本机回环上游（127.0.0.1:<端口>）时才打开：此时这类请求仍必须带浏览器同源标记，显式跨站请求照旧拒绝。第三方托管的反向代理不要打开——它可以替你伪造这些标记。",
-			"settings.trustForwardedProxyHintBrief": "默认关闭。仅在自己的反代或隧道指向本机回环时才开启。",
-			"settings.powerBoundary": "这可能增加电池消耗。合盖、手动睡眠、休眠、关机、低电量或企业策略不在保证范围内，也不会唤醒已经睡眠的机器。",
+			"settings.trustForwardedProxyHintBrief": "只在自己的反代指向本机回环时开启。",
+			"settings.powerBoundary": "合盖、休眠、关机或低电量不在保证范围内。",
 			"settings.powerError": "最近一次电源保护错误：{error}",
 			"settings.powerPhase": "保护状态",
 			"settings.powerPlatform": "平台",
@@ -3720,42 +3720,38 @@ window.__ModuleLoader__.load({
 			"settings.inherit": "继承",
 			"settings.on": "开",
 			"settings.off": "关",
-			"settings.overridden": "已覆盖",
+			"settings.overridden": "已修改",
 			"settings.reset": "恢复默认",
-			"settings.notExposed": "当前 DSH 版本未向设置页暴露本插件的配置命名空间，表单不可用。可编辑 ~/.dsh/settings.yaml 直接配置，或将本命名空间加入 Host 设置白名单后重启。",
-			"settings.readOnly": "当前部署的设置只读。",
+			"settings.notExposed": "这个版本的 DSH 没有开放任务看板的设置。",
+			"settings.readOnly": "设置只读。",
 			"settings.expand": "展开设置",
 			"settings.collapse": "收起设置",
-			"settings.save": "保存",
-			"settings.saving": "保存中…",
-			"settings.discard": "放弃",
-			"settings.unsaved": "未保存",
-			"settings.saveFailed": "部署未接受这些值，已保留供你修改。",
-			"settings.invalidNumber": "请输入数字，留空则使用默认值。",
+			"settings.saveFailed": "没有保存成功。",
+			"settings.invalidNumber": "填一个数字，留空用默认值。",
 			"settings.sessionPollSeconds": "会话轮询间隔（秒）",
 			"settings.sessionPollSecondsHint": "默认 5 秒。仅在看板有需要核对的事情——运行中的卡片或未结算的执行——时才读取会话名册；两者都没有时不再轮询，Host 不会持续扫描持久化会话目录。取值 1–300 秒：间隔越短结算越快、Host 负载越高。",
-			"settings.sessionPollSecondsHintBrief": "默认 5 秒，可设 1 到 300：间隔越短结算越快，Host 负载越高。",
+			"settings.sessionPollSecondsHintBrief": "多久核对一次会话，越短结算越快。",
 			"settings.maxSubtaskDepth": "子任务深度上限",
 			"settings.maxSubtaskDepthHint": "默认 1：一个任务只允许一层子任务，子任务不能再创建或关联子任务。最大 3。它只决定一张卡下面能挂多深的子任务：执行一张卡始终只开它自己的一个会话，子任务由它自己按依赖顺序派发，所以层级深浅不改变一次执行开几个会话。",
-			"settings.maxSubtaskDepthHintBrief": "默认 1 层，最多 3：只限制子任务能挂多深，不改变一次执行开几个会话。",
+			"settings.maxSubtaskDepthHintBrief": "子任务最多挂几层。",
 			"settings.maxSubtaskDepthOption": "{depth} 层",
 			"settings.runLaunchWidth": "并发启动上限",
 			"settings.runLaunchWidthHint": "默认 3。多张卡片同时要执行时（手动执行、重新执行与到点定时一样），同一刻最多有这么多个执行被准入、创建会话并入队 Prompt，其余排队等待；每张卡的一次执行只开它自己一个会话，所以这个值不改变单卡的执行形态。默认值取自本仓「重型实施子代理并发 ≤ 3」的实测纪律。取值 1–16：越大启动越快，Host 的内存与 swap 压力越高。执行中修改只影响尚未入列的启动。",
-			"settings.runLaunchWidthHintBrief": "默认 3，可设 1 到 16：多张卡同时要执行时，同一刻最多这么多个开始建会话，其余排队；单卡执行仍只开一个会话。",
+			"settings.runLaunchWidthHintBrief": "同时最多几个执行开始建会话，其余排队。",
 			"settings.spendBudgetTokens": "每日 token 上限",
 			"settings.spendBudgetTokensHint": "默认 0，表示不设闸，行为与没有这项设置时完全一致（不读账本、不计数）。设为正整数后，今日已用 token 达到该值时：手动执行与重新执行被拒绝，调用方看到的拒绝文本就是原因；到点的定时执行把原因写进调度错误并跳过本次触发，不消耗计划次数，因此调高上限或跨过本地零点后下一次触发照常执行。计量单位是 token 而不是金额：使用账本只对 DeepSeek 官方路由计价，其他路由恒为 0。今日已用取自该账本按本地日期分桶的输入、缓存读写与输出之和，与「使用统计」面板的口径一致。",
-			"settings.spendBudgetTokensHintBrief": "默认 0 不设闸。设成正值后今日用量到顶，手动执行被拒绝，定时触发跳过。",
+			"settings.spendBudgetTokensHintBrief": "今日用量到顶后，手动执行被拒绝，定时触发跳过。",
 			"settings.runBehaviorTitle": "运行行为",
 			"settings.runBehaviorCardHint": "全局原生 /goal 执行开关（总开关，默认关闭）。",
-			"settings.goalRunGlobal": "全局启用 DSH 原生 /goal 执行",
+			"settings.goalRunGlobal": "原生 /goal 执行",
 			"settings.goalRunGlobalHint": "默认关闭。关闭时所有任务都按普通单回合执行，不调用 dsh 内置的 /goal；只有这里开启、且任务级「以 /goal 开始执行」被勾选时，才执行原生 /goal。任务级勾选始终可操作、也不会被这里的开关改写，总开关只决定它是否生效。开关按执行启动时冻结，只影响之后新开的执行。",
-			"settings.goalRunGlobalHintBrief": "默认关闭。只有它与卡片级选项都开启，执行才使用原生 /goal。",
+			"settings.goalRunGlobalHintBrief": "开启后执行才使用原生 /goal。",
 			"settings.goalRunGlobalDisabledTaskOption": "全局「原生 /goal 执行」总开关已关闭：任务级选项仍可随时勾选或取消，但暂不生效，你保存的偏好也不会被改写；开启总开关后即按该偏好执行。本次执行按普通单回合进行，未执行 goal 验收。",
 			"settings.goalVerificationTitle": "任务验收",
-			"settings.goalVerification": "启用任务验收",
+			"settings.goalVerification": "任务验收",
 			"settings.goalVerificationCardHint": "验收开关、裁判模型与判据阈值。",
 			"settings.goalVerificationHint": "默认打开：以 goal 形式执行的任务在 update_goal 标记完成前必须先通过一次验收（三项 coding 判据（本分区面向工程任务）、阈值 0.65、每项两轮且交换 A/B 位置，实际工作须胜过空工作基线）。首次不通过会把总分、逐项分数与可定位问题反馈给 agent 修复，同一执行最多两次验收；第二次仍不通过则本次执行判失败。仅作用于本插件以 goal 形式执行的任务，不影响普通聊天，也不影响显式 goalRun:false 的单回合任务。每次验收都会真实调用裁判模型并消耗额度。",
-			"settings.goalVerificationHintBrief": "默认开启。每项判据两轮，阈值 0.65，每次验收都会调用裁判模型。",
+			"settings.goalVerificationHintBrief": "每项判据两轮，每次验收都会调用裁判模型。",
 			"settings.goalVerificationModel": "验收模型",
 			"settings.goalVerificationModelHint": "留空即继承宿主：使用宿主模型目录的默认路由，而不是任务卡钉住的执行模型。",
 			"settings.goalVerificationModelHintBrief": "留空继承宿主默认路由，不跟随卡片钉住的执行模型。",
@@ -3897,7 +3893,8 @@ window.__ModuleLoader__.load({
 			"board.group.collapse": "收起",
 			"board.hideSubtasks": "隐藏子任务",
 			"board.showSubtasks": "显示子任务",
-			"board.subtaskFilterHint": "看板默认只显示父任务；搜索或按标签筛选时会自动展开子任务。"
+			"board.subtaskFilterHint": "看板默认只显示父任务；搜索或按标签筛选时会自动展开子任务。",
+			"settings.enabledTopic": "基础"
 		};
 		/** en dictionary, complete against the zh key set. */
 		const en = {
@@ -4175,20 +4172,20 @@ window.__ModuleLoader__.load({
 			"exec.hint.short": "Blank inherits the deployment default; applied at run time",
 			"settings.title": "Task Board",
 			"settings.description": "Task orchestration, agent announcement and goal acceptance.",
-			"settings.enabled": "Enable the task board",
-			"settings.enabledCardHint": "Master switch, announcement, sleep protection and subtask depth.",
+			"settings.enabled": "Master switch",
+			"settings.enabledCardHint": "Announcement, sleep protection and subtask depth.",
 			"settings.enabledHint": "When off, the sidebar entry and board view are hidden and the task_board_* agent tools are unregistered; while on, any session can read and drive the board, its subtasks and its schedules through those tools.",
-			"settings.enabledHintBrief": "On by default. Off hides the entry and board view and unregisters the task_board_* tools.",
-			"settings.announceToAgent": "Announce the task board to agents",
+			"settings.enabledHintBrief": "Off hides the entry and board view and unregisters the task_board_* tools.",
+			"settings.announceToAgent": "Announce to agents",
 			"settings.announceToAgentHint": "On: every agent system prompt includes a note about this board. Off: no announcement; agents learn about the board only when you mention it.",
-			"settings.announceToAgentHintBrief": "Off by default. On adds a note about this board to every agent system prompt.",
+			"settings.announceToAgentHintBrief": "Every system prompt carries a note about this board.",
 			"settings.preventIdleSleep": "Prevent idle system sleep",
 			"settings.preventIdleSleepHint": "Off by default. When enabled, the Host prevents idle system sleep while any DSH session runs, any schedule is enabled, or session state is not yet known. The display may still turn off.",
-			"settings.preventIdleSleepHintBrief": "Off by default. On blocks idle system sleep while a session runs or a schedule is enabled.",
-			"settings.trustForwardedProxy": "Trust requests forwarded by my own proxy or tunnel",
+			"settings.preventIdleSleepHintBrief": "Blocks idle system sleep while a session runs or a schedule is enabled.",
+			"settings.trustForwardedProxy": "Trust forwarded requests",
 			"settings.trustForwardedProxyHint": "Off by default. While it is off the fence behaves exactly as if the setting did not exist: a request carrying CF-Connecting-IP or X-Forwarded-For is never treated as local. Turn it on only when the reverse proxy or tunnel is one you (the operator) run yourself and it dials this machine loopback upstream (127.0.0.1:<port>): even then such a request must still carry a browser same-origin marker, and an explicit cross-site request stays refused. Do not enable it for a reverse proxy hosted by a third party, which can forge those markers on your behalf.",
-			"settings.trustForwardedProxyHintBrief": "Off by default. Turn on only for a proxy or tunnel you run that dials this machine loopback.",
-			"settings.powerBoundary": "This may use more battery. Lid close, manual sleep, hibernation, shutdown, low-battery actions, and enterprise policy are outside the guarantee; an already sleeping computer is not woken.",
+			"settings.trustForwardedProxyHintBrief": "On only for a proxy of your own that dials this machine loopback.",
+			"settings.powerBoundary": "Closing the lid, hibernate, shutdown or a low battery is outside the guarantee.",
 			"settings.powerError": "Latest power-protection error: {error}",
 			"settings.powerPhase": "Protection",
 			"settings.powerPlatform": "Platform",
@@ -4198,42 +4195,38 @@ window.__ModuleLoader__.load({
 			"settings.inherit": "Inherit",
 			"settings.on": "On",
 			"settings.off": "Off",
-			"settings.overridden": "Overridden",
+			"settings.overridden": "Changed",
 			"settings.reset": "Reset to default",
-			"settings.notExposed": "This DSH version does not expose this plugin's settings namespace to the configuration page, so the form is unavailable. Edit ~/.dsh/settings.yaml directly, or add the namespace to the Host settings allowlist and restart.",
-			"settings.readOnly": "This deployment stores settings read-only.",
+			"settings.notExposed": "This DSH version does not open the task board settings.",
+			"settings.readOnly": "Settings are read-only.",
 			"settings.expand": "Show settings",
 			"settings.collapse": "Hide settings",
-			"settings.save": "Save",
-			"settings.saving": "Saving…",
-			"settings.discard": "Discard",
-			"settings.unsaved": "Unsaved",
-			"settings.saveFailed": "The deployment did not accept these values; they were left for you to correct.",
-			"settings.invalidNumber": "Enter a number, or leave blank to use the default.",
+			"settings.saveFailed": "Not saved.",
+			"settings.invalidNumber": "Enter a number, or leave it empty for the default.",
 			"settings.sessionPollSeconds": "Session poll interval (seconds)",
 			"settings.sessionPollSecondsHint": "Default 5. The Host reads the DSH session roster only while the board has something to reconcile: a running card or an open execution. With neither it stops polling and never re-scans the persisted session directory. Range 1 to 300 seconds: a shorter interval settles runs sooner and costs the Host more.",
-			"settings.sessionPollSecondsHintBrief": "Default 5 seconds, range 1 to 300: a shorter interval settles runs sooner and costs the Host more.",
+			"settings.sessionPollSecondsHintBrief": "How often sessions are checked; shorter settles sooner.",
 			"settings.maxSubtaskDepth": "Subtask depth limit",
 			"settings.maxSubtaskDepthHint": "Default 1: a task may carry one level of subtasks, and a subtask cannot create or link further subtasks. Maximum 3. The limit only decides how deep the tree under one card can go: a run still opens that card's own single session and dispatches its subtasks itself, so the depth never changes how many sessions a run opens.",
-			"settings.maxSubtaskDepthHintBrief": "Default 1, maximum 3: it caps only how deep subtasks can go, not how many sessions a run opens.",
+			"settings.maxSubtaskDepthHintBrief": "How deep subtasks may go.",
 			"settings.maxSubtaskDepthOption": "{depth} levels",
 			"settings.runLaunchWidth": "Concurrent run launches",
 			"settings.runLaunchWidthHint": "Default 3. When several cards want to run at the same time, a manual run, a re-run and a due schedule alike, only this many runs are admitted at once: each creates its session and queues its prompt, and the rest wait their turn. Running one card always opens just that card's own session, so this value never changes the shape of a single-card run. The default comes from this repository's measured guidance for heavy implementation subagents (at most three). Range 1 to 16: a larger width starts runs sooner and costs the Host more memory and swap. Edited during a run, it bounds the launches that have not been admitted yet.",
-			"settings.runLaunchWidthHintBrief": "Default 3, range 1 to 16: when several cards want to run, this many are admitted at once and the rest wait; a single card still opens one session.",
+			"settings.runLaunchWidthHintBrief": "How many runs start at once; the rest wait.",
 			"settings.spendBudgetTokens": "Daily token cap",
 			"settings.spendBudgetTokensHint": "Default 0 means no gate: behavior is exactly what it was before this setting existed, with no ledger read and no counting. With a positive cap, once today's measured spend reaches it a manual run or re-run is refused and the caller sees that message as the refusal, while a due schedule writes the reason to the scheduler error and skips that occurrence without spending a planned run — raising the cap, or the local day rolling over, lets the next trigger run as usual. The unit is tokens rather than money: the usage ledger prices only DeepSeek's own routes and stays 0 on every other route. Today's spend is that ledger's local-date bucket summed over input, cache read/write and output, the same measure the usage panel shows.",
-			"settings.spendBudgetTokensHintBrief": "Default 0 gates nothing. Past a positive cap, manual runs are refused and due schedules skip.",
+			"settings.spendBudgetTokensHintBrief": "Past today's cap, manual runs are refused and due schedules skip.",
 			"settings.runBehaviorTitle": "Run behavior",
 			"settings.runBehaviorCardHint": "The global native /goal switch (master control, off by default).",
-			"settings.goalRunGlobal": "Global: run tasks with dsh native /goal",
+			"settings.goalRunGlobal": "Native /goal",
 			"settings.goalRunGlobalHint": "Off by default. While off, every task runs one plain turn and never calls dsh built-in /goal; a run uses native /goal only when this is on AND the task-level option is checked (see the task option below). The task-level checkbox always stays operable and this switch never rewrites it: the master switch only decides whether that choice takes effect. The switch is frozen when an execution starts, so it only affects runs opened afterwards.",
-			"settings.goalRunGlobalHintBrief": "Off by default. A run uses native /goal only when this and the card option are both on.",
+			"settings.goalRunGlobalHintBrief": "A run uses native /goal only while this is on.",
 			"settings.goalRunGlobalDisabledTaskOption": "The global native /goal switch is off: the task-level option can still be checked or cleared, but it has no effect right now and the preference you save is never rewritten; turning the global switch back on applies it. This execution runs one plain turn and performs no goal acceptance.",
 			"settings.goalVerificationTitle": "Task acceptance",
-			"settings.goalVerification": "Enable task acceptance",
+			"settings.goalVerification": "Task acceptance",
 			"settings.goalVerificationCardHint": "The switch, the judge model and the criteria threshold.",
 			"settings.goalVerificationHint": "On by default: a task executed in goal form must pass one acceptance before update_goal may mark it complete (the three coding criteria, aimed at engineering tasks, a 0.65 threshold, two rounds per criterion with the A/B slots swapped, and the work must beat the empty-work baseline). A first failure returns the total, the per-criterion scores and the located findings to the fixing agent, and one execution may accept at most twice; a second failure fails that execution. It affects only this board goal-form executions, never plain chat and never a task pinned to goalRun: false. Every acceptance really calls the judge model and spends quota.",
-			"settings.goalVerificationHintBrief": "On by default. Two rounds per criterion at 0.65, and each acceptance calls the judge model.",
+			"settings.goalVerificationHintBrief": "Two rounds per criterion, and each acceptance calls the judge model.",
 			"settings.goalVerificationModel": "Judge model",
 			"settings.goalVerificationModelHint": "Blank inherits the host: the default route of the host model catalog, never the card pinned execution model.",
 			"settings.goalVerificationModelHintBrief": "Blank inherits the host default route, never the model pinned on the card.",
@@ -4375,7 +4368,8 @@ window.__ModuleLoader__.load({
 			"board.group.collapse": "Collapse",
 			"board.hideSubtasks": "Hide subtasks",
 			"board.showSubtasks": "Show subtasks",
-			"board.subtaskFilterHint": "The board shows parent tasks only; a text or label filter reveals the subtasks automatically."
+			"board.subtaskFilterHint": "The board shows parent tasks only; a text or label filter reveals the subtasks automatically.",
+			"settings.enabledTopic": "Basics"
 		};
 		/** Active dictionary, picked by the document language at call time. */
 		function dictionary() {
@@ -12409,7 +12403,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 		}
 		//#endregion
 		//#region \0dsh-css:packages/dsh-task-board/src/client/settings-card.module.css.mjs
-		const css$1 = ".Jh0q7G_card{--settings-card-radius:12px;--settings-card-header-pad:16px;--settings-card-header-gap:13px;--settings-card-title-size:15px;--settings-card-description-size:13px;--settings-card-body-inset:16px;--settings-card-motion:.18s;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:var(--settings-card-radius);list-style:none;transition:border-color .16s,background .16s}.Jh0q7G_card:hover{border-color:var(--dsw-alias-label-dimmed)}.Jh0q7G_cardOpen{background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-label-dimmed)}.Jh0q7G_cardNested{--settings-card-radius:10px;--settings-card-header-pad:10px 12px;--settings-card-header-gap:10px;--settings-card-title-size:13px;--settings-card-description-size:12px;--settings-card-body-inset:12px}.Jh0q7G_cardNested .Jh0q7G_description{white-space:nowrap;text-overflow:ellipsis;overflow:hidden}.Jh0q7G_header{appearance:none;box-sizing:border-box;width:100%;font:inherit;color:inherit;text-align:left;cursor:pointer;border-radius:var(--settings-card-radius);align-items:center;gap:var(--settings-card-header-gap);padding:var(--settings-card-header-pad);background:0 0;border:0;display:flex}.Jh0q7G_header:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}.Jh0q7G_headerStatic{box-sizing:border-box;border-radius:var(--settings-card-radius);align-items:center;gap:var(--settings-card-header-gap);width:100%;padding:var(--settings-card-header-pad);display:flex}.Jh0q7G_headText{flex-direction:column;flex:1;gap:4px;min-width:0;display:flex}.Jh0q7G_mark{background:var(--dsw-alias-bg-module-platform);width:34px;height:34px;color:var(--dsw-alias-label-secondary);border-radius:10px;flex:none;place-items:center;transition:color .16s;display:grid}.Jh0q7G_header:hover .Jh0q7G_mark,.Jh0q7G_cardOpen .Jh0q7G_mark{color:var(--dsw-alias-label-primary)}.Jh0q7G_name{color:var(--dsw-alias-label-primary);font-size:var(--settings-card-title-size);font-weight:600;line-height:1.4}.Jh0q7G_description{color:var(--dsw-alias-label-secondary);font-size:var(--settings-card-description-size);line-height:1.5}.Jh0q7G_pending{white-space:nowrap;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);border-radius:999px;flex:none;padding:1px 8px;font-size:11px;font-weight:500;line-height:17px}.Jh0q7G_headerAction{flex:none;align-items:center;display:inline-flex}.Jh0q7G_chevron{color:var(--dsw-alias-label-tertiary);flex:none;width:16px;height:16px;transition:transform .16s,color .16s}.Jh0q7G_header:hover .Jh0q7G_chevron{color:var(--dsw-alias-label-secondary)}.Jh0q7G_chevronOpen{transform:rotate(180deg)}.Jh0q7G_disclosure{opacity:0;transition:grid-template-rows var(--settings-card-motion) ease, opacity var(--settings-card-motion) ease;grid-template-rows:0fr;display:grid}.Jh0q7G_disclosure[data-state=collapsed],.Jh0q7G_disclosure[data-state=entering],.Jh0q7G_disclosure[data-state=closing]{overflow:hidden}.Jh0q7G_disclosure[data-state=entering],.Jh0q7G_disclosure[data-state=shown]{opacity:1;grid-template-rows:1fr}.Jh0q7G_disclosure>.Jh0q7G_body{min-width:0;min-height:0}.Jh0q7G_body{border-top:1px solid var(--dsw-alias-border-l2);margin:0 var(--settings-card-body-inset);padding-bottom:8px}.Jh0q7G_readOnly{color:var(--dsw-alias-label-secondary);margin:12px 0 0;font-size:12px;line-height:1.5}.Jh0q7G_notExposed{color:var(--dsw-alias-state-warn-primary);margin:12px 0 0;font-size:12px;line-height:1.5}.Jh0q7G_footer{border-top:1px solid var(--dsw-alias-border-l2);justify-content:flex-end;align-items:center;gap:8px;padding:12px 0 4px;display:flex}.Jh0q7G_failed{min-width:0;color:var(--dsw-alias-state-error-primary,#b42318);text-overflow:ellipsis;white-space:nowrap;flex:1;margin:0;font-size:12px;line-height:1.5;overflow:hidden}.Jh0q7G_discard,.Jh0q7G_save{appearance:none;font:inherit;cursor:pointer;border:1px solid #0000;border-radius:8px;padding:5px 14px;font-size:13px;line-height:1.5}.Jh0q7G_discard{border-color:var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);background:0 0}.Jh0q7G_discard:hover:not(:disabled){color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-label-dimmed)}.Jh0q7G_save{background:var(--dsw-alias-label-primary);color:var(--dsw-alias-bg-layer-3)}.Jh0q7G_discard:disabled,.Jh0q7G_save:disabled{opacity:.4;cursor:default}.Jh0q7G_discard:focus-visible,.Jh0q7G_save:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}.Jh0q7G_field{flex-direction:column;gap:6px;padding:12px 0;display:flex}.Jh0q7G_field+.Jh0q7G_field{border-top:1px solid var(--dsw-alias-border-l2)}.Jh0q7G_head{align-items:center;gap:8px;display:flex}.Jh0q7G_label{min-width:0;color:var(--dsw-alias-label-primary);flex:1;font-size:13px;font-weight:500;line-height:1.5}.Jh0q7G_badges{align-items:center;gap:8px;display:inline-flex}.Jh0q7G_badge{white-space:nowrap;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);border-radius:999px;padding:1px 8px;font-size:11px;font-weight:500;line-height:17px}.Jh0q7G_reset{font:inherit;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:none;padding:0;font-size:12px;line-height:1.5}.Jh0q7G_reset:hover:not(:disabled){color:var(--dsw-alias-label-primary)}.Jh0q7G_reset:disabled{cursor:default}.Jh0q7G_reset:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px;outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}.Jh0q7G_input,.Jh0q7G_select{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);height:34px;font:inherit;color:var(--dsw-alias-label-primary);border-radius:8px;padding:0 12px;font-size:13px;line-height:1.5}.Jh0q7G_input:focus-visible,.Jh0q7G_select:focus-visible{border-color:var(--dsw-alias-brand-primary);outline:none}.Jh0q7G_input:disabled,.Jh0q7G_select:disabled{color:var(--dsw-alias-label-tertiary);cursor:default}.Jh0q7G_inputInvalid{border:1px solid var(--dsw-alias-state-error-primary,#b42318);background:var(--dsw-alias-bg-layer-3);height:34px;font:inherit;color:var(--dsw-alias-label-primary);border-radius:8px;padding:0 12px;font-size:13px;line-height:1.5}.Jh0q7G_inputInvalid:focus-visible{outline:2px solid var(--dsw-alias-state-error-primary,#b42318);outline-offset:1px;border-color:var(--dsw-alias-state-error-primary,#b42318)}.Jh0q7G_selectWrap{position:relative}.Jh0q7G_selectButton{appearance:none;text-align:left;cursor:pointer;justify-content:space-between;align-items:center;gap:8px;width:100%;display:flex}.Jh0q7G_selectLabel{text-overflow:ellipsis;white-space:nowrap;min-width:0;overflow:hidden}.Jh0q7G_selectChevron{color:var(--dsw-alias-label-tertiary);flex:none;transition:transform .16s}.Jh0q7G_selectChevronOpen{transform:rotate(180deg)}.Jh0q7G_selectPopup{z-index:40;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);max-height:240px;box-shadow:0 8px 24px var(--dsw-alias-bg-mask-2);opacity:0;border-radius:8px;flex-direction:column;padding:4px;transition:opacity .1s,transform .1s;display:flex;position:absolute;top:calc(100% + 4px);left:0;right:0;overflow-y:auto;transform:translateY(-4px)}.Jh0q7G_selectPopupOpen{opacity:1;transform:none}.Jh0q7G_selectPopupClose{opacity:0;pointer-events:none;transform:translateY(-4px)}.Jh0q7G_selectOption{color:var(--dsw-alias-label-primary);cursor:pointer;white-space:nowrap;text-overflow:ellipsis;border-radius:6px;flex-shrink:0;padding:6px 10px;font-size:13px;line-height:1.5;overflow:hidden}.Jh0q7G_selectOption:hover,.Jh0q7G_selectOptionActive{background:var(--dsw-alias-interactive-bg-hover)}.Jh0q7G_selectOptionSelected{color:var(--dsw-alias-brand-primary);background:color-mix(in srgb, var(--dsw-alias-brand-primary-new-colorprimary-new-color) 10%, transparent);font-weight:500}.Jh0q7G_invalid{color:var(--dsw-alias-state-error-primary,#b42318);margin:0;font-size:12px;line-height:1.5}.Jh0q7G_hint{color:var(--dsw-alias-label-secondary);margin:0;font-size:12px;line-height:1.5}.Jh0q7G_toggle{appearance:none;cursor:pointer;font:inherit;background:0 0;border:0;border-radius:999px;align-items:center;margin:0;padding:0;display:inline-flex}.Jh0q7G_toggleTrack{background:var(--dsw-alias-label-dimmed);border-radius:999px;flex:none;width:30px;height:16px;transition:background .18s;position:relative}.Jh0q7G_toggleThumb{background:var(--dsw-alias-bg-layer-3);border-radius:50%;width:12px;height:12px;transition:left .18s;position:absolute;top:2px;left:2px}.Jh0q7G_toggle[aria-checked=true] .Jh0q7G_toggleTrack{background:var(--dsw-alias-button-primary-fill,var(--dsw-alias-label-primary))}.Jh0q7G_toggle[aria-checked=true] .Jh0q7G_toggleThumb{background:var(--dsw-alias-label-primary-foreground,var(--dsw-alias-bg-layer-3));left:16px}.Jh0q7G_toggle:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}.Jh0q7G_toggle:disabled{opacity:.45;cursor:default}@media (prefers-reduced-motion:reduce){.Jh0q7G_card,.Jh0q7G_header,.Jh0q7G_mark,.Jh0q7G_chevron,.Jh0q7G_chevronOpen,.Jh0q7G_discard,.Jh0q7G_save,.Jh0q7G_selectChevron,.Jh0q7G_selectChevronOpen,.Jh0q7G_selectPopup,.Jh0q7G_toggleTrack,.Jh0q7G_toggleThumb{transition:none}.Jh0q7G_disclosure{transition-property:opacity}}";
+		const css$1 = ".Jh0q7G_card{--settings-card-radius:12px;--settings-card-header-pad:16px;--settings-card-header-gap:13px;--settings-card-title-size:15px;--settings-card-description-size:13px;--settings-card-body-inset:16px;--settings-card-motion:.18s;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:var(--settings-card-radius);list-style:none;transition:border-color .16s,background .16s}.Jh0q7G_card:hover{border-color:var(--dsw-alias-label-dimmed)}.Jh0q7G_cardOpen{background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-label-dimmed)}.Jh0q7G_cardNested{--settings-card-radius:10px;--settings-card-header-pad:10px 12px;--settings-card-header-gap:10px;--settings-card-title-size:13px;--settings-card-description-size:12px;--settings-card-body-inset:12px}.Jh0q7G_cardNested .Jh0q7G_description{white-space:nowrap;text-overflow:ellipsis;overflow:hidden}.Jh0q7G_header{appearance:none;box-sizing:border-box;width:100%;font:inherit;color:inherit;text-align:left;cursor:pointer;border-radius:var(--settings-card-radius);align-items:center;gap:var(--settings-card-header-gap);padding:var(--settings-card-header-pad);background:0 0;border:0;display:flex}.Jh0q7G_header:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}.Jh0q7G_headerStatic{box-sizing:border-box;border-radius:var(--settings-card-radius);align-items:center;gap:var(--settings-card-header-gap);width:100%;padding:var(--settings-card-header-pad);display:flex}.Jh0q7G_headText{flex-direction:column;flex:1;gap:4px;min-width:0;display:flex}.Jh0q7G_mark{background:var(--dsw-alias-bg-module-platform);width:34px;height:34px;color:var(--dsw-alias-label-secondary);border-radius:10px;flex:none;place-items:center;transition:color .16s;display:grid}.Jh0q7G_header:hover .Jh0q7G_mark,.Jh0q7G_cardOpen .Jh0q7G_mark{color:var(--dsw-alias-label-primary)}.Jh0q7G_name{color:var(--dsw-alias-label-primary);font-size:var(--settings-card-title-size);font-weight:600;line-height:1.4}.Jh0q7G_description{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}.Jh0q7G_headerAction{flex:none;align-items:center;display:inline-flex}.Jh0q7G_chevron{color:var(--dsw-alias-label-tertiary);flex:none;width:16px;height:16px;transition:transform .16s,color .16s}.Jh0q7G_header:hover .Jh0q7G_chevron{color:var(--dsw-alias-label-secondary)}.Jh0q7G_chevronOpen{transform:rotate(180deg)}.Jh0q7G_disclosure{opacity:0;transition:grid-template-rows var(--settings-card-motion) ease, opacity var(--settings-card-motion) ease;grid-template-rows:0fr;display:grid}.Jh0q7G_disclosure[data-state=collapsed],.Jh0q7G_disclosure[data-state=entering],.Jh0q7G_disclosure[data-state=closing]{overflow:hidden}.Jh0q7G_disclosure[data-state=entering],.Jh0q7G_disclosure[data-state=shown]{opacity:1;grid-template-rows:1fr}.Jh0q7G_disclosure>.Jh0q7G_body{min-width:0;min-height:0}.Jh0q7G_body{border-top:1px solid var(--dsw-alias-border-l2);margin:0 var(--settings-card-body-inset);padding-bottom:8px;container:Jh0q7G_settings-card/inline-size}.Jh0q7G_readOnly{color:var(--dsw-alias-label-secondary);margin:12px 0 0;font-size:12px;line-height:1.5}.Jh0q7G_notExposed{color:var(--dsw-alias-state-warn-primary);margin:12px 0 0;font-size:12px;line-height:1.5}.Jh0q7G_failed{color:var(--dsw-alias-state-error-primary,#b42318);overflow-wrap:anywhere;margin:8px 0 4px;font-size:12px;line-height:18px}.Jh0q7G_field{grid-template-columns:minmax(0,1fr) fit-content(50%);grid-template-areas:\"Jh0q7G_head Jh0q7G_control\"\"Jh0q7G_hint Jh0q7G_control\";align-items:center;gap:4px 24px;padding:16px 0;display:grid}.Jh0q7G_field>.Jh0q7G_head{grid-area:Jh0q7G_head}.Jh0q7G_field>:is(.Jh0q7G_hint,.Jh0q7G_invalid){grid-area:Jh0q7G_hint}.Jh0q7G_field>:not(.Jh0q7G_head,.Jh0q7G_hint,.Jh0q7G_invalid){grid-area:Jh0q7G_control;justify-self:end;max-width:100%}.Jh0q7G_field+.Jh0q7G_field{border-top:1px solid var(--dsw-alias-border-l2)}.Jh0q7G_head{align-items:center;gap:8px;display:flex}.Jh0q7G_label{min-width:0;color:var(--dsw-alias-label-primary);flex:1;font-size:14px;font-weight:400;line-height:22px}.Jh0q7G_badges{align-items:center;gap:8px;display:inline-flex}.Jh0q7G_badge{white-space:nowrap;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);border-radius:999px;padding:1px 8px;font-size:11px;font-weight:500;line-height:17px}.Jh0q7G_reset{font:inherit;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:none;padding:0;font-size:12px;line-height:1.5}.Jh0q7G_reset:hover:not(:disabled){color:var(--dsw-alias-label-primary)}.Jh0q7G_reset:disabled{cursor:default}.Jh0q7G_reset:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}.Jh0q7G_segmentGroup{background:color-mix(in srgb, var(--dsw-alias-label-primary) 7%, transparent);box-shadow:inset 0 0 0 1px color-mix(in srgb, var(--dsw-alias-label-primary) 5%, transparent);border-radius:8px;flex-wrap:wrap;align-items:center;gap:2px;padding:2px;display:inline-flex;position:relative}.Jh0q7G_segment{appearance:none;color:var(--dsw-alias-label-secondary);font:inherit;white-space:nowrap;cursor:pointer;background:0 0;border:0;border-radius:7px;margin:0;padding:3px 12px;font-size:13px;font-weight:500;line-height:18px;transition:background-color .12s,color .12s}.Jh0q7G_segment:hover:not(:disabled):not([data-active]){color:var(--dsw-alias-label-primary)}.Jh0q7G_segmentGroup:not([data-pill])>.Jh0q7G_segment[data-active],.Jh0q7G_segmentGroup[data-pill]:before{background:var(--dsw-alias-bg-overlay,var(--dsw-alias-bg-layer-3));box-shadow:0 1px 2px #14141314}body[data-ds-dark-theme] .Jh0q7G_segmentGroup:not([data-pill])>.Jh0q7G_segment[data-active],body[data-ds-dark-theme] .Jh0q7G_segmentGroup[data-pill]:before{box-shadow:none;background:#ffffff24}.Jh0q7G_segment[data-active]{color:var(--dsw-alias-label-primary)}.Jh0q7G_segmentGroup[data-pill]:before{content:\"\";width:var(--segment-pill-w,0px);height:var(--segment-pill-h,0px);transform:translate(var(--segment-pill-x,0px), var(--segment-pill-y,0px));pointer-events:none;border-radius:7px;transition:transform .24s cubic-bezier(.22,.61,.36,1),width .24s cubic-bezier(.22,.61,.36,1),height .24s cubic-bezier(.22,.61,.36,1);position:absolute;top:0;left:0}.Jh0q7G_segmentGroup>*{z-index:1;position:relative}.Jh0q7G_segment:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}.Jh0q7G_segment:disabled{cursor:not-allowed;opacity:.45}.Jh0q7G_segmentGroup[data-pill]:has(>.Jh0q7G_segment:disabled):before{opacity:.45}.Jh0q7G_input,.Jh0q7G_select{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);height:34px;font:inherit;color:var(--dsw-alias-label-primary);border-radius:8px;padding:0 12px;font-size:13px;line-height:1.5}.Jh0q7G_input:focus-visible,.Jh0q7G_select:focus-visible{border-color:var(--dsw-alias-brand-primary);outline:none}.Jh0q7G_input:disabled,.Jh0q7G_select:disabled{color:var(--dsw-alias-label-tertiary);cursor:default}.Jh0q7G_inputInvalid{border:1px solid var(--dsw-alias-state-error-primary,#b42318);background:var(--dsw-alias-bg-layer-3);height:34px;font:inherit;color:var(--dsw-alias-label-primary);border-radius:8px;padding:0 12px;font-size:13px;line-height:1.5}.Jh0q7G_inputInvalid:focus-visible{outline:2px solid var(--dsw-alias-state-error-primary,#b42318);outline-offset:1px;border-color:var(--dsw-alias-state-error-primary,#b42318)}.Jh0q7G_field>:is(.Jh0q7G_input,.Jh0q7G_inputInvalid,.Jh0q7G_select,.Jh0q7G_selectWrap,.Jh0q7G_rangeAnchor){box-sizing:border-box;width:220px}.Jh0q7G_rangeAnchor>:is(.Jh0q7G_input,.Jh0q7G_inputInvalid){box-sizing:border-box;width:100%}@container Jh0q7G_settings-card (width<=440px){.Jh0q7G_field{grid-template-columns:minmax(0,1fr);grid-template-areas:\"Jh0q7G_head\"\"Jh0q7G_hint\"\"Jh0q7G_control\";row-gap:8px}.Jh0q7G_field>:not(.Jh0q7G_head,.Jh0q7G_hint,.Jh0q7G_invalid){justify-self:start}.Jh0q7G_field>:is(.Jh0q7G_input,.Jh0q7G_inputInvalid,.Jh0q7G_select,.Jh0q7G_selectWrap,.Jh0q7G_rangeAnchor){justify-self:stretch;width:auto}}.Jh0q7G_selectWrap{position:relative}.Jh0q7G_selectButton{appearance:none;text-align:left;cursor:pointer;justify-content:space-between;align-items:center;gap:8px;width:100%;display:flex}.Jh0q7G_selectLabel{text-overflow:ellipsis;white-space:nowrap;min-width:0;overflow:hidden}.Jh0q7G_selectChevron{color:var(--dsw-alias-label-tertiary);flex:none;transition:transform .16s}.Jh0q7G_selectChevronOpen{transform:rotate(180deg)}.Jh0q7G_selectPopup{z-index:40;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);max-height:240px;box-shadow:0 8px 24px var(--dsw-alias-bg-mask-2);opacity:0;border-radius:8px;flex-direction:column;padding:4px;transition:opacity .1s,transform .1s;display:flex;position:absolute;top:calc(100% + 4px);left:0;right:0;overflow-y:auto;transform:translateY(-4px)}.Jh0q7G_selectPopupOpen{opacity:1;transform:none}.Jh0q7G_selectPopupClose{opacity:0;pointer-events:none;transform:translateY(-4px)}.Jh0q7G_rangeAnchor{display:inline-flex;position:relative}.Jh0q7G_rangeBubble{z-index:40;box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);width:220px;box-shadow:0 8px 24px var(--dsw-alias-bg-mask-2);opacity:0;visibility:hidden;border-radius:10px;padding:10px 12px 6px;transition:opacity .12s,transform .12s,visibility 0s linear .12s;position:absolute;right:0}.Jh0q7G_rangeBubble[data-side=above]{bottom:calc(100% + 6px);transform:translateY(4px)}.Jh0q7G_rangeBubble[data-side=below]{top:calc(100% + 6px);transform:translateY(-4px)}.Jh0q7G_rangeBubble[data-open]{opacity:1;visibility:visible;transition:opacity .12s,transform .12s,visibility;transform:none}.Jh0q7G_rangeSlider{appearance:none;cursor:pointer;background:0 0;width:100%;height:18px;margin:0;display:block}.Jh0q7G_rangeSlider::-webkit-slider-runnable-track{background:linear-gradient(to right, var(--dsw-alias-brand-primary) var(--range-fill,0%), color-mix(in srgb, var(--dsw-alias-label-primary) 12%, transparent) var(--range-fill,0%));border-radius:999px;height:4px}.Jh0q7G_rangeSlider::-moz-range-track{background:color-mix(in srgb, var(--dsw-alias-label-primary) 12%, transparent);border-radius:999px;height:4px}.Jh0q7G_rangeSlider::-moz-range-progress{background:var(--dsw-alias-brand-primary);border-radius:999px;height:4px}.Jh0q7G_rangeSlider::-webkit-slider-thumb{appearance:none;background:#fff;border:0;border-radius:50%;width:14px;height:14px;margin-top:-5px;transition:transform .12s;box-shadow:0 0 0 1px #0000001f,0 1px 3px #00000040}.Jh0q7G_rangeSlider::-moz-range-thumb{background:#fff;border:0;border-radius:50%;width:14px;height:14px;box-shadow:0 0 0 1px #0000001f,0 1px 3px #00000040}.Jh0q7G_rangeSlider:active::-webkit-slider-thumb{transform:scale(1.15)}.Jh0q7G_rangeSlider:focus-visible{outline:none}.Jh0q7G_rangeSlider:focus-visible::-webkit-slider-thumb{box-shadow:0 0 0 2px var(--dsw-alias-brand-primary)}.Jh0q7G_rangeSlider:disabled{cursor:not-allowed}.Jh0q7G_rangeEnds{color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums;justify-content:space-between;margin-top:2px;font-size:11px;line-height:16px;display:flex}.Jh0q7G_selectOption{color:var(--dsw-alias-label-primary);cursor:pointer;white-space:nowrap;text-overflow:ellipsis;border-radius:6px;flex-shrink:0;padding:6px 10px;font-size:13px;line-height:1.5;overflow:hidden}.Jh0q7G_selectOption:hover,.Jh0q7G_selectOptionActive{background:var(--dsw-alias-interactive-bg-hover)}.Jh0q7G_selectOptionSelected{color:var(--dsw-alias-brand-primary);background:color-mix(in srgb, var(--dsw-alias-brand-primary) 10%, transparent);font-weight:500}.Jh0q7G_invalid{color:var(--dsw-alias-state-error-primary,#b42318);margin:0;font-size:12px;line-height:18px}.Jh0q7G_hint{color:var(--dsw-alias-label-secondary);margin:0;font-size:12px;line-height:18px}.Jh0q7G_toggle{appearance:none;cursor:pointer;font:inherit;background:0 0;border:0;border-radius:999px;align-items:center;margin:0;padding:0;display:inline-flex}.Jh0q7G_toggleTrack{background:var(--dsw-alias-label-dimmed);border-radius:999px;flex:none;width:36px;height:20px;transition:background-color .18s;position:relative}.Jh0q7G_toggleThumb{--toggle-travel:16px;--toggle-overshoot:1px;background:var(--dsw-alias-bg-layer-3);border-radius:50%;width:16px;height:16px;transition:translate .18s;position:absolute;top:2px;left:2px;translate:0;box-shadow:0 1px 2px #1414132e}.Jh0q7G_toggle[aria-checked=true] .Jh0q7G_toggleTrack{background:var(--dsw-alias-button-primary-fill,var(--dsw-alias-label-primary))}.Jh0q7G_toggle[aria-checked=true] .Jh0q7G_toggleThumb{translate:var(--toggle-travel) 0;background:var(--dsw-alias-label-primary-foreground,var(--dsw-alias-bg-layer-3))}.Jh0q7G_toggle[data-moved][aria-checked=true] .Jh0q7G_toggleThumb{animation:.35s cubic-bezier(.34,1.45,.64,1) both Jh0q7G_toggle-on}.Jh0q7G_toggle[data-moved][aria-checked=false] .Jh0q7G_toggleThumb{animation:.35s cubic-bezier(.34,1.45,.64,1) both Jh0q7G_toggle-off}@keyframes Jh0q7G_toggle-on{0%{translate:0}55%{translate:calc(var(--toggle-travel) + var(--toggle-overshoot)) 0}80%,to{translate:var(--toggle-travel) 0}}@keyframes Jh0q7G_toggle-off{0%{translate:var(--toggle-travel) 0}55%{translate:calc(0px - var(--toggle-overshoot)) 0}80%,to{translate:0}}.Jh0q7G_toggle:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}.Jh0q7G_toggle:disabled{opacity:.45;cursor:not-allowed}@media (prefers-reduced-motion:reduce){.Jh0q7G_card,.Jh0q7G_header,.Jh0q7G_mark,.Jh0q7G_chevron,.Jh0q7G_chevronOpen,.Jh0q7G_rangeBubble,.Jh0q7G_selectChevron,.Jh0q7G_selectChevronOpen,.Jh0q7G_selectPopup,.Jh0q7G_toggleTrack,.Jh0q7G_toggleThumb{transition:none}.Jh0q7G_toggle[data-moved] .Jh0q7G_toggleThumb{animation:none}.Jh0q7G_disclosure{transition-property:opacity}}";
 		const tagId$1 = "@linxin666/dsh-client-ui-task-board/packages/dsh-task-board/src/client/settings-card.module.css";
 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId$1) + "]") === null) {
 			const tag = document.createElement("style");
@@ -12427,12 +12421,11 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 			"cardOpen": "Jh0q7G_cardOpen",
 			"chevron": "Jh0q7G_chevron",
 			"chevronOpen": "Jh0q7G_chevronOpen",
+			"control": "Jh0q7G_control",
 			"description": "Jh0q7G_description",
-			"discard": "Jh0q7G_discard",
 			"disclosure": "Jh0q7G_disclosure",
 			"failed": "Jh0q7G_failed",
 			"field": "Jh0q7G_field",
-			"footer": "Jh0q7G_footer",
 			"head": "Jh0q7G_head",
 			"headText": "Jh0q7G_headText",
 			"header": "Jh0q7G_header",
@@ -12446,10 +12439,14 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 			"mark": "Jh0q7G_mark",
 			"name": "Jh0q7G_name",
 			"notExposed": "Jh0q7G_notExposed",
-			"pending": "Jh0q7G_pending",
+			"rangeAnchor": "Jh0q7G_rangeAnchor",
+			"rangeBubble": "Jh0q7G_rangeBubble",
+			"rangeEnds": "Jh0q7G_rangeEnds",
+			"rangeSlider": "Jh0q7G_rangeSlider",
 			"readOnly": "Jh0q7G_readOnly",
 			"reset": "Jh0q7G_reset",
-			"save": "Jh0q7G_save",
+			"segment": "Jh0q7G_segment",
+			"segmentGroup": "Jh0q7G_segmentGroup",
 			"select": "Jh0q7G_select",
 			"selectButton": "Jh0q7G_selectButton",
 			"selectChevron": "Jh0q7G_selectChevron",
@@ -12462,7 +12459,10 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 			"selectPopupClose": "Jh0q7G_selectPopupClose",
 			"selectPopupOpen": "Jh0q7G_selectPopupOpen",
 			"selectWrap": "Jh0q7G_selectWrap",
+			"settings-card": "Jh0q7G_settings-card",
 			"toggle": "Jh0q7G_toggle",
+			"toggle-off": "Jh0q7G_toggle-off",
+			"toggle-on": "Jh0q7G_toggle-on",
 			"toggleThumb": "Jh0q7G_toggleThumb",
 			"toggleTrack": "Jh0q7G_toggleTrack"
 		};
@@ -12545,15 +12545,264 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 			});
 		}
 		//#endregion
+		//#region src/client/RangeBubble.tsx
+		/**
+		* Coarse adjustment for a bounded number: resting the pointer on the control
+		* (or moving focus into it) raises a small bubble holding a slider across the
+		* field's whole range, so a large change is one drag instead of many presses
+		* or a retyped value. The control itself stays the precise entry.
+		*
+		* The bubble belongs to the anchor's subtree, so moving from the control onto
+		* the bubble never counts as leaving. It opens after a short rest and closes a
+		* moment after the pointer and focus have both gone, so crossing the control
+		* on the way elsewhere does not flash it. While a drag is in progress the
+		* bubble stays put even if the pointer strays off it.
+		*
+		* Dragging reports each value through `onInput`, so the field shows it live;
+		* releasing the thumb, or a key press on it, reports `onCommit` once. The
+		* bubble opens on the side of the control that has room inside the nearest
+		* scrolling ancestor, so a row near the top of a settings page does not hang
+		* its bubble under the page edge.
+		*/
+		/** Rest on the control before the bubble opens. */
+		const OPEN_DELAY_MS = 220;
+		/** Grace after pointer and focus have left before the bubble closes. */
+		const CLOSE_DELAY_MS = 200;
+		/** Room the bubble needs between the control and the scroller's edge. */
+		const BUBBLE_ROOM_PX = 64;
+		/** The nearest ancestor that scrolls vertically, or the viewport's root. */
+		function scroller(node) {
+			for (let parent = node.parentElement; parent !== null; parent = parent.parentElement) {
+				const overflow = getComputedStyle(parent).overflowY;
+				if (overflow === "auto" || overflow === "scroll") return parent;
+			}
+			return node.ownerDocument.documentElement;
+		}
+		/**
+		* Render the control with its coarse-adjustment bubble.
+		* @param props - the range, the value and the two report callbacks.
+		* @returns the anchor holding the control and the bubble.
+		*/
+		function RangeBubble(props) {
+			const { min, max, step, disabled = false } = props;
+			const [open, setOpen] = (0, react.useState)(false);
+			const [side, setSide] = (0, react.useState)("above");
+			const [live, setLive] = (0, react.useState)(null);
+			const anchorRef = (0, react.useRef)(null);
+			const timer = (0, react.useRef)(void 0);
+			const hovered = (0, react.useRef)(false);
+			const focused = (0, react.useRef)(false);
+			const dragging = (0, react.useRef)(false);
+			(0, react.useEffect)(() => () => {
+				clearTimeout(timer.current);
+			}, []);
+			(0, react.useEffect)(() => {
+				if (disabled) {
+					clearTimeout(timer.current);
+					setOpen(false);
+				}
+			}, [disabled]);
+			const show = () => {
+				const anchor = anchorRef.current;
+				if (anchor !== null) {
+					const room = anchor.getBoundingClientRect().top - scroller(anchor).getBoundingClientRect().top;
+					setSide(room >= BUBBLE_ROOM_PX ? "above" : "below");
+				}
+				setOpen(true);
+			};
+			const schedule = () => {
+				clearTimeout(timer.current);
+				if (disabled) return;
+				if (hovered.current || focused.current || dragging.current) {
+					if (!open) timer.current = setTimeout(show, focused.current ? 0 : OPEN_DELAY_MS);
+					return;
+				}
+				timer.current = setTimeout(() => {
+					setOpen(false);
+				}, CLOSE_DELAY_MS);
+			};
+			const commit = (value) => {
+				dragging.current = false;
+				setLive(null);
+				props.onCommit(value);
+				schedule();
+			};
+			const onChange = (event) => {
+				const value = Number(event.target.value);
+				setLive(value);
+				props.onInput(value);
+			};
+			const onKeyUp = (event) => {
+				if (live !== null) commit(live);
+				if (event.key === "Escape") {
+					clearTimeout(timer.current);
+					setOpen(false);
+				}
+			};
+			const shown = live ?? Math.min(max, Math.max(min, props.value));
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+				ref: anchorRef,
+				className: settings_card_module_css_default.rangeAnchor,
+				onPointerEnter: () => {
+					hovered.current = true;
+					schedule();
+				},
+				onPointerLeave: () => {
+					hovered.current = false;
+					schedule();
+				},
+				onFocus: () => {
+					focused.current = true;
+					schedule();
+				},
+				onBlur: (event) => {
+					if (event.currentTarget.contains(event.relatedTarget)) return;
+					focused.current = false;
+					if (live !== null) commit(live);
+					else schedule();
+				},
+				children: [props.children, /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					className: settings_card_module_css_default.rangeBubble,
+					"data-open": open ? "" : void 0,
+					"data-side": side,
+					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
+						type: "range",
+						className: settings_card_module_css_default.rangeSlider,
+						min,
+						max,
+						step,
+						value: shown,
+						"aria-label": props.label,
+						tabIndex: open ? 0 : -1,
+						disabled,
+						style: { "--range-fill": `${(shown - min) / (max - min) * 100}%` },
+						onPointerDown: () => {
+							dragging.current = true;
+						},
+						onPointerUp: (event) => {
+							commit(Number(event.currentTarget.value));
+						},
+						onPointerCancel: (event) => {
+							commit(Number(event.currentTarget.value));
+						},
+						onChange,
+						onKeyUp
+					}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+						className: settings_card_module_css_default.rangeEnds,
+						"aria-hidden": "true",
+						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: min }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: max })]
+					})]
+				})]
+			});
+		}
+		//#endregion
+		//#region src/client/SegmentGroup.tsx
+		/**
+		* The family's segmented control: a quiet track whose options share one
+		* highlight that slides to the pressed option, instead of each option fading
+		* its own background out and the next one in. The settings fields' small
+		* choices and the Web Extensions TAB strip both render through it, so the two
+		* read as one control.
+		*
+		* The caller builds the option buttons and marks the pressed one with
+		* `data-active`; the group measures that button after every render and writes
+		* its box as four custom properties, and the stylesheet draws the highlight
+		* there (`.segmentGroup[data-pill]::before`). Attribute and first placement
+		* land in the same task, so the highlight appears in place and only later
+		* changes slide. A ResizeObserver re-measures when the group or an option
+		* changes size: a longer locale, a font arriving, a container growing, a
+		* strip wrapping onto a second line.
+		*/
+		/** The attribute marking a group whose highlight has been placed. */
+		const PILL_ATTR = "data-pill";
+		/** The pressed option, relative to the group. */
+		const ACTIVE_SELECTOR = ":scope > [data-active]";
+		const PILL_PROPERTIES = [
+			"--segment-pill-x",
+			"--segment-pill-y",
+			"--segment-pill-w",
+			"--segment-pill-h"
+		];
+		/**
+		* Write the highlight's box from the pressed option's box, or take the
+		* highlight off when nothing is pressed or the group has no layout yet.
+		* The two boxes are read in viewport pixels and turned back into the group's
+		* own CSS pixels, so a dialog that opens through a scale transform still
+		* lands the highlight on its option.
+		*/
+		function placePill(group) {
+			const item = group.querySelector(ACTIVE_SELECTOR);
+			const box = group.getBoundingClientRect();
+			if (item === null || group.offsetWidth === 0 || box.width === 0) {
+				group.removeAttribute(PILL_ATTR);
+				for (const property of PILL_PROPERTIES) group.style.removeProperty(property);
+				return;
+			}
+			const scale = box.width / group.offsetWidth;
+			const itemBox = item.getBoundingClientRect();
+			[
+				(itemBox.left - box.left) / scale - group.clientLeft,
+				(itemBox.top - box.top) / scale - group.clientTop,
+				itemBox.width / scale,
+				itemBox.height / scale
+			].forEach((value, index) => {
+				group.style.setProperty(PILL_PROPERTIES[index], `${Math.round(value * 100) / 100}px`);
+			});
+			if (!group.hasAttribute(PILL_ATTR)) group.setAttribute(PILL_ATTR, "");
+		}
+		/**
+		* Render a segmented track around the caller's option buttons.
+		* @param props - the track's attributes (role, accessible name, key handler) and its options.
+		* @returns the track.
+		*/
+		function SegmentGroup(props) {
+			const { children, className, ...rest } = props;
+			const group = (0, react.useRef)(null);
+			const count = react.Children.count(children);
+			(0, react.useLayoutEffect)(() => {
+				if (group.current !== null) placePill(group.current);
+			});
+			(0, react.useLayoutEffect)(() => {
+				const element = group.current;
+				if (element === null || typeof ResizeObserver === "undefined") return void 0;
+				const observer = new ResizeObserver(() => {
+					placePill(element);
+				});
+				observer.observe(element);
+				for (const item of Array.from(element.children)) observer.observe(item);
+				return () => {
+					observer.disconnect();
+				};
+			}, [count]);
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+				...rest,
+				ref: group,
+				className: className === void 0 ? settings_card_module_css_default.segmentGroup : `${settings_card_module_css_default.segmentGroup} ${className}`,
+				children
+			});
+		}
+		//#endregion
 		//#region src/client/PluginSettingsCard.tsx
 		/**
 		* Family-shared chrome for plugin settings cards: a disclosure header naming
-		* the plugin and what its settings govern, the controls inside, and the save
-		* that writes them. Renders nothing while the namespace is unavailable — a
+		* the plugin and what its settings govern, the controls inside, and the line
+		* that reports a refused write. A pick is written the moment it is made and a
+		* typed value after a pause, so the card has no save button and nothing waits
+		* on the reader. Renders nothing while the namespace is unavailable — a
 		* deployment that does not compose the owning plugin should show no trace of
 		* it. Inlined into each consumer's client bundle; mirrors the official
 		* ui-plugin-config PluginCard in a self-contained slice.
+		*
+		* Every field inside the body is one settings row: the label and its hint on
+		* the left, the control on the right, a hairline between two rows; a narrow
+		* card stacks the control under the text (settings-card.module.css).
 		*/
+		/**
+		* What a text field inside a card reaches without its plugin wiring it: write
+		* the pending draft now (Enter, leaving the field) or put it back (Escape).
+		* Picks need neither; they are written the moment they are made.
+		*/
+		const CardApply = (0, react.createContext)(null);
 		/** Length of the body's disclosure motion; it matches `--settings-card-motion` on the card root. */
 		const BODY_MOTION_MS = 180;
 		/**
@@ -12593,7 +12842,6 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 			const title = props.t(props.titleKey);
 			const description = props.t(props.descriptionKey);
 			const descriptionTitle = props.descriptionTitleKey === void 0 ? description : props.t(props.descriptionTitleKey);
-			const blocked = !state.dirty || state.invalid || state.saving;
 			const baseClass = expanded ? `${settings_card_module_css_default.cardOpen} ${settings_card_module_css_default.card}` : settings_card_module_css_default.card;
 			const cardClass = props.density === "nested" ? `${baseClass} ${settings_card_module_css_default.cardNested}` : baseClass;
 			/** The body region both legs share; a hidden phase renders nothing at all. */
@@ -12630,11 +12878,6 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 					props.headerAction !== void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 						className: settings_card_module_css_default.headerAction,
 						children: props.headerAction
-					}) : null,
-					state.dirty ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-						className: settings_card_module_css_default.pending,
-						title: props.t("settings.unsaved"),
-						children: props.t("settings.unsaved")
 					}) : null
 				]
 			}) : /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
@@ -12668,11 +12911,6 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 						className: settings_card_module_css_default.headerAction,
 						children: props.headerAction
 					}) : null,
-					state.dirty ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-						className: settings_card_module_css_default.pending,
-						title: props.t("settings.unsaved"),
-						children: props.t("settings.unsaved")
-					}) : null,
 					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("svg", {
 						width: "14",
 						height: "14",
@@ -12703,36 +12941,56 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 						role: "status",
 						children: props.t("settings.readOnly")
 					}) : null,
-					props.children,
-					props.hideFooter === true ? null : /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-						className: settings_card_module_css_default.footer,
-						children: [
-							state.failed ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("p", {
-								className: settings_card_module_css_default.failed,
-								role: "status",
-								children: [props.t("settings.saveFailed"), state.failedReason ? " - " + state.failedReason : ""]
-							}) : null,
-							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-								type: "button",
-								className: settings_card_module_css_default.discard,
-								disabled: !state.dirty || state.saving,
-								onClick: props.onDiscard,
-								children: props.t("settings.discard")
-							}),
-							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-								type: "button",
-								className: settings_card_module_css_default.save,
-								disabled: blocked,
-								onClick: props.onSave,
-								children: props.t(!state.saving ? "settings.save" : "settings.saving")
-							})
-						]
-					})
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)(CardApply.Provider, {
+						value: {
+							commit: props.onSave,
+							revert: props.onDiscard
+						},
+						children: props.children
+					}),
+					props.hideFooter !== true && state.failed ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("p", {
+						className: settings_card_module_css_default.failed,
+						role: "status",
+						children: [props.t("settings.saveFailed"), state.failedReason ? " - " + state.failedReason : ""]
+					}) : null
 				] })) : null]
 			});
 		}
-		/** A staged value field. `numeric` only hints the keypad: which drafts a field accepts is decided by its spec. */
+		/**
+		* A typed value field. Its draft is written after a pause in typing, at once on
+		* Enter or when focus leaves, and Escape puts the stored value back. `numeric`
+		* only hints the keypad: which drafts a field accepts is decided by its spec.
+		* A field given a `range` also offers the coarse slider bubble: dragging fills
+		* the draft live and releasing writes it.
+		*/
 		function ValueField(props) {
+			const apply = (0, react.useContext)(CardApply);
+			const onKeyDown = (event) => {
+				if (apply === null || event.key !== "Enter" && event.key !== "Escape") return;
+				event.preventDefault();
+				if (event.key === "Enter") apply.commit();
+				else apply.revert();
+				event.currentTarget.blur();
+			};
+			const input = /* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
+				id: props.id,
+				className: props.invalid ? settings_card_module_css_default.inputInvalid : settings_card_module_css_default.input,
+				type: "text",
+				...props.numeric === true ? { inputMode: "numeric" } : {},
+				...props.invalid ? { "aria-invalid": true } : {},
+				value: props.text,
+				placeholder: props.placeholder ?? "",
+				disabled: props.disabled,
+				onChange: (event) => {
+					props.onEdit(event.target.value);
+				},
+				onKeyDown,
+				onBlur: () => {
+					apply?.commit();
+				}
+			});
+			const { range } = props;
+			const typed = Number(props.text);
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				className: settings_card_module_css_default.field,
 				children: [
@@ -12756,18 +13014,21 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 							})]
 						}) : null]
 					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
-						id: props.id,
-						className: props.invalid ? settings_card_module_css_default.inputInvalid : settings_card_module_css_default.input,
-						type: "text",
-						...props.numeric === true ? { inputMode: "numeric" } : {},
-						...props.invalid ? { "aria-invalid": true } : {},
-						value: props.text,
-						placeholder: props.placeholder ?? "",
+					range === void 0 ? input : /* @__PURE__ */ (0, react_jsx_runtime.jsx)(RangeBubble, {
+						min: range.min,
+						max: range.max,
+						step: range.step,
+						value: props.text.trim() === "" || Number.isNaN(typed) ? range.min : typed,
+						label: `${props.label} ${range.min}–${range.max}`,
 						disabled: props.disabled,
-						onChange: (event) => {
-							props.onEdit(event.target.value);
-						}
+						onInput: (value) => {
+							props.onEdit(String(value));
+						},
+						onCommit: (value) => {
+							props.onEdit(String(value));
+							apply?.commit();
+						},
+						children: input
 					}),
 					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
 						className: props.invalid ? settings_card_module_css_default.invalid : settings_card_module_css_default.hint,
@@ -12787,8 +13048,8 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 		* renders the legacy native `<select>` untouched, so element-level skin
 		* selectors keep working; under the default appearance it renders a
 		* self-drawn `role="listbox"` popup whose open/close is transition-animated.
-		* Staged cards reach it through BooleanField/ChoiceField; immediate-apply
-		* editors (the side-card prefs) bind it directly through onEdit.
+		* Cards reach it through BooleanField/ChoiceField; editors outside a card
+		* (the side-card prefs) bind it directly through onEdit.
 		* 双模式下拉框：皮肤激活时用原生 select，默认外观用自绘动画弹层。
 		*/
 		function SelectField(props) {
@@ -12946,14 +13207,48 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 				}) : null]
 			});
 		}
-		/** A staged boolean field: 继承 / 开 / 关. */
+		/**
+		* A visible segmented group for a small set of mutually exclusive values.
+		* Every option stays on screen, so inherit/on/off and short enum fields take
+		* one click without opening a popup. The pressed option carries the group's
+		* sliding highlight and `aria-pressed`; the group takes the field label as its
+		* accessible name.
+		*/
+		function SegmentField(props) {
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(SegmentGroup, {
+				id: props.id,
+				role: "group",
+				"aria-label": props.label,
+				"aria-invalid": props.invalid || void 0,
+				children: props.options.map((option, index) => {
+					const active = option.value === props.value;
+					return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+						type: "button",
+						className: settings_card_module_css_default.segment,
+						"aria-pressed": active,
+						disabled: props.disabled,
+						"data-active": active ? "" : void 0,
+						"data-segment-index": index,
+						onClick: () => {
+							if (!active) props.onEdit(option.value);
+						},
+						children: option.label
+					}, option.value);
+				})
+			});
+		}
+		/** A boolean field: 继承 / 开 / 关. */
 		function BooleanField(props) {
+			const segmented = props.presentation !== "select";
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				className: settings_card_module_css_default.field,
 				children: [
 					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 						className: settings_card_module_css_default.head,
-						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("label", {
+						children: [segmented ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+							className: settings_card_module_css_default.label,
+							children: props.label
+						}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("label", {
 							className: settings_card_module_css_default.label,
 							htmlFor: props.id,
 							children: props.label
@@ -12971,7 +13266,28 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 							})]
 						}) : null]
 					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)(SelectField, {
+					segmented ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(SegmentField, {
+						id: props.id,
+						label: props.label,
+						options: [
+							{
+								value: "",
+								label: props.inheritLabel
+							},
+							{
+								value: "true",
+								label: props.onLabel
+							},
+							{
+								value: "false",
+								label: props.offLabel
+							}
+						],
+						value: props.text,
+						disabled: props.disabled,
+						invalid: props.invalid,
+						onEdit: props.onEdit
+					}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)(SelectField, {
 						id: props.id,
 						options: [
 							{
@@ -13000,14 +13316,22 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 				]
 			});
 		}
-		/** A staged enumerated field rendered as a select. */
+		/** An enumerated field, selecting or segmenting its small choice set. */
 		function ChoiceField(props) {
+			const segmented = props.presentation === "segment";
+			const options = [{
+				value: "",
+				label: props.inheritLabel
+			}, ...props.choices];
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				className: settings_card_module_css_default.field,
 				children: [
 					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 						className: settings_card_module_css_default.head,
-						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("label", {
+						children: [segmented ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+							className: settings_card_module_css_default.label,
+							children: props.label
+						}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("label", {
 							className: settings_card_module_css_default.label,
 							htmlFor: props.id,
 							children: props.label
@@ -13025,12 +13349,17 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 							})]
 						}) : null]
 					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)(SelectField, {
+					segmented ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(SegmentField, {
 						id: props.id,
-						options: [{
-							value: "",
-							label: props.inheritLabel
-						}, ...props.choices],
+						label: props.label,
+						options,
+						value: props.text,
+						disabled: props.disabled,
+						invalid: props.invalid,
+						onEdit: props.onEdit
+					}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)(SelectField, {
+						id: props.id,
+						options,
 						value: props.text,
 						disabled: props.disabled,
 						invalid: props.invalid,
@@ -13044,12 +13373,14 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 				]
 			});
 		}
-		//#endregion
-		//#region src/client/settings-form.ts
-		/** A free-text field. An empty draft clears the field. */
-		function textField(field) {
+		/**
+		* A free-text field. An empty draft clears the field. `entry` is `pick` when
+		* the text arrives whole from a picker (a preset or a reasoning level).
+		*/
+		function textField(field, entry = "type") {
 			return {
 				field,
+				entry,
 				format: (value) => typeof value === "string" ? value : "",
 				parse: (text) => {
 					const trimmed = text.trim();
@@ -13064,6 +13395,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 		function booleanField(field) {
 			return {
 				field,
+				entry: "pick",
 				format: (value) => typeof value === "boolean" ? String(value) : "",
 				parse: (text) => {
 					const trimmed = text.trim();
@@ -13083,6 +13415,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 		function choiceField(field, choices) {
 			return {
 				field,
+				entry: "pick",
 				format: (value) => typeof value === "string" && choices.includes(value) ? value : "",
 				parse: (text) => {
 					if (text === "") return { kind: "clear" };
@@ -13094,12 +13427,14 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 			};
 		}
 		/**
-		* Stages one card's edits over one settings namespace and writes them on save.
+		* Applies one card's edits to one settings namespace as the reader makes them.
 		*
 		* The Host is the only authority on whether a value was accepted — its
 		* validators own the constraints no schema can express — so the outcome is
-		* read back from the section rather than predicted here. A save that did not
-		* land keeps its drafts, so the user can correct them instead of retyping.
+		* read back from the section rather than predicted here. A write that did not
+		* land puts each pick back to the stored value, the way a switch that could not
+		* flip springs back, and keeps typed text so the reader can correct it instead
+		* of retyping.
 		*/
 		var CardForm = class {
 			scope;
@@ -13109,6 +13444,8 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 			/** The form subscription installed in the constructor; released by dispose(). */
 			disposeForm;
 			disposed = false;
+			/** The pending write of typed text, waiting for typing to pause. */
+			typePause;
 			saving = false;
 			/** A save asked for while one was in flight; it runs once the first settles (#1754). */
 			saveQueued = false;
@@ -13129,6 +13466,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 			dispose() {
 				if (this.disposed) return;
 				this.disposed = true;
+				clearTimeout(this.typePause);
 				this.disposeForm();
 				this.listeners.clear();
 			}
@@ -13140,7 +13478,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 				});
 				return store;
 			}
-			/** Read the card-level state: what the Host serves, and what a save would do. */
+			/** Read the card-level state: what the Host serves, and what is still waiting to be written. */
 			shell() {
 				const snapshot = this.scope.getSnapshot();
 				const plan = this.plan();
@@ -13187,9 +13525,10 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 						});
 					},
 					save: () => {
-						this.requestSave();
+						this.applyNow();
 					},
 					discard: () => {
+						clearTimeout(this.typePause);
 						if (this.staged.size === 0 && !this.failed) return;
 						this.staged.clear();
 						this.failed = false;
@@ -13199,8 +13538,15 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 				};
 			}
 			/**
-			* Serialize saves, retaining the latest draft requested during a Host write.
-			* @returns settlement after the active queue drains, or immediately when this call queues another save.
+			* Run one write, and re-run it once if another was asked for while this one
+			* was still in flight.
+			*
+			* A write is a Host round trip that also drives the profile reconcile, and
+			* the Host runs it inside one exclusive transaction. Answering an edit that
+			* arrives mid-flight by returning immediately dropped it with no explanation
+			* (#1754). Serializing instead means an edit made while another write is
+			* still settling is written against the settled state.
+			* @returns settlement after the mutation and the read-back.
 			*/
 			async requestSave() {
 				if (this.saving) {
@@ -13213,27 +13559,27 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 				await this.requestSave();
 			}
 			/**
-			* Write every staged edit in one atomic form mutation, then re-seed from
-			* what the Host accepted.
+			* Write every valid draft in one atomic form mutation, then re-seed from
+			* what the Host accepted. A draft the field does not accept stays on screen,
+			* unwritten, without holding the others back.
 			*
-			* The whole batch rides one mutate, so cross-field validate hooks
-			* (baseURL+model) judge it as a unit: the Host either applies every write
-			* or refuses the batch. The form contract answers a refusal or a skipped
-			* write with `false` (it recovers with a fresh Host view instead of
-			* throwing), so the outcome is judged twice: the answer itself, and then the
-			* settled snapshot read back one planned write at a time. One missed write
-			* fails the whole save. A transport that rejects instead (the dsh-web bridge
-			* controller on a dead connection) reports through the same failure path
-			* with its rejection message. A save that did not land keeps its drafts, so
-			* the user can correct them instead of retyping.
+			* The batch rides one mutate, so cross-field validate hooks (baseURL+model)
+			* judge it as a unit: the Host either applies every write or refuses the
+			* batch. The form contract answers a refusal or a skipped write with `false`
+			* (it recovers with a fresh Host view instead of throwing), so the outcome is
+			* judged twice: the answer itself, and then the settled snapshot read back
+			* one planned write at a time. One missed write fails the whole batch. A
+			* transport that rejects instead (the dsh-web bridge controller on a dead
+			* connection) reports through the same failure path with its rejection
+			* message. A batch that did not land puts its picks and clears back to the
+			* stored value and keeps its typed text, so the reader can correct it.
 			* @returns settlement after the mutation and the read-back.
 			*/
 			async save() {
-				const plan = this.plan();
-				const valid = plan.filter((item) => item.judge !== void 0);
-				if (plan.length === 0 || this.saving || valid.length !== plan.length) return;
+				const valid = this.plan().filter((item) => item.judge !== void 0);
+				if (valid.length === 0 || this.saving) return;
 				const pending = /* @__PURE__ */ new Map();
-				for (const item of plan) pending.set(item.field, this.staged.get(item.field));
+				for (const item of valid) pending.set(item.field, this.staged.get(item.field));
 				this.saving = true;
 				this.failed = false;
 				this.failedReason = void 0;
@@ -13254,16 +13600,19 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 					failedReason = error instanceof Error ? error.message : String(error);
 				}
 				const landed = accepted && failedReason === void 0 && valid.every((item) => item.judge());
-				for (const [field, before] of pending) if (landed && this.staged.get(field) === before) this.staged.delete(field);
+				for (const [field, before] of pending) {
+					if (this.staged.get(field) !== before) continue;
+					if (landed || before === void 0 || before.clear || this.specOf(field).entry === "pick") this.staged.delete(field);
+				}
 				this.saving = false;
 				this.failed = !landed;
 				this.failedReason = failedReason;
 				this.publish();
 			}
 			/**
-			* Every staged edit a save would write. An entry whose draft is not a value
-			* its field accepts carries no write: the form is still dirty, and the save
-			* refuses rather than dropping the edit. A staged edit that matches the
+			* Every staged edit a write would carry. An entry whose draft is not a value
+			* its field accepts carries no write: the form is still dirty, and the draft
+			* stays on screen rather than being dropped. A staged edit that matches the
 			* effective section is not a write at all.
 			* @returns the planned writes, in the order the fields were staged.
 			*/
@@ -13327,11 +13676,30 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 			landedUnset(field) {
 				return !this.stored(field);
 			}
+			/**
+			* Take one edit and schedule its write: a pick or a clear is written now,
+			* typed text once typing has rested for TYPE_PAUSE_MS.
+			*/
 			stage(field, edit) {
 				this.staged.set(field, edit);
 				this.failed = false;
 				this.failedReason = void 0;
 				this.publish();
+				if (edit.clear || this.specOf(field).entry === "pick") {
+					this.applyNow();
+					return;
+				}
+				clearTimeout(this.typePause);
+				this.typePause = setTimeout(() => {
+					this.applyNow();
+				}, 600);
+			}
+			/** Write every pending draft now, taking the place of a waiting pause. */
+			applyNow() {
+				clearTimeout(this.typePause);
+				this.typePause = void 0;
+				if (this.disposed) return;
+				this.requestSave();
 			}
 			specOf(field) {
 				const spec = this.specs.get(field);
@@ -13394,6 +13762,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 		function sessionPollField() {
 			return {
 				field: "sessionPollSeconds",
+				entry: "type",
 				format: (value) => typeof value === "number" && Number.isInteger(value) ? String(value) : "",
 				parse: (text) => {
 					const trimmed = text.trim();
@@ -13416,6 +13785,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 		function subtaskDepthField() {
 			return {
 				field: "maxSubtaskDepth",
+				entry: "pick",
 				format: (value) => typeof value === "number" && Number.isInteger(value) ? String(value) : "",
 				parse: (text) => {
 					const trimmed = text.trim();
@@ -13436,6 +13806,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 		function runLaunchWidthField() {
 			return {
 				field: "runLaunchWidth",
+				entry: "type",
 				format: (value) => typeof value === "number" && Number.isInteger(value) ? String(value) : "",
 				parse: (text) => {
 					const trimmed = text.trim();
@@ -13457,6 +13828,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 		function spendBudgetField() {
 			return {
 				field: "spendBudgetTokens",
+				entry: "type",
 				format: (value) => typeof value === "number" && Number.isInteger(value) ? String(value) : "",
 				parse: (text) => {
 					const trimmed = text.trim();
@@ -13479,6 +13851,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 		function modelRouteField(field) {
 			return {
 				field,
+				entry: "pick",
 				format: (value) => typeof value === "string" ? value : "",
 				parse: (text) => {
 					const trimmed = text.trim();
@@ -13512,11 +13885,11 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 					booleanField("goalRunEnabled"),
 					booleanField("goalVerification"),
 					modelRouteField("goalVerificationModel"),
-					textField("goalVerificationReasoningEffort"),
-					textField("cardDefaultMode"),
+					textField("goalVerificationReasoningEffort", "pick"),
+					textField("cardDefaultMode", "pick"),
 					choiceField("cardDefaultPermission", TASK_PERMISSIONS),
 					modelRouteField("cardDefaultModel"),
-					textField("cardDefaultReasoningEffort")
+					textField("cardDefaultReasoningEffort", "pick")
 				]);
 				this.store = this.form.bind(() => this.projection());
 			}
@@ -13713,7 +14086,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)(PluginSettingsCard, {
 							t,
 							density: "nested",
-							titleKey: "settings.enabled",
+							titleKey: "settings.enabledTopic",
 							descriptionKey: "settings.enabledCardHint",
 							defaultOpen: false,
 							hideFooter: true,
@@ -13795,6 +14168,11 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 									hint: t("settings.sessionPollSecondsHintBrief"),
 									hintTitle: t("settings.sessionPollSecondsHint"),
 									numeric: true,
+									range: {
+										min: 1,
+										max: 300,
+										step: 1
+									},
 									...fieldProps,
 									...state.sessionPollSeconds,
 									onEdit: (text) => {
@@ -13829,6 +14207,11 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 									hint: t("settings.runLaunchWidthHintBrief"),
 									hintTitle: t("settings.runLaunchWidthHint"),
 									numeric: true,
+									range: {
+										min: 1,
+										max: 16,
+										step: 1
+									},
 									...fieldProps,
 									...state.runLaunchWidth,
 									onEdit: (text) => {
@@ -14471,7 +14854,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 		/** The building package's version, when the bundle carries it. */
 		function bakedVersion() {
 			try {
-				return "0.4.8-dsh.20261026.1";
+				return "0.4.11-dsh.20261027.1";
 			} catch {
 				return;
 			}
@@ -14646,6 +15029,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 				if (reconciling) return;
 				const target = familyGroupLoaded(ctx) ? FAMILY_PLUGIN_CARD_SEAT : OFFICIAL_PLUGIN_CARD_SEAT;
 				if (current === target) return;
+				if (typeof slots.spec === "function" && slots.spec(target) === void 0) return;
 				reconciling = true;
 				const previous = dispose;
 				dispose = void 0;

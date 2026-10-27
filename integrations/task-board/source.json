@@ -1,9 +1,9 @@
 {
   "repository": "https://github.com/sdwhwzp/dsh-web",
   "branch": "dev",
-  "commit": "b66a1fafb5e085f84a1cbf8dd7aae48f16efa40b",
+  "commit": "ff12ef9f98250490fd9226905b4dce0e0ed9debd",
   "package": "@linxin666/dsh-client-ui-task-board",
-  "version": "0.4.8-dsh.20261026.1",
+  "version": "0.4.11-dsh.20261027.1",
   "files": {
     "core/card-defaults.ts": "95c6ee30cdb57ff937ec18eeac03d5e6d4732e35",
     "core/execution-summary.ts": "60df0735e94cf884937700b8d907109e21de9e7f",
@@ -54,7 +54,7 @@
   },
   "client": {
     "path": "client-shell/client.js",
-    "sha256": "fc896e8bc8d9f2f73e5ba64bcfd0dcf89199fee4438cb0a10de0ac9263070244",
+    "sha256": "ff4895f126576a78c1d3bcd26dfb2cb53ed97598ba01da5f8099875132c11385",
     "registration": "path-mounted client-shell/index.js; Host apply is empty"
   }
 }
