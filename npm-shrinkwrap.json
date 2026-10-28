@@ -1,12 +1,12 @@
 {
   "name": "dsh-passwords",
-  "version": "2.7.8-dsh.20261028.1",
+  "version": "2.7.8-dsh.20261028.2",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
     "": {
       "name": "dsh-passwords",
-      "version": "2.7.8-dsh.20261028.1",
+      "version": "2.7.8-dsh.20261028.2",
       "license": "BSD-3-Clause",
       "dependencies": {
         "bcryptjs": "^3.0.2",
@@ -94,7 +94,7 @@
         "@deepseek-ai/dsh-tools": ">=0.2.1-rc.2 <0.2.2-0 || >=0.2.2-alpha.2 <0.2.3-0",
         "@deepseek-ai/dsh-typert-protocol": ">=0.2.1-rc.2 <0.2.2-0 || >=0.2.2-alpha.2 <0.2.3-0",
         "@deepseek-ai/dsh-workspace": ">=0.2.1-rc.2 <0.2.2-0 || >=0.2.2-alpha.2 <0.2.3-0",
-        "@linxin666/dsh-client-ui-task-board": "0.4.11-dsh.20261028.1"
+        "@linxin666/dsh-client-ui-task-board": "0.4.11-dsh.20261028.2"
       },
       "peerDependenciesMeta": {
         "@deepseek-ai/dsh-principal-access": {
@@ -907,7 +907,7 @@
     },
     "../dsh-web/packages/dsh-task-board": {
       "name": "@linxin666/dsh-client-ui-task-board",
-      "version": "0.4.11-dsh.20261028.1",
+      "version": "0.4.11-dsh.20261028.2",
       "dev": true,
       "license": "Apache-2.0",
       "dependencies": {
