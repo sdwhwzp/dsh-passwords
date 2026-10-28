@@ -7,6 +7,7 @@ export const TENANT_REMOTE_STREAM_ENDPOINTS: ReadonlySet<string> = new Set([
   'session/follow',
   'session/control',
   'workspaceFiles/changes',
+  'toolResults/watch',
   'terminal/retain',
   'terminal/follow',
   'job/list',

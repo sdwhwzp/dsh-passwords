@@ -1,9 +1,9 @@
 {
   "repository": "https://github.com/sdwhwzp/dsh-web",
   "branch": "dev",
-  "commit": "6d52250131eb22c1453c592671ad32d29db85411",
+  "commit": "35a073a63c7b24b32bffeb74258cbf4d906d12c6",
   "package": "@linxin666/dsh-client-ui-task-board",
-  "version": "0.4.11-dsh.20261027.3",
+  "version": "0.4.11-dsh.20261028.1",
   "files": {
     "core/card-defaults.ts": "95c6ee30cdb57ff937ec18eeac03d5e6d4732e35",
     "core/execution-summary.ts": "60df0735e94cf884937700b8d907109e21de9e7f",
@@ -24,7 +24,7 @@
     "core/use-cases/task-delete.ts": "ec4bf690ad4ff8867b95febaebd1f268cbd93584",
     "core/use-cases/task-parent.ts": "11a657a7370a1e2fc87638e5086a4ced4f228348",
     "core/use-cases/task-schedule.ts": "8e945e5be6e2bc223cd1724eed46ee72bab48738",
-    "core/use-cases/task-tag.ts": "ad887476d78dfd22a707dc77f402636b5395d2cd",
+    "core/use-cases/task-tag.ts": "a9adc7592b171979241b66b7a2cc5807b3ded25d",
     "core/use-cases/task-update.ts": "665c2e5bff839b52e335470529925a379e7ab797",
     "core/verification-budget.ts": "bd3aec959abf9d589d254bcc8a52dec849d0dd44",
     "core/verification.ts": "6372d19f0135e257842cc1dcb916c080c975bd29",
@@ -54,7 +54,7 @@
   },
   "client": {
     "path": "client-shell/client.js",
-    "sha256": "3c00ffae5405cf097f2003b0e58aafe2dad53dec661b81ccb89a178978bdf70c",
+    "sha256": "f59731acec4e281baa420e12e4425f4c001ad89ac6ef561f19d4def780b16eb2",
     "registration": "path-mounted client-shell/index.js; Host apply is empty"
   }
 }

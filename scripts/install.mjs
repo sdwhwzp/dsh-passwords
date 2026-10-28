@@ -123,12 +123,11 @@ if ((nodeMajor === 22 && nodeMinor < 19) || nodeMajor < 22 || nodeMajor === 23) 
 say(`Node.js v${process.versions.node} ✓`);
 
 // ── 2. dsh（DeepSeek Harness）版本窗口校验 ──
-// 支持的补丁线：>=0.2.1-rc.2 <0.2.2-0（与 src/cli.ts 的运行时门禁同一身份边界）。
-// 0.2.1 的后续预发布（alpha.3/beta/rc）与稳定版共享同一 bundle/wire 契约，仍在窗口内；
-// 0.1.x、0.2.0、0.2.1-alpha.0 以及 0.2.2+ 都不允许打补丁或公开监听，安装器必须同样失败。
-const DSH_SUPPORTED_RANGE = '>=0.2.1-rc.2 <0.2.2-0';
+// 支持的补丁线：>=0.2.1-rc.2 <0.2.2-0 || >=0.2.2-alpha.2 <0.2.3-0（与 src/cli.ts 的运行时门禁同一身份边界）。
+// 0.2.1 从 rc.2 起、0.2.2 从 alpha.2 起进入支持窗口；其他补丁线保持拒绝。
+const DSH_SUPPORTED_RANGE = '>=0.2.1-rc.2 <0.2.2-0 || >=0.2.2-alpha.2 <0.2.3-0';
 const DSH_SUPPORTED_CORE = '0.2.1';
-const DSH_SUPPORTED_PRERELEASE_FLOOR = ['alpha', '1'];
+const DSH_SUPPORTED_PRERELEASE_FLOOR = ['rc', '2'];
 const SEMVER_RE = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
 function stripBuildMetadata(version) {
@@ -165,6 +164,7 @@ function isSupportedDshVersion(version) {
   const dash = stripped.indexOf('-');
   const core = dash === -1 ? stripped : stripped.slice(0, dash);
   const prerelease = dash === -1 ? [] : stripped.slice(dash + 1).split('.');
+  if (core === '0.2.2') return prerelease.length === 0 || comparePrerelease(prerelease, ['alpha', '2']) >= 0;
   if (core !== DSH_SUPPORTED_CORE) return false;
   return prerelease.length === 0 || comparePrerelease(prerelease, DSH_SUPPORTED_PRERELEASE_FLOOR) >= 0;
 }

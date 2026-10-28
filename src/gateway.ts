@@ -36,6 +36,7 @@ import { registerMediaRoutes } from './media.js';
 import { MobileAuth, isMobileRequest, mobileRequestToken } from './mobile-auth.js';
 import { attachMobileAccount, loadMobileAccountProtocol } from './mobile-account-bridge.js';
 import { registerDesktopDownloads } from './desktop-downloads.js';
+import { toolResultItem, toolResultSessionId } from './tool-results-policy.js';
 import { registerTenantServiceRoutes } from './tenant-service-routes.js';
 import WebSocket, { type RawData, WebSocketServer } from 'ws';
 import {
@@ -5231,7 +5232,7 @@ export function createGatewayServer(
    * checks remain enforceable, while heartbeat and payload limits mirror DSH.
    */
   const remoteMuxStreamEndpoints = new Set([
-    'session/control', 'session/follow', 'workspace/follow', '$events',
+    'session/control', 'session/follow', 'workspace/follow', '$events', 'toolResults/watch',
     ...OFFICIAL_JOB_REMOTE_ENDPOINTS,
     ...OFFICIAL_ACCOUNT_REMOTE_ENDPOINTS,
   ]);
@@ -5304,6 +5305,7 @@ export function createGatewayServer(
     jobSessionId?: string;
     jobId?: string;
     jobOwnerConfirmed?: boolean;
+    toolResultSessionId?: string;
     /** Workspace path is retained only to re-check the current permission on each delta. */
     workspaceFileScopeId?: string;
     workspaceFileRoot?: string;
@@ -5419,6 +5421,11 @@ export function createGatewayServer(
     value: unknown,
   ): unknown | null => {
     const perms = db.getPermissions(userId) ?? fallbackPerms;
+    if (state.endpoint === 'toolResults/watch') {
+      if (state.toolResultSessionId === undefined ||
+          authorizedSubuserSessionRoot(userId, state.toolResultSessionId, perms) === null) return null;
+      return toolResultItem(value);
+    }
     if (state.endpoint === 'job/list' || state.endpoint === 'job/follow') {
       if (!isPlainJsonRecord(value)) return null;
       if (state.endpoint === 'job/list') {
@@ -11810,6 +11817,11 @@ export function createGatewayServer(
             const followAddress = frame.endpoint === 'session/follow' ? parseSessionAddress(request?.address) : null;
             const jobRequest = frame.endpoint === 'job/list' || frame.endpoint === 'job/follow' ? remoteJobRequest(frame.payload, frame.endpoint) : null;
             const jobSessionId = jobRequest?.sessionId ?? null;
+            const resultSessionId = frame.endpoint === 'toolResults/watch' ? toolResultSessionId(frame.payload) : null;
+            if (frame.endpoint === 'toolResults/watch' && (resultSessionId === null ||
+                !subuserCanAccessSession(userId, perms, resultSessionId))) {
+              rejectStream('gateway/forbidden'); return;
+            }
             if (frame.endpoint.startsWith('job/') && (jobSessionId === null ||
               !subuserCanAccessSession(userId, perms, jobSessionId) ||
               (frame.endpoint === 'job/follow' && (typeof request?.jobId !== 'string' || request.jobId.length === 0)))) {
@@ -11826,7 +11838,7 @@ export function createGatewayServer(
               : frame.endpoint === 'terminal/retain'
                 ? tenantTerminalRetentionSessionId(frame.payload)
                 : frame.endpoint === 'terminal/follow' ? tenantTerminalFollowSessionId(frame.payload)
-                : followAddress !== null ? sessionAuthorizationId(followAddress) : jobSessionId;
+                : followAddress !== null ? sessionAuthorizationId(followAddress) : resultSessionId ?? jobSessionId;
             if (authorizedSessionId !== null &&
                 !subuserCanAccessSession(userId, perms, authorizedSessionId)) {
               if (officialTerminalStream) {
@@ -11839,10 +11851,11 @@ export function createGatewayServer(
               endpoint: frame.endpoint,
               events: frame.endpoint === '$events' ? new TenantRemoteEventFilter() : null,
               authorizedSessionId,
-              filtered: frame.endpoint === 'session/control' || frame.endpoint === 'workspaceFiles/changes' || frame.endpoint === 'workspace/follow' || frame.endpoint === 'session/follow' || frame.endpoint === 'job/list' || frame.endpoint === 'job/follow'
+              filtered: frame.endpoint === 'session/control' || frame.endpoint === 'workspaceFiles/changes' || frame.endpoint === 'workspace/follow' || frame.endpoint === 'session/follow' || frame.endpoint === 'job/list' || frame.endpoint === 'job/follow' || frame.endpoint === 'toolResults/watch'
                 ? { streamId: frame.streamId, endpoint: frame.endpoint, followAddress,
                     ...(fileTarget === null ? {} : { workspaceFileScopeId: fileTarget.scopeId, workspaceFileRoot: fileTarget.root, workspaceFileTarget: fileTarget.target, workspaceFileRootCanonical: fileTarget.rootCanonical, workspaceFileTargetCanonical: fileTarget.targetCanonical }),
                     ...(jobSessionId === null ? {} : { jobSessionId }),
+                    ...(resultSessionId === null ? {} : { toolResultSessionId: resultSessionId }),
                     ...(typeof request?.jobId === 'string' ? { jobId: request.jobId } : {}),
                     visibleWorkspaces: new Map(), visibleWorkspaceRows: new Map() }
                 : null,

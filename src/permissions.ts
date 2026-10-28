@@ -266,6 +266,7 @@ export const OFFICIAL_API_NAMESPACES: ReadonlySet<string> = new Set([
   'workspace',
   'userQuestions',
   'workspaceFiles',
+  'toolResults',
   // ── 非 RPC 的官方通道 ──
   '$events', // dsh-api-gateway：remote mux 上的逻辑事件流端点（/api/$events*）
   'remote.mux', // dsh-api-gateway：流多路复用 WebSocket
@@ -1625,7 +1626,7 @@ export const WORKSPACE_ENDPOINT_RE = /^\/api\/session[.\/](create)([.\/]|$)/;
  * 开流校验，account 的登录写操作由 SUBUSER_BLOCKED_API_ENDPOINTS 硬拒绝。
  */
 export const SESSION_SCOPED_RE =
-  /^\/api\/(?:schedule[.\/](?:list|history|update|delete)|session[.\/](?:history|models|prompt|respond|archive|delete|rename|retitle|title|resume|fork|truncate|export|attachment|updateQueue|cancel|page|projections|selectModel)|workspace[.\/](?:archiveSession|pinSession|unpinSession|unarchiveSession)|commands[.\/](?:list|execute)|subagents[.\/](?:list|prompt|interruptByParent)|fileUploads[.\/](?:upload)|fileReferences[.\/](?:list)|sessionReferenceResolver[.\/](?:candidates)|skills[.\/](?:list)|messageFeedback[.\/](?:list|put|delete)|sessionFeedback[.\/](?:record)|goals[.\/](?:clear|complete|create|edit|get|pause|resume)|workspaceFiles[.\/](?:read|readAll|readBytes|stat|readRelated|list|changes)|present[.\/](?:open)|changes[.\/](?:open)|userQuestions[.\/](?:answer)|job[.\/](?:kill))([.\/]|$)/;
+  /^\/api\/(?:toolResults[.\/](?:watch)|schedule[.\/](?:list|history|update|delete)|session[.\/](?:history|models|prompt|respond|archive|delete|rename|retitle|title|resume|fork|truncate|export|attachment|updateQueue|cancel|page|projections|selectModel)|workspace[.\/](?:archiveSession|pinSession|unpinSession|unarchiveSession)|commands[.\/](?:list|execute)|subagents[.\/](?:list|prompt|interruptByParent)|fileUploads[.\/](?:upload)|fileReferences[.\/](?:list)|sessionReferenceResolver[.\/](?:candidates)|skills[.\/](?:list)|messageFeedback[.\/](?:list|put|delete)|sessionFeedback[.\/](?:record)|goals[.\/](?:clear|complete|create|edit|get|pause|resume)|workspaceFiles[.\/](?:read|readAll|readBytes|stat|readRelated|list|changes)|present[.\/](?:open)|changes[.\/](?:open)|userQuestions[.\/](?:answer)|job[.\/](?:kill))([.\/]|$)/;
 
 /**
  * workspaceFiles 的会话作用域方法（与 SESSION_SCOPED_RE 里的方法列表一致）。

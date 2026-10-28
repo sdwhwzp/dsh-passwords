@@ -445,7 +445,7 @@ test('terminal：alpha.2 客户端会调用 list/environment/shells/close，网�
 
 // ── alpha.2 官方命名空间清理：清单固定 / 精确路由 / 遗留兼容 / 硬拒单端点 ──
 
-test('OFFICIAL_API_NAMESPACES：alpha.1 实测清单精确固定（新增必须显式改测试与兼容性矩阵）', () => {
+test('OFFICIAL_API_NAMESPACES：alpha.2 实测清单精确固定（新增必须显式改测试与兼容性矩阵）', () => {
   assert.deepEqual([...OFFICIAL_API_NAMESPACES].sort(), [
     '$events',
     'account',
@@ -470,6 +470,7 @@ test('OFFICIAL_API_NAMESPACES：alpha.1 实测清单精确固定（新增必须�
     'settings',
     'skills',
     'subagents',
+    'toolResults',
     'userQuestions',
     'workspace',
     'workspaceFiles',

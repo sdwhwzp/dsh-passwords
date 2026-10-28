@@ -19,6 +19,7 @@ import { MuxHeartbeat, type MuxHeartbeatCloseSource, type MuxHeartbeatOptions, t
 import { createRemoteMuxDiagnosticsSession, type RemoteMuxCloseSource, type RemoteMuxStallKind } from './remote-mux-diagnostics.js';
 import { MuxSender, MuxSenderBudget, type MuxAcceptOutcome, type MuxFragmentSocket, type MuxRejectKind } from './remote-mux-sender.js';
 import { loadingTimeline, eventLoopDelaySampler } from './loading-timeline.js';
+import { toolResultSessionId } from './tool-results-policy.js';
 import { samePathForMatch, type Database, type UserPermissionsRow } from './db.js';
 import type { Lang } from './i18n.js';
 import { t } from './i18n.js';
@@ -152,6 +153,7 @@ type RemoteMuxUserStreamState = {
   jobSessionId?: string;
   jobId?: string;
   jobOwnerConfirmed?: boolean;
+  toolResultSessionId?: string;
   /** Workspace path is retained only to re-check the current permission on each delta. */
   workspaceFileScopeId?: string;
   workspaceFileRoot?: string;
@@ -3909,6 +3911,7 @@ export function registerProxyRoutes(app: Application, deps: ProxyDeps): ProxyRou
                 OFFICIAL_JOB_REMOTE_ENDPOINTS.has(frame.endpoint) ||
                 OFFICIAL_ACCOUNT_REMOTE_ENDPOINTS.has(frame.endpoint) ||
                 frame.endpoint === 'workspaceFiles/changes';
+              const isToolResultEndpoint = frame.endpoint === 'toolResults/watch';
               const endpointPaths = [
                 `/api/${frame.endpoint}`,
                 `/api/${frame.endpoint.replace('/', '.')}`,
@@ -3925,7 +3928,7 @@ export function registerProxyRoutes(app: Application, deps: ProxyDeps): ProxyRou
               // 已登记的 ssh 能力 Remote 流不随 allowSsh 放开：mux 只由 allowSsh 放行
               // 官方 terminal（v2.7.5 既定语义），其余登记命中一律拒绝；未登记流仍走
               // 下方官方集合/敏感面的 fail-closed 判定，不在这里凭空放开。
-              if (!isOfficialRemoteCoreEndpoint &&
+              if (!isOfficialRemoteCoreEndpoint && !isToolResultEndpoint &&
                   !OFFICIAL_TERMINAL_REMOTE_ENDPOINTS.has(frame.endpoint) &&
                   endpointPaths.some((path) => endpointAllowed(path, getEndpointRules()))) {
                 rejectLogicalStream(frame.streamId, 'gateway/forbidden', 'Remote endpoint is not available for this user');
@@ -3934,7 +3937,20 @@ export function registerProxyRoutes(app: Application, deps: ProxyDeps): ProxyRou
               // workspaceFiles/changes carries a lookup session id and a target path.
               // It is allowed only after both are bound to the current subuser's
               // authorized workspace; the downlink is filtered again below.
-              if (frame.endpoint === 'workspaceFiles/changes') {
+              if (isToolResultEndpoint) {
+                const sessionId = toolResultSessionId(frame.payload);
+                const access = userSessionAccess.get(authUserId!);
+                if (sessionId === null || perms.disabled_sessions.includes(sessionId) ||
+                    (access !== undefined && authorizedSubuserSessionRoot(authUserId!, sessionId, perms) === null)) {
+                  rejectLogicalStream(frame.streamId, 'gateway/forbidden', 'Tool result is not available for this user');
+                  return;
+                }
+                if (access === undefined) deferUntilWorkspaceBaseline = true;
+                active.set(frame.streamId, {
+                  streamId: frame.streamId, endpoint: frame.endpoint, toolResultSessionId: sessionId,
+                  visibleWorkspaces: new Map(), visibleWorkspaceRows: new Map(),
+                });
+              } else if (frame.endpoint === 'workspaceFiles/changes') {
                 const request = remoteWorkspaceFileChangeRequest(frame.payload);
                 const target = request === null ? null : authorizedWorkspaceFileChangeTarget(authUserId!, perms, request);
                 if (target === null) {
@@ -4099,6 +4115,7 @@ export function registerProxyRoutes(app: Application, deps: ProxyDeps): ProxyRou
                     const address = remoteMuxFollowAddress(frame.payload);
                     return address === null ? null : sessionAuthorizationId(address);
                   })()
+                : frame.endpoint === 'toolResults/watch' ? toolResultSessionId(frame.payload)
                 : (frame.endpoint === 'job/list' || frame.endpoint === 'job/follow')
                   ? (remoteJobRequest(frame.payload, frame.endpoint as 'job/list' | 'job/follow')?.sessionId ?? null)
                   : null,

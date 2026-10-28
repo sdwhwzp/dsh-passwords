@@ -241,6 +241,7 @@ function readDshVersion(dshRoot: string): string | null {
 function isSupportedDshRuntime(version: string | null): version is string {
   if (version === null) return false;
   const { core, prerelease } = splitDshRuntime(stripBuildMetadata(version));
+  if (core === '0.2.2') return prerelease.length === 0 || comparePrerelease(prerelease, ['alpha', '2']) >= 0;
   if (core !== DSH_SUPPORTED_CORE) return false;
   return prerelease.length === 0 || comparePrerelease(prerelease, DSH_SUPPORTED_PRERELEASE_FLOOR) >= 0;
 }
@@ -278,7 +279,7 @@ function runPatch(argv: string[]): void {
   if (action === undefined || action === 'on' || action === 'reload') {
     const dshVersion = readDshVersion(root);
     if (!isSupportedDshRuntime(dshVersion)) {
-      console.error(`[dsh-passwords] Unsupported or invalid DSH version ${dshVersion ?? '(missing/corrupt)'}; refusing to patch (supported runtime: >=0.2.1-rc.2 <0.2.2-0)`);
+      console.error(`[dsh-passwords] Unsupported or invalid DSH version ${dshVersion ?? '(missing/corrupt)'}; refusing to patch (supported runtime: >=0.2.1-rc.2 <0.2.2-0 || >=0.2.2-alpha.2 <0.2.3-0)`);
       process.exit(EXIT_DSH_VERSION_UNSUPPORTED);
     }
     const result = applyRemotePatch(root);
@@ -385,7 +386,7 @@ async function boot() {
   // bridge regex”被静默放行：它可能拥有不同的 bundle / Remote wire contract。
   const dshVersion = readDshVersion(root);
   if (!isSupportedDshRuntime(dshVersion)) {
-    console.error(`[dsh-passwords] Unsupported or invalid DSH version ${dshVersion ?? '(missing/corrupt)'}; refusing to patch or start the public gateway (supported runtime: >=0.2.1-rc.2 <0.2.2-0)`);
+    console.error(`[dsh-passwords] Unsupported or invalid DSH version ${dshVersion ?? '(missing/corrupt)'}; refusing to patch or start the public gateway (supported runtime: >=0.2.1-rc.2 <0.2.2-0 || >=0.2.2-alpha.2 <0.2.3-0)`);
     process.exit(EXIT_DSH_VERSION_UNSUPPORTED);
   }
   try {

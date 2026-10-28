@@ -611,7 +611,7 @@ The UI is bilingual (Chinese/English) and follows dsh's language setting:
 - **CLI**: follows the `LANG` / `LC_ALL` environment variables (`en` prefix = English).
 
 ## Release notes
-This fork compiles against the private Harness `0.2.1-rc.3` checkout with linked development packages. Public installers and Docker retain the `0.2.1-rc.2` pin. Runtime identity checks accept `>=0.2.1-rc.2 <0.2.2-0`; deployment records separately track combined acceptance and production release. Upstream test results do not establish fork acceptance.
+This fork compiles against the private Harness `0.2.2-alpha.2` checkout with linked development packages. Public installers and Docker retain the `0.2.1-rc.2` pin. Runtime identity checks accept `>=0.2.1-rc.2 <0.2.2-0 || >=0.2.2-alpha.2 <0.2.3-0`; deployment records separately track combined acceptance and production release. Upstream test results do not establish fork acceptance.
 
 ### v2.6.20 (2026-09-08)
 
@@ -741,7 +741,7 @@ Desktop terminal restoration through `terminal/retain` checks session ownership,
 
 Host login exchange accepts root redirects `/` and `./` without following them; external destinations and query-bearing targets are rejected.
 
-The current candidate uses native Harness 0.2.1-rc.3 Peer and account permission APIs without rewriting installed bundles. The startup version gate matches the peer range; deployment records track composition acceptance.
+The current candidate uses native Harness 0.2.2-alpha.2 Peer and account permission APIs without rewriting installed bundles. The startup version gate matches the peer range; deployment records track composition acceptance.
 
 Session ownership validation accepts legacy projections and current `cached`/`sequenced` projections with the `agentAvailable` flag, while retaining strict type and field validation.
 ## Harness 0.2 deployment
@@ -758,7 +758,7 @@ This fork uses native Host principals for account isolation, managed terminals, 
 
 This fork confines workspace creation to the account’s authorized private roots; the directory picker does not grant temporary server-folder access. Other accounts’ workspace subtrees remain unreadable even under a shared allowlisted parent. Host authentication exchanges the native authenticatedUrl; internal Cookie refresh requires a loopback peer, the internal secret, and the expected Host authority. Both HTTP and HTTPS upstream pools apply their expiry only to idle connections.
 
-This upgrade requires Harness `>=0.2.1-rc.2 <0.2.2-0` and the exact task-board client peer version. See the [tenant-board migration](docs/upgrade-guide/v2.7.8-dsh.20261021.1/tenant-board/guide.md) for profile wiring and ledger backups. Subscription Fetch speed queries and updates enforce account session ownership. A denied terminal stream does not close the shared connection that carries workspace grouping.
+This upgrade supports Harness `>=0.2.1-rc.2 <0.2.2-0 || >=0.2.2-alpha.2 <0.2.3-0` and the exact task-board client peer version. See the [tenant-board migration](docs/upgrade-guide/v2.7.8-dsh.20261021.1/tenant-board/guide.md) for profile wiring and ledger backups. Subscription Fetch speed queries and updates enforce account session ownership. A denied terminal stream does not close the shared connection that carries workspace grouping.
 
 Restricted accounts require private sandbox confirmation before prompts run; policy changes during that wait reject the request. Newly granted owned Sessions also require confirmation; failure revokes the grant and closes stale subscriptions. Directory creation and workspace registration recheck current permissions, private roots and ownership when the response arrives and record audit results with sensitive path summaries redacted. Optional loading timelines measure history parsing, filtering, encoding and the first Remote item without recording conversation content or credentials.
 
@@ -767,3 +767,5 @@ The shared Host Agent Teams routes (`/dsh-agents/api/*`) are administrator-only.
 The ownership scan accepts the Host format states `current` and `migration-required`, while validating identity fields and rejecting unknown fields. Tenant lists and historical ownership remain isolated.
 
 Binary workspace previews use Connection multipart byte responses for both server and paired folders; PDF, image and Office contents remain native bytes instead of JSON byte objects. `readBytes` accepts `options.range` and `options.baseFile`.
+
+Live Trajectory result inspection (`toolResults/watch`) requires an authorized Session and is rechecked for every item. Invalid, foreign and revoked streams cannot expose retained raw tool values; web and mobile carriers retain their other logical streams after an opening refusal.

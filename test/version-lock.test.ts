@@ -7,8 +7,8 @@ const projectRoot = path.resolve(import.meta.dirname, '..');
 const read = (...parts: string[]) => readFileSync(path.join(projectRoot, ...parts), 'utf8');
 
 const DSH_PIN = '0.2.1-rc.2';
-const DSH_COMPILER_PIN = '0.2.1-rc.3';
-const DSH_DEV_RANGE = '>=0.2.1-rc.2 <0.2.2-0';
+const DSH_COMPILER_PIN = '0.2.2-alpha.2';
+const DSH_DEV_RANGE = '>=0.2.1-rc.2 <0.2.2-0 || >=0.2.2-alpha.2 <0.2.3-0';
 // Pinned target shipped and validated by the last dsh-passwords release (v2.7.5). It
 // survives only as history (CHANGELOG release notes, release/verification prose) and
 // must never reappear as a current source pin.
@@ -111,18 +111,18 @@ test('the released-pin detector matches the previous pin exactly and never a lon
   assert.match('DSH-0.1.7--rc.2', RELEASED_PIN_RE, 'the shields.io double-hyphen spelling must also be detected');
 });
 
-test('the declared dev range is the 0.2.1 patch line and rejects 0.1.x, 0.2.0, 0.2.1-alpha.0, and 0.2.2+', () => {
+test('the declared dev range admits each supported patch floor and rejects adjacent releases', () => {
   // Accepted: the resolved 0.2.1-alpha.2 pin, later 0.2.1 prereleases, stable 0.2.1, and
   // build metadata. Cross-checked against node_modules/semver@7.8.5, which agrees on
   // every identity below.
-  for (const version of ['0.2.1-rc.2', '0.2.1-rc.10', '0.2.1', '0.2.1+build.7', '0.2.1-rc.2+build.3']) {
+  for (const version of ['0.2.1-rc.2', '0.2.1-rc.10', '0.2.1', '0.2.1+build.7', '0.2.1-rc.2+build.3', '0.2.2-alpha.2', '0.2.2-alpha.2+build.4', '0.2.2-rc.1', '0.2.2']) {
     assert.ok(satisfiesPinnedRange(version, DSH_DEV_RANGE), `${version} must satisfy ${DSH_DEV_RANGE}`);
   }
   // Rejected: the retired 0.1.x head and 0.2.0 line (stable and prerelease), the pre-pin
   // `0.2.1-alpha.0` and bare `0.2.1-alpha` (both below the floor), numeric-only 0.2.1
   // prereleases (they sort below alphanumeric identifiers), later 0.2.x patches including
   // their prereleases, and the next minor.
-  for (const version of ['0.2.1-alpha.1', '0.2.1-alpha.2', '0.2.1-beta.1', '0.2.1-rc.1', '0.1.7', '0.1.7-rc.2', '0.2.0', '0.2.0-rc.2', '0.2.0-alpha.1', '0.2.1-alpha', '0.2.1-alpha.0', '0.2.1-0', '0.2.1-1', '0.2.2', '0.2.2-alpha.1', '0.3.0']) {
+  for (const version of ['0.2.1-alpha.1', '0.2.1-alpha.2', '0.2.1-beta.1', '0.2.1-rc.1', '0.1.7', '0.1.7-rc.2', '0.2.0', '0.2.0-rc.2', '0.2.0-alpha.1', '0.2.1-alpha', '0.2.1-alpha.0', '0.2.1-0', '0.2.1-1', '0.2.2-alpha', '0.2.2-alpha.1', '0.2.3-alpha.1', '0.2.3', '0.3.0']) {
     assert.ok(!satisfiesPinnedRange(version, DSH_DEV_RANGE), `${version} must not satisfy ${DSH_DEV_RANGE}`);
   }
   // The resolved pin must always sit inside the range that declares it.
@@ -269,7 +269,7 @@ test('CHANGELOG.md 2.7.7 records the Issue #35 and hardening fixes', () => {
   assert.doesNotMatch(section, /0\.2\.0-rc\.[0-9]/, 'the 2.7.7 section must not present a retired 0.2.0 rc as current');
 });
 
-test('public docs distinguish the rc.2 installer pin and rc.3 compiler within the supported range', () => {
+test('public docs distinguish the installer pin and alpha.2 compiler within the supported range', () => {
   const docs = ['README.md', 'README_en.md', 'CONTRIBUTING.md', 'docs/compatibility-matrix.md'];
   for (const file of docs) {
     const source = read(...file.split('/'));

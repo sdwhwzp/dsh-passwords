@@ -61,6 +61,7 @@ const CORE_STREAMS: readonly CoreStream[] = [
   { endpoint: 'workspace/follow' },
   { endpoint: '$events' },
   { endpoint: 'job/list', payload: { args: { request: { sessionId: AUTHORIZED_SESSION_ID } } } },
+  { endpoint: 'toolResults/watch', payload: { args: { request: { sessionId: AUTHORIZED_SESSION_ID, seq: 1 } } } },
 ];
 
 let appDir: string;

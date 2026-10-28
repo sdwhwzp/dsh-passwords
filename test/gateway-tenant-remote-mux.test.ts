@@ -242,6 +242,53 @@ tenantTest('file change items stop after the session permission is revoked', asy
   }
 });
 
+tenantTest('live tool results require an owned Session and keep sibling streams connected after refusals', async mobile => {
+  const env = await setup(mobile);
+  const { downstream, upstream } = await env.connect();
+  try {
+    for (const [index, request] of [
+      { sessionId: 'other-session', seq: 1 }, { sessionId: 'missing-session', seq: 1 },
+      { sessionId: 'own-session', seq: -1 }, { sessionId: 'own-session', seq: 1, foreign: true },
+    ].entries()) {
+      const refused = nextMessage(downstream);
+      downstream.send(JSON.stringify({ type: 'open', streamId: `denied-${index}`, endpoint: 'toolResults/watch', payload: { args: { request } } }));
+      assert.equal((await refused).type, 'error');
+      assert.equal(downstream.readyState, WebSocket.OPEN);
+    }
+    const opened = nextMessage(upstream);
+    const payload = { args: { request: { sessionId: 'own-session', seq: 4 } } };
+    downstream.send(JSON.stringify({ type: 'open', streamId: 'result', endpoint: 'toolResults/watch', payload }));
+    assert.deepEqual(await opened, { type: 'open', streamId: 'result', endpoint: 'toolResults/watch', payload });
+    for (const value of [null, false, 0, '', { private: ['own'] }]) {
+      const received = nextMessage(downstream);
+      upstream.send(muxItem('result', { available: true, value }));
+      assert.deepEqual(await received, { type: 'item', streamId: 'result', value: { available: true, value } });
+    }
+    const rejectedItem = nextMessage(downstream);
+    upstream.send(muxItem('result', { available: false, value: 'forged' }));
+    assert.deepEqual(await rejectedItem, { type: 'end', streamId: 'result' });
+    assert.equal(downstream.readyState, WebSocket.OPEN);
+  } finally { downstream.terminate(); await env.cleanup(); }
+});
+
+tenantTest('live tool results stop before a value racing a Session grant revocation', async mobile => {
+  const env = await setup(mobile);
+  const { downstream, upstream } = await env.connect();
+  try {
+    const opened = nextMessage(upstream);
+    downstream.send(JSON.stringify({ type: 'open', streamId: 'result', endpoint: 'toolResults/watch',
+      payload: { args: { request: { sessionId: 'own-session', seq: 4 } } } }));
+    await opened;
+    const received: unknown[] = [];
+    downstream.on('message', data => received.push(JSON.parse(data.toString())));
+    env.disableSession();
+    const closed = nextClose(downstream);
+    upstream.send(muxItem('result', { available: true, value: 'private' }));
+    assert.equal(await closed, 1008);
+    assert.deepEqual(received, []);
+  } finally { downstream.terminate(); await env.cleanup(); }
+});
+
 tenantTest('restricted Remote events hide Host-global and cross-tenant frames', async mobile => {
   const env = await setup(mobile);
   const { downstream, upstream } = await env.connect();
