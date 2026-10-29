@@ -125,7 +125,7 @@
     "@deepseek-ai/dsh-tools": ">=0.2.1-rc.2 <0.2.2-0 || >=0.2.2-alpha.2 <0.2.3-0",
     "@deepseek-ai/dsh-typert-protocol": ">=0.2.1-rc.2 <0.2.2-0 || >=0.2.2-alpha.2 <0.2.3-0",
     "@deepseek-ai/dsh-workspace": ">=0.2.1-rc.2 <0.2.2-0 || >=0.2.2-alpha.2 <0.2.3-0",
-    "@linxin666/dsh-client-ui-task-board": "0.4.11-dsh.20261028.2"
+    "@linxin666/dsh-client-ui-task-board": "0.4.11-dsh.20261028.2 || 0.4.12-dsh.20261029.1"
   },
   "overrides": {
     "qs": "^6.16.0"
