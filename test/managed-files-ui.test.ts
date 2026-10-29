@@ -67,6 +67,7 @@ test('managed host file panel has complete Chinese and English copy', () => {
     'managedFilesBack',
     'managedFilesRefresh',
     'managedFilesUpload',
+    'managedFilesUploadProgress',
     'managedFilesUploadFolder',
     'managedFilesDownload',
     'managedFilesDelete',

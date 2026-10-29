@@ -79,6 +79,7 @@ export function ManagedFilesPanel(props: Props) {
   const [cloneForm, setCloneForm] = useState<{ url: string; directory: string } | null>(null);
   const [gitCredentials, setGitCredentials] = useState({ username: '', password: '' });
   const [gitOutput, setGitOutput] = useState('');
+  const [uploadProgress, setUploadProgress] = useState<{ index: number; total: number; name: string } | null>(null);
   const dragged = useRef<ManagedFileEntry | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -126,7 +127,7 @@ export function ManagedFilesPanel(props: Props) {
   };
 
   const upload = (files: readonly File[], preserveRelativePaths: boolean) => {
-    if (files.length === 0) return;
+    if (files.length === 0 || busy || loading) return;
     const current = currentDirectory;
     setBusy(true);
     setError('');
@@ -134,6 +135,7 @@ export function ManagedFilesPanel(props: Props) {
     let completed = 0;
     void (async () => {
       for (const file of files) {
+        setUploadProgress({ index: completed + 1, total: files.length, name: file.name });
         const relativePath = preserveRelativePaths && file.webkitRelativePath !== ''
           ? file.webkitRelativePath
           : file.name;
@@ -164,6 +166,7 @@ export function ManagedFilesPanel(props: Props) {
         load(current, false);
       })
       .finally(() => {
+        setUploadProgress(null);
         setBusy(false);
         if (inputRef.current !== null) inputRef.current.value = '';
         if (folderInputRef.current !== null) folderInputRef.current.value = '';
@@ -321,10 +324,10 @@ export function ManagedFilesPanel(props: Props) {
         h('input', {
           ref: inputRef,
           type: 'file',
+          multiple: true,
           disabled: busy || loading,
           onChange: (event: { target: { files: FileList | null } }) => {
-            const file = event.target.files?.[0];
-            if (file !== undefined) upload([file], false);
+            upload(Array.from(event.target.files ?? []), false);
           },
         }),
       ),
@@ -343,6 +346,11 @@ export function ManagedFilesPanel(props: Props) {
           },
         }),
       ),
+    ),
+    uploadProgress === null ? null : h(
+      'div',
+      { className: 'dshpw-hint', role: 'status', 'aria-live': 'polite' },
+      t('managedFilesUploadProgress', uploadProgress),
     ),
     folderName === null
       ? null
