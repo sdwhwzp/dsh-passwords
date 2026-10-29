@@ -4,7 +4,9 @@ import type { Context } from '@deepseek-ai/cordis';
 import type {
   PrincipalAccessResult,
   PrincipalAccessSubjects,
+  PrincipalAttachmentGrant,
 } from '@deepseek-ai/dsh-principal-access';
+import type { AttachmentId } from '@deepseek-ai/dsh-attachment';
 import type { SessionId } from '@deepseek-ai/dsh-session/types';
 import type { WorkspaceId } from '@deepseek-ai/dsh-workspace';
 import { realpath } from 'node:fs/promises';
@@ -12,6 +14,7 @@ import path from 'node:path';
 import type { Database, UserPermissionsRow } from './db.js';
 import type { AuthenticatedPrincipal } from './principal.js';
 import { customerModelAllowed } from './model-policy.js';
+import { attachmentGrantDenied } from './attachment-grants.js';
 
 interface WorkspaceRecord {
   readonly id: string;
@@ -80,18 +83,21 @@ export class DshPasswordsPrincipalAccessProvider {
     const denied: PrincipalAccessResult = {
       readableSessionIds: new Set(),
       readableWorkspaceIds: new Set(),
+      readableAttachmentIds: new Set(),
     };
     const user = this.authenticatedUser(principal);
     if (user === null) return denied;
+    const permissions = this.db.getPermissions(user.id) ?? defaultPermissions(user.id);
+    if (permissions.banned) return denied;
+    const attachments = () => this.db.readableAttachmentIds(user.id, subjects.attachmentIds ?? []) as Set<AttachmentId>;
     if (user.role === 'admin') {
       return {
         readableSessionIds: new Set(requestedSessions),
         readableWorkspaceIds: new Set(requestedWorkspaces),
+        readableAttachmentIds: attachments(),
       };
     }
 
-    const permissions = this.db.getPermissions(user.id) ?? defaultPermissions(user.id);
-    if (permissions.banned) return denied;
     const services = this.ctx.root as unknown as HostServices;
     const registry = services.get('workspaceRegistry') as { list(): readonly WorkspaceRecord[] } | undefined;
     const sessions = services.get('sessions') as { get(id: string): SessionRecord | undefined } | undefined;
@@ -101,7 +107,7 @@ export class DshPasswordsPrincipalAccessProvider {
     const query = services.get('sessionQuery') as {
       listSessions(signal?: AbortSignal): Promise<readonly SessionRecord[]>;
     } | undefined;
-    if (registry === undefined) return denied;
+    if (registry === undefined) return { ...denied, readableAttachmentIds: attachments() };
 
     const workspacePaths = new Map(registry.list().map((workspace) => [String(workspace.id), workspace.path]));
     const pathDecisions = new Map<string, Promise<boolean>>();
@@ -166,7 +172,22 @@ export class DshPasswordsPrincipalAccessProvider {
       }
     }
     signal?.throwIfAborted();
-    return { readableSessionIds, readableWorkspaceIds };
+    if (this.authenticatedUser(principal) === null || this.db.getPermissions(user.id)?.banned) return denied;
+    return { readableSessionIds, readableWorkspaceIds, readableAttachmentIds: attachments() };
+  }
+
+  /** Called only by Host admission after byte/receipt validation, never from request history. */
+  async recordAttachments(
+    principal: AuthenticatedPrincipal,
+    grant: PrincipalAttachmentGrant,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    signal?.throwIfAborted();
+    const permissions = this.db.getPermissions(Number(principal.id));
+    const access = await this.resolve(principal, { sessionIds: [grant.sessionId] }, signal);
+    if (!access.readableSessionIds.has(grant.sessionId)) throw attachmentGrantDenied();
+    this.db.recordAttachmentGrants(principal, grant.sessionId, grant.attachmentIds, 'host-validated-upload', signal, false, permissions);
+    signal?.throwIfAborted();
   }
 
   /**

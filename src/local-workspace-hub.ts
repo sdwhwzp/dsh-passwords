@@ -2,7 +2,8 @@
 
 import type { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
-import type { AttachmentStore, ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment';
+import type { AttachmentId, AttachmentStore, ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment';
+import type { PrincipalAccessResult, PrincipalAccessSubjects } from '@deepseek-ai/dsh-principal-access';
 import type {} from '@deepseek-ai/dsh-system-prompt';
 import type { ToolDefinition, ToolResult } from '@deepseek-ai/dsh-tools';
 import type { WorkspaceRegistry } from '@deepseek-ai/dsh-workspace';
@@ -1570,7 +1571,19 @@ function remoteToolDefinitions(
           if (!localWorkspacePrincipalAllowed(principal, workspace.user_id)) {
             throw new RemoteOperationError('当前账号无权访问此本机工作区', 'FORBIDDEN');
           }
-          const hostRead = await readHostAttachmentWindow(filePath, value, root);
+          const hostRead = await readHostAttachmentWindow(filePath, value, root, async (id) => {
+            const provider = ctx.root.get('principalAccess') as {
+              resolve(principal: AuthenticatedPrincipal, subjects: PrincipalAccessSubjects, signal?: AbortSignal): Promise<PrincipalAccessResult>;
+            } | undefined;
+            if (principal === undefined || provider === undefined) {
+              throw new RemoteOperationError('附件缺少账号授权', 'FORBIDDEN');
+            }
+            const access = await provider.resolve(principal, { attachmentIds: [id as AttachmentId] }, exec.signal);
+            exec.signal.throwIfAborted();
+            if (!access.readableAttachmentIds?.has(id as AttachmentId)) {
+              throw new RemoteOperationError('当前账号无权读取此附件', 'FORBIDDEN');
+            }
+          });
           if (hostRead !== undefined) return hostRead;
         }
       }
@@ -2378,6 +2391,7 @@ export async function readHostAttachmentWindow(
   absolutePath: string,
   args: Record<string, unknown>,
   root: string,
+  authorize: (attachmentId: string) => Promise<void>,
 ): Promise<{ path: string; offset: number; lines: { number: number; text: string }[]; totalLines: number } | undefined> {
   let real: string;
   try {
@@ -2389,6 +2403,15 @@ export async function readHostAttachmentWindow(
   if (relative === '' || relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) {
     return undefined;
   }
+  // Only canonical immutable objects/aliases carry an attachment identity.
+  // Authorize the real target before reading bytes, including same-store symlinks.
+  const parts = relative.split(path.sep);
+  const digest = parts[2];
+  const knownLayout = (parts[0] === 'files' && parts.length === 4)
+    || ((parts[0] === 'objects' || parts[0] === 'file-objects') && parts.length === 3);
+  if (!knownLayout || !/^[a-f0-9]{64}$/u.test(digest ?? '') || parts[1] !== digest.slice(0, 2)
+    || typeof authorize !== 'function') throw new RemoteOperationError('附件缺少账号授权', 'FORBIDDEN');
+  await authorize(`sha256:${digest}`);
   const info = await stat(real);
   if (!info.isFile()) return undefined;
   if (info.size > HOST_ATTACHMENT_MAX_BYTES) {

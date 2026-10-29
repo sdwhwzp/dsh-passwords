@@ -28,6 +28,8 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, realpathSync } from 'node:fs';
 import path from 'node:path';
+import type { AuthenticatedPrincipal } from './principal.js';
+import { attachmentGrantDenied, attachmentGrantKey } from './attachment-grants.js';
 import { normalizePath } from './permissions.js';
 import type { FieldCrypto } from './encrypt.js';
 import {
@@ -492,6 +494,15 @@ CREATE TABLE IF NOT EXISTS session_owners (
   agent_preset TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_session_owners_user ON session_owners(user_id);
+CREATE TABLE IF NOT EXISTS account_attachment_grants (
+  user_id INTEGER NOT NULL,
+  attachment_key TEXT NOT NULL,
+  attachment_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  provenance TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (user_id, attachment_key)
+);
 CREATE TABLE IF NOT EXISTS session_model_selections (
   session_id       TEXT PRIMARY KEY,
   provider         TEXT NOT NULL,
@@ -736,6 +747,15 @@ CREATE TABLE IF NOT EXISTS session_owners (
   agent_preset VARCHAR(200),
   KEY idx_session_owners_user (user_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+CREATE TABLE IF NOT EXISTS account_attachment_grants (
+  user_id INT UNSIGNED NOT NULL,
+  attachment_key CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  attachment_id TEXT NOT NULL,
+  session_id VARCHAR(200) NOT NULL,
+  provenance TEXT NOT NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (user_id, attachment_key)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 CREATE TABLE IF NOT EXISTS workspace_cleanup_intents (
   root           VARCHAR(768) PRIMARY KEY,
   session_ids    MEDIUMTEXT NOT NULL,
@@ -1373,6 +1393,7 @@ export class Database {
 
       this.stmt('DELETE FROM user_permissions WHERE user_id = ?').run(id);
       this.stmt('DELETE FROM user_session_grants WHERE user_id = ?').run(id);
+      this.stmt('DELETE FROM account_attachment_grants WHERE user_id = ?').run(id);
       this.stmt('DELETE FROM user_usage WHERE user_id = ?').run(id);
       this.stmt('DELETE FROM user_workspaces WHERE user_id = ?').run(id);
       this.stmt('DELETE FROM user_auto_granted_folders WHERE user_id = ?').run(id);
@@ -3357,6 +3378,85 @@ export class Database {
       'SELECT user_id FROM session_owners WHERE session_id = ?',
     ).get(sessionId) as { user_id: number } | undefined;
     return row === undefined ? null : Number(row.user_id);
+  }
+
+  /** Exact account-scoped lookup; collation, whitespace and hash collisions never confer access. */
+  readableAttachmentIds(userId: number, ids: readonly string[]): Set<string> {
+    const readable = new Set<string>();
+    for (const id of new Set(ids)) {
+      let key: string;
+      try { key = attachmentGrantKey(id); } catch { continue; }
+      const row = this.stmt(
+        'SELECT attachment_id FROM account_attachment_grants WHERE user_id = ? AND attachment_key = ?',
+      ).get(userId, key) as { attachment_id: string } | undefined;
+      if (row?.attachment_id === id) readable.add(id);
+    }
+    return readable;
+  }
+
+  /**
+   * Host-only trusted admission (or explicit offline reviewed backfill).
+   * Never call with client references/history. Ownership must already exist.
+   * The transaction rechecks mutable identity/policy and commits every ID together.
+   */
+  recordAttachmentGrants(
+    principal: AuthenticatedPrincipal,
+    sessionId: string,
+    attachmentIds: readonly string[],
+    provenance: string,
+    signal?: AbortSignal,
+    dryRun = false,
+    expectedPermissions?: UserPermissionsRow | null,
+  ): void {
+    signal?.throwIfAborted();
+    const userId = Number(principal.id);
+    if (principal.source !== 'dsh-passwords' || !/^[1-9][0-9]*$/u.test(principal.id)
+      || !Number.isSafeInteger(userId) || typeof sessionId !== 'string'
+      || sessionId.length === 0 || sessionId.length > 200
+      || typeof provenance !== 'string' || provenance.length === 0 || provenance.length > 4096) {
+      throw attachmentGrantDenied();
+    }
+    const entries = [...new Set(attachmentIds)].map((id) => ({ id, key: attachmentGrantKey(id) }));
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const lock = this.mysql ? ' FOR UPDATE' : '';
+      this.stmt('SELECT id FROM users WHERE id = ?' + lock).get(userId);
+      this.stmt('SELECT user_id FROM user_permissions WHERE user_id = ?' + lock).get(userId);
+      const owner = this.stmt(
+        'SELECT session_id, user_id FROM session_owners WHERE session_id = ?' + lock,
+      ).get(sessionId) as { session_id: string; user_id: number } | undefined;
+      const sessionGrant = this.stmt(
+        'SELECT session_id FROM user_session_grants WHERE user_id = ? AND session_id = ?' + lock,
+      ).get(userId, sessionId) as { session_id: string } | undefined;
+      const user = this.getUserListRowById(userId);
+      const permissions = this.getPermissions(userId);
+      if (user === null || user.username !== principal.username || user.role !== principal.role
+        || (expectedPermissions !== undefined && permissionState(permissions) !== permissionState(expectedPermissions))
+        || permissions?.banned || owner?.session_id !== sessionId || owner.user_id !== userId
+        || permissions?.disabled_sessions.includes(sessionId)
+        || (user.role !== 'admin' && (permissions === null
+          || (this.isSessionGrantsSeeded(userId) && sessionGrant?.session_id !== sessionId)))) {
+        throw attachmentGrantDenied();
+      }
+      signal?.throwIfAborted();
+      for (const { id, key } of entries) {
+        const existing = this.stmt(
+          'SELECT attachment_id FROM account_attachment_grants WHERE user_id = ? AND attachment_key = ?' + lock,
+        ).get(userId, key) as { attachment_id: string } | undefined;
+        if (existing !== undefined) {
+          if (existing.attachment_id !== id) throw attachmentGrantDenied();
+          continue;
+        }
+        this.stmt(
+          'INSERT INTO account_attachment_grants (user_id, attachment_key, attachment_id, session_id, provenance) VALUES (?, ?, ?, ?, ?)',
+        ).run(userId, key, id, sessionId, provenance);
+      }
+      signal?.throwIfAborted();
+      this.db.exec(dryRun ? 'ROLLBACK' : 'COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   /** Load the durable ownership index used by the gateway. */

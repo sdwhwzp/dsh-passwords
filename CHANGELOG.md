@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.7.8-dsh.20261029.3
+
+按账号持久保存可信上传的附件授权，支持 SQLite/MySQL 事务内重验身份、会话归属和权限；独立校验附件读取（含配对本机 read 工具）。旧附件仅通过显式可信离线 backfill 恢复，禁止从用户可注入 history 推导授权。保留 `.2` 的 403 修复、批量上传和 alpha2 peer 兼容范围。
+
+Persist account-scoped grants from trusted Host uploads with transactional identity, session-owner and policy checks on SQLite/MySQL. Enforce independent attachment reads, including paired local-workspace tools. Add explicit reviewed offline backfill without history-based grants. Preserve `.2` workspace 403 fixes, batch uploads and alpha2 peers.
+
 ## 2.7.8-dsh.20261029.2
 
 支持任务看板 `0.4.12-dsh.20261029.1`，同时保留 `0.4.11-dsh.20261028.2` 的 peer 兼容范围，并同步 shrinkwrap 元数据。此版本为 alpha2 候选包提供独立版本号，保留工作区 403 修复和批量上传功能。

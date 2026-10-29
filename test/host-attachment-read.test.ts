@@ -16,7 +16,7 @@ async function fixture(): Promise<{ root: string; file: string }> {
   // so the macOS /var → /private/var symlink does not make every path read as "outside".
   const base = await realpath(await mkdtemp(path.join(tmpdir(), 'dsh-attach-')));
   const root = path.join(base, 'attachments', 'v1');
-  const dir = path.join(root, 'files', '75', '75cc');
+  const dir = path.join(root, 'files', '75', '75' + 'c'.repeat(62));
   await mkdir(dir, { recursive: true });
   const file = path.join(dir, '考勤openapi.json');
   await writeFile(file, 'line1\nline2\nline3\nline4\n', 'utf8');
@@ -25,7 +25,7 @@ async function fixture(): Promise<{ root: string; file: string }> {
 
 test('reads an attachment inside the store root', async () => {
   const { root, file } = await fixture();
-  const result = await readHostAttachmentWindow(file, {}, root);
+  const result = await readHostAttachmentWindow(file, {}, root, async () => {});
   assert.ok(result);
   assert.equal(result.path, file);
   assert.equal(result.totalLines, 5); // trailing newline yields a final empty line
@@ -35,7 +35,7 @@ test('reads an attachment inside the store root', async () => {
 
 test('honors offset and limit like the companion window', async () => {
   const { root, file } = await fixture();
-  const result = await readHostAttachmentWindow(file, { offset: 2, limit: 2 }, root);
+  const result = await readHostAttachmentWindow(file, { offset: 2, limit: 2 }, root, async () => {});
   assert.ok(result);
   assert.deepEqual(result.lines, [{ number: 2, text: 'line2' }, { number: 3, text: 'line3' }]);
   assert.equal(result.offset, 2);
@@ -45,7 +45,7 @@ test('returns undefined for a path outside the store root', async () => {
   const { root } = await fixture();
   const outside = path.join(root, '..', '..', 'secret.txt');
   await writeFile(path.resolve(outside), 'private\n', 'utf8');
-  assert.equal(await readHostAttachmentWindow(path.resolve(outside), {}, root), undefined);
+  assert.equal(await readHostAttachmentWindow(path.resolve(outside), {}, root, async () => {}), undefined);
 });
 
 test('a symlink escaping the store root is rejected after realpath', async () => {
@@ -54,10 +54,10 @@ test('a symlink escaping the store root is rejected after realpath', async () =>
   await writeFile(path.resolve(secret), 'x\n', 'utf8');
   const link = path.join(root, 'files', 'link.txt');
   await symlink(path.resolve(secret), link);
-  assert.equal(await readHostAttachmentWindow(link, {}, root), undefined);
+  assert.equal(await readHostAttachmentWindow(link, {}, root, async () => {}), undefined);
 });
 
 test('returns undefined for a nonexistent path', async () => {
   const { root } = await fixture();
-  assert.equal(await readHostAttachmentWindow(path.join(root, 'files', 'nope.json'), {}, root), undefined);
+  assert.equal(await readHostAttachmentWindow(path.join(root, 'files', 'nope.json'), {}, root, async () => {}), undefined);
 });
