@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.7.8-dsh.20261029.1
+
+修复关闭“新建工作区权限”后，已分配或已登记工作区在打开时仍被当作新工作区而返回 403 的问题。只有真正需要登记新工作区时才检查创建开关；未登记子目录仍按原权限拒绝。新增已分配、已登记和未登记三种路径的回归测试。
+
+Fix assigned or already registered workspaces being rejected with 403 when workspace creation is disabled. The creation grant is now required only for a new registration; unregistered directories remain denied. Added regression coverage for assigned, registered, and unregistered paths.
+
 ## 2.7.8-dsh.20261024.3
 
 修复工作区二进制预览：服务器文件与配对本机文件均使用 Connection multipart 字节响应；本机字节读取对齐 `options.range` / `options.baseFile`，保留账号和路径校验。

@@ -5675,6 +5675,56 @@ test('Issue #38：授权根内可建目录并登记；根外与主目录拒绝�
   }
 });
 
+test('Issue #38：关闭新建后仍可打开已分配或已登记工作区，未登记子目录仍拒绝', async () => {
+  const rootPath = issue38Slash(realpathSync(mkdtempSync(path.join(os.tmpdir(), 'dshpw-issue38-open-root-'))));
+  const assignedWorkspace = issue38Slash(path.join(rootPath, 'Flooring+Sell in'));
+  const registeredWorkspace = issue38Slash(path.join(rootPath, 'registered'));
+  const unregisteredWorkspace = issue38Slash(path.join(rootPath, 'new-workspace'));
+  mkdirSync(assignedWorkspace, { recursive: true });
+  mkdirSync(registeredWorkspace, { recursive: true });
+  mkdirSync(unregisteredWorkspace, { recursive: true });
+
+  const originalCookie = cookie;
+  const json = { 'content-type': 'application/json' };
+  const register = (target: string, rpcId: string) =>
+    gatewayReq('POST', '/api/workspace/create', json, JSON.stringify({
+      type: 'client-request',
+      rpcId,
+      method: 'workspace/create',
+      payload: { args: { request: { path: target } } },
+    }));
+
+  try {
+    const subUser = createOwnedFixtureUser(
+      'issue38-open-existing-user',
+      '$2a$10$dummyhashdummyhashdummyhashdu',
+      'user',
+    );
+    db.setManagedWorkspace(subUser.id, rootPath);
+    db.setPermissions(subUser.id, {
+      ...ISSUE38_PERM_BASE,
+      allowedFolders: [rootPath, assignedWorkspace],
+      allowWorkspaceCreate: false,
+    });
+    db.addUserWorkspace(subUser.id, registeredWorkspace);
+    cookie = issue38Cookie(subUser);
+
+    const assigned = await register(assignedWorkspace, 'issue38-open-assigned');
+    assert.equal(assigned.status, 200, assigned.body);
+
+    const registered = await register(registeredWorkspace, 'issue38-open-registered');
+    assert.equal(registered.status, 200, registered.body);
+
+    const beforeUnregistered = lastUpstreamUrl;
+    const unregistered = await register(unregisteredWorkspace, 'issue38-open-unregistered');
+    assert.equal(unregistered.status, 403, unregistered.body);
+    assert.equal(lastUpstreamUrl, beforeUnregistered, '未登记目录在关闭新建权限时不得触达上游');
+  } finally {
+    cookie = originalCookie;
+    try { rmSync(rootPath, { recursive: true, force: true }); } catch { /* 尽力清理 */ }
+  }
+});
+
 test('Issue #38：专属根外导航被拒绝，白名单不授予其它工作区', async () => {
   const rootPath = issue38Slash(realpathSync(mkdtempSync(path.join(os.tmpdir(), 'dshpw-issue38-nav-'))));
   const originalCookie = cookie;

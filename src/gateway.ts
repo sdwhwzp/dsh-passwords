@@ -10853,8 +10853,18 @@ export function createGatewayServer(
               !isSensitivePath(target) && !isSensitivePath(canonical) &&
               pathAllowedFor(reqAs.dshpwUser!, target, reqAs.dshpwPerms!.allowed_folders);
             const managedRoot = db.getManagedWorkspace(reqAs.dshpwUser!)?.path;
+            const normalizedTarget = target === null ? null : normalizePath(target);
+            const exactAssignedWorkspace = normalizedTarget !== null &&
+              reqAs.dshpwPerms!.allowed_folders.some((folder) =>
+                folder !== '__deny__' && samePathForMatch(folder, normalizedTarget));
+            const alreadyRegisteredWorkspace = normalizedTarget !== null &&
+              db.listUserWorkspacePaths(reqAs.dshpwUser!).some((workspacePath) =>
+                samePathForMatch(workspacePath, normalizedTarget));
             const requiresCreateGrant = workspaceDirectoryCreateRequest ||
-              (isWorkspaceCreate(proxyPath) && canonical !== canonicalCandidate(managedRoot ?? ''));
+              (isWorkspaceCreate(proxyPath) &&
+                canonical !== canonicalCandidate(managedRoot ?? '') &&
+                !exactAssignedWorkspace &&
+                !alreadyRegisteredWorkspace);
             if (!allowed || (requiresCreateGrant && !reqAs.dshpwPerms!.allow_workspace_create)) {
               auditDirectoryEvent(workspaceDirectoryCreateRequest ? 'directory_create_denied' : 'workspace_registration_denied', req, {
                 result: 'denied', reason: workspaceDirectoryCreateRequest && !reqAs.dshpwPerms!.allow_workspace_create
