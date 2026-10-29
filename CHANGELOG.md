@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.7.8-dsh.20261029.2
+
+支持任务看板 `0.4.12-dsh.20261029.1`，同时保留 `0.4.11-dsh.20261028.2` 的 peer 兼容范围，并同步 shrinkwrap 元数据。此版本为 alpha2 候选包提供独立版本号，保留工作区 403 修复和批量上传功能。
+
+Accept task-board `0.4.12-dsh.20261029.1` alongside `0.4.11-dsh.20261028.2` and synchronize the shrinkwrap metadata. Give the alpha2 candidate a distinct release version while preserving workspace 403 fixes and batch uploads.
+
 ## 2.7.8-dsh.20261029.1
 
 修复关闭“新建工作区权限”后，已分配或已登记工作区在打开时仍被当作新工作区而返回 403 的问题。只有真正需要登记新工作区时才检查创建开关；未登记子目录仍按原权限拒绝。新增已分配、已登记和未登记三种路径的回归测试。
