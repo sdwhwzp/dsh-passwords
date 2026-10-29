@@ -1,6 +1,6 @@
 # Account attachment grants
 
-`2.7.8-dsh.20261029.3` implements the Host `recordAttachments` and
+`2.7.8-dsh.20261029.4` implements the Host `recordAttachments` and
 `readableAttachmentIds` contract. Deploy it with the matching core attachment
 admission/read changes. SQLite and MySQL initialize an additive
 `account_attachment_grants` table; no history or attachment objects are rewritten.
@@ -23,6 +23,18 @@ safe, idempotent grant without delivering the prompt.
 
 The paired local-workspace `read` tool also checks an independent grant before
 reading any Host attachment bytes, including same-store symlink aliases.
+
+The global `llm/stream` guard checks all assembled image/file blocks, including
+assistant/tool history and offloaded images, before model adapters read bytes
+or the runtime projects files into paths. Identity comes only from the current
+trusted `agent/pre-step` or `agent/request` hook, matched to the exact signal and
+Session. Historical message principals never confer authority. Same-step
+compaction and prepared calls use the same guard. Attachment calls with an
+unbound or different auxiliary signal fail closed; text-only calls remain usable.
+The guard does not grant historical objects. A continued conversation containing
+ungranted legacy attachments can therefore be blocked before model dispatch,
+even when its newest prompt contains text only. Release `.3` lacks this replay
+boundary and must be superseded by `.4` and the corresponding corrected core cohort.
 
 ## Legacy backfill
 

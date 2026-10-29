@@ -41,6 +41,7 @@ import { ManagedWorkspaceProvisioner, registerManagedUserWorkspace } from './man
 import { AgentTurnPrincipalTracker, registerRequestPrincipal } from './principal.js';
 import type { AuthenticatedPrincipal } from './principal.js';
 import { registerPrincipalAccess } from './principal-access.js';
+import { registerAttachmentReplayGuard } from './attachment-replay-guard.js';
 import { registerBotBridge } from './bot-bridge.js';
 import { DshPasswordsRemote } from './remote.js';
 import { backupSqliteBeforeMigration } from './db-backup.js';
@@ -1053,7 +1054,8 @@ export function apply(ctx: Context): void {
   const managedWorkspaces = db === null ? null : new ManagedWorkspaceProvisioner(db, cfg);
   if (db !== null) {
     registerManagedUserWorkspace(ctx, db, cfg);
-    registerPrincipalAccess(ctx, db);
+    const principalAccess = registerPrincipalAccess(ctx, db);
+    registerAttachmentReplayGuard(ctx, principalAccess);
     registerTenantTerminal(ctx, db, cfg);
     registerConversationMode(ctx, db);
     registerTenantAgentShell(ctx, db, cfg);

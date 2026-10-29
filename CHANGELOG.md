@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.7.8-dsh.20261029.4
+
+在 `llm/stream` 中校验完整历史的图片和文件授权，阻止继续会话时经模型适配器读取外账号附件。当前身份只来自可信 agent hook，并绑定精确 signal/Session；不从历史 principal 推断。覆盖 prepared call、同一步压缩和并发账号；无当前身份的附件调用拒绝。替代 `.3`，旧附件迁移兼容门禁仍保留。
+
+Authorize assembled image/file history before adapter reads or file-path projection. Bind current identity from trusted Agent hooks to the exact signal and Session, including prepared calls and same-step compaction. Never infer authority from historical principals. Supersede `.3`; legacy attachment recovery remains an activation requirement.
+
 ## 2.7.8-dsh.20261029.3
 
 按账号持久保存可信上传的附件授权，支持 SQLite/MySQL 事务内重验身份、会话归属和权限；独立校验附件读取（含配对本机 read 工具）。旧附件仅通过显式可信离线 backfill 恢复，禁止从用户可注入 history 推导授权。保留 `.2` 的 403 修复、批量上传和 alpha2 peer 兼容范围。
