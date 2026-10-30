@@ -3311,6 +3311,12 @@ export function createGatewayServer(
     return null;
   }
 
+  /** Paired folders are owned by one account and stay visible to that account. */
+  const pairedWorkspacePathAllowed = (userId: number, candidate: string): boolean => {
+    const localWorkspaceOwner = db.localWorkspaceOwnerForPath(candidate);
+    return localWorkspaceOwner !== null && localWorkspaceOwner === userId;
+  };
+
   /** 文件夹白名单与两类用户专属工作区所有权的统一判定。 */
   function pathAllowedFor(userId: number, candidate: string, allowedFolders: string[]): boolean {
     if (workspaceSubtreeOverlap(userId, candidate)) return false;
@@ -4925,6 +4931,8 @@ export function createGatewayServer(
   const workspaceOwnersSnapshot = (): ReturnType<Database['listWorkspaceOwners']> => db.listWorkspaceOwners();
 
   const workspaceOwnedByAnotherSubuser = (userId: number, workspacePath: string): boolean => {
+    const localOwner = db.localWorkspaceOwnerForPath(workspacePath);
+    if (localOwner !== null && localOwner !== userId) return true;
     const owners = workspaceOwnersSnapshot();
     if (owners.length === 0) return false;
     // 等值语义保持不变（不是「父工作区包含他人工作区」），但比较改走 canonical 口径：
@@ -5005,7 +5013,8 @@ export function createGatewayServer(
   ): Map<string, string> => {
     const merged = new Map<string, string>();
     for (const [workspaceId, workspacePath] of userWorkspacePaths.get(userId) ?? new Map<string, string>()) {
-      if (folderAllowed(workspacePath, perms.allowed_folders) && !workspaceOwnedByAnotherSubuser(userId, workspacePath)) {
+      if ((pairedWorkspacePathAllowed(userId, workspacePath) || folderAllowed(workspacePath, perms.allowed_folders)) &&
+        !workspaceOwnedByAnotherSubuser(userId, workspacePath)) {
         merged.set(workspaceId, workspacePath);
       }
     }
@@ -5023,7 +5032,7 @@ export function createGatewayServer(
     const decoder = new StringDecoder('utf8');
     const workspacePathAllowed = (candidate: string): boolean => {
       const currentPerms = db.getPermissions(userId) ?? perms;
-      if (!folderAllowed(candidate, currentPerms.allowed_folders)) return false;
+      if (!pairedWorkspacePathAllowed(userId, candidate) && !folderAllowed(candidate, currentPerms.allowed_folders)) return false;
 
       return !workspaceOwnedByAnotherSubuser(userId, candidate);
     };
@@ -5554,7 +5563,8 @@ export function createGatewayServer(
       typeof id === 'string' && subuserCanAccessSession(userId, perms, id);
     const workspacePathAllowed = (row: Record<string, unknown>): boolean => {
       const pathValue = row.path;
-      if (typeof row.workspaceId !== 'string' || typeof pathValue !== 'string' || !folderAllowed(pathValue, perms.allowed_folders)) return false;
+      if (typeof row.workspaceId !== 'string' || typeof pathValue !== 'string') return false;
+      if (!pairedWorkspacePathAllowed(userId, pathValue) && !folderAllowed(pathValue, perms.allowed_folders)) return false;
       return !workspaceOwnedByAnotherSubuser(userId, pathValue);
     };
     const workspaceAllowed = (row: Record<string, unknown>): boolean => {
@@ -5564,7 +5574,7 @@ export function createGatewayServer(
       const owners = workspaceOwnersSnapshot();
       // 增量 upsert 允许当前用户新建且尚未出现在本连接 baseline 的工作区；
       // 但未知 workspaceId 必须有当前用户的持久化登记，不能只凭目录白名单放行。
-      return state.visibleWorkspaces.has(id) || owners.some(
+      return state.visibleWorkspaces.has(id) || pairedWorkspacePathAllowed(userId, pathValue) || owners.some(
         (owner) => owner.userId === userId && normalizePath(owner.path) === normalizePath(pathValue),
       );
     };
@@ -5696,7 +5706,8 @@ export function createGatewayServer(
       }
       if (frame.type === 'remove' && typeof frame.workspaceId === 'string') {
         const workspacePath = state.visibleWorkspaces.get(frame.workspaceId);
-        if (workspacePath === undefined || !folderAllowed(workspacePath, perms.allowed_folders) ||
+        if (workspacePath === undefined ||
+          (!pairedWorkspacePathAllowed(userId, workspacePath) && !folderAllowed(workspacePath, perms.allowed_folders)) ||
           workspaceOwnedByAnotherSubuser(userId, workspacePath)) return null;
         state.visibleWorkspaces.delete(frame.workspaceId);
         state.visibleWorkspaceRows.delete(frame.workspaceId);
@@ -5706,7 +5717,8 @@ export function createGatewayServer(
         const ids = frame.workspaceIds.filter((id): id is string => {
           if (typeof id !== 'string') return false;
           const workspacePath = state.visibleWorkspaces.get(id);
-          return workspacePath !== undefined && folderAllowed(workspacePath, perms.allowed_folders) &&
+          return workspacePath !== undefined &&
+            (pairedWorkspacePathAllowed(userId, workspacePath) || folderAllowed(workspacePath, perms.allowed_folders)) &&
             !workspaceOwnedByAnotherSubuser(userId, workspacePath);
         });
         return { type: 'order', workspaceIds: ids };

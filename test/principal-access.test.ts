@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -11,6 +11,46 @@ import { DshPasswordsPrincipalAccessProvider } from '../src/principal-access.js'
 function hostContext(services: Map<string, unknown>): Context {
   return { root: { get: (name: string) => services.get(name) } } as unknown as Context;
 }
+
+test('paired local workspaces stay readable for their owner even without explicit grants', async () => {
+  const temporary = await realpath(await mkdtemp(path.join(os.tmpdir(), 'dshpw-paired-workspace-')));
+  const placeholder = path.join(temporary, 'local-workspaces', 'u2', 'workspace');
+  await mkdir(placeholder, { recursive: true });
+  const db = new Database(path.join(temporary, 'platform.db'), createFieldCrypto('enc', 'setup'));
+  try {
+    db.init();
+    db.createUser('admin', 'hash', 'admin');
+    const alice = db.createUser('alice', 'hash', 'user');
+    db.setPermissions(alice.id, {
+      allowedFolders: [path.join(temporary, 'unrelated')],
+      hourlyTokenLimit: null,
+      dailyMinutesLimit: null,
+      allowUpload: true,
+      allowGitDownload: false,
+      banned: false,
+    });
+    const workspace = db.createLocalWorkspace({
+      id: 'paired-workspace-1',
+      userId: alice.id,
+      token: 'paired-token-012345678901234567890123',
+      deviceName: 'kmMac',
+      workspaceName: 'Hero Model',
+      remoteRoot: '/Users/alice/Desktop/Hero Model',
+      placeholderPath: placeholder,
+      platform: process.platform,
+      shellEnabled: true,
+      desktopControl: false,
+    });
+    const registry = { list: () => [{ id: workspace.id, path: placeholder }] };
+    const provider = new DshPasswordsPrincipalAccessProvider(hostContext(new Map([['workspaceRegistry', registry]])), db);
+    const principal = { source: 'dsh-passwords', id: String(alice.id), username: alice.username, role: 'user' } as const;
+    const access = await provider.resolve(principal, { workspaceIds: [workspace.id] });
+    assert.deepEqual([...access.readableWorkspaceIds], [workspace.id]);
+  } finally {
+    db.close();
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
 
 test('cold session access reads only current target metadata and observes deletion and directory changes', async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), 'dshpw-cold-access-'));

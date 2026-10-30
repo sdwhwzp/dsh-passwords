@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -146,12 +146,111 @@ async function setup(mobile = false, heartbeatTimeout = false) {
     await rm(temporary, { recursive: true, force: true });
   };
   const disableSession = () => db.setPermissions(customer.id, { ...permissions, disabledSessions: ['own-session'] });
-  return { connect, cleanup, disableSession };
+  return { connect, cleanup, disableSession, db, customer, permissions, temporary };
 }
 
 function tenantTest(name: string, run: (mobile: boolean) => Promise<void>) {
   for (const mobile of [false, true]) test(`${mobile ? 'mobile bearer' : 'web cookie'}: ${name}`, { timeout: 15000 }, () => run(mobile));
 }
+
+tenantTest('paired folders survive workspace baseline and new-folder increments without host folder grants', async mobile => {
+  const env = await setup(mobile);
+  const { downstream, upstream } = await env.connect();
+  try {
+    const other = env.db.createUser('other-owner', 'hash', 'user');
+    const paired = async (id: string, ownerId = env.customer.id) => {
+      const directory = path.join(env.temporary, 'local', `u${ownerId}`, id);
+      await mkdir(directory, { recursive: true });
+      const root = await realpath(directory);
+      env.db.createLocalWorkspace({
+        id, userId: ownerId, token: `fixture-paired-token-${id}`, deviceName: 'fixture-pc',
+        workspaceName: id, remoteRoot: 'C:\\fixture', placeholderPath: root,
+        platform: 'win32', shellEnabled: true, desktopControl: false,
+      });
+      return { workspaceId: `host-${id}`, path: root, title: id, sessionIds: [] };
+    };
+    const first = await paired('first');
+    const foreign = await paired('foreign', other.id);
+    const receive = nextMessage(downstream);
+    downstream.send(JSON.stringify({ type: 'open', streamId: 'workspaces', endpoint: 'workspace/follow', payload: { args: {} } }));
+    assert.deepEqual(await nextMessage(upstream), {
+      type: 'open', streamId: 'workspaces', endpoint: 'workspace/follow', payload: { args: {} },
+    });
+    upstream.send(muxItem('workspaces', {
+      type: 'baseline', value: { items: [first, foreign], archivedSessionIds: [], pinnedSessionIds: [] },
+    }));
+    assert.deepEqual(await receive, {
+      type: 'item', streamId: 'workspaces',
+      value: { type: 'baseline', value: { items: [first], archivedSessionIds: [], pinnedSessionIds: [] } },
+    });
+
+    // The Host id differs from the pairing id and there is no user_workspaces row.
+    const second = await paired('second');
+    const added = nextMessage(downstream);
+    upstream.send(muxItem('workspaces', { type: 'upsert', workspace: second }));
+    assert.deepEqual(await added, { type: 'item', streamId: 'workspaces', value: { type: 'upsert', workspace: second } });
+
+    const ordered = nextMessage(downstream);
+    upstream.send(muxItem('workspaces', { type: 'upsert', workspace: foreign }));
+    upstream.send(muxItem('workspaces', { type: 'order', workspaceIds: [second.workspaceId, first.workspaceId, foreign.workspaceId] }));
+    assert.deepEqual(await ordered, {
+      type: 'item', streamId: 'workspaces',
+      value: { type: 'order', workspaceIds: [second.workspaceId, first.workspaceId] },
+    });
+    const removed = nextMessage(downstream);
+    upstream.send(muxItem('workspaces', { type: 'remove', workspaceId: second.workspaceId }));
+    assert.deepEqual(await removed, {
+      type: 'item', streamId: 'workspaces', value: { type: 'remove', workspaceId: second.workspaceId },
+    });
+    const afterRevoke = nextMessage(downstream);
+    env.db.revokeLocalWorkspace(env.customer.id, 'first');
+    upstream.send(muxItem('workspaces', {
+      type: 'baseline', value: { items: [first, second, foreign], archivedSessionIds: [], pinnedSessionIds: [] },
+    }));
+    assert.deepEqual(await afterRevoke, {
+      type: 'item', streamId: 'workspaces',
+      value: { type: 'baseline', value: { items: [second], archivedSessionIds: [], pinnedSessionIds: [] } },
+    });
+  } finally {
+    downstream.terminate();
+    await env.cleanup();
+  }
+});
+
+tenantTest('folder grants cannot expose another account paired workspace', async mobile => {
+  const env = await setup(mobile);
+  const root = await realpath(env.temporary);
+  env.db.setPermissions(env.customer.id, { ...env.permissions, allowedFolders: [root] });
+  const { downstream, upstream } = await env.connect();
+  try {
+    const other = env.db.createUser('other-owner', 'hash', 'user');
+    env.db.createLocalWorkspace({
+      id: 'foreign', userId: other.id, token: 'fixture-foreign-paired-token',
+      deviceName: 'fixture-pc', workspaceName: 'foreign', remoteRoot: 'C:\\fixture',
+      placeholderPath: root, platform: 'win32', shellEnabled: true, desktopControl: false,
+    });
+    const foreign = { workspaceId: 'host-foreign', path: root, sessionIds: [] };
+    const opened = nextMessage(upstream);
+    downstream.send(JSON.stringify({ type: 'open', streamId: 'workspaces', endpoint: 'workspace/follow', payload: { args: {} } }));
+    await opened;
+    const baseline = nextMessage(downstream);
+    upstream.send(muxItem('workspaces', {
+      type: 'baseline', value: { items: [foreign], archivedSessionIds: [] },
+    }));
+    assert.deepEqual(await baseline, {
+      type: 'item', streamId: 'workspaces', value: { type: 'baseline', value: { items: [], archivedSessionIds: [] } },
+    });
+    const ordered = nextMessage(downstream);
+    upstream.send(muxItem('workspaces', { type: 'upsert', workspace: foreign }));
+    upstream.send(muxItem('workspaces', { type: 'order', workspaceIds: [foreign.workspaceId] }));
+    assert.deepEqual(await ordered, {
+      type: 'item', streamId: 'workspaces', value: { type: 'order', workspaceIds: [] },
+    });
+  } finally {
+    downstream.terminate();
+    await env.cleanup();
+  }
+});
 
 tenantTest('opening and cancelling file previews keeps the shared history stream connected', async mobile => {
   const env = await setup(mobile);
