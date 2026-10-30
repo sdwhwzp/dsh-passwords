@@ -1888,7 +1888,7 @@ export function createGatewayServer(
   const SESSION_MODEL_STATE_MAX = 20_000;
 
   type RemoteMuxUserConnection = {
-    socket: any;
+    socket: WebSocket;
     publishSessionAttachment: (sessionId: string, cwd: string) => void;
     publishWorkspaceUpsert: (workspace: Record<string, unknown>) => void;
   };
@@ -2330,7 +2330,7 @@ export function createGatewayServer(
       try { client.close(code, reason); } catch {}
     }
   };
-  const closeUserRemoteMuxClients = (userId: number, code = 1012, reason = 'Permissions changed'): void => {
+  const closeUserRemoteMuxClients = (userId: number, code = 1008, reason = 'permissions changed'): void => {
     const clients = remoteMuxClientsByUser.get(userId);
     if (clients === undefined) return;
     remoteMuxClientsByUser.delete(userId);
@@ -4979,7 +4979,7 @@ export function createGatewayServer(
     sessionOwner(sessionId) === userId &&
     grants.has(sessionId) &&
     !perms.disabled_sessions.includes(sessionId) &&
-    folderAllowed(workspacePath, perms.allowed_folders) &&
+    pathAllowedFor(userId, workspacePath, perms.allowed_folders) &&
     !workspaceOwnedByAnotherSubuser(userId, workspacePath);
 
   /**
@@ -5360,8 +5360,8 @@ export function createGatewayServer(
   const pathBoundToAuthorizedWorkspace = (userId: number, perms: UserPermissionsRow, candidate: string): boolean => {
     const access = userSessionAccess.get(userId);
     if (access === undefined) return false;
-    if (!folderAllowed(candidate, perms.allowed_folders) &&
-        !folderAllowed(canonicalizePathBestEffort(candidate), perms.allowed_folders)) return false;
+    if (!pathAllowedFor(userId, candidate, perms.allowed_folders) &&
+        !pathAllowedFor(userId, canonicalizePathBestEffort(candidate), perms.allowed_folders)) return false;
     if (workspaceSubtreeOverlap(userId, candidate)) return false;
     for (const [sessionId, sessionRoot] of access) {
       // 词法与真实路径两种形态都做包含性比较：候选路径由请求方给出时（官方
@@ -5411,7 +5411,7 @@ export function createGatewayServer(
     const rootCanonical = canonicalizePathBestEffort(root);
     const targetCanonical = canonicalizePathBestEffort(target);
     if (!pathWithin(root, target) || !pathWithin(rootCanonical, targetCanonical) ||
-      !folderAllowed(target, perms.allowed_folders) || !folderAllowed(targetCanonical, perms.allowed_folders) ||
+      !pathAllowedFor(userId, target, perms.allowed_folders) || !pathAllowedFor(userId, targetCanonical, perms.allowed_folders) ||
       workspaceSubtreeOverlap(userId, target) || isSensitivePath(target) || isSensitivePath(targetCanonical)) return null;
     return { scopeId: request.scopeId, root, target, rootCanonical, targetCanonical };
   };
@@ -5479,7 +5479,7 @@ export function createGatewayServer(
         return sessionPath !== undefined &&
           (sessionOwner(sessionId) === userId && currentGrants.has(sessionId)) &&
           !perms.disabled_sessions.includes(sessionId) &&
-          folderAllowed(sessionPath, perms.allowed_folders) &&
+          pathAllowedFor(userId, sessionPath, perms.allowed_folders) &&
           !workspaceOwnedByAnotherSubuser(userId, sessionPath);
       };
       const pendingSessionAllowedForEvent = (sessionId: string, args: unknown[]): boolean => {
@@ -5488,7 +5488,7 @@ export function createGatewayServer(
         const summary = args[0];
         if (!isPlainJsonRecord(summary) || typeof summary.cwd !== 'string') return false;
         return normalizePath(summary.cwd) === normalizePath(pending.cwd) &&
-          folderAllowed(pending.cwd, perms.allowed_folders) && !workspaceOwnedByAnotherSubuser(userId, pending.cwd);
+          pathAllowedFor(userId, pending.cwd, perms.allowed_folders) && !workspaceOwnedByAnotherSubuser(userId, pending.cwd);
       };
       if (value.type === 'cancel') {
         if (Object.keys(value).length !== 2 || typeof value.eventId !== 'string' || value.eventId.length === 0 || value.eventId.length > 200) return null;
@@ -5557,7 +5557,7 @@ export function createGatewayServer(
       if (typeof id !== 'string' || workspacePath === undefined) return false;
       const candidate = pending?.get(id);
       return candidate !== undefined && candidate.expiresAt > Date.now() && normalizePath(candidate.cwd) === normalizePath(workspacePath) &&
-        folderAllowed(candidate.cwd, perms.allowed_folders) && !workspaceOwnedByAnotherSubuser(userId, candidate.cwd);
+        pathAllowedFor(userId, candidate.cwd, perms.allowed_folders) && !workspaceOwnedByAnotherSubuser(userId, candidate.cwd);
     };
     const allowedSession = (id: unknown): id is string =>
       typeof id === 'string' && subuserCanAccessSession(userId, perms, id);
@@ -5604,7 +5604,7 @@ export function createGatewayServer(
       const withinRoot = pathWithin(state.workspaceFileRoot, changedPath) &&
         pathWithin(state.workspaceFileRootCanonical, changedCanonical);
       if (!withinTarget || !withinRoot ||
-        (!folderAllowed(changedPath, perms.allowed_folders) && !folderAllowed(changedCanonical, perms.allowed_folders)) ||
+        (!pathAllowedFor(userId, changedPath, perms.allowed_folders) && !pathAllowedFor(userId, changedCanonical, perms.allowed_folders)) ||
         isSensitivePath(changedPath) || isSensitivePath(changedCanonical) ||
         workspaceOwnedByAnotherSubuser(userId, changedPath)) return null;
       return frame;
@@ -10012,8 +10012,8 @@ export function createGatewayServer(
                     // epoch 相等只说明授权行在本请求期间未变；仍按最新权限行复核一次
                     // disabled/folder，双重保险（未来新增权限入口忘记推进 epoch 时也不放行）。
                     const currentPerms = db.getPermissions(reqAs.dshpwUser) ?? reqAs.dshpwPerms;
-                    if (!currentPerms.disabled_sessions.includes(sessionId) &&
-                        folderAllowed(cwd, currentPerms.allowed_folders)) {
+                    if (!currentPerms.banned && !currentPerms.disabled_sessions.includes(sessionId) &&
+                        pathAllowedFor(reqAs.dshpwUser, cwd, currentPerms.allowed_folders)) {
                       // 增量追加单条 grant：不读取也不重写整张授权表，所以同一窗口内
                       // 其它调用（管理员保存、沙盒定向回收）并发写入的 grant 不会被
                       // 这次回写抹掉（epoch 已保证期间没有授权变更，故不回写异常数据）。
@@ -10733,8 +10733,8 @@ export function createGatewayServer(
             const canonicalCandidate = canonicalizePathBestEffort(candidate);
             return pathWithin(sessionRoot, candidate) &&
               pathWithin(canonicalSessionRoot, canonicalCandidate) &&
-              folderAllowed(candidate, reqAs.dshpwPerms!.allowed_folders) &&
-              folderAllowed(canonicalCandidate, reqAs.dshpwPerms!.allowed_folders) &&
+              pathAllowedFor(reqAs.dshpwUser!, candidate, reqAs.dshpwPerms!.allowed_folders) &&
+              pathAllowedFor(reqAs.dshpwUser!, canonicalCandidate, reqAs.dshpwPerms!.allowed_folders) &&
               !workspaceSubtreeOverlap(reqAs.dshpwUser!, candidate) &&
               !isSensitivePath(candidate) && !isSensitivePath(canonicalCandidate);
           };
@@ -11697,6 +11697,7 @@ export function createGatewayServer(
       let closed = false;
       let upstreamWebSocket: WebSocket | null = null;
       let unregisterTenantConnection = () => {};
+      let unregisterWorkspacePublisher = () => {};
       let downstreamLeg: ReturnType<typeof createTenantMuxLeg> | null = null;
       let upstreamLeg: ReturnType<typeof createTenantMuxLeg> | null = null;
 
@@ -11724,6 +11725,7 @@ export function createGatewayServer(
           clientSender: downstreamLeg?.snapshot(), upstreamSender: upstreamLeg?.snapshot() });
         if (record !== null) console.error(`[dsh-passwords] remote.mux close source=${record.source} direction=${record.direction} code=${record.code} buffered=${record.bufferedBytes} pending=${record.pendingBytes} streams=${record.streams} clientQueued=${record.clientSender.queuedMessages}/${record.clientSender.queuedBytes} upstreamQueued=${record.upstreamSender.queuedMessages}/${record.upstreamSender.queuedBytes}`);
         unregisterTenantConnection();
+        unregisterWorkspacePublisher();
         downstreamLeg?.dispose();
         upstreamLeg?.dispose();
         streams.clear();
@@ -11787,6 +11789,46 @@ export function createGatewayServer(
         }
         pendingFrames.push(value);
       };
+
+      if (!ownerCarrier) {
+        const publish = (state: RemoteMuxUserStreamState, workspace: Record<string, unknown>) => {
+          if (closed || !tenantCredentialIsCurrent()) return;
+          const perms = effectivePermissions(userId);
+          if (perms.banned) return;
+          const value = filterRemoteMuxUserItem(userId, perms, state, { type: 'upsert', workspace });
+          if (value !== null) {
+            sendDownstream(JSON.stringify({ type: 'item', streamId: state.streamId, value }), state.streamId);
+          }
+        };
+        const connection: RemoteMuxUserConnection = {
+          socket: downstream,
+          publishWorkspaceUpsert(workspace) {
+            for (const stream of streams.values()) {
+              if (stream.endpoint === 'workspace/follow' && stream.filtered !== null) publish(stream.filtered, workspace);
+            }
+          },
+          publishSessionAttachment(sessionId, cwd) {
+            if (!subuserCanAccessSession(userId, effectivePermissions(userId), sessionId)) return;
+            for (const stream of streams.values()) {
+              if (stream.endpoint !== 'workspace/follow' || stream.filtered === null) continue;
+              // Host membership can arrive before the create response commits the grant.
+              // Replay the known workspace after that commit, through the same tenant filter.
+              for (const row of stream.filtered.visibleWorkspaceRows.values()) {
+                if (typeof row.path !== 'string' || normalizePath(row.path) !== normalizePath(cwd) ||
+                    !Array.isArray(row.sessionIds) || row.sessionIds.includes(sessionId)) continue;
+                publish(stream.filtered, { ...row, sessionIds: [...row.sessionIds, sessionId] });
+              }
+            }
+          },
+        };
+        const connections = remoteMuxClientsByUser.get(userId) ?? new Set<RemoteMuxUserConnection>();
+        connections.add(connection);
+        remoteMuxClientsByUser.set(userId, connections);
+        unregisterWorkspacePublisher = () => {
+          connections.delete(connection);
+          if (connections.size === 0 && remoteMuxClientsByUser.get(userId) === connections) remoteMuxClientsByUser.delete(userId);
+        };
+      }
 
       downstream.on('message', (data, isBinary) => {
         if (closed) return;

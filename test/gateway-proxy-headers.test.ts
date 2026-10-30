@@ -6312,3 +6312,79 @@ test('subscription Fetch speed routes require the current account session', asyn
     assert.equal((await request({ mode: 'fast' })).status, 403);
   }
 });
+
+test('paired session creation grants access and attaches the session before returning to the browser', async () => {
+  const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'dshpw-paired-session-')));
+  const subUser = createOwnedFixtureUser('paired-session-owner', 'hash', 'user');
+  db.setPermissions(subUser.id, {
+    allowedFolders: ['/workspaces/visible'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: true, allowGitDownload: false, allowWorkspaceCreate: false,
+    allowedAgentPresets: null, banned: false, sandboxMode: 'workspace-write', disabledSessions: [],
+  });
+  db.markSessionGrantsSeeded(subUser.id);
+  db.createLocalWorkspace({
+    id: 'paired-session', userId: subUser.id, token: 'paired-session-fixture-token',
+    deviceName: 'fixture-pc', workspaceName: 'paired', remoteRoot: 'C:\\fixture',
+    placeholderPath: root, platform: 'win32', shellEnabled: true, desktopControl: true,
+  });
+  remoteMuxBaselineVisiblePath = root;
+  remoteMuxBaselineVisibleSessionIds = [];
+  const subCookie = `dsh_gateway_token=${jwt.sign(
+    { sub: String(subUser.id), username: subUser.username, cv: 0 }, 'test-secret', { expiresIn: '1h' },
+  )}`;
+  let connection: Awaited<ReturnType<typeof openRemoteMux>> | undefined;
+  const json = { 'content-type': 'application/json', cookie: subCookie };
+  try {
+    connection = await openRemoteMux({ cookie: subCookie });
+    connection.client.send(JSON.stringify({
+      type: 'open', streamId: 'paired-workspace', endpoint: 'workspace/follow', payload: { args: {} },
+    }));
+    const baseline = await nextFrameOrFail(connection, 'paired baseline');
+    assert.deepEqual((baseline.value as { value: { items: { sessionIds: string[] }[] } }).value.items[0]!.sessionIds, []);
+    const response = await gatewayReq('POST', '/api/session.create', json, JSON.stringify({
+      type: 'client-request', rpcId: 'paired-create', method: 'session/create',
+      payload: { args: { request: { cwd: root } } },
+    }));
+    assert.equal(response.status, 200, response.body);
+    const sessionId = JSON.parse(response.body).result.value.sessionId as string;
+    assert.equal(db.getSessionOwner(sessionId), subUser.id);
+    assert.equal(db.hasUserSessionGrant(subUser.id, sessionId), true, 'paired create must persist the session grant');
+    assert.deepEqual(sandboxRequests[sandboxRequests.length - 1], { sessionId, mode: 'workspace-write' });
+    const attached = await nextFrameOrFail(connection, 'paired session attachment');
+    assert.equal(attached.streamId, 'paired-workspace');
+    assert.deepEqual((attached.value as { workspace: { sessionIds: string[] } }).workspace.sessionIds, [sessionId]);
+
+    remoteMuxSnapshotHeaderId = sessionId;
+    connection.client.send(JSON.stringify({
+      type: 'open', streamId: 'paired-history', endpoint: 'session/follow',
+      payload: { args: { request: { address: { kind: 'session', sessionId } } } },
+    }));
+    assert.equal((await nextFrameOrFail(connection, 'paired history')).type, 'item');
+    const file = await gatewayReq('POST', '/api/workspaceFiles/readBytes', json, readBytesEnvelope(sessionId, 'inside.txt', {}));
+    assert.equal(file.status, 200, file.body);
+    const outside = await gatewayReq('POST', '/api/workspaceFiles/readBytes', json, readBytesEnvelope(sessionId, '../outside.txt', {}));
+    assert.equal(outside.status, 403);
+
+    // An unrelated account cannot create or read a session inside this pairing.
+    const foreign = await gatewayReq('POST', '/api/session.create', {
+      ...json, cookie: secondCustomerCookie,
+    }, JSON.stringify({ type: 'client-request', rpcId: 'foreign-paired-create', method: 'session/create',
+      payload: { args: { request: { cwd: root } } } }));
+    assert.equal(foreign.status, 403);
+
+    // A fresh baseline must retain the membership and access after create completes.
+    remoteMuxBaselineVisibleSessionIds = [sessionId];
+    connection.client.send(JSON.stringify({
+      type: 'open', streamId: 'paired-reloaded', endpoint: 'workspace/follow', payload: { args: {} },
+    }));
+    const reloaded = await nextFrameOrFail(connection, 'paired reloaded baseline');
+    assert.deepEqual((reloaded.value as { value: { items: { sessionIds: string[] }[] } }).value.items[0]!.sessionIds, [sessionId]);
+
+    db.revokeLocalWorkspace(subUser.id, 'paired-session');
+    const revoked = await gatewayReq('POST', '/api/workspaceFiles/readBytes', json, readBytesEnvelope(sessionId, 'inside.txt', {}));
+    assert.equal(revoked.status, 403);
+  } finally {
+    connection?.client.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
