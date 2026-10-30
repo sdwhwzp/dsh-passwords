@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -8,11 +8,14 @@ import { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt';
 import Tools, { type ToolRunContext } from '@deepseek-ai/dsh-tools';
+import LlmRuntime, { LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm';
 import { WebSocket } from 'ws';
 import type { PlatformConfig } from '../src/config.js';
 import { Database } from '../src/db.js';
 import { createFieldCrypto } from '../src/encrypt.js';
 import { LocalWorkspaceHub } from '../src/local-workspace-hub.js';
+import { registerPrincipalAccess } from '../src/principal-access.js';
+import { registerAttachmentReplayGuard } from '../src/attachment-replay-guard.js';
 
 /** A 2x2 PNG; the desktop tools only ever read its IHDR through the companion. */
 const TINY_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAACZgbYnAAAAFElEQVR4nGP8z4AAT'
@@ -30,7 +33,7 @@ interface Harness {
 async function startHarness(t: Parameters<typeof test>[0] extends never ? never : {
   after(fn: () => void | Promise<void>): void;
 }, desktopControl: boolean): Promise<Harness> {
-  const temp = await mkdtemp(path.join(os.tmpdir(), 'dsh-desktop-tools-'));
+  const temp = await realpath(await mkdtemp(path.join(os.tmpdir(), 'dsh-desktop-tools-')));
   const ctx = new Context();
   const db = new Database(path.join(temp, 'db'), createFieldCrypto('test-key', 'test-setup'));
   db.init();
@@ -43,6 +46,19 @@ async function startHarness(t: Parameters<typeof test>[0] extends never ? never 
     placeholderPath: path.join(temp, 'workspaces', 'project'), platform: 'darwin',
     shellEnabled: true, desktopControl,
   });
+  await mkdir(workspace.placeholder_path, { recursive: true });
+  db.setPermissions(owner.id, {
+    allowedFolders: ['__deny__'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: true, allowGitDownload: false, banned: false,
+  });
+  const sessionId = 'session-desktop';
+  db.claimSessionOwner(sessionId, owner.id);
+  const agent = {
+    id: sessionId, ctx, session: { header: { id: sessionId, cwd: workspace.placeholder_path } },
+  } as unknown as Agent;
+  ctx.provide('sessions', { get: (id: string) => id === sessionId ? agent.session : undefined } as never);
+  const provider = registerPrincipalAccess(ctx, db);
+  registerAttachmentReplayGuard(ctx, provider);
   const config = {
     gateway: { tls: null },
     localWorkspace: { host: '127.0.0.1', port: 0, publicUrl: '', placeholderRoot: path.join(temp, 'workspaces') },
@@ -77,7 +93,7 @@ async function startHarness(t: Parameters<typeof test>[0] extends never ? never 
   }));
   assert.equal(JSON.parse(String((await ready)[0])).type, 'ready');
 
-  const agent = { ctx, session: { header: { cwd: workspace.placeholder_path } } } as unknown as Agent;
+  ctx.provide('workspaceRegistry', { list: () => [{ id: workspace.id, path: workspace.placeholder_path }] } as never);
   ctx.emit('agent/created', { agent });
   const execution = {
     agent, signal: new AbortController().signal,
@@ -113,7 +129,7 @@ test('a pairing without desktop control gets no desktop tools', { timeout: 15_00
 });
 
 test('a granted pairing publishes each capture and names its coordinate space', { timeout: 15_000 }, async (t) => {
-  const { ctx, socket, execution } = await startHarness(t, true);
+  const { ctx, db, socket, execution, otherUserId } = await startHarness(t, true);
   const screenshot = ctx.tools.get('computer_screenshot');
   assert.ok(screenshot);
 
@@ -148,6 +164,42 @@ test('a granted pairing publishes each capture and names its coordinate space', 
     type: 'image',
     attachment: { attachmentId: 'attachment-1', mediaType: 'image/png', bytes: 77, width: 1280, height: 800 },
   });
+  assert.deepEqual([...db.readableAttachmentIds(Number(execution.principal!.id), ['attachment-1'])], ['attachment-1']);
+  assert.equal(db.readableAttachmentIds(otherUserId, ['attachment-1']).size, 0);
+
+  await ctx.plugin(LlmRuntime);
+  let dispatches = 0;
+  class Adapter extends LlmAdapter {
+    async *stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {
+      dispatches += 1;
+      yield { type: 'finish', reason: { kind: 'stop' } };
+    }
+  }
+  ctx.llm.registerAdapter(['fixture'], new Adapter());
+  await ctx.waterfall('agent/request', {
+    agent: execution.agent, principal: execution.principal, signal: execution.signal, turn: 1, step: 2,
+  } as never, async () => ({ provider: 'fixture', model: 'vision' }));
+  for await (const _ of ctx.llm.stream({
+    provider: 'fixture', model: 'vision', sessionId: execution.agent.id, signal: execution.signal,
+    messages: [{ role: 'tool', content: blocks, toolCallId: 'capture' }] as never,
+  })) { /* The actual replay boundary must admit the just-published capture. */ }
+  assert.equal(dispatches, 1);
+});
+
+test('a capture is not published when account access is revoked while it is in flight', { timeout: 15_000 }, async t => {
+  const { ctx, db, socket, execution } = await startHarness(t, true);
+  const pending = ctx.tools.get('computer_screenshot')!.execute({}, execution) as Promise<unknown>;
+  const rejected = assert.rejects(pending, { code: 'PRINCIPAL_ACCESS_DENIED' });
+  db.setPermissions(Number(execution.principal!.id), {
+    allowedFolders: ['__deny__'], hourlyTokenLimit: null, dailyMinutesLimit: null,
+    allowUpload: true, allowGitDownload: false, banned: true,
+  });
+  await answerOnce(socket, 'screenshot', {
+    mediaType: 'image/png', data: TINY_PNG, width: 1280, height: 800,
+    screenWidth: 1440, screenHeight: 900, scale: 1.125, display: 0, displays: 1,
+  });
+  await rejected;
+  assert.equal(db.readableAttachmentIds(Number(execution.principal!.id), ['attachment-1']).size, 0);
 });
 
 test('a capture the attachment store resized carries the multiplier back', { timeout: 15_000 }, async (t) => {

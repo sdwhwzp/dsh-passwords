@@ -18,6 +18,8 @@ import { WebSocketServer, WebSocket, type RawData } from 'ws';
 import type { PlatformConfig } from './config.js';
 import { Database, type LocalWorkspaceRow } from './db.js';
 import type { AuthenticatedPrincipal } from './principal.js';
+import type { DshPasswordsPrincipalAccessProvider } from './principal-access.js';
+import { attachmentGrantDenied } from './attachment-grants.js';
 import {
   LOCAL_WORKSPACE_MAX_MESSAGE_BYTES,
   buildLocalWorkspaceLaunchUri,
@@ -1408,6 +1410,10 @@ function desktopToolDefinitions(ctx: Context, executeRemote: ExecuteRemote): Too
       if (attachments === undefined) {
         throw new Error('this deployment has no attachment store, so a screenshot cannot be published');
       }
+      const principal = (exec as typeof exec & { readonly principal?: AuthenticatedPrincipal }).principal;
+      const sessionId = exec.agent?.id;
+      const provider = ctx.root.get('principalAccess') as Pick<DshPasswordsPrincipalAccessProvider, 'recordAttachments'> | undefined;
+      if (principal === undefined || sessionId === undefined || provider?.recordAttachments === undefined) throw attachmentGrantDenied();
       const display = (args as Record<string, unknown>).display;
       const value = await executeRemote(
         exec,
@@ -1420,6 +1426,13 @@ function desktopToolDefinitions(ctx: Context, executeRemote: ExecuteRemote): Too
         mediaType: value.mediaType,
         name: `screen-${String(value.display + 1)}.png`,
       });
+      // Only the store-issued reference from this authenticated capture is
+      // admitted; rendered tool history must never confer attachment ownership.
+      await provider.recordAttachments(principal, {
+        sessionId,
+        attachmentIds: [ref.attachmentId],
+      }, exec.signal);
+      exec.signal.throwIfAborted();
       return {
         image: {
           attachmentId: ref.attachmentId,

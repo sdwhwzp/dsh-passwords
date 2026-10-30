@@ -14,7 +14,11 @@ Two accounts can independently upload the same bytes and obtain the same content
 ID without sharing any other grants.
 
 Only trusted Host admission may call the provider, after validating bytes or a
-receipt bound to the exact receiving session. The provider rechecks the current
+receipt bound to the exact receiving session. The paired desktop screenshot tool
+also records the store-issued reference immediately after saving a new capture,
+using its authenticated execution principal and session, before publishing the
+tool result. Failed or cancelled grant writes do not publish the image. Existing
+tool history is not an admission source. The provider rechecks the current
 identity, active account, session owner and permissions. It never creates or
 adopts session ownership. Account, permission and ownership rows are locked for
 the MySQL transaction; SQLite uses `BEGIN IMMEDIATE`. Every upload batch commits
