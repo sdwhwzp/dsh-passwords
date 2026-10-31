@@ -10337,7 +10337,9 @@ export function createGatewayServer(
           proxyPath.startsWith('/assets/') ||
           (proxyPath.startsWith('/plugins/') && parsedUrl.searchParams.has('rev'));
         if (isHashedStatic) {
-          respHeaders['cache-control'] = 'public, max-age=31536000, immutable';
+          // 只有成功响应对应该内容哈希；404/5xx 若被长缓存，浏览器会一直复用失败结果。
+          const cacheable = upstreamRes.statusCode === 200 || upstreamRes.statusCode === 304;
+          respHeaders['cache-control'] = cacheable ? 'public, max-age=31536000, immutable' : 'no-store';
         }
         const shouldCompressStatic =
           isHashedStatic &&

@@ -616,6 +616,9 @@ function startMockUpstream(): Promise<http.Server> {
       } else if ((req.url ?? '').startsWith('/api/dsh-usage/')) {
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ ok: true, plan: 'administrator subscription' }));
+      } else if ((req.url ?? '').startsWith('/plugins/example/missing.js?rev=abc123')) {
+        res.writeHead(404, { 'content-type': 'text/plain' });
+        res.end('missing');
       } else if ((req.url ?? '').startsWith('/plugins/example/client.js?rev=abc123')) {
         res.writeHead(200, {
           'content-type': 'application/javascript; charset=utf-8',
@@ -2555,6 +2558,12 @@ test('dsh-usage 余额与计划 API 仅管理员可访问', async () => {
   const admin = await gatewayReq('GET', '/api/dsh-usage/overview');
   assert.equal(admin.status, 200);
   assert.equal(JSON.parse(admin.body).plan, 'administrator subscription');
+});
+
+test('带 rev 的插件静态资源失败响应不进入长期缓存', async () => {
+  const missing = await gatewayReq('GET', '/plugins/example/missing.js?rev=abc123');
+  assert.equal(missing.status, 404);
+  assert.equal(rawHeader(missing.rawHeaders, 'cache-control'), 'no-store');
 });
 
 test('带 rev 的插件静态资源流式 gzip 并长期缓存，identity 客户端保持原文', async () => {
