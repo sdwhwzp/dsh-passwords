@@ -19,7 +19,10 @@ interface Protocol {
   admitMessage(api: unknown, message: Frame): Promise<Frame>;
 }
 interface Adapter {
-  createDshHostAdapter(carrier: ReturnType<typeof createMobileRemoteCarrier>): MobileAdmissionApi;
+  createDshHostAdapter(
+    carrier: ReturnType<typeof createMobileRemoteCarrier>,
+    peer: { signal: AbortSignal },
+  ): MobileAdmissionApi;
 }
 interface FollowerModule {
   createSessionFollower(api: unknown, callbacks: {
@@ -63,7 +66,7 @@ export function attachMobileAccount(
   const lifetime = new AbortController();
   const carrier = createMobileRemoteCarrier(target, token, lifetime.signal, parentOf, initialHistoryMessages);
   const controls = createMobileSessionControls(request => carrier.invoke(request));
-  const api = modules.adapter.createDshHostAdapter(carrier);
+  const api = modules.adapter.createDshHostAdapter(carrier, { signal: lifetime.signal });
   const send = (frame: Frame) => {
     if (socket.readyState !== 1) return;
     if (socket.bufferedAmount > 64 * 1024 * 1024) { socket.close(1013, 'Client too slow'); return; }

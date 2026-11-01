@@ -38,9 +38,12 @@ async function fixture(t: TestContext) {
       async handleQuery(_api, _host, _defaults, message) { reads.push(String(message.sessionId)); return { kind: message.type, sessionId: message.sessionId }; },
       async admitMessage() { return { kind: 'message' }; },
     },
-    adapter: { createDshHostAdapter: carrier => ({ sessions: {
-      prompt: payload => carrier.invoke({ namespace: 'session', method: 'prompt', args: { request: payload } }),
-    } }) },
+    adapter: { createDshHostAdapter: (carrier, peer) => {
+      assert.equal(peer?.signal instanceof AbortSignal, true);
+      return { sessions: {
+        prompt: payload => carrier.invoke({ namespace: 'session', method: 'prompt', args: { request: payload } }),
+      } };
+    } },
     follower: { createSessionFollower(_api, handlers) {
       callbacks = handlers;
       return { async start(sessionId, subscriptionId) { current = { sessionId, subscriptionId }; }, stop() {} };

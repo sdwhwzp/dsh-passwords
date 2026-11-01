@@ -12238,10 +12238,14 @@ export function createGatewayServer(
           handleProtocols: protocols => protocols.has('dsh-mobile-v1') ? 'dsh-mobile-v1' : false });
         mobileServer.handleUpgrade(req, socket, head, client => {
           client.once('close', () => mobileServer.close());
-          attachMobileAccount(client, target, accountToken, identity, modules, async sessionId => {
-            await ensureSessionAccessSnapshot(sessionId);
-            return sessionParentById.get(sessionId);
-          }, config.mobileAuth!.initialHistoryMessages);
+          try {
+            attachMobileAccount(client, target, accountToken, identity, modules, async sessionId => {
+              await ensureSessionAccessSnapshot(sessionId);
+              return sessionParentById.get(sessionId);
+            }, config.mobileAuth!.initialHistoryMessages);
+          } catch {
+            client.close(1011, 'Mobile bridge unavailable');
+          }
         });
       }).catch(() => { if (!socket.destroyed) rejectUpgrade(socket, 503); });
       return;
