@@ -1,17 +1,17 @@
 {
   "name": "dsh-passwords",
-  "version": "2.7.8-dsh.20261104.1",
+  "version": "2.7.8-dsh.20261104.2",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
     "": {
       "name": "dsh-passwords",
-      "version": "2.7.8-dsh.20261104.1",
+      "version": "2.7.8-dsh.20261104.2",
       "license": "BSD-3-Clause",
       "dependencies": {
         "bcryptjs": "^3.0.2",
         "dotenv": "^16.4.5",
-        "dsh-plugin-mobile-gateway": "https://codeload.github.com/sdwhwzp/dsh-plugin-mobile-gateway/tar.gz/bde2734bcc2da772ebbec78d30995919fb9b536d",
+        "dsh-plugin-mobile-gateway": "https://codeload.github.com/sdwhwzp/dsh-plugin-mobile-gateway/tar.gz/01799bfa92f433a39787add86f5f86689545b5aa",
         "express": "^4.21.0",
         "jsonwebtoken": "^9.0.2",
         "mysql2": "^3.15.3",
@@ -3258,9 +3258,9 @@
       }
     },
     "node_modules/dsh-plugin-mobile-gateway": {
-      "version": "0.11.3-dsh.20261104.1",
-      "resolved": "https://codeload.github.com/sdwhwzp/dsh-plugin-mobile-gateway/tar.gz/bde2734bcc2da772ebbec78d30995919fb9b536d",
-      "integrity": "sha512-aJVz09bmquBUnCwxftoFULO20yndSQ4zMnc+oVAErUBKz2PbAp6vKakjojZAceVqmenFF2ri117i67OGbWw8Aw==",
+      "version": "0.11.3-dsh.20261104.2",
+      "resolved": "https://codeload.github.com/sdwhwzp/dsh-plugin-mobile-gateway/tar.gz/01799bfa92f433a39787add86f5f86689545b5aa",
+      "integrity": "sha512-3B23QhXltRdIXUE3BM7RgYssyN0GV9F0jfaBUywmcNoN1cWiHeYxevoqxBMKvB2cAarQjwIcYJbP6BfKiShUQQ==",
       "license": "MIT",
       "dependencies": {
         "@deepseek-ai/schemastery": "^3.18.1",
@@ -3272,7 +3272,7 @@
         "dsh-plugin-mobile-gateway": "bin/setup-ip.mjs"
       },
       "engines": {
-        "node": ">=22"
+        "node": ">=24.9"
       }
     },
     "node_modules/dunder-proto": {

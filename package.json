@@ -1,6 +1,6 @@
 {
   "name": "dsh-passwords",
-  "version": "2.7.8-dsh.20261104.1",
+  "version": "2.7.8-dsh.20261104.2",
   "description": "dsh-passwords: a server-grade gateway that turns DeepSeek Harness into a multi-tenant platform \u2014 remote access + automatic HTTPS, per-subuser permissions & quotas, sandbox enforcement, first-run setup, SQLite/MySQL auth with at-rest encryption, rate-limit and audit log (bilingual zh/en UI)",
   "type": "module",
   "main": "dist/index.js",
@@ -98,7 +98,7 @@
     "mysql2": "^3.15.3",
     "ws": "^8.21.0",
     "node-pty": "^1.1.0",
-    "dsh-plugin-mobile-gateway": "https://codeload.github.com/sdwhwzp/dsh-plugin-mobile-gateway/tar.gz/bde2734bcc2da772ebbec78d30995919fb9b536d"
+    "dsh-plugin-mobile-gateway": "https://codeload.github.com/sdwhwzp/dsh-plugin-mobile-gateway/tar.gz/01799bfa92f433a39787add86f5f86689545b5aa"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.6-alpha.1",
