@@ -333,6 +333,7 @@ const DIRECTORY_PICKER_CREATE_RE = /^\/api\/(?:host[.\/]createDirectory|director
 const DIRECTORY_PICKER_NATIVE_RE = /^\/api\/directoryPicker[.\/]pick$/;
 const WORKSPACE_CREATE_RE = /^\/api\/workspace[.\/]create$/;
 const WORKSPACE_REMOVE_RE = /^\/api\/workspace[.\/](?:remove|delete)$/;
+const WORKSPACE_TITLE_RE = /^\/api\/workspace\/rename$/;
 
 /** DSH 官方 terminal HTTP unary RPC：主用户直通，子用户由 allowSsh 控制。 */
 const OFFICIAL_TERMINAL_HTTP_RE = /^\/api\/terminal[.\/](?:environment|shells|list|create|write|resize|rename|close)$/;
@@ -3334,7 +3335,7 @@ export function createGatewayServer(
     });
   }
 
-  /** A subuser may remove only a registration backed by its own private workspace record. */
+  /** A subuser may remove or retitle only a registration backed by its own private workspace record. */
   function workspaceRegistrationOwnedBy(userId: number, candidate: string): boolean {
     const localOwner = db.localWorkspaceOwnerForPath(candidate);
     if (localOwner !== null) return localOwner === userId;
@@ -10459,7 +10460,7 @@ export function createGatewayServer(
         DIRECTORY_PICKER_LIST_RE.test(proxyPath) ||
         DIRECTORY_PICKER_CREATE_RE.test(proxyPath) ||
         isWorkspaceCreate(proxyPath) ||
-        (isWorkspaceDeleteOrRename(proxyPath) && !WORKSPACE_REMOVE_RE.test(proxyPath))
+        (isWorkspaceDeleteOrRename(proxyPath) && !WORKSPACE_REMOVE_RE.test(proxyPath) && !WORKSPACE_TITLE_RE.test(proxyPath))
       );
     const needsFolderCheck =
       reqAs.dshpwPerms !== undefined &&
@@ -10981,9 +10982,9 @@ export function createGatewayServer(
               return;
             }
           } else {
-            // Removal is addressed by workspaceId. An extra caller-supplied path must not
+            // Removal and title changes use workspaceId. An extra caller-supplied path must not
             // authorize a different registration after the Host strips unknown fields.
-            targetPath = WORKSPACE_REMOVE_RE.test(proxyPath)
+            targetPath = (WORKSPACE_REMOVE_RE.test(proxyPath) || WORKSPACE_TITLE_RE.test(proxyPath))
               ? null
               : extractPathFromBody(authorizationPayload);
             if (targetPath === null) {
@@ -11034,7 +11035,7 @@ export function createGatewayServer(
             reqAs.dshpwOpenWorkspacePath = canonical;
           }
           if (
-            WORKSPACE_REMOVE_RE.test(proxyPath) &&
+            (WORKSPACE_REMOVE_RE.test(proxyPath) || WORKSPACE_TITLE_RE.test(proxyPath)) &&
             (targetPath === null || !workspaceRegistrationOwnedBy(reqAs.dshpwUser!, targetPath))
           ) {
             upstreamReq.destroy();

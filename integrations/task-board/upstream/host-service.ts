@@ -11,6 +11,7 @@ import { LIANGSHEN_PRESET_ID } from './core/subtask.ts'
 import { workspaceOwningSession } from './core/workspace-target.ts'
 import { PowerInhibitor } from './power-inhibitor.ts'
 import { TASK_BOARD_SCHEMA_VERSION, type TaskBoardAction, type TaskBoardEventPayload, type TaskBoardSnapshot } from './protocol.ts'
+import { projectSnapshotForWire } from './core/wire-projection.ts'
 import type { CardDefaults } from './core/card-defaults.ts'
 import { TaskBoardExtensionRegistry } from './host/extension-registry.ts'
 import type { TaskBoardExtension } from './core/extension.ts'
@@ -18,6 +19,13 @@ import { isTaskPermission, normalizeTargetId, type ExecutionOutcome, type Execut
 import { passedAttempt, resolveContract, verificationNeverInvoked, verificationOnlyInvalid, verificationRequired, withAcceptanceDetailCleared, type ExecutionVerification, type ModelCatalogView, type VerificationContract, type VerificationSettings } from './core/verification.ts'
 import type { TaskPermission } from './core/handover.ts'
 import { principalKey, type TaskBoardAccounts, type TaskBoardPrincipal } from './host-accounts.ts'
+import type { TaskAttachment } from './core/attachment.ts'
+import {
+  publishedAttachmentLimits,
+  verifyAttachments,
+  type ModelInfoResolver,
+  type TaskBoardAttachmentStore,
+} from './host/attachments.ts'
 
 /** Ceiling for the roster-poll failure backoff: a broken session tree is retried at most once a minute. */
 const POLL_FAILURE_MAX_BACKOFF_MS = 60_000
@@ -48,6 +56,14 @@ const UNREADABLE_SETTLE_POLLS = 24
  * interrupted-start recovery.
  */
 const ABANDONED_LAUNCH_REASON = 'host stopped before this execution started'
+
+/**
+ * Why a rework could not launch: it redoes work in the card's own
+ * conversation, so a session the Host cannot continue means there is nothing to
+ * send the reviewer's instructions into. Starting a fresh conversation instead
+ * would hand those instructions to an agent that never saw the work.
+ */
+const REWORK_SESSION_REASON = 'rework: the card\'s previous execution session is not present and idle in the host session roster, so there is no conversation to send the rework instructions into'
 
 /**
  * The acceptance contract one run group freezes, read once for the whole group.
@@ -195,6 +211,7 @@ const ACTION_KINDS: Readonly<Record<TaskBoardAction['kind'], true>> = {
   'set-schedule': true,
   run: true,
   rerun: true,
+  rework: true,
   'confirm-permission': true,
   'set-parent': true,
   'rename-tag': true,
@@ -202,10 +219,24 @@ const ACTION_KINDS: Readonly<Record<TaskBoardAction['kind'], true>> = {
   'extension-action': true,
 }
 
+/**
+ * The attachments an action carries, or undefined when it carries none.
+ *
+ * Only a create and an update can carry attachments: an import refuses them
+ * outright, and every other action kind has no attachment surface at all.
+ */
+function attachmentsOfAction(action: Exclude<TaskBoardAction, { kind: 'extension-action' }>): TaskAttachment[] | undefined {
+  if (action.kind === 'create') return action.input.attachments
+  if (action.kind === 'update') return action.patch.attachments ?? undefined
+  return undefined
+}
+
 export class TaskBoardHostService {
   readonly ledger: HostTaskLedger
   readonly runner: HostExecutionRunner
   readonly power: PowerInhibitor
+  /** The official attachment storage, read live so a late mount is honoured. */
+  private readonly attachmentStore: () => TaskBoardAttachmentStore | undefined
   private readonly listeners = new Set<() => void>()
   /** The one recurring timer: the session-roster poll. */
   private pollTimer: (() => void) | undefined
@@ -334,6 +365,18 @@ export class TaskBoardHostService {
      * no readable usage ledger. Defaults to the family usage ledger reader.
      */
     spendUsedToday?: (now: number) => number | undefined
+    /**
+     * The official attachment storage, read at request time. Absent means the
+     * deployment stores no attachments: every attachment action is then
+     * refused and the board publishes no attachment limits.
+     */
+    attachments?: () => TaskBoardAttachmentStore | undefined
+    /**
+     * The model-info reader the image preflight uses. Absent means the
+     * deployment serves no model information, and a route whose modalities are
+     * unknown is allowed.
+     */
+    modelInfo?: () => ModelInfoResolver | undefined
   } = {}) {
     this.ledger = options.ledger ?? new HostTaskLedger(undefined, undefined, {
       sessionDefaultPermission: options.sessionDefaultPermission,
@@ -343,7 +386,11 @@ export class TaskBoardHostService {
       spendUsedToday: options.spendUsedToday,
     })
     this.accounts = options.accounts
-    this.runner = new HostExecutionRunner(gateway, options.commandDispatcher, options.workspaceRegistry, undefined, principal => this.accounts?.assert(principal), options.ownerPeer)
+    this.attachmentStore = options.attachments ?? (() => undefined)
+    this.runner = new HostExecutionRunner(gateway, options.commandDispatcher, options.workspaceRegistry, undefined, principal => this.accounts?.assert(principal), options.ownerPeer, {
+      attachments: this.attachmentStore,
+      llm: options.modelInfo,
+    })
     this.workspaceRegistry = options.workspaceRegistry
     this.timers = options.timers ?? PROCESS_TIMERS
     this.power = options.power ?? new PowerInhibitor()
@@ -362,6 +409,15 @@ export class TaskBoardHostService {
       // Capability writes go through the board's own action path, so every
       // board gate (content freeze, running lock, permission gate) still holds.
       apply: (action, initiator) => this.applyBoardAction(crypto.randomUUID(), action, initiator),
+      // Delivery into a run the board already owns is the runner's session wire
+      // call, never a second execution path.
+      followUp: (sessionId, text) => this.runner.followUp(sessionId, text),
+      // A rework is a run request like any other: it opens its execution through
+      // the same action path, so the running lock, the permission confirmation,
+      // the acceptance contract and the spend cap all apply to it.
+      rework: (taskId, instructions, initiator) => {
+        this.applyBoardAction(crypto.randomUUID(), { kind: 'rework', taskId, instructions }, initiator)
+      },
       now: this.now,
     })
     installStreamErrorGuards()
@@ -442,11 +498,20 @@ export class TaskBoardHostService {
     this.emit()
   }
 
+  /**
+   * The board's published snapshot.
+   *
+   * Every read path serializes this object — the HTTP `state` answer, the
+   * `action` answer through {@link apply}, and the remote bridge's
+   * `board.snapshot` — so a provider's integration credentials are stripped
+   * once, here, instead of at each exit. The ledger keeps them verbatim for the
+   * provider's own in-process read.
+   */
   snapshot(): TaskBoardSnapshot {
     const state = this.ledger.state()
     const published = this.extensions.published()
     const cardDefaults = cardDefaultsOf(this.cardDefaults())
-    return {
+    return projectSnapshotForWire({
       schemaVersion: TASK_BOARD_SCHEMA_VERSION,
       revision: state.revision,
       tasks: state.tasks,
@@ -462,8 +527,11 @@ export class TaskBoardHostService {
       // is: the create dialog prefills from them, and each creating session
       // re-reads them for the create it submits.
       ...(cardDefaults === undefined ? {} : { cardDefaults }),
+      // The attachment limits travel with the snapshot so the browser can
+      // refuse an oversized selection before it uploads anything.
+      ...(this.attachmentStore() === undefined ? {} : { attachmentLimits: publishedAttachmentLimits(this.attachmentStore()) }),
       ...(Object.keys(published).length === 0 ? {} : { extensions: published }),
-    }
+    })
   }
 
   /**
@@ -543,6 +611,46 @@ export class TaskBoardHostService {
     return { ...action, input: { ...input, workspaceId } }
   }
 
+  /**
+   * Apply an action whose attachments the Host proved against the official
+   * storage first.
+   *
+   * This is the board's trust boundary for attachment metadata: the browser
+   * asserts the size, the type and the digest of every object it uploaded, and
+   * the Host reads the stored objects back (an image is compared, a file is
+   * streamed and its digest recomputed) before the ledger commits the claim.
+   * An attachment the storage cannot prove is refused, so a spoofed client
+   * claim never becomes a stored fact.
+   */
+  async applyVerified(requestId: string, action: TaskBoardAction, initiator?: string, principal?: TaskBoardPrincipal): Promise<TaskBoardSnapshot> {
+    this.accounts?.assert(principal)
+    if (!this.active) throw new Error('task board is disabled')
+    // A provider action never carries attachments: it is routed through the
+    // registry exactly like every other extension call.
+    if (action.kind === 'extension-action') return await this.apply(requestId, action, initiator, principal)
+    await this.verifyActionAttachments(action)
+    this.accounts?.assert(principal)
+    if (!this.active) throw new Error('task board is disabled')
+    return projectSnapshotForWire(this.applyBoardAction(requestId, action, initiator, principal, true))
+  }
+
+  /**
+   * Prove every attachment of an action against the official storage.
+   *
+   * An action without attachments is untouched: the board keeps working in a
+   * deployment that serves no attachment storage at all.
+   */
+  private async verifyActionAttachments(action: Exclude<TaskBoardAction, { kind: 'extension-action' }>): Promise<void> {
+    const attachments = attachmentsOfAction(action)
+    if (attachments === undefined || attachments.length === 0) return
+    const store = this.attachmentStore()
+    if (store === undefined) throw new Error('this deployment serves no attachment storage')
+    // The failure keeps its CLASS: a storage that is unavailable must reach
+    // the caller as "the storage is unavailable" (503), not as a generic
+    // rejected action (400).
+    await verifyAttachments(store, attachments)
+  }
+
   apply(requestId: string, action: Extract<TaskBoardAction, { kind: 'extension-action' }>, initiator?: string, principal?: TaskBoardPrincipal): Promise<TaskBoardSnapshot>
   apply(requestId: string, action: Exclude<TaskBoardAction, { kind: 'extension-action' }>, initiator?: string, principal?: TaskBoardPrincipal): TaskBoardSnapshot
   apply(requestId: string, action: TaskBoardAction, initiator?: string, principal?: TaskBoardPrincipal): TaskBoardSnapshot | Promise<TaskBoardSnapshot>
@@ -564,7 +672,10 @@ export class TaskBoardHostService {
     if (action.kind === 'extension-action') {
       return this.handleExtensionAction(action)
     }
-    return this.applyBoardAction(requestId, action, initiator, principal)
+    // The answer to a write is a read like any other — it crosses the same wire
+    // (the HTTP action route and the remote bridge's board.apply) — so it leaves
+    // through the same projection as snapshot().
+    return projectSnapshotForWire(this.applyBoardAction(requestId, action, initiator, principal))
   }
 
   /**
@@ -572,9 +683,16 @@ export class TaskBoardHostService {
    * calls and the same-origin wire both land here, so the two surfaces can
    * never disagree about a card.
    */
-  private applyBoardAction(requestId: string, action: Exclude<TaskBoardAction, { kind: 'extension-action' }>, initiator?: string, principal?: TaskBoardPrincipal): TaskBoardSnapshot {
+  private applyBoardAction(requestId: string, action: Exclude<TaskBoardAction, { kind: 'extension-action' }>, initiator?: string, principal?: TaskBoardPrincipal, attachmentVerified = false): TaskBoardSnapshot {
+    // Attachments reach the ledger only through the VERIFIED action path: the
+    // in-process capability face, the agent tools and the legacy import never
+    // carry them, and an action that does is refused here rather than
+    // committed without the storage proof.
+    if (!attachmentVerified && attachmentsOfAction(action) !== undefined) {
+      throw new Error('attachments must be applied through the verified attachment action route')
+    }
     const before = this.statusMap()
-    if (action.kind === 'run' || action.kind === 'rerun') this.assertSpendCap()
+    if (action.kind === 'run' || action.kind === 'rerun' || action.kind === 'rework') this.assertSpendCap()
     const result = this.ledger.applyRequest(requestId, this.withInheritedWorkspace(action, initiator), initiator, principal)
     if (result.runs !== undefined) this.dispatchRuns(result.runs)
     // A committed write that can move a rule moves the nearest trigger;
@@ -674,13 +792,24 @@ export class TaskBoardHostService {
       // never rewritten by it.
       const forcedPreset = this.ledger.hasOutstandingDescendants(opened.task.id) ? LIANGSHEN_PRESET_ID : undefined
       const descendants = forcedPreset === undefined ? [] : this.ledger.outstandingDescendants(opened.task.id)
+      // The rework this execution carries, when it carries one: it decides both
+      // the session this run continues in and the section the prompt states.
+      const rework = opened.execution.rework
       // A forced preset is not the card's own composition, so continuing a
       // session composed from another preset would be refused anyway: mint a
-      // fresh one and run the tree the way this execution requires.
-      const reuseSessionId = forcedPreset === undefined ? await this.reuseSessionFor(opened.task, opened.principal) : undefined
+      // fresh one and run the tree the way this execution requires. A rework
+      // has no such freedom — its whole point is the conversation the reviewer
+      // read — so it fails instead of quietly opening a new one.
+      let reuseSessionId: string | undefined
+      if (rework === undefined) {
+        reuseSessionId = forcedPreset === undefined ? await this.reuseSessionFor(opened.task, opened.principal) : undefined
+      } else {
+        if (forcedPreset !== undefined) throw new Error(REWORK_SESSION_REASON)
+        reuseSessionId = await this.reworkSessionFor(opened.task, opened.principal)
+      }
       // A cron-triggered run additionally states its own firing instant and
       // rule zone, so a scheduled job can resolve "today" without guessing.
-      const promptContext = descendants.length === 0 && schedule === undefined ? undefined : {
+      const contextParts = {
         ...(descendants.length === 0 ? {} : {
           descendants: descendants.map(descendant => ({
             id: descendant.id,
@@ -689,7 +818,9 @@ export class TaskBoardHostService {
           })),
         }),
         ...(schedule === undefined ? {} : { schedule }),
+        ...(rework === undefined ? {} : { rework }),
       }
+      const promptContext = Object.keys(contextParts).length === 0 ? undefined : contextParts
       // Freeze this execution's acceptance contract BEFORE the session is
       // prompted: a settings change made while the run is in flight must not
       // retrofit the rule that will judge it. A card that opted out resolves the
@@ -890,10 +1021,13 @@ export class TaskBoardHostService {
    * exactly as an unknown roster always did.
    * @param task - the task about to run.
    * @param principal - the task account whose session roster may be reused.
+   * @param force - continue the settled session regardless of the card's own
+   *   opt-in (a rework), which the reuse rule accepts without waiving any of its
+   *   evidence conditions.
    * @returns the session id to continue in, or undefined for a fresh session.
    */
-  private async reuseSessionFor(task: TaskRecord, principal?: TaskBoardPrincipal): Promise<string | undefined> {
-    if (task.reuseSession !== true) return undefined
+  private async reuseSessionFor(task: TaskRecord, principal?: TaskBoardPrincipal, force?: boolean): Promise<string | undefined> {
+    if (task.reuseSession !== true && force !== true) return undefined
     let running: Awaited<ReturnType<HostExecutionRunner['listRunning']>>
     try {
       running = await this.runner.listRunning(principal)
@@ -905,7 +1039,30 @@ export class TaskBoardHostService {
       return undefined
     }
     if (!running.known) return undefined
-    return reusableSessionId(task, new Set(running.items.filter(item => !item.running).map(item => item.sessionId)))
+    return reusableSessionId(
+      task,
+      new Set(running.items.filter(item => !item.running).map(item => item.sessionId)),
+      force === true ? { force: true } : {},
+    )
+  }
+
+  /**
+   * The session a rework continues, or the refusal that says why it cannot.
+   *
+   * A rework exists for one conversation — the one the reviewer read before
+   * sending the work back — so the evidence that this Host still reaches it is
+   * required, exactly as it is for a card that opted into reuse. What a rework
+   * does NOT get is the fresh-conversation fallback: launching there would hand
+   * the reviewer's instructions to an agent that never saw the work, so the run
+   * fails with a readable reason instead.
+   * @param task - the card being reworked.
+   * @param principal - the task account whose session roster may be reused.
+   * @returns the session id this rework continues in.
+   */
+  private async reworkSessionFor(task: TaskRecord, principal?: TaskBoardPrincipal): Promise<string> {
+    const sessionId = await this.reuseSessionFor(task, principal, true)
+    if (sessionId === undefined) throw new Error(REWORK_SESSION_REASON)
+    return sessionId
   }
 
   /** Reuse the session list this poll already fetched: one list RPC per tick, not 1 + E. */

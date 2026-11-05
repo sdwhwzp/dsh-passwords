@@ -232,6 +232,23 @@ async function runScenario(
         return;
       }
 
+      if (envelope.method === 'workspace/rename') {
+        const paths = new Map([
+          ['workspace-local-owned', ownedLocal],
+          ['workspace-local-other', otherLocal],
+          ['workspace-shared', shared],
+          ['workspace-created', createdWorkspacePath],
+        ]);
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(rpcResponse(envelope.rpcId, { workspace: {
+          workspaceId: logicalPayload.workspaceId,
+          path: paths.get(String(logicalPayload.workspaceId)),
+          title: logicalPayload.title,
+          sessionIds: [],
+        } }));
+        return;
+      }
+
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(rpcResponse(envelope.rpcId, { deleted: true }));
     });
@@ -494,5 +511,32 @@ test('alpha.1 directory and workspace RPCs stay confined to the private root', a
     assert.equal((await request('session/create', { cwd: outside })).status, 403);
     assert.equal((await request('directoryPicker/pick', {})).status, 403);
     assert.equal(upstreamCalls.length, callsBeforeDenials);
+  });
+});
+
+test('workspace title changes authorize the registry identity for managed and paired folders', async () => {
+  await runScenario(async ({ child, ownedLocal, upstreamCalls, request, otherRequest }) => {
+    const renamed = await request('workspace/rename', {
+      workspaceId: 'workspace-local-owned', title: '本地工作区',
+    });
+    assert.equal(renamed.status, 200, JSON.stringify(renamed.body));
+    assert.deepEqual(upstreamCalls.at(-1), {
+      method: 'workspace/rename',
+      payload: { workspaceId: 'workspace-local-owned', title: '本地工作区' },
+    });
+    assert.equal((await request('workspace/create', { path: child })).status, 200);
+    assert.equal((await request('workspace/rename', {
+      workspaceId: 'workspace-created', title: 'Managed project',
+    })).status, 200);
+    const forwarded = upstreamCalls.filter(call => call.method === 'workspace/rename').length;
+    for (const workspaceId of ['workspace-local-other', 'workspace-shared', 'missing']) {
+      assert.equal((await request('workspace/rename', {
+        workspaceId, title: 'Blocked', path: ownedLocal,
+      })).status, 403);
+    }
+    assert.equal((await otherRequest('workspace/rename', {
+      workspaceId: 'workspace-local-owned', title: 'Blocked',
+    })).status, 403);
+    assert.equal(upstreamCalls.filter(call => call.method === 'workspace/rename').length, forwarded);
   });
 });

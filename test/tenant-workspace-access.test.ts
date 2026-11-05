@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtemp, mkdir, symlink, rm, realpath } from 'node:fs/promises';
+import { mkdtemp, mkdir, symlink, rm, realpath, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
@@ -116,6 +116,22 @@ test('task-board HTTP state and mutations are isolated by signed principal and p
   };
   try {
     registerTenantTaskBoard(ctx as never, db as never, config as never);
+    for (const suffix of ['attachments/upload', 'attachments/image']) {
+      for (const authenticated of [false, true]) {
+        const response = await fetch(`${origin}/api/task-board/${suffix}`, {
+          method: suffix.endsWith('upload') ? 'POST' : 'GET',
+          headers: { origin, ...(authenticated ? signedPrincipalHeaders({ userId: 2, username: 'first', role: 'user' }, 'secret') : {}) },
+        });
+        assert.equal(response.status, authenticated ? 503 : 403);
+        const result = await response.json() as { code?: string };
+        if (authenticated) assert.equal(result.code, 'storage-unavailable');
+      }
+    }
+    await call('2', { kind: 'create', id: 'foreign-attachment', input: {
+      title: 'foreign attachment', description: '', prompt: '',
+      attachments: [{ kind: 'file', attachmentId: 'another-account', name: 'private.txt', bytes: 1, mediaType: 'text/plain', sha256: 'a'.repeat(64) }],
+    } }, 400);
+    assert.deepEqual((await call('2')).tasks, []);
     assert.deepEqual((await call('2', { kind: 'create', id: 'shared-id', input: { title: 'owner-2', description: '', prompt: 'only mine', workspaceId: 'ws-owned', permission: 'read-only', reuseSession: true, tags: [{ name: 'frontend' }] } })).tasks.map(task => task.title), ['owner-2']);
     assert.deepEqual((await call('3')).tasks, []);
     await call('3', { kind: 'delete', taskId: 'shared-id' }, 400);
@@ -145,9 +161,23 @@ test('task-board HTTP state and mutations are isolated by signed principal and p
     await httpBrowser.body?.cancel();
     const denied = await fetch(origin + '/api/task-board/state', { headers: { origin } });
     assert.equal(denied.status, 403);
+    await denied.body?.cancel();
     for (const dispose of disposers.splice(0).reverse()) dispose();
+    const ledgerFile = path.join(directory, 'u2', 'ledger-v2.json');
+    const ownerFile = path.join(directory, 'u2', 'owner.json');
+    const ownerBefore = await readFile(ownerFile, 'utf8');
+    const legacy = JSON.parse(await readFile(ledgerFile, 'utf8'));
+    legacy.schemaVersion = 6;
+    legacy.scheduler.importedSources = ['legacy-import'];
+    await writeFile(ledgerFile, JSON.stringify(legacy));
     registerTenantTaskBoard(ctx as never, db as never, config as never);
     const restored = (await call('2')).tasks;
+    const migrated = JSON.parse(await readFile(ledgerFile, 'utf8'));
+    assert.equal(migrated.schemaVersion, 7);
+    assert.deepEqual(migrated.taskPrincipals, legacy.taskPrincipals);
+    assert.deepEqual(migrated.recentRequests, legacy.recentRequests);
+    assert.deepEqual(migrated.scheduler.importedSources, ['legacy-import']);
+    assert.equal(await readFile(ownerFile, 'utf8'), ownerBefore);
     assert.equal(restored.find(task => task.id === 'shared-id')?.title, 'owner-2');
     assert.equal(restored.find(task => task.id === 'shared-id')?.reuseSession, true);
     assert.equal(restored.find(task => task.id === 'shared-id')?.goalRun, undefined);
@@ -164,6 +194,18 @@ test('task-board HTTP state and mutations are isolated by signed principal and p
     await Promise.all([new Promise<void>(resolve => serve.close(() => resolve())), new Promise<void>(resolve => rpcServer.close(() => resolve()))]);
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test('bundled board refuses invalid version-six rows without overwriting the account ledger', async () => {
+  const { HostTaskLedger } = await import('../dist/task-board-engine.js');
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'tenant-board-invalid-'));
+  const file = path.join(directory, 'ledger-v2.json');
+  const contents = JSON.stringify({ schemaVersion: 6, revision: 1, tasks: [{ id: 'broken' }], scheduler: {}, recentRequests: [] });
+  try {
+    await writeFile(file, contents);
+    assert.throws(() => new HostTaskLedger(directory), /migration failed/);
+    assert.equal(await readFile(file, 'utf8'), contents);
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 

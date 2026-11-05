@@ -1,6 +1,6 @@
 {
   "name": "dsh-passwords",
-  "version": "2.7.8-dsh.20261029.5",
+  "version": "2.7.8-dsh.20261104.1",
   "description": "dsh-passwords: a server-grade gateway that turns DeepSeek Harness into a multi-tenant platform \u2014 remote access + automatic HTTPS, per-subuser permissions & quotas, sandbox enforcement, first-run setup, SQLite/MySQL auth with at-rest encryption, rate-limit and audit log (bilingual zh/en UI)",
   "type": "module",
   "main": "dist/index.js",
@@ -98,7 +98,7 @@
     "mysql2": "^3.15.3",
     "ws": "^8.21.0",
     "node-pty": "^1.1.0",
-    "dsh-plugin-mobile-gateway": "https://codeload.github.com/Clarklevis1995/dsh-plugin-mobile-gateway/tar.gz/d805c567d106cc9bd19e5c429fe7c689f3be9645"
+    "dsh-plugin-mobile-gateway": "https://codeload.github.com/sdwhwzp/dsh-plugin-mobile-gateway/tar.gz/bde2734bcc2da772ebbec78d30995919fb9b536d"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.6-alpha.1",
@@ -125,7 +125,7 @@
     "@deepseek-ai/dsh-tools": ">=0.2.1-rc.2 <0.2.2-0 || >=0.2.2-alpha.2 <0.2.3-0",
     "@deepseek-ai/dsh-typert-protocol": ">=0.2.1-rc.2 <0.2.2-0 || >=0.2.2-alpha.2 <0.2.3-0",
     "@deepseek-ai/dsh-workspace": ">=0.2.1-rc.2 <0.2.2-0 || >=0.2.2-alpha.2 <0.2.3-0",
-    "@linxin666/dsh-client-ui-task-board": "0.4.11-dsh.20261028.2 || 0.4.12-dsh.20261029.1"
+    "@linxin666/dsh-client-ui-task-board": "0.4.15-dsh.20261104.1"
   },
   "overrides": {
     "qs": "^6.16.0"

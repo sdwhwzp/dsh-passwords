@@ -8,7 +8,7 @@ import { isValidCron, isValidTimeZone, nextRunAtMs, resolveHostTimeZone } from '
 import { isTaskRecord, parseLedger } from './core/store.ts'
 import { DEFAULT_SPEND_BUDGET_TOKENS, spendCapMessage, spendCapReached } from './core/spend-budget.ts'
 import { usedTokensToday } from './host-spend.ts'
-import { canMoveManually, hasOpenExecution, retainRecentExecutions, scheduleExhausted, scheduleRunBudget, settleExecution, settledStatus, startExecution, withSchedule, withStatus, type ExecutionOutcome, type ExecutionRecord, type ExecutionSummary, type ScheduleMode, type ScheduleStopReason, type TaskRecord } from './core/tasks.ts'
+import { canMoveManually, hasOpenExecution, retainRecentExecutions, scheduleExhausted, scheduleRunBudget, settleExecution, settledStatus, startExecution, withSchedule, withStatus, type ExecutionOutcome, type ExecutionRecord, type ExecutionRework, type ExecutionSummary, type ScheduleMode, type ScheduleStopReason, type TaskRecord } from './core/tasks.ts'
 import {
   DEFAULT_SUBTASK_DEPTH,
   ancestorChain,
@@ -1325,17 +1325,23 @@ export class HostTaskLedger {
         this.document.tasks = [...result.tasks]
         break
       }
+      case 'rework':
       case 'rerun':
       case 'run': {
         const task = this.document.tasks.find(item => item.id === action.taskId)
         if (task?.archivedAt !== undefined) throw new Error('archived task is read-only')
         if (task === undefined || hasOpenExecution(task)) throw new Error('task is already running or missing')
+        // A rework asks for a second attempt at work this card's own conversation
+        // already holds; the ledger alone decides whether that conversation
+        // exists, so the run can never be opened with instructions no session
+        // ever saw.
+        const rework = action.kind === 'rework' ? this.reworkInput(task, action.instructions) : undefined
         // The confirmation gate judges the RESOLVED binding: a subtask that
         // inherits an elevated permission from its parent is exactly as
         // unconfirmed as the parent would be without its own stamp.
         const refusal = this.bindingRefusal(task)
         if (refusal !== undefined) throw new Error(bindingRefusalMessage(refusal, this.sessionDefaultPermission, 'run'))
-        runs = this.startRun(task, now, initiator, action.kind === 'rerun', undefined, principal)
+        runs = this.startRun(task, now, initiator, action.kind !== 'run', undefined, principal, rework)
         break
       }
       default: {
@@ -1351,7 +1357,7 @@ export class HostTaskLedger {
     if (taskId !== undefined) {
       if (action.kind === 'delete') {
         if (this.document.taskPrincipals !== undefined) delete this.document.taskPrincipals[taskId]
-      } else if (principal !== undefined && (action.kind === 'create' || action.kind === 'run' || action.kind === 'rerun' || action.kind === 'set-schedule')) {
+      } else if (principal !== undefined && (action.kind === 'create' || action.kind === 'run' || action.kind === 'rerun' || action.kind === 'rework' || action.kind === 'set-schedule')) {
         this.document.taskPrincipals = { ...this.document.taskPrincipals, [taskId]: { ...principal } }
       }
     }
@@ -1401,6 +1407,26 @@ export class HostTaskLedger {
     return { kind: root.parentId === undefined ? 'root' : 'inherited', title: root.title }
   }
 
+  /**
+   * The rework block a rework request opens its execution with, or the refusal
+   * that names why there is nothing to rework.
+   *
+   * Read from the ledger alone: a card that never ran, and a card whose runs
+   * recorded no session, have no conversation to send the reviewer's
+   * instructions into. Minting one would hand those instructions to an agent
+   * that never saw the work being sent back, which is the opposite of what a
+   * rework asks for.
+   * @param task - the card being reworked.
+   * @param instructions - the reviewer's instructions, already validated.
+   * @returns the block recorded on the opened execution.
+   */
+  private reworkInput(task: TaskRecord, instructions: string): ExecutionRework {
+    if (task.executions.length === 0) throw new Error('task ' + task.id + ' has never executed; there is no run to rework')
+    const settled = [...task.executions].reverse().find(entry => entry.endedAt !== undefined && entry.sessionId !== undefined)
+    if (settled?.sessionId === undefined) throw new Error('task ' + task.id + ' records no execution session to continue')
+    return { instructions }
+  }
+
   /** Whether a task or any of its subtasks still has an open execution. */
   private subtreeHasOpenExecution(id: string): boolean {
     return subtreeTasks(this.document.tasks, id, this.maxSubtaskDepth)
@@ -1431,8 +1457,11 @@ export class HostTaskLedger {
    * @param progress - when set, this run was a due occurrence and the root's
    *   rule is advanced (counter, next target, stop/skip record) in the same
    *   atomic commit that opened the execution.
+   * @param principal - the verified account that owns every task opened by this run.
+   * @param rework - the reviewer's instructions, when this run redoes previous
+   *   work; recorded on the execution it opens.
    */
-  private startRun(root: TaskRecord, now: number, initiator?: string, rerun = false, progress?: ScheduleProgress, principal?: TaskBoardPrincipal): OpenedRun[] {
+  private startRun(root: TaskRecord, now: number, initiator?: string, rerun = false, progress?: ScheduleProgress, principal?: TaskBoardPrincipal, rework?: ExecutionRework): OpenedRun[] {
     const before = this.document.tasks
     for (const task of subtreeTasks(before, root.id, this.maxSubtaskDepth)) {
       const owner = this.taskPrincipal(task.id)
@@ -1443,7 +1472,7 @@ export class HostTaskLedger {
     if (hasOpenExecution(participant)) return []
     const groupId = crypto.randomUUID()
     const base = rerun ? withStatus(participant, 'todo', now) : participant
-    const opened = startExecution(base, now, crypto.randomUUID(), initiator, groupId)
+    const opened = startExecution(base, now, crypto.randomUUID(), initiator, groupId, rework)
     let tasks: readonly TaskRecord[] = before.map(task => task.id === participant.id ? opened.task : task)
     if (progress !== undefined) tasks = applyScheduleProgress(tasks, root.id, progress, now)
     this.document.tasks = [...tasks]

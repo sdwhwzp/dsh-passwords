@@ -41,6 +41,7 @@ import type { CardDefaults } from './core/card-defaults.ts'
 import { buildTaskBoardTools, TASK_BOARD_TOOL_NAMES } from './host/agent-tools.ts'
 import { PLUGIN_TOOL_SECTION_ORDERS, visibleToolText } from './tool-surface.ts'
 import { makeTaskBoardRoutes, type TaskBoardConnectionTrust } from './host-routes.ts'
+import type { ModelInfoResolver, TaskBoardAttachmentStore } from './host/attachments.ts'
 import { TASK_BOARD_SERVICE_NAME, type TaskBoardExtension } from './core/extension.ts'
 import type { TaskBoardAction } from './protocol.ts'
 import { mountOnce } from './mount-once.ts'
@@ -237,7 +238,7 @@ export interface Config {
  * config against, before the schema turns volatile fields into live references
  * and applies defaults. Declared separately because the two sides no longer
  * share one shape, so the schema is annotated `z<ConfigInput, Config>` — the
- * same split `dsh-git-graph` uses. The annotation is also what keeps the
+ * same split the git-family packages use. The annotation is also what keeps the
  * emitted declaration portable: an unannotated schema holding a nested object
  * array infers a type that cannot be named without reaching into a transitive
  * dependency's own types.
@@ -513,6 +514,49 @@ export function resolveLlmRuntime(ctx: Context): LlmRuntime | undefined {
 }
 
 /**
+ * Resolve the optional attachment storage.
+ *
+ * The board does not inject the service: a deployment without one must still
+ * mount the board, and every attachment surface then answers with a typed
+ * "storage unavailable" failure instead of the plugin failing to load.
+ * @param ctx - the plugin context.
+ * @returns the attachment storage, or undefined when this deployment serves none.
+ */
+export function resolveAttachmentStore(ctx: Context): TaskBoardAttachmentStore | undefined {
+  try {
+    const store = ctx.get('attachments') as TaskBoardAttachmentStore | undefined
+    return store !== undefined && typeof store.saveImage === 'function' ? store : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The model-info reader the image preflight uses.
+ *
+ * It asks the OFFICIAL model service about one exact route. The model catalog
+ * the board already publishes carries no modality information and must not be
+ * used to answer that question: only the model's own declared input
+ * modalities can refuse an image route, and a route whose modalities cannot be
+ * read is UNKNOWN and therefore allowed.
+ * @param ctx - the plugin context.
+ * @returns the reader, or undefined when the deployment serves no model service.
+ */
+export function resolveModelInfoReader(ctx: Context): ModelInfoResolver | undefined {
+  return async (provider: string, model: string): Promise<{ inputModalities?: readonly string[] } | undefined> => {
+    const llm = resolveLlmRuntime(ctx)
+    if (llm === undefined) return undefined
+    try {
+      const info = await llm.resolveModelInfo(provider, model)
+      return { ...(info.inputModalities === undefined ? {} : { inputModalities: info.inputModalities }) }
+    } catch (error) {
+      console.warn('[dsh-task-board] could not resolve the model info of ' + provider + '/' + model + '; the image preflight allows the route', error)
+      return undefined
+    }
+  }
+}
+
+/**
  * The subset of `sessionController` the board uses to wake a cold persisted
  * session before running a slash command on it (issue #1861).
  */
@@ -684,6 +728,8 @@ function applyImpl(ctx: Context, config?: Config): void {
     cardDefaults,
     verificationSettings,
     verificationCatalog,
+    attachments: () => resolveAttachmentStore(ctx),
+    modelInfo: () => resolveModelInfoReader(ctx),
     timers: resolveHostTimers(ctx),
     commandDispatcher: {
       async execute(sessionId, line, signal) {
@@ -827,6 +873,7 @@ function applyImpl(ctx: Context, config?: Config): void {
         authenticate: req => accounts.request(req),
         assertPrincipal: principal => accounts.assert(principal),
       }, {
+        attachments: () => resolveAttachmentStore(ctx),
         parseTask: async (request, signal) => {
           const llm = resolveLlmRuntime(ctx)
           if (llm === undefined) throw new TaskParseError('no-model', 'this deployment serves no llm service')

@@ -344,7 +344,7 @@ test('current task-board child creation, attach and detach survive tenant ledger
   assert.equal(f.calls.length, 0, 'creating and linking tasks does not invoke a model');
 });
 
-test('tenant goal opt-in persists in schema 6 and rejects invalid or foreign-account updates', async t => {
+test('tenant goal opt-in persists in schema 7 and rejects invalid or foreign-account updates', async t => {
   const f = await fixture(t);
   const action = async (id: number, value: object, expected = 200) => {
     const response = await fetch(f.origin + '/api/task-board/action', {
@@ -362,7 +362,7 @@ test('tenant goal opt-in persists in schema 6 and rejects invalid or foreign-acc
   await action(3, { kind: 'update', taskId: 'plain-turn', patch: { goalRun: true } }, 400);
   await action(2, { kind: 'update', taskId: 'plain-turn', patch: { goalRun: 0 } }, 400);
   const disk = JSON.parse(await readFile(path.join(f.directory, 'u2', 'ledger-v2.json'), 'utf8'));
-  assert.equal(disk.schemaVersion, 6);
+  assert.equal(disk.schemaVersion, 7);
   assert.equal(disk.tasks.find((task: { id: string }) => task.id === 'plain-turn').goalRun, undefined);
   assert.equal('goalRun' in disk.tasks.find((task: { id: string }) => task.id === 'default-goal'), false);
   f.reload();
@@ -525,7 +525,7 @@ test('a revoked tenant cannot execute an already armed cron occurrence', { timeo
   assert.match(board.tasks[0].executions[0].error, /task owner unavailable/);
 });
 
-test('schema 3 tenant ledgers migrate to schema 6 without losing task history or account partitions', async t => {
+test('schema 3 tenant ledgers migrate to schema 7 without losing task history or account partitions', async t => {
   const expected = new Map<number, object[]>();
   const f = await fixture(t, boardTimers().timer, async directory => {
     for (const id of [2, 3]) {
@@ -554,7 +554,7 @@ test('schema 3 tenant ledgers migrate to schema 6 without losing task history or
     const response = await fetch(f.origin + '/api/task-board/state', { headers: f.headers(id) });
     const board = await response.json();
     assert.equal(response.status, 200);
-    assert.equal(board.schemaVersion, 6);
+    assert.equal(board.schemaVersion, 7);
     const tasks = structuredClone(expected.get(id)!) as Array<{ schedule?: { timeZone?: string; mode?: string; runCount?: number } }>;
     for (const task of tasks) if ('goalRun' in task && task.goalRun !== true) delete task.goalRun;
     tasks[0].schedule!.timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -562,7 +562,7 @@ test('schema 3 tenant ledgers migrate to schema 6 without losing task history or
     tasks[0].schedule!.runCount = 0;
     assert.deepEqual(board.tasks, tasks);
     const disk = JSON.parse(await readFile(path.join(f.directory, `u${id}`, 'ledger-v2.json'), 'utf8'));
-    assert.equal(disk.schemaVersion, 6);
+    assert.equal(disk.schemaVersion, 7);
     assert.deepEqual(disk.tasks, tasks);
     assert.equal(disk.scheduler.ledgerId, `ledger-${id}`);
     assert.deepEqual(disk.scheduler.importedSources, [`import-${id}`]);

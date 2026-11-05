@@ -8,6 +8,7 @@ import type { FreezeSnapshot } from './freeze-snapshot.ts'
 import type { ExecutionVerification } from './verification.ts'
 import type { TaskHandover, TaskHandoverInput } from './handover.ts'
 import { normalizeTaskIntegrations, type TaskBoardExtensionPayload } from './extension.ts'
+import { normalizeAttachments, type TaskAttachment } from './attachment.ts'
 
 /** Task lifecycle status, one per kanban column. */
 export type TaskStatus = 'backlog' | 'todo' | 'running' | 'done' | 'failed'
@@ -37,6 +38,27 @@ export interface ExecutionSummary {
  * {@link ExecutionSummary.seq} into the session history.
  */
 export const EXECUTION_SUMMARY_LIMIT = 4000
+
+/**
+ * Rework input recorded on the execution it opened: the reviewer's instructions
+ * for redoing work in the card's own session.
+ */
+export interface ExecutionRework {
+  /** The rework instructions this run was given, as the reviewer wrote them. */
+  instructions: string
+}
+
+/**
+ * Repair a persisted rework block: only a non-blank instruction string
+ * survives, so a hand-edited ledger loses the block instead of the execution.
+ */
+export function normalizeExecutionRework(value: unknown): ExecutionRework | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const instructions = (value as { instructions?: unknown }).instructions
+  if (typeof instructions !== 'string') return undefined
+  const trimmed = instructions.trim()
+  return trimmed === '' ? undefined : { instructions: trimmed }
+}
 
 /**
  * One real execution attempt: the run's own id, the dsh session that ran it
@@ -77,6 +99,13 @@ export interface ExecutionRecord {
    * `sessionId` and never claims a verdict the Host observed.
    */
   external?: boolean
+  /**
+   * Rework instructions this execution carries as extra input: a reviewer sent
+   * the previous run back, so the card re-ran in the same session with these
+   * instructions instead of having its frozen content rewritten. Absent on
+   * every ordinary run.
+   */
+  rework?: ExecutionRework
   /** Freeze instant captured from the card snapshot when the run opened. */
   frozenAt?: number
   /** Freeze source session captured from the card snapshot when the run opened. */
@@ -535,6 +564,14 @@ export interface TaskRecord {
    * absent means on-board.
    */
   hidden?: boolean
+  /**
+   * Files and images the card carries (issue #1979). Metadata only: the bytes
+   * live in the official attachment storage, and this record names the stored
+   * object, its size and the digest of the exact bytes the Host verified
+   * there. Additive and absent on every card written before the field
+   * existed, so an old card keeps running exactly as it did.
+   */
+  attachments?: TaskAttachment[]
 }
 
 /**
@@ -636,6 +673,12 @@ export interface NewTaskInput {
   status?: TaskStatus
   /** Create the card off-board (held in the ledger, never rendered). */
   hidden?: boolean
+  /**
+   * Files and images the new card carries (issue #1979). The metadata is
+   * host-verified against the official attachment storage before it reaches
+   * the ledger, so a create never records a claim the storage cannot prove.
+   */
+  attachments?: TaskAttachment[]
 }
 
 /** The five kanban columns, in display order. */
@@ -734,6 +777,7 @@ export function freezeOf(
 export function createTask(input: NewTaskInput, now: number, id: string): TaskRecord {
   const tags = normalizeTags(input.tags)
   const integrations = normalizeTaskIntegrations(input.integrations)
+  const attachments = normalizeAttachments(input.attachments)
   return {
     id,
     title: input.title.trim(),
@@ -762,6 +806,7 @@ export function createTask(input: NewTaskInput, now: number, id: string): TaskRe
     ...(input.handover === undefined ? {} : { handover: { ...input.handover, bundledAt: now } }),
     ...(tags === undefined ? {} : { tags }),
     ...(integrations === undefined ? {} : { integrations }),
+    ...(attachments === undefined ? {} : { attachments }),
     ...(input.hidden === true ? { hidden: true } : {}),
   }
 }
@@ -811,6 +856,8 @@ export function withSchedule(
  * running execution record. Returns the new task and the new execution.
  * @param runGroupId - cascade run group, when this run also opened executions
  *   for the task's subtasks (see `core/subtask.ts`).
+ * @param rework - the reviewer's instructions, when this run is a rework of the
+ *   card's previous work; recorded on the execution it opens.
  */
 export function startExecution(
   task: TaskRecord,
@@ -818,6 +865,7 @@ export function startExecution(
   executionId: string,
   initiatedBy?: string,
   runGroupId?: string,
+  rework?: ExecutionRework,
 ): { task: TaskRecord; execution: ExecutionRecord } {
   const execution: ExecutionRecord = {
     id: executionId,
@@ -826,6 +874,7 @@ export function startExecution(
     endedAt: undefined,
     result: undefined,
     error: undefined,
+    ...(rework === undefined ? {} : { rework }),
     ...(runGroupId === undefined || runGroupId === '' ? {} : { runGroupId }),
     ...(initiatedBy === undefined || initiatedBy === '' ? {} : { initiatedBy }),
     // Capture the card's freeze provenance on the execution record so the

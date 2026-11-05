@@ -262,7 +262,7 @@ export function registerTenantTaskBoard(ctx: Context, db: Database, config: Plat
       boardFor(principal);
     } catch { console.warn('[dsh-passwords] task board owner unavailable:', entry.name); }
   }
-  for (const suffix of ['state', 'action', 'events', 'parse', 'verification']) {
+  for (const suffix of ['state', 'action', 'events', 'parse', 'verification', 'attachments/upload', 'attachments/image']) {
     const pathname = `/api/task-board/${suffix}`;
     ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: pathname, handler: async (req, res) => {
       try {

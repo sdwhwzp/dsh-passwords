@@ -108,6 +108,8 @@ The owner can configure, per subuser, from the settings page:
 
 ### 5️⃣ Local workspaces
 
+Subusers can rename workspace titles for their own managed or paired local directories. Renaming changes only the display title and does not move the directory. The gateway resolves the directory from the workspace ID and verifies account ownership; a caller-supplied path cannot authorize changes to a shared workspace or another account's workspace.
+
 - Every signed-in user can pair one or more folders from their own computer as independent workspaces without uploading those files to the dsh server
 - dsh `read`, `write`, `edit`, `glob`, and `grep` operations act on the original authorized folder through the local companion
 - The Windows EXE enables `--allow-shell` automatically, including restored workspaces; non-Windows-EXE command-line mode keeps Shell off until the user adds it explicitly

@@ -6,7 +6,6 @@ window.__ModuleLoader__.load({
 		Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
 		let react = require("react");
 		let react_jsx_runtime = require("react/jsx-runtime");
-		let _deepseek_ai_dsh_client_ui_slots = require("@deepseek-ai/dsh-client-ui-slots");
 		let _deepseek_ai_dsh_client_store = require("@deepseek-ai/dsh-client-store");
 		//#region src/core/extension.ts
 		/** Cordis service name the host and browser halves each publish. */
@@ -80,6 +79,185 @@ window.__ModuleLoader__.load({
 			}
 			return Object.keys(result).length === 0 ? void 0 : result;
 		}
+		/** Maximum byte length of one attachment (10 MiB). */
+		const TASK_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
+		/** Maximum byte length of all attachments of one card together (32 MiB). */
+		const TASK_ATTACHMENT_TOTAL_MAX_BYTES = 32 * 1024 * 1024;
+		/** Raster media types the official image path accepts. */
+		const TASK_ATTACHMENT_IMAGE_MEDIA_TYPES = [
+			"image/png",
+			"image/jpeg",
+			"image/webp",
+			"image/gif"
+		];
+		/** Longest accepted display name of an attachment. */
+		const ATTACHMENT_NAME_MAX_LENGTH = 255;
+		/** Longest accepted media type of an attachment. */
+		const ATTACHMENT_MEDIA_TYPE_MAX_LENGTH = 255;
+		/** Longest accepted storage identifier of an attachment. */
+		const ATTACHMENT_ID_MAX_LENGTH = 512;
+		const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+		const MEDIA_TYPE_PATTERN = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/;
+		/** Every key one attachment may carry. */
+		const ATTACHMENT_KEYS = [
+			"kind",
+			"attachmentId",
+			"name",
+			"bytes",
+			"mediaType",
+			"sha256",
+			"width",
+			"height"
+		];
+		function isPlainObject(value) {
+			return typeof value === "object" && value !== null && !Array.isArray(value);
+		}
+		/** Whether a value is a well-formed positive pixel count. */
+		function isPixelCount(value) {
+			return typeof value === "number" && Number.isInteger(value) && value > 0;
+		}
+		/**
+		* The canonical display name of an attachment.
+		*
+		* A name reaches the ledger from two directions: the browser picks it, and an
+		* execution prompt reads it. Both make one form mandatory — the name must be
+		* a single line without any path part, so it can neither break out of the
+		* prompt line nor point at a directory.
+		*
+		* The canonical form is therefore: the LEAF of whatever path-like text was
+		* offered, every control character (a newline included) turned into a space,
+		* whitespace runs collapsed into one space, the result trimmed and bounded.
+		* An empty result becomes a fixed placeholder.
+		*
+		* The Host upload path canonicalizes the name BEFORE publishing it, and the
+		* wire gate accepts only a name that already IS canonical — so the name the
+		* ledger holds and the name the storage holds are the same string.
+		* @param value - the offered name.
+		* @returns the canonical name.
+		*/
+		function canonicalAttachmentName(value) {
+			const cleaned = ((typeof value === "string" ? value : "").split(/[\\/]/).pop() ?? "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+			if (cleaned === "") return "attachment";
+			return cleaned.slice(0, ATTACHMENT_NAME_MAX_LENGTH);
+		}
+		/**
+		* Whether an unknown value is a well-formed attachment (the STRICT gate: the
+		* wire path uses it, so a hand-written payload cannot smuggle an extra field
+		* onto the ledger, a path-like name, or an image without its pixel size).
+		* @param value - the candidate attachment.
+		* @returns whether the value is a usable attachment.
+		*/
+		function isTaskAttachment(value) {
+			if (!isPlainObject(value)) return false;
+			if (Object.keys(value).some((key) => !ATTACHMENT_KEYS.includes(key))) return false;
+			if (value.kind !== "image" && value.kind !== "file") return false;
+			if (typeof value.attachmentId !== "string") return false;
+			const id = value.attachmentId;
+			if (id === "" || id.length > ATTACHMENT_ID_MAX_LENGTH) return false;
+			if (id.includes("/") || id.includes("\\") || id.includes("..")) return false;
+			if (typeof value.name !== "string") return false;
+			if (value.name !== canonicalAttachmentName(value.name)) return false;
+			if (typeof value.bytes !== "number" || !Number.isInteger(value.bytes) || value.bytes < 0) return false;
+			if (typeof value.mediaType !== "string" || value.mediaType.length > ATTACHMENT_MEDIA_TYPE_MAX_LENGTH) return false;
+			if (!MEDIA_TYPE_PATTERN.test(value.mediaType)) return false;
+			if (value.mediaType !== value.mediaType.toLowerCase()) return false;
+			if (typeof value.sha256 !== "string" || !SHA256_PATTERN.test(value.sha256)) return false;
+			if (value.kind === "image") {
+				if (!TASK_ATTACHMENT_IMAGE_MEDIA_TYPES.includes(value.mediaType.toLowerCase())) return false;
+				if (!isPixelCount(value.width) || !isPixelCount(value.height)) return false;
+			} else if (value.width !== void 0 || value.height !== void 0) return false;
+			return true;
+		}
+		/**
+		* Repair one persisted attachment entry: canonicalize its name and keep the
+		* fields that are usable. An entry that cannot be repaired — an unknown kind,
+		* a malformed identifier, an image without its pixel size — is dropped.
+		* @param value - the persisted entry.
+		* @returns the repaired attachment, or undefined when it cannot be repaired.
+		*/
+		function repairAttachment(value) {
+			if (!isPlainObject(value)) return void 0;
+			if (value.kind !== "image" && value.kind !== "file") return void 0;
+			if (typeof value.attachmentId !== "string") return void 0;
+			const id = value.attachmentId;
+			if (id === "" || id.length > ATTACHMENT_ID_MAX_LENGTH) return void 0;
+			if (id.includes("/") || id.includes("\\") || id.includes("..")) return void 0;
+			if (typeof value.bytes !== "number" || !Number.isInteger(value.bytes) || value.bytes < 0) return void 0;
+			if (typeof value.mediaType !== "string" || !MEDIA_TYPE_PATTERN.test(value.mediaType)) return void 0;
+			if (typeof value.sha256 !== "string" || !SHA256_PATTERN.test(value.sha256)) return void 0;
+			const name = canonicalAttachmentName(value.name);
+			if (value.kind === "image") {
+				if (!TASK_ATTACHMENT_IMAGE_MEDIA_TYPES.includes(value.mediaType.toLowerCase())) return void 0;
+				if (!isPixelCount(value.width) || !isPixelCount(value.height)) return void 0;
+				return {
+					kind: "image",
+					attachmentId: id,
+					name,
+					bytes: value.bytes,
+					mediaType: value.mediaType.toLowerCase(),
+					sha256: value.sha256,
+					width: value.width,
+					height: value.height
+				};
+			}
+			if (value.width !== void 0 || value.height !== void 0) return void 0;
+			return {
+				kind: "file",
+				attachmentId: id,
+				name,
+				bytes: value.bytes,
+				mediaType: value.mediaType.toLowerCase(),
+				sha256: value.sha256
+			};
+		}
+		/**
+		* Drop the repeated storage identifiers of a list, keeping the FIRST entry of
+		* each identifier.
+		*
+		* The storage is content-addressed, so the same bytes uploaded twice produce
+		* the same identifier. A list that carried the identifier twice would render
+		* two rows for one object and claim it twice against the card's limits, so the
+		* list is deduplicated at the boundary that can produce it.
+		* @param attachments - the candidate list.
+		* @returns the deduplicated list, in the original order.
+		*/
+		function dedupeAttachments(attachments) {
+			const seen = /* @__PURE__ */ new Set();
+			const unique = [];
+			for (const attachment of attachments) {
+				if (seen.has(attachment.attachmentId)) continue;
+				seen.add(attachment.attachmentId);
+				unique.push(attachment);
+			}
+			return unique;
+		}
+		/**
+		* Repair a persisted attachment list: canonicalize the names, drop the
+		* entries that cannot be repaired, deduplicate the storage identifiers, and
+		* cap the count and the byte totals. Returns undefined when nothing usable
+		* remains, so the caller clears the field instead of storing an empty list —
+		* the same policy the tag and schedule repairs follow.
+		* @param value - the persisted value.
+		* @returns the repaired list, or undefined when nothing survives.
+		*/
+		function normalizeAttachments(value) {
+			if (!Array.isArray(value)) return void 0;
+			const repaired = [];
+			const seen = /* @__PURE__ */ new Set();
+			let total = 0;
+			for (const entry of value) {
+				const attachment = repairAttachment(entry);
+				if (attachment === void 0) continue;
+				if (attachment.bytes > 10485760) continue;
+				if (total + attachment.bytes > 33554432) continue;
+				if (seen.has(attachment.attachmentId)) continue;
+				seen.add(attachment.attachmentId);
+				total += attachment.bytes;
+				repaired.push(attachment);
+				if (repaired.length >= 8) break;
+			}
+			return repaired.length === 0 ? void 0 : repaired;
+		}
 		//#endregion
 		//#region src/core/tasks.ts
 		/**
@@ -88,6 +266,17 @@ window.__ModuleLoader__.load({
 		* {@link ExecutionSummary.seq} into the session history.
 		*/
 		const EXECUTION_SUMMARY_LIMIT = 4e3;
+		/**
+		* Repair a persisted rework block: only a non-blank instruction string
+		* survives, so a hand-edited ledger loses the block instead of the execution.
+		*/
+		function normalizeExecutionRework(value) {
+			if (typeof value !== "object" || value === null) return void 0;
+			const instructions = value.instructions;
+			if (typeof instructions !== "string") return void 0;
+			const trimmed = instructions.trim();
+			return trimmed === "" ? void 0 : { instructions: trimmed };
+		}
 		/** Every stop reason this build understands; the repair and wire gates share it. */
 		const SCHEDULE_STOP_REASONS = [
 			"fired",
@@ -288,6 +477,7 @@ window.__ModuleLoader__.load({
 		function createTask(input, now, id) {
 			const tags = normalizeTags(input.tags);
 			const integrations = normalizeTaskIntegrations(input.integrations);
+			const attachments = normalizeAttachments(input.attachments);
 			return {
 				id,
 				title: input.title.trim(),
@@ -313,6 +503,7 @@ window.__ModuleLoader__.load({
 				} },
 				...tags === void 0 ? {} : { tags },
 				...integrations === void 0 ? {} : { integrations },
+				...attachments === void 0 ? {} : { attachments },
 				...input.hidden === true ? { hidden: true } : {}
 			};
 		}
@@ -1491,6 +1682,7 @@ window.__ModuleLoader__.load({
 			"description",
 			"prompt"
 		];
+		[...TASK_CONTENT_FIELDS];
 		/**
 		* Whether a task's content may still be edited: the task must be on-board
 		* (not archived) and must never have started executing. Fail-closed: a task
@@ -1517,7 +1709,7 @@ window.__ModuleLoader__.load({
 		function applyUpdateTask(tasks, id, patch, now) {
 			return tasks.map((task) => {
 				if (task.id !== id) return task;
-				const { freeze: freezePatch, handover: handoverPatch, tags: tagsPatch, ...rest } = patch;
+				const { freeze: freezePatch, handover: handoverPatch, tags: tagsPatch, attachments: attachmentsPatch, ...rest } = patch;
 				const workspaceId = "workspaceId" in patch ? normalizeTargetId(patch.workspaceId) : void 0;
 				const mode = "mode" in patch ? normalizeTargetId(patch.mode) : void 0;
 				const permission = "permission" in patch ? normalizePermission(task.permission, patch.permission) : void 0;
@@ -1539,6 +1731,7 @@ window.__ModuleLoader__.load({
 					bundledAt: now
 				};
 				if ("tags" in patch) next.tags = tagsPatch == null ? void 0 : normalizeTags(tagsPatch);
+				if ("attachments" in patch) next.attachments = attachmentsPatch == null ? void 0 : normalizeAttachments(attachmentsPatch);
 				if ("permission" in patch && patch.permission !== void 0 && patch.permission !== task.permission || "handover" in patch) next.permissionConfirmedAt = void 0;
 				if ("reuseSession" in patch) next.reuseSession = patch.reuseSession === true ? true : void 0;
 				if ("goalRun" in patch) next.goalRun = patch.goalRun === true ? true : void 0;
@@ -1602,6 +1795,8 @@ window.__ModuleLoader__.load({
 			hostState;
 			/** Provider visibility predicates (immutable array; replaced on change). */
 			visibility = [];
+			/** Provider source-group selectors (immutable array; replaced on change). */
+			grouping = [];
 			remoteSubscribed = false;
 			remoteInitialization;
 			/** @param deps - store and the sessions navigation face. */
@@ -1642,6 +1837,7 @@ window.__ModuleLoader__.load({
 					...this.transportError === void 0 ? {} : { transportError: this.transportError },
 					...this.hostState === void 0 ? {} : { host: this.hostState },
 					visibility: this.visibility,
+					grouping: this.grouping,
 					...this.hostState?.extensions === void 0 ? {} : { extensions: this.hostState.extensions }
 				};
 			}
@@ -1656,6 +1852,17 @@ window.__ModuleLoader__.load({
 					const next = this.visibility.filter((candidate) => candidate !== predicate);
 					if (next.length === this.visibility.length) return;
 					this.visibility = next;
+					this.notify();
+				};
+			}
+			/** Register one source-group selector; registration order breaks ownership ties. */
+			registerGrouping(selector) {
+				this.grouping = [...this.grouping, selector];
+				this.notify();
+				return () => {
+					const next = this.grouping.filter((candidate) => candidate !== selector);
+					if (next.length === this.grouping.length) return;
+					this.grouping = next;
 					this.notify();
 				};
 			}
@@ -1848,6 +2055,22 @@ window.__ModuleLoader__.load({
 				const parse = transport?.parseDraft;
 				if (transport === void 0 || parse === void 0) throw new Error("task parsing is unavailable");
 				return await parse.call(transport, request, signal);
+			}
+			/**
+			* Upload one attachment into the Host's attachment storage.
+			*
+			* The form calls this when the card is SAVED, never when a file is picked:
+			* a staged file is a local preview until the card is really saved.
+			* @param file - the picked file.
+			* @param kind - whether the file is stored as an image or verbatim.
+			* @returns the metadata the Host computed, or undefined when this
+			*   deployment serves no attachment storage.
+			*/
+			async uploadAttachment(file, kind) {
+				const transport = this.deps.transport;
+				const upload = transport?.uploadAttachment;
+				if (transport === void 0 || upload === void 0) return void 0;
+				return await upload.call(transport, file, kind);
 			}
 			moveTask(id, status) {
 				if (this.deps.transport !== void 0) {
@@ -2183,6 +2406,7 @@ window.__ModuleLoader__.load({
 				const goalRunEnabled = snapshot.goalRunEnabled ?? this.hostState?.goalRunEnabled;
 				const cardDefaults = snapshot.cardDefaults;
 				const extensions = snapshot.extensions ?? this.hostState?.extensions;
+				const attachmentLimits = snapshot.attachmentLimits ?? this.hostState?.attachmentLimits;
 				return {
 					revision: snapshot.revision,
 					scheduler: snapshot.scheduler,
@@ -2191,7 +2415,8 @@ window.__ModuleLoader__.load({
 					...maxSubtaskDepth === void 0 ? {} : { maxSubtaskDepth },
 					...goalRunEnabled === void 0 ? {} : { goalRunEnabled },
 					...cardDefaults === void 0 ? {} : { cardDefaults },
-					...extensions === void 0 ? {} : { extensions }
+					...extensions === void 0 ? {} : { extensions },
+					...attachmentLimits === void 0 ? {} : { attachmentLimits }
 				};
 			}
 			async refreshRemote(preserveError) {
@@ -2313,8 +2538,27 @@ window.__ModuleLoader__.load({
 			return options;
 		}
 		/**
+		* The display form of one model row: the model name first, then the provider
+		* that publishes it, joined by " · ".
+		*
+		* Two providers publishing one model name are two different routes, so the
+		* provider belongs in the label — otherwise the picker offers two identical
+		* rows and the operator cannot tell which route a card would pin. A row
+		* without a provider (the flat discovery fallback names models only) keeps
+		* its bare name, and a row that carries no name of its own shows the model
+		* part of its own qualified route, so the provider is never printed twice.
+		* @param model - the roster row.
+		* @returns the label every model picker row and every collapsed summary shows.
+		*/
+		function modelDisplayLabel(model) {
+			const provider = model.provider === void 0 || model.provider === "" ? void 0 : model.provider;
+			const name = model.name !== void 0 && model.name !== "" ? model.name : provider !== void 0 && model.id.startsWith(provider + "/") ? model.id.slice(provider.length + 1) : model.id;
+			if (provider === void 0) return name;
+			return name + " · " + provider;
+		}
+		/**
 		* The picker rows of a model roster: the qualified `provider/model` route as
-		* the value a pin stores, and the provider beside the model name so two
+		* the value a pin stores, and the shared display form as the label, so two
 		* providers offering one model name stay distinguishable.
 		* @param models - the roster rows.
 		* @returns the choice rows, in roster order.
@@ -2322,7 +2566,7 @@ window.__ModuleLoader__.load({
 		function modelChoiceRows(models) {
 			return models.map((model) => ({
 				value: model.id,
-				label: (model.provider === void 0 ? "" : model.provider + " · ") + (model.name ?? model.id)
+				label: modelDisplayLabel(model)
 			}));
 		}
 		/**
@@ -3207,6 +3451,7 @@ window.__ModuleLoader__.load({
 			if (record.permission !== void 0 && typeof record.permission !== "string") return false;
 			if (record.integrations !== void 0 && (typeof record.integrations !== "object" || record.integrations === null || Array.isArray(record.integrations))) return false;
 			if (record.hidden !== void 0 && typeof record.hidden !== "boolean") return false;
+			if (record.attachments !== void 0 && !Array.isArray(record.attachments)) return false;
 			if (record.reuseSession !== void 0 && typeof record.reuseSession !== "boolean") return false;
 			if (record.goalRun !== void 0 && typeof record.goalRun !== "boolean") return false;
 			if (record.skipVerification !== void 0 && typeof record.skipVerification !== "boolean") return false;
@@ -3366,6 +3611,7 @@ window.__ModuleLoader__.load({
 					ownError: typeof execution.ownError === "string" ? execution.ownError : void 0,
 					summary: normalizeExecutionSummary(execution.summary),
 					verification: normalizeVerification(execution.verification),
+					rework: normalizeExecutionRework(execution.rework),
 					external: execution.external === true ? true : void 0
 				}));
 				task.workspaceId = normalizeTargetId(row.workspaceId);
@@ -3381,6 +3627,7 @@ window.__ModuleLoader__.load({
 				task.tags = normalizeTags(row.tags);
 				task.permissionConfirmedAt = typeof row.permissionConfirmedAt === "number" && Number.isFinite(row.permissionConfirmedAt) ? row.permissionConfirmedAt : void 0;
 				task.integrations = normalizeTaskIntegrations(row.integrations);
+				task.attachments = normalizeAttachments(row.attachments);
 				task.hidden = row.hidden === true ? true : void 0;
 				tasks.push(task);
 			}
@@ -3526,12 +3773,14 @@ window.__ModuleLoader__.load({
 			"new.section.parse": "AI 解析",
 			"new.section.content": "任务内容",
 			"new.section.labels": "标签",
+			"new.section.attachments": "附件",
 			"new.section.execution": "执行设置",
 			"new.section.run": "运行方式",
 			"new.section.handover": "交接与续跑",
 			"new.section.schedule": "定时运行",
 			"new.summary.none": "未设置",
 			"new.summary.labelCount": "{count} 个标签",
+			"new.summary.attachmentCount": "{count} 个附件",
 			"new.summary.filled": "已填写",
 			"new.summary.scheduleOff": "未启用",
 			"new.summary.multiRound": "多轮 /goal",
@@ -3569,6 +3818,20 @@ window.__ModuleLoader__.load({
 			"new.tagPromptPlaceholder": "例如：产物归档到 02-工作/",
 			"new.tagAdd": "添加标签",
 			"new.tagRemove": "移除标签 {name}",
+			"new.attachments": "附件",
+			"new.attachmentsHint": "拖放、粘贴或选择文件；文件在保存卡片时才上传。图片会随执行一起送给模型，普通文件以只读路径交给执行会话。",
+			"new.attachments.drop": "把文件拖到这里，或直接粘贴",
+			"new.attachments.pick": "选择文件",
+			"new.attachments.remove": "移除附件 {name}",
+			"new.attachments.limitCount": "每张卡片最多 {count} 个附件",
+			"new.attachments.limitImages": "这个部署每条消息最多接收 {count} 张图片",
+			"new.attachments.limitImageBytes": "图片总大小超过部署上限 {size}",
+			"new.attachments.limitSize": "{name} 超过单个附件上限 {size}",
+			"new.attachments.limitTotal": "附件总大小超过上限 {size}",
+			"new.attachments.unavailable": "这个部署没有提供附件存储，无法上传附件",
+			"new.attachments.uploading": "上传中",
+			"detail.attachments": "附件",
+			"detail.attachments.removeHint": "移除附件只会删掉卡片上的引用；Host 存储里的文件不会被物理删除。",
 			"board.tagFilter": "按标签筛选",
 			"board.tagFilterClear": "清除标签筛选",
 			"board.tagEmpty": "没有同时带这些标签的任务",
@@ -3945,6 +4208,7 @@ window.__ModuleLoader__.load({
 			"card.time.updated": "更新于 {time}",
 			"board.density.compact": "切换为紧凑卡片",
 			"board.density.comfortable": "切换为完整卡片",
+			"board.source.local": "本地任务",
 			"board.group.today": "今天",
 			"board.group.week": "近 7 天",
 			"board.group.earlier": "更早",
@@ -4010,12 +4274,14 @@ window.__ModuleLoader__.load({
 			"new.section.parse": "AI Parse",
 			"new.section.content": "Task Content",
 			"new.section.labels": "Tags",
+			"new.section.attachments": "Attachments",
 			"new.section.execution": "Execution Settings",
 			"new.section.run": "Run Mode",
 			"new.section.handover": "Handover",
 			"new.section.schedule": "Scheduled Runs",
 			"new.summary.none": "Not set",
 			"new.summary.labelCount": "{count} tags",
+			"new.summary.attachmentCount": "{count} attachments",
 			"new.summary.filled": "Filled",
 			"new.summary.scheduleOff": "Off",
 			"new.summary.multiRound": "multi-round /goal",
@@ -4053,6 +4319,20 @@ window.__ModuleLoader__.load({
 			"new.tagPromptPlaceholder": "e.g. Archive artefacts under 02-work/",
 			"new.tagAdd": "Add tag",
 			"new.tagRemove": "Remove tag {name}",
+			"new.attachments": "Attachments",
+			"new.attachmentsHint": "Drag, paste, or pick files; they are uploaded when the card is saved. Images travel with the execution, plain files reach the session as read-only paths.",
+			"new.attachments.drop": "Drop files here, or paste them",
+			"new.attachments.pick": "Choose files",
+			"new.attachments.remove": "Remove attachment {name}",
+			"new.attachments.limitCount": "A card carries at most {count} attachments",
+			"new.attachments.limitImages": "This deployment admits at most {count} images per message",
+			"new.attachments.limitImageBytes": "The images exceed the deployment limit of {size}",
+			"new.attachments.limitSize": "{name} exceeds the per-attachment limit of {size}",
+			"new.attachments.limitTotal": "The attachments exceed the total limit of {size}",
+			"new.attachments.unavailable": "This deployment serves no attachment storage, so nothing can be uploaded",
+			"new.attachments.uploading": "uploading",
+			"detail.attachments": "Attachments",
+			"detail.attachments.removeHint": "Removing an attachment drops the reference on the card; the stored file itself is not physically deleted.",
 			"board.tagFilter": "Filter by tag",
 			"board.tagFilterClear": "Clear tag filter",
 			"board.tagEmpty": "No task carries all of these tags",
@@ -4429,6 +4709,7 @@ window.__ModuleLoader__.load({
 			"card.time.updated": "Updated {time}",
 			"board.density.compact": "Switch to compact cards",
 			"board.density.comfortable": "Switch to full cards",
+			"board.source.local": "Local tasks",
 			"board.group.today": "Today",
 			"board.group.week": "Last 7 days",
 			"board.group.earlier": "Earlier",
@@ -4464,7 +4745,7 @@ window.__ModuleLoader__.load({
 		}
 		//#endregion
 		//#region \0dsh-css:packages/dsh-task-board/src/client/board.module.css.mjs
-		const css$3 = "[data-dsh-taskboard-view]{box-sizing:border-box;background:var(--dsw-alias-bg-base);flex-direction:column;width:100%;min-width:0;height:100%;min-height:0;display:flex;container:_7D6uKa_task-board-view/inline-size}._7D6uKa_board{--dsh-tb-control-h:30px;--dsh-tb-control-radius:8px;--dsh-tb-control-gap:8px;--dsh-tb-icon-size:30px;--dsh-tb-hit-size:44px;--dsh-tb-motion-enter:.16s;--dsh-tb-motion-close:.14s;--dsh-tb-ease:cubic-bezier(.2, 0, 0, 1);--dsh-tb-rail:12px;--dsh-tb-card-stripe:3px;--dsh-tb-card-inset:8px;--dsh-tb-card-row:18px;--dsh-tb-card-gap:6px;box-sizing:border-box;background:var(--dsw-alias-bg-base);min-width:0;height:100%;min-height:0;color:var(--dsw-alias-label-primary);font-family:var(--dsw-font-family);flex-direction:column;gap:12px;padding:14px 16px 16px;display:flex}._7D6uKa_boardHeader{flex:none;align-items:center;gap:10px;display:flex}._7D6uKa_boardTools{align-items:center;gap:var(--dsh-tb-control-gap);flex:auto;justify-content:flex-end;min-width:0;margin-left:auto;display:flex}._7D6uKa_boardTitle{color:var(--dsw-alias-label-primary);white-space:nowrap;margin:0;font-size:15px;font-weight:700}._7D6uKa_backButton{align-items:center;gap:4px;display:inline-flex}._7D6uKa_search{box-sizing:border-box;min-width:120px;height:var(--dsh-tb-control-h);color:var(--dsw-alias-label-primary);background:var(--dsw-specific-input-major);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsh-tb-control-radius);outline:none;flex:0 260px;padding:0 10px;font-size:13px}._7D6uKa_search::placeholder{color:var(--dsw-alias-label-tertiary)}._7D6uKa_columns{overscroll-behavior-inline:contain;scrollbar-color:var(--dsw-alias-border-l3) var(--dsw-alias-interactive-bg-hover);scrollbar-width:thin;flex:1;grid-auto-columns:minmax(220px,1fr);grid-auto-flow:column;gap:12px;min-height:0;padding-bottom:6px;display:grid;overflow:auto hidden}._7D6uKa_columns::-webkit-scrollbar{height:10px}._7D6uKa_columns::-webkit-scrollbar-track{background:var(--dsw-alias-interactive-bg-hover);border-radius:999px}._7D6uKa_columns::-webkit-scrollbar-thumb{background:var(--dsw-alias-border-l3);background-clip:content-box;border:2px solid #0000;border-radius:999px}._7D6uKa_columns::-webkit-scrollbar-thumb:hover{background:var(--dsw-alias-border-l4);background-clip:content-box}._7D6uKa_column{background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l1);border-radius:12px;flex-direction:column;min-height:0;display:flex;overflow:hidden}._7D6uKa_columnHeader{padding:8px var(--dsh-tb-rail);min-height:calc(var(--dsh-tb-card-row) + 18px);flex:none;align-items:center;gap:8px;display:flex}._7D6uKa_columnTitle{color:var(--dsw-alias-label-primary);text-overflow:ellipsis;white-space:nowrap;flex:1;margin:0;font-size:13px;font-weight:700;overflow:hidden}._7D6uKa_columnCount{min-width:0;font-size:12px;line-height:var(--dsh-tb-card-row);color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-interactive-bg-hover);border-radius:999px;flex:none;padding:0 8px}._7D6uKa_statusDot{border-radius:50%;flex:none;width:8px;height:8px}._7D6uKa_statusDot[data-status=backlog]{background:var(--dsw-alias-label-tertiary)}._7D6uKa_statusDot[data-status=todo]{background:var(--dsw-alias-state-business-primary)}._7D6uKa_statusDot[data-status=running]{background:var(--dsw-alias-state-warn-primary)}._7D6uKa_statusDot[data-status=done]{background:var(--dsw-alias-state-success-primary)}._7D6uKa_statusDot[data-status=failed]{background:var(--dsw-alias-state-error-primary)}._7D6uKa_cards{padding:2px var(--dsh-tb-rail) 10px;flex-direction:column;flex:1;gap:8px;min-height:0;display:flex;overflow-y:auto}._7D6uKa_columnEmpty{text-align:center;color:var(--dsw-alias-label-tertiary);padding:24px 0;font-size:12px}._7D6uKa_card{grid-template-columns:var(--dsh-tb-card-stripe) minmax(0, 1fr);column-gap:var(--dsh-tb-card-inset);row-gap:var(--dsh-tb-card-gap);padding:10px calc(var(--dsh-tb-card-stripe) + var(--dsh-tb-card-inset)) 10px 0;text-align:left;background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);cursor:pointer;color:var(--dsw-alias-label-primary);border-radius:10px;flex:none;align-content:start;font-family:inherit;transition:box-shadow .12s,border-color .12s,transform .12s;display:grid;position:relative;overflow:hidden}._7D6uKa_card>:not(._7D6uKa_cardOpen){z-index:1;grid-column:2;min-width:0;position:relative}._7D6uKa_card:before{content:\"\";width:var(--dsh-tb-card-stripe);pointer-events:none;background:0 0;position:absolute;top:0;bottom:0;left:0}._7D6uKa_card[data-tone=running]:before{background:var(--dsw-alias-state-warn-primary)}._7D6uKa_card[data-tone=succeeded]:before{background:var(--dsw-alias-state-success-primary)}._7D6uKa_card[data-tone=failed]:before{background:var(--dsw-alias-state-error-primary)}._7D6uKa_card[data-tone=cancelled]:before{background:var(--dsw-alias-label-tertiary)}._7D6uKa_card:hover{box-shadow:var(--dsw-shadow-lv2);border-color:var(--dsw-alias-border-l3);transform:translateY(-1px)}._7D6uKa_card[data-compact]:hover{box-shadow:none;transform:none}._7D6uKa_card[data-status=running]{border-color:var(--dsw-alias-state-warn-primary)}._7D6uKa_cardOpen{z-index:0;border-radius:inherit;cursor:pointer;background:0 0;border:0;margin:0;padding:0;position:absolute;inset:0}._7D6uKa_cardOpen:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:-2px}._7D6uKa_cardTitleRow{align-items:flex-start;gap:6px;min-width:0;display:flex}._7D6uKa_cardKind{font-size:12px;font-weight:600;line-height:var(--dsh-tb-card-row);white-space:nowrap;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-interactive-bg-hover);border-radius:999px;flex:none;padding:0 8px}._7D6uKa_cardTitle{-webkit-line-clamp:2;-webkit-box-orient:vertical;min-width:0;font-size:13px;font-weight:600;line-height:1.4;display:-webkit-box;overflow:hidden}._7D6uKa_card[data-compact]{row-gap:2px;padding-top:6px;padding-bottom:6px}._7D6uKa_card[data-compact] ._7D6uKa_cardTitle{-webkit-line-clamp:1;font-size:12px;font-weight:500}._7D6uKa_cardDecoration{flex:none;align-items:center;gap:4px;display:inline-flex}._7D6uKa_cardDecoration:empty{display:none}._7D6uKa_cardExcerpt{color:var(--dsw-alias-label-secondary);-webkit-line-clamp:2;-webkit-box-orient:vertical;font-size:12px;line-height:1.4;display:-webkit-box;overflow:hidden}._7D6uKa_cardMeta{min-height:var(--dsh-tb-card-row);font-size:12px;line-height:var(--dsh-tb-card-row);color:var(--dsw-alias-label-tertiary);flex-wrap:wrap;align-items:center;gap:4px 8px;display:flex}._7D6uKa_cardTime{text-overflow:ellipsis;white-space:nowrap;font-variant-numeric:tabular-nums;flex:auto;min-width:max-content;overflow:hidden}._7D6uKa_cardSchedule{min-width:0;height:var(--dsh-tb-card-row);white-space:nowrap;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-interactive-bg-hover);border-radius:999px;flex:none;align-items:center;gap:4px;padding:0 8px;font-size:12px;line-height:1;display:inline-flex}._7D6uKa_cardRun{height:var(--dsh-tb-card-row);font-size:12px;line-height:var(--dsh-tb-card-row);color:var(--dsw-alias-label-tertiary);flex:none;align-items:center;gap:6px;display:inline-flex}._7D6uKa_cardRun[data-declared]{text-underline-offset:2px;text-decoration:underline dotted}._7D6uKa_cardResult{font-size:12px;font-weight:600;line-height:var(--dsh-tb-card-row);color:var(--dsw-alias-state-warn-primary);background:var(--dsw-alias-state-warn-secondary);border-radius:999px;flex:none;padding:0 8px}._7D6uKa_cardResult[data-result=succeeded]{color:var(--dsw-alias-state-success-primary);background:var(--dsw-alias-state-success-secondary)}._7D6uKa_cardResult[data-result=failed]{color:var(--dsw-alias-state-error-primary);background:var(--dsw-alias-state-error-secondary)}._7D6uKa_cardResult[data-result=cancelled]{color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-interactive-bg-hover)}._7D6uKa_cardSession{width:var(--dsh-tb-card-row);height:var(--dsh-tb-card-row);color:var(--dsw-alias-state-business-primary);flex:none;justify-content:center;align-items:center;display:inline-flex}._7D6uKa_cardAction{cursor:pointer;background:0 0;border:0;border-radius:6px;padding:0;font-family:inherit;position:relative}._7D6uKa_cardAction:after{content:\"\";width:var(--dsh-tb-hit-size);height:var(--dsh-tb-hit-size);position:absolute;top:50%;left:50%;transform:translate(-50%,-50%)}._7D6uKa_cardAction:hover{background:var(--dsw-alias-interactive-bg-hover)}._7D6uKa_cardAction:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}._7D6uKa_cardGroup{flex-direction:column;gap:6px;display:flex}._7D6uKa_cardGroupHeader{min-height:var(--dsh-tb-card-row);color:var(--dsw-alias-label-tertiary);align-items:center;gap:6px;padding:4px 0 0;font-size:12px;font-weight:600;display:flex}._7D6uKa_cardGroupCount{font-weight:400}._7D6uKa_cardGroupHeader ._7D6uKa_linkButton{margin-left:auto;font-size:12px}._7D6uKa_densityToggle{width:var(--dsh-tb-card-row);height:var(--dsh-tb-card-row);color:var(--dsw-alias-label-tertiary);cursor:pointer;background:0 0;border:0;border-radius:6px;flex:none;justify-content:center;align-items:center;padding:0;display:inline-flex;position:relative}._7D6uKa_densityToggle:after{content:\"\";width:var(--dsh-tb-hit-size);height:var(--dsh-tb-hit-size);position:absolute;top:50%;left:50%;transform:translate(-50%,-50%)}._7D6uKa_densityToggle:hover,._7D6uKa_densityToggle[data-active=true]{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}._7D6uKa_densityToggle:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}._7D6uKa_cardStatus{min-height:var(--dsh-tb-card-row);font-size:12px;line-height:var(--dsh-tb-card-row);color:var(--dsw-alias-label-tertiary);align-items:center;gap:8px;display:flex}._7D6uKa_cardStatusText{flex:0 auto;align-items:center;gap:8px;min-width:0;display:flex}._7D6uKa_cardStatusTrail{flex:none;align-items:center;gap:8px;display:flex}._7D6uKa_cardRuns{font-variant-numeric:tabular-nums;white-space:nowrap}._7D6uKa_cardRunningLabel{text-overflow:ellipsis;white-space:nowrap;min-width:0;color:var(--dsw-alias-state-warn-primary);flex:0 auto;font-size:12px;overflow:hidden}._7D6uKa_cardSpinnerSlot{width:var(--dsh-tb-card-row);height:var(--dsh-tb-card-row);flex:none;justify-content:center;align-items:center;display:inline-flex}._7D6uKa_cardSpinner{border:2px solid var(--dsw-alias-state-warn-primary);border-top-color:#0000;border-radius:50%;flex:none;width:12px;height:12px;animation:.8s linear infinite _7D6uKa_dshTbSpin}@keyframes _7D6uKa_dshTbSpin{to{transform:rotate(360deg)}}._7D6uKa_primaryButton,._7D6uKa_ghostButton,._7D6uKa_dangerButton,._7D6uKa_iconButton{box-sizing:border-box;height:var(--dsh-tb-control-h);border-radius:var(--dsh-tb-control-radius);cursor:pointer;white-space:nowrap;justify-content:center;align-items:center;gap:6px;font-family:inherit;display:inline-flex}._7D6uKa_primaryButton,._7D6uKa_dangerButton{padding:0 14px;font-size:13px;font-weight:600}._7D6uKa_primaryButton{color:var(--dsw-alias-label-primary-foreground);background:var(--dsw-alias-button-primary-fill);border:1px solid #0000}._7D6uKa_dangerButton{color:var(--dsw-alias-label-primary-foreground);background:var(--dsw-alias-state-error-primary);border:1px solid #0000}._7D6uKa_ghostButton{color:var(--dsw-alias-label-primary);border:1px solid var(--dsw-alias-border-l2);background:0 0;padding:0 12px;font-size:13px}._7D6uKa_ghostButton[data-active=true]{color:var(--dsw-alias-label-primary-foreground);background:var(--dsw-alias-button-primary-fill);border-color:#0000}._7D6uKa_primaryButton:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover)}._7D6uKa_ghostButton:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}._7D6uKa_ghostButton[data-active=true]:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover)}._7D6uKa_dangerButton:hover:not(:disabled){filter:brightness(1.08)}._7D6uKa_dangerButton:active:not(:disabled){filter:brightness(.94)}._7D6uKa_primaryButton:disabled,._7D6uKa_dangerButton:disabled{opacity:.5;cursor:default}._7D6uKa_ghostButton:disabled{opacity:.45;cursor:default}._7D6uKa_iconButton{width:var(--dsh-tb-icon-size);color:var(--dsw-alias-label-secondary);background:0 0;border:1px solid #0000;padding:0;position:relative}._7D6uKa_iconButton:after{content:\"\";width:var(--dsh-tb-hit-size);height:var(--dsh-tb-hit-size);position:absolute;top:50%;left:50%;transform:translate(-50%,-50%)}._7D6uKa_iconButton:disabled{opacity:.45;cursor:default}._7D6uKa_linkButton{color:var(--dsw-alias-state-business-primary);cursor:pointer;white-space:nowrap;background:0 0;border:none;padding:0;font-size:12px}._7D6uKa_linkButton:hover{text-decoration:underline}._7D6uKa_modalBackdrop{z-index:1300;background:var(--dsw-alias-bg-mask-1);animation:_7D6uKa_dshTbBackdropIn var(--dsh-tb-motion-enter) var(--dsh-tb-ease) both;justify-content:center;align-items:center;display:flex;position:fixed;inset:0}._7D6uKa_modalBackdrop[data-state=closing]{animation:_7D6uKa_dshTbBackdropOut var(--dsh-tb-motion-close) var(--dsh-tb-ease) both}._7D6uKa_modal,._7D6uKa_detail{animation:_7D6uKa_dshTbSurfaceIn var(--dsh-tb-motion-enter) var(--dsh-tb-ease) both}._7D6uKa_modalBackdrop[data-state=closing] ._7D6uKa_modal,._7D6uKa_modalBackdrop[data-state=closing] ._7D6uKa_detail{animation:_7D6uKa_dshTbSurfaceOut var(--dsh-tb-motion-close) var(--dsh-tb-ease) both}@keyframes _7D6uKa_dshTbBackdropIn{0%{opacity:0}to{opacity:1}}@keyframes _7D6uKa_dshTbBackdropOut{0%{opacity:1}to{opacity:0}}@keyframes _7D6uKa_dshTbSurfaceIn{0%{opacity:0;transform:translateY(8px)scale(.98)}to{opacity:1;transform:none}}@keyframes _7D6uKa_dshTbSurfaceOut{0%{opacity:1;transform:none}to{opacity:0;transform:translateY(8px)scale(.98)}}._7D6uKa_modal{background:var(--dsw-alias-bg-overlay,var(--dsw-alias-bg-layer-1));background:rgb(from var(--dsw-alias-bg-overlay,var(--dsw-alias-bg-layer-1)) r g b / 1);border:1px solid var(--dsw-alias-border-l2);width:min(520px,100vw - 48px);max-height:calc(100vh - 96px);box-shadow:var(--dsw-shadow-lv3);color:var(--dsw-alias-label-primary);border-radius:14px;flex-direction:column;gap:10px;padding:18px;display:flex;overflow:hidden}._7D6uKa_modalTitle{margin:0;font-size:16px;font-weight:700}._7D6uKa_confirmMessage{color:var(--dsw-alias-label-secondary);white-space:pre-wrap;overflow-wrap:anywhere;margin:0;font-size:13px;line-height:1.5}._7D6uKa_modalFooter{justify-content:flex-end;gap:10px;margin-top:4px;display:flex}._7D6uKa_modalHeader{align-items:center;gap:10px;display:flex}._7D6uKa_modalHeader>._7D6uKa_modalTitle{text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;overflow:hidden}._7D6uKa_tagManageList{flex-direction:column;gap:6px;margin:0;padding:0;list-style:none;display:flex}._7D6uKa_tagManageRow{border:1px solid var(--dsw-alias-border-l1);border-radius:var(--dsh-tb-control-radius);flex-wrap:wrap;align-items:center;gap:8px;padding:6px 8px;display:flex}._7D6uKa_tagManageName{text-overflow:ellipsis;white-space:nowrap;min-width:0;color:var(--dsw-alias-label-primary);flex:auto;font-size:13px;overflow:hidden}._7D6uKa_tagManageCount{color:var(--dsw-alias-label-tertiary);flex:none;font-size:12px}._7D6uKa_tagManageInput{flex:auto;min-width:0}._7D6uKa_tagManageMerge{color:var(--dsw-alias-label-tertiary);flex:1 0 100%;font-size:12px}._7D6uKa_tagCleanup{align-items:center;gap:var(--dsh-tb-control-gap);flex:none;display:flex}._7D6uKa_tagCleanup ._7D6uKa_ghostButton{flex:none}._7D6uKa_helpButton{box-sizing:border-box;width:var(--dsh-tb-control-h);height:var(--dsh-tb-control-h);border:1px solid var(--dsw-alias-border-l1);color:var(--dsw-alias-label-secondary);cursor:help;background:0 0;border-radius:50%;flex:none;justify-content:center;align-items:center;padding:0;font-family:inherit;font-size:12px;font-weight:600;line-height:1;display:inline-flex}._7D6uKa_helpButton:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}._7D6uKa_helpTipWrap{flex:none;display:inline-flex;position:relative}._7D6uKa_helpTip{z-index:4;box-sizing:border-box;background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);width:max-content;max-width:240px;box-shadow:var(--dsw-shadow-lv3);color:var(--dsw-alias-label-primary);text-align:left;white-space:pre-line;opacity:0;visibility:hidden;pointer-events:none;border-radius:10px;padding:10px 12px;font-size:12px;font-weight:400;line-height:1.5;transition:opacity .12s;position:absolute;top:calc(100% + 8px);left:0}._7D6uKa_helpTipWrap:hover ._7D6uKa_helpTip,._7D6uKa_helpTipWrap:focus-within ._7D6uKa_helpTip{opacity:1;visibility:visible}._7D6uKa_tagCleanupInput{flex:none;width:64px}._7D6uKa_tagCleanupNotice{color:var(--dsw-alias-label-secondary);margin:0;font-size:12px;line-height:1.4}._7D6uKa_modalBody{flex-direction:column;gap:8px;min-height:0;display:flex;overflow-y:auto}._7D6uKa_modalBody>*{flex:none}._7D6uKa_formSection{border:1px solid var(--dsw-alias-separator-primary);border-radius:10px;flex-direction:column;display:flex;overflow:visible}._7D6uKa_formSectionHeader{box-sizing:border-box;width:100%;min-height:28px;color:var(--dsw-alias-label-primary);text-align:left;cursor:pointer;background:0 0;border:0;border-radius:9px;align-items:center;gap:8px;padding:6px 10px;font-family:inherit;font-size:12px;font-weight:600;line-height:16px;display:flex;position:relative}._7D6uKa_formSectionHeader:hover{background:var(--dsw-alias-bg-mask-1)}._7D6uKa_formSection[data-open=true] ._7D6uKa_formSectionHeader{border-radius:9px 9px 0 0}._7D6uKa_formSectionHeader:after{content:\"\";width:var(--dsh-tb-hit-size);height:var(--dsh-tb-hit-size);position:absolute;top:50%;left:50%;transform:translate(-50%,-50%)}._7D6uKa_formSectionChevron{border-top:4px solid #0000;border-bottom:4px solid #0000;border-left:5px solid var(--dsw-alias-label-tertiary);flex:none;width:0;height:0;margin-left:1px;transition:transform .12s}._7D6uKa_formSection[data-open=true] ._7D6uKa_formSectionChevron{transform:rotate(90deg)}._7D6uKa_formSectionTitle{text-overflow:ellipsis;white-space:nowrap;flex:0 auto;min-width:0;overflow:hidden}._7D6uKa_formSectionSummary{min-width:0;color:var(--dsw-alias-label-tertiary);text-align:right;text-overflow:ellipsis;white-space:nowrap;flex:0 auto;margin-left:auto;font-weight:400;overflow:hidden}._7D6uKa_formSectionBody{border-top:1px solid var(--dsw-alias-separator-primary);flex-direction:column;gap:8px;padding:8px 10px 10px;display:flex}._7D6uKa_field{flex-direction:column;gap:5px;display:flex}._7D6uKa_fieldLabel{color:var(--dsw-alias-label-secondary);font-size:12px;font-weight:600}._7D6uKa_input{box-sizing:border-box;min-height:var(--dsh-tb-control-h);color:var(--dsw-alias-label-primary);background:var(--dsw-specific-input-major);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsh-tb-control-radius);resize:vertical;outline:none;padding:6px 10px;font-family:inherit;font-size:13px}._7D6uKa_input:focus{border-color:var(--dsw-alias-state-business-primary)}._7D6uKa_select{box-sizing:border-box;height:var(--dsh-tb-control-h);color:var(--dsw-alias-label-primary);background:var(--dsw-specific-input-major);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsh-tb-control-radius);outline:none;max-width:100%;padding:0 10px;font-family:inherit;font-size:13px}._7D6uKa_input::placeholder{color:var(--dsw-alias-label-tertiary)}._7D6uKa_formError{color:var(--dsw-alias-state-error-primary);margin:0;font-size:12px}._7D6uKa_detail{background:var(--dsw-alias-bg-overlay,var(--dsw-alias-bg-layer-1));background:rgb(from var(--dsw-alias-bg-overlay,var(--dsw-alias-bg-layer-1)) r g b / 1);border:1px solid var(--dsw-alias-border-l2);width:min(960px,100vw - 48px);max-height:calc(100vh - 80px);box-shadow:var(--dsw-shadow-lv3);color:var(--dsw-alias-label-primary);border-radius:14px;flex-direction:column;display:flex;overflow:hidden}._7D6uKa_detailHeader{z-index:1;border-bottom:1px solid var(--dsw-alias-separator-primary);flex:none;align-items:center;gap:8px;padding:16px 24px;display:flex;position:relative}._7D6uKa_detailTitle{overflow-wrap:anywhere;flex:1;min-width:0;margin:0;font-size:15px;font-weight:700;line-height:1.4}._7D6uKa_statusBadge{border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);border-radius:999px;flex:none;padding:2px 10px;font-size:12px}._7D6uKa_statusBadge[data-status=running]{color:var(--dsw-alias-state-warn-primary);border-color:var(--dsw-alias-state-warn-primary)}._7D6uKa_statusBadge[data-status=done]{color:var(--dsw-alias-state-success-primary);border-color:var(--dsw-alias-state-success-primary)}._7D6uKa_statusBadge[data-status=failed]{color:var(--dsw-alias-state-error-primary);border-color:var(--dsw-alias-state-error-primary)}._7D6uKa_detailBody{flex-direction:column;flex:1;gap:16px;min-height:0;padding:16px 24px 24px;display:flex;overflow-y:auto}._7D6uKa_detailColumns{grid-template-columns:minmax(0,1fr);align-items:start;gap:24px;display:grid}._7D6uKa_detailColumn{flex-direction:column;gap:16px;min-width:0;display:flex}._7D6uKa_detailFolds{flex-direction:column;gap:8px;min-width:0;display:flex}@media (width>=1024px){._7D6uKa_detailColumns{grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr)}}._7D6uKa_detailSection{flex-direction:column;gap:8px;min-width:0;display:flex}._7D6uKa_detailSection h4{color:var(--dsw-alias-label-secondary);margin:0;font-size:12px;font-weight:700}._7D6uKa_detailText{color:var(--dsw-alias-label-primary);white-space:pre-wrap;overflow-wrap:anywhere;margin:0;font-size:13px;line-height:1.55}._7D6uKa_detailBody ._7D6uKa_scheduleInput,._7D6uKa_detailBody ._7D6uKa_schedulePreset,._7D6uKa_detailBody ._7D6uKa_promptBlock{font-size:13px}._7D6uKa_detailBody ._7D6uKa_scheduleZone,._7D6uKa_detailBody ._7D6uKa_scheduleMeta,._7D6uKa_detailBody ._7D6uKa_cardTag{font-size:12px}._7D6uKa_scheduleToggle{color:var(--dsw-alias-label-primary);cursor:pointer;user-select:none;align-items:center;gap:8px;font-size:13px;display:flex}._7D6uKa_scheduleToggle input{accent-color:var(--dsw-alias-state-business-primary)}._7D6uKa_scheduleRow{align-items:center;gap:8px;display:flex}._7D6uKa_scheduleInput{min-width:0;font-family:var(--dsw-font-markdown-code-block-small);flex:1}._7D6uKa_scheduleInputInvalid,._7D6uKa_scheduleInputInvalid:focus{border-color:var(--dsw-alias-state-error-primary)}._7D6uKa_schedulePreset{box-sizing:border-box;height:var(--dsh-tb-control-h);color:var(--dsw-alias-label-primary);background:var(--dsw-specific-input-major);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsh-tb-control-radius);outline:none;flex:none;padding:0 8px}._7D6uKa_scheduleZone{color:var(--dsw-alias-label-secondary);align-items:center;gap:8px;display:flex}._7D6uKa_scheduleZone select{flex:1;min-width:0}._7D6uKa_scheduleMeta{color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere;margin:0}._7D6uKa_promptBlock{line-height:1.5;font-family:var(--dsw-font-markdown-code-block-small);color:var(--dsw-alias-label-primary);background:var(--dsw-alias-markdown-code-block);border:1px solid var(--dsw-alias-border-l1);white-space:pre-wrap;overflow-wrap:anywhere;border-radius:8px;max-height:240px;margin:0;padding:10px 12px;overflow-y:auto}._7D6uKa_clampBody{position:relative}._7D6uKa_clampBody[data-clamped=true]{max-height:160px;overflow:hidden}._7D6uKa_clampBody[data-clamped=true]:after{content:\"\";pointer-events:none;background:linear-gradient(to bottom, transparent, var(--dsw-alias-bg-base));height:44px;position:absolute;bottom:0;left:0;right:0}._7D6uKa_clampToggle{align-self:flex-start}._7D6uKa_executionLog{flex-direction:column;gap:8px;min-width:0;display:flex}._7D6uKa_executionList{flex-direction:column;gap:8px;min-width:0;margin:0;padding:0;list-style:none;display:flex}._7D6uKa_executionExtra{flex-direction:column;gap:8px;min-width:0;display:flex}._7D6uKa_executionRow{border:1px solid var(--dsw-alias-border-l1);border-radius:8px;flex-direction:column;gap:8px;min-width:0;padding:10px 12px;display:flex}._7D6uKa_executionRowHead{flex-wrap:wrap;align-items:center;gap:8px;min-width:0;display:flex}._7D6uKa_executionRowEvidence{flex-direction:column;gap:6px;min-width:0;display:flex}._7D6uKa_executionBadge{color:var(--dsw-alias-state-warn-primary);background:var(--dsw-alias-state-warn-secondary);border-radius:999px;flex:none;padding:1px 8px;font-size:12px;font-weight:600;line-height:18px}._7D6uKa_executionBadge[data-result=succeeded]{color:var(--dsw-alias-state-success-primary);background:var(--dsw-alias-state-success-secondary)}._7D6uKa_executionBadge[data-result=failed]{color:var(--dsw-alias-state-error-primary);background:var(--dsw-alias-state-error-secondary)}._7D6uKa_executionBadge[data-result=cancelled]{color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-interactive-bg-hover)}._7D6uKa_executionTimes{color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere;font-size:12px;line-height:1.5}._7D6uKa_executionError{color:var(--dsw-alias-state-error-primary);overflow-wrap:anywhere;font-size:12px;line-height:1.5}._7D6uKa_executionSession{color:var(--dsw-alias-state-business-primary);cursor:pointer;white-space:nowrap;background:0 0;border:none;align-items:center;gap:4px;margin-left:auto;padding:0 2px;font-family:inherit;font-size:12px;display:inline-flex;position:relative}._7D6uKa_executionSession:after{content:\"\";width:100%;height:var(--dsh-tb-hit-size);position:absolute;top:50%;left:50%;transform:translate(-50%,-50%)}._7D6uKa_executionSession:hover{text-decoration:underline}._7D6uKa_executionDisclosure{align-self:flex-start;align-items:center;gap:6px;display:inline-flex}._7D6uKa_disclosureChevron{width:5px;height:5px;transition:transform .12s var(--dsh-tb-ease);border-bottom:1.5px solid;border-right:1.5px solid;flex:none;transform:rotate(45deg)}._7D6uKa_disclosureChevron[data-open=true]{transform:rotate(225deg)}._7D6uKa_verifyReport{flex-direction:column;gap:8px;min-width:0;display:flex}._7D6uKa_verifyBadge{max-width:100%;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-interactive-bg-hover);border:1px solid var(--dsw-alias-border-l2);cursor:pointer;border-radius:999px;align-self:flex-start;align-items:center;gap:6px;padding:2px 10px;font-family:inherit;font-size:12px;font-weight:600;line-height:18px;display:inline-flex;position:relative}._7D6uKa_verifyBadge:after{content:\"\";height:var(--dsh-tb-hit-size);position:absolute;top:50%;left:0;right:0;transform:translateY(-50%)}._7D6uKa_verifyBadge[data-tone=warn]{color:var(--dsw-alias-state-warn-primary);background:var(--dsw-alias-state-warn-secondary);border-color:#0000}._7D6uKa_verifyBadge[data-tone=success]{color:var(--dsw-alias-state-success-primary);background:var(--dsw-alias-state-success-secondary);border-color:#0000}._7D6uKa_verifyBadge[data-tone=error]{color:var(--dsw-alias-state-error-primary);background:var(--dsw-alias-state-error-secondary);border-color:#0000}._7D6uKa_verifyVerdict{overflow-wrap:anywhere;font-weight:700}._7D6uKa_verifyPanel{background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l1);border-radius:8px;flex-direction:column;gap:8px;min-width:0;padding:10px 12px;display:flex}._7D6uKa_attemptRow{background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l1);border-radius:8px;flex-direction:column;gap:6px;min-width:0;padding:8px 10px;display:flex}._7D6uKa_attemptHead{flex-wrap:wrap;align-items:center;gap:8px;min-width:0;display:flex}._7D6uKa_referenceList{flex-direction:column;gap:6px;min-width:0;margin:0;padding:0;list-style:none;display:flex}._7D6uKa_referenceRow{color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere;font-size:12px}._7D6uKa_menuRoot{flex:none;display:inline-flex;position:relative}._7D6uKa_menuChevron{width:5px;height:5px;transition:transform .12s var(--dsh-tb-ease);border-bottom:1.5px solid;border-right:1.5px solid;flex:none;margin-top:-3px;transform:rotate(45deg)}._7D6uKa_menuChevron[data-open=true]{margin-top:0;transform:rotate(225deg)}._7D6uKa_menuPanel{z-index:20;background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);min-width:180px;box-shadow:var(--dsw-shadow-lv2);border-radius:10px;flex-direction:column;padding:4px;display:flex;position:absolute;top:calc(100% + 4px);left:0}._7D6uKa_detailHeader ._7D6uKa_menuPanel{left:auto;right:0}._7D6uKa_menuItem{min-height:var(--dsh-tb-hit-size);color:var(--dsw-alias-label-primary);cursor:pointer;text-align:left;white-space:nowrap;background:0 0;border:none;border-radius:8px;align-items:center;padding:0 10px;font-family:inherit;font-size:13px;display:flex}._7D6uKa_menuItem:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}._7D6uKa_menuItem:disabled{opacity:.45;cursor:default}._7D6uKa_detailFooter{border-top:1px solid var(--dsw-alias-separator-primary);flex:none;align-items:center;gap:8px;padding:16px 24px;display:flex}._7D6uKa_detailMeta{color:var(--dsw-alias-label-tertiary);overflow-wrap:anywhere;font-size:12px}._7D6uKa_detailFooter>._7D6uKa_detailMeta{margin-left:0}._7D6uKa_detailStamp{text-align:end;margin-left:auto}._7D6uKa_executionExtra,._7D6uKa_verifyPanel,._7D6uKa_detailBody ._7D6uKa_formSectionBody{animation:_7D6uKa_dshTbRowsIn var(--dsh-tb-motion-enter) var(--dsh-tb-ease) both}._7D6uKa_executionExtra[data-execution-fold=closing],._7D6uKa_verifyPanel[data-state=closing],._7D6uKa_detailBody ._7D6uKa_formSectionBody[data-state=closing]{animation:_7D6uKa_dshTbRowsOut var(--dsh-tb-motion-close) var(--dsh-tb-ease) both}._7D6uKa_formSectionBody{animation:_7D6uKa_dshTbRowsIn var(--dsh-tb-motion-enter) var(--dsh-tb-ease) both}._7D6uKa_formSectionBody[data-state=closing]{animation:_7D6uKa_dshTbRowsOut var(--dsh-tb-motion-close) var(--dsh-tb-ease) both}@keyframes _7D6uKa_dshTbRowsIn{0%{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}@keyframes _7D6uKa_dshTbRowsOut{0%{opacity:1;transform:translateY(0)}to{opacity:0;transform:translateY(-6px)}}@keyframes _7D6uKa_dshTbFadeIn{0%{opacity:0}to{opacity:1}}@keyframes _7D6uKa_dshTbFadeOut{0%{opacity:1}to{opacity:0}}@media (prefers-reduced-motion:reduce){._7D6uKa_executionExtra,._7D6uKa_verifyPanel,._7D6uKa_detailBody ._7D6uKa_formSectionBody{animation:_7D6uKa_dshTbFadeIn var(--dsh-tb-motion-close) linear both}._7D6uKa_executionExtra[data-execution-fold=closing],._7D6uKa_verifyPanel[data-state=closing],._7D6uKa_detailBody ._7D6uKa_formSectionBody[data-state=closing]{animation:_7D6uKa_dshTbFadeOut var(--dsh-tb-motion-close) linear both}._7D6uKa_formSectionBody{animation:_7D6uKa_dshTbFadeIn var(--dsh-tb-motion-close) linear both}._7D6uKa_formSectionBody[data-state=closing]{animation:_7D6uKa_dshTbFadeOut var(--dsh-tb-motion-close) linear both}}._7D6uKa_detailBody ._7D6uKa_formSection{min-width:0;overflow:visible}._7D6uKa_detailBody ._7D6uKa_formSectionHeader{box-sizing:border-box;border-radius:9px;min-height:28px;padding:4px 10px;font-size:12px;line-height:16px;position:relative}._7D6uKa_detailBody ._7D6uKa_formSection[data-open=true] ._7D6uKa_formSectionHeader{border-radius:9px 9px 0 0}._7D6uKa_detailBody ._7D6uKa_formSectionHeader:after{content:\"\";width:var(--dsh-tb-hit-size);height:var(--dsh-tb-hit-size);position:absolute;top:50%;left:50%;transform:translate(-50%,-50%)}._7D6uKa_detailBody ._7D6uKa_formSectionTitle{text-overflow:ellipsis;white-space:nowrap;flex:0 auto;min-width:0;overflow:hidden}._7D6uKa_detailBody ._7D6uKa_formSectionSummary{flex:0 auto;min-width:0;margin-left:auto}._7D6uKa_detailBody ._7D6uKa_formSectionBody{gap:8px}@container _7D6uKa_task-board-view (width<=768px){._7D6uKa_board{gap:10px;padding:10px}._7D6uKa_boardHeader{flex-wrap:wrap;align-items:center;gap:8px}._7D6uKa_backButton{flex:none}._7D6uKa_boardTitle{flex:auto}._7D6uKa_boardHeader>._7D6uKa_detailMeta{flex:1 0 100%;margin-left:0}._7D6uKa_boardTools{flex-wrap:wrap;flex:1 0 100%;justify-content:flex-start;margin-left:0}._7D6uKa_boardTools>._7D6uKa_search{flex:1 0 100%;min-width:0}._7D6uKa_boardTools>._7D6uKa_projectFilter{flex:auto;min-width:0}._7D6uKa_boardTools>button{flex:1 1 0;min-width:0}._7D6uKa_columns{scroll-snap-type:inline mandatory;scrollbar-width:none;-webkit-overflow-scrolling:touch;grid-auto-columns:86cqw;gap:10px;padding-inline:2px 14cqw;scroll-padding-inline:2px}._7D6uKa_columns::-webkit-scrollbar{display:none}._7D6uKa_column{scroll-snap-align:start;scroll-snap-stop:always}}@container _7D6uKa_task-board-view (width<=720px){._7D6uKa_boardHeader>._7D6uKa_detailMeta{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}}@container _7D6uKa_task-board-view (width<=600px){._7D6uKa_board{padding-inline:8px}}@media (width<=768px){[data-dsh-taskboard-view]{height:100dvh}._7D6uKa_card,._7D6uKa_primaryButton,._7D6uKa_ghostButton,._7D6uKa_dangerButton,._7D6uKa_iconButton,._7D6uKa_linkButton,._7D6uKa_search,._7D6uKa_input,._7D6uKa_select,._7D6uKa_schedulePreset,._7D6uKa_scheduleToggle{min-height:44px}._7D6uKa_search,._7D6uKa_input,._7D6uKa_select,._7D6uKa_schedulePreset{box-sizing:border-box;font-size:16px}._7D6uKa_modalBackdrop{justify-content:stretch;align-items:stretch;width:100vw;height:100dvh}._7D6uKa_modal,._7D6uKa_detail{box-sizing:border-box;border:0;border-radius:0;width:100vw;height:100dvh;max-height:none}._7D6uKa_modal{padding-top:max(16px, env(safe-area-inset-top));padding-right:max(16px, env(safe-area-inset-right));padding-bottom:max(16px, env(safe-area-inset-bottom));padding-left:max(16px, env(safe-area-inset-left))}._7D6uKa_modalFooter{z-index:1;background:inherit;flex-wrap:wrap;padding-top:8px;position:sticky;bottom:0}._7D6uKa_modalFooter>button{flex:120px}._7D6uKa_detailHeader{padding-top:max(16px, env(safe-area-inset-top));padding-right:max(16px, env(safe-area-inset-right));padding-left:max(16px, env(safe-area-inset-left));flex-wrap:wrap}._7D6uKa_detailTitle{min-width:0}._7D6uKa_detailColumns{grid-template-columns:minmax(0,1fr);gap:16px}._7D6uKa_detailColumn{gap:16px}._7D6uKa_detailBody{overscroll-behavior-y:contain;padding-right:max(16px, env(safe-area-inset-right));padding-left:max(16px, env(safe-area-inset-left))}._7D6uKa_detailFooter{padding-right:max(16px, env(safe-area-inset-right));padding-bottom:max(16px, env(safe-area-inset-bottom));padding-left:max(16px, env(safe-area-inset-left));flex-wrap:wrap}._7D6uKa_menuPanel{min-width:200px}._7D6uKa_detailFooter>button{flex:96px}._7D6uKa_detailFooter>._7D6uKa_detailMeta{text-align:end;flex:1 0 100%;margin-left:0}._7D6uKa_scheduleRow{flex-direction:column;align-items:stretch}._7D6uKa_schedulePreset{width:100%}}._7D6uKa_primaryButton:focus-visible,._7D6uKa_ghostButton:focus-visible,._7D6uKa_dangerButton:focus-visible,._7D6uKa_iconButton:focus-visible,._7D6uKa_linkButton:focus-visible,._7D6uKa_menuItem:focus-visible,._7D6uKa_verifyBadge:focus-visible,._7D6uKa_executionSession:focus-visible,._7D6uKa_search:focus-visible,._7D6uKa_input:focus-visible,._7D6uKa_select:focus-visible,._7D6uKa_schedulePreset:focus-visible,._7D6uKa_scheduleToggle input:focus-visible,._7D6uKa_formSectionHeader:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}._7D6uKa_primaryButton,._7D6uKa_ghostButton,._7D6uKa_dangerButton,._7D6uKa_iconButton,._7D6uKa_linkButton,._7D6uKa_menuItem,._7D6uKa_verifyBadge,._7D6uKa_executionSession,._7D6uKa_search,._7D6uKa_input,._7D6uKa_select,._7D6uKa_schedulePreset,._7D6uKa_scheduleToggle input,._7D6uKa_formSectionHeader,._7D6uKa_formSectionChevron{transition:background-color .12s,color .12s,border-color .12s,outline-color .12s,box-shadow .12s,transform .12s}._7D6uKa_card:active{box-shadow:var(--dsw-shadow-lv1);transform:translateY(0)}._7D6uKa_primaryButton:active:not(:disabled),._7D6uKa_ghostButton:active:not(:disabled),._7D6uKa_dangerButton:active:not(:disabled),._7D6uKa_iconButton:active:not(:disabled),._7D6uKa_linkButton:active:not(:disabled){transform:translateY(1px)}._7D6uKa_iconButton:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}._7D6uKa_linkButton:hover:not(:disabled){text-decoration:underline}._7D6uKa_iconButton:disabled,._7D6uKa_linkButton:disabled{opacity:.45;cursor:default}._7D6uKa_search:focus,._7D6uKa_select:focus,._7D6uKa_schedulePreset:focus{border-color:var(--dsw-alias-state-business-primary)}._7D6uKa_scheduleToggle input{margin:0}@media (prefers-reduced-motion:reduce){._7D6uKa_card,._7D6uKa_primaryButton,._7D6uKa_ghostButton,._7D6uKa_dangerButton,._7D6uKa_iconButton,._7D6uKa_linkButton,._7D6uKa_menuItem,._7D6uKa_verifyBadge,._7D6uKa_executionSession,._7D6uKa_disclosureChevron,._7D6uKa_menuChevron,._7D6uKa_search,._7D6uKa_input,._7D6uKa_select,._7D6uKa_schedulePreset,._7D6uKa_scheduleToggle input,._7D6uKa_formSectionHeader,._7D6uKa_formSectionChevron{transition:none}._7D6uKa_cardSpinner{animation:none}._7D6uKa_modalBackdrop,._7D6uKa_modal,._7D6uKa_detail{animation:_7D6uKa_dshTbBackdropIn var(--dsh-tb-motion-close) linear both}._7D6uKa_modalBackdrop[data-state=closing],._7D6uKa_modalBackdrop[data-state=closing] ._7D6uKa_modal,._7D6uKa_modalBackdrop[data-state=closing] ._7D6uKa_detail{animation:_7D6uKa_dshTbBackdropOut var(--dsh-tb-motion-close) linear both}}._7D6uKa_cardTags{flex-wrap:wrap;gap:4px;display:flex}._7D6uKa_cardTags:empty{display:none}._7D6uKa_cardTag{border:1px solid var(--dsh-task-tag-border);background:var(--dsh-task-tag-fill);max-width:100%;color:var(--dsw-alias-label-primary);text-overflow:ellipsis;white-space:nowrap;border-radius:999px;padding:0 8px;font-size:12px;line-height:1.5;overflow:hidden}._7D6uKa_tagFilter{flex-wrap:wrap;flex:none;align-items:center;gap:8px;margin:0;display:flex}._7D6uKa_tagFilterLabel{color:var(--dsw-alias-label-tertiary);font-size:12px}._7D6uKa_tagChip{border:1px solid var(--dsh-task-tag-border);color:var(--dsw-alias-label-secondary);cursor:pointer;font-family:inherit;font-size:12px;line-height:var(--dsh-tb-card-row);background:0 0;border-radius:999px;padding:1px 9px;position:relative}._7D6uKa_tagChip:after{content:\"\";width:var(--dsh-tb-hit-size);height:var(--dsh-tb-hit-size);position:absolute;top:50%;left:50%;transform:translate(-50%,-50%)}._7D6uKa_tagChip:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}._7D6uKa_tagChip[data-active=true]{background:var(--dsh-task-tag-fill);color:var(--dsw-alias-label-primary)}._7D6uKa_cardTag[data-tag-tone=\"0\"],._7D6uKa_tagChip[data-tag-tone=\"0\"]{--dsh-task-tag-fill:#4e93e82e;--dsh-task-tag-border:#4e93e866}._7D6uKa_cardTag[data-tag-tone=\"1\"],._7D6uKa_tagChip[data-tag-tone=\"1\"]{--dsh-task-tag-fill:#2ea36a2e;--dsh-task-tag-border:#2ea36a66}._7D6uKa_cardTag[data-tag-tone=\"2\"],._7D6uKa_tagChip[data-tag-tone=\"2\"]{--dsh-task-tag-fill:#d08a2a2e;--dsh-task-tag-border:#d08a2a66}._7D6uKa_cardTag[data-tag-tone=\"3\"],._7D6uKa_tagChip[data-tag-tone=\"3\"]{--dsh-task-tag-fill:#b456c82e;--dsh-task-tag-border:#b456c866}._7D6uKa_cardTag[data-tag-tone=\"4\"],._7D6uKa_tagChip[data-tag-tone=\"4\"]{--dsh-task-tag-fill:#cf5f7a2e;--dsh-task-tag-border:#cf5f7a66}._7D6uKa_cardTag[data-tag-tone=\"5\"],._7D6uKa_tagChip[data-tag-tone=\"5\"]{--dsh-task-tag-fill:#4a9fb52e;--dsh-task-tag-border:#4a9fb566}._7D6uKa_fieldHint{color:var(--dsw-alias-label-tertiary);margin:0;font-size:12px;line-height:1.4}._7D6uKa_tagRow{align-items:center;gap:6px;display:flex}._7D6uKa_tagRow ._7D6uKa_input{flex:1 1 0;min-width:0}._7D6uKa_tagRow ._7D6uKa_ghostButton{flex:none}._7D6uKa_tagAddButton{align-self:flex-start}._7D6uKa_projectFilter{flex:none;align-items:center;gap:6px;display:flex}._7D6uKa_projectFilterLabel{color:var(--dsw-alias-label-secondary);white-space:nowrap;font-size:12px}._7D6uKa_projectDialog{background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:10px;flex-direction:column;flex:none;gap:8px;margin-bottom:8px;padding:10px 12px;display:flex}._7D6uKa_projectDialogActions{justify-content:flex-end;gap:8px;display:flex}._7D6uKa_aiParse{background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:10px;flex-direction:column;gap:6px;padding:10px 12px;display:flex}._7D6uKa_aiParseRow{align-items:center;gap:8px;display:flex}._7D6uKa_aiParseRow ._7D6uKa_select{flex:1 1 0;min-width:0}._7D6uKa_aiParseRow ._7D6uKa_ghostButton,._7D6uKa_aiParseRow ._7D6uKa_primaryButton{flex:none}._7D6uKa_cardSubtask{background:var(--dsw-alias-interactive-bg-hover);max-width:100%;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:var(--dsh-tb-card-row);text-overflow:ellipsis;white-space:nowrap;border-radius:999px;padding:0 8px;overflow:hidden}._7D6uKa_cardSubtask[data-tone=failed]{color:var(--dsw-alias-state-error-primary);background:var(--dsw-alias-state-error-secondary)}._7D6uKa_cardSubtask[data-tone=running]{color:var(--dsw-alias-state-warn-primary);background:var(--dsw-alias-state-warn-secondary)}._7D6uKa_cardSubtask[data-tone=done]{color:var(--dsw-alias-state-success-primary);background:var(--dsw-alias-state-success-secondary)}._7D6uKa_subtaskList{flex-direction:column;gap:6px;margin:0;padding:0;list-style:none;display:flex}._7D6uKa_subtaskRow{border:1px solid var(--dsw-alias-border-l1);border-radius:8px;flex-wrap:wrap;align-items:center;gap:10px;padding:6px 10px;display:flex}._7D6uKa_subtaskRow ._7D6uKa_linkButton:first-child{text-align:left;overflow-wrap:anywhere;flex:auto;min-width:0}._7D6uKa_subtaskAddRow{flex-wrap:wrap;gap:8px;display:flex}._7D6uKa_pickList{flex-direction:column;gap:6px;max-height:320px;margin:0;padding:0;list-style:none;display:flex;overflow-y:auto}._7D6uKa_pickRow{border:1px solid var(--dsw-alias-border-l1);border-radius:8px;align-items:center;gap:10px;padding:6px 10px;display:flex}._7D6uKa_pickTitle{min-width:0;color:var(--dsw-alias-label-primary);overflow-wrap:anywhere;flex:auto;font-size:13px}";
+		const css$3 = "[data-dsh-taskboard-view]{box-sizing:border-box;background:var(--dsw-alias-bg-base);flex-direction:column;width:100%;min-width:0;height:100%;min-height:0;display:flex;container:_7D6uKa_task-board-view/inline-size}._7D6uKa_board{--dsh-tb-control-h:30px;--dsh-tb-control-radius:8px;--dsh-tb-control-gap:8px;--dsh-tb-icon-size:30px;--dsh-tb-hit-size:44px;--dsh-tb-motion-enter:.16s;--dsh-tb-motion-close:.14s;--dsh-tb-ease:cubic-bezier(.2, 0, 0, 1);--dsh-tb-rail:12px;--dsh-tb-card-stripe:3px;--dsh-tb-card-inset:8px;--dsh-tb-card-row:18px;--dsh-tb-card-gap:6px;box-sizing:border-box;background:var(--dsw-alias-bg-base);min-width:0;height:100%;min-height:0;color:var(--dsw-alias-label-primary);font-family:var(--dsw-font-family);flex-direction:column;gap:12px;padding:14px 16px 16px;display:flex}._7D6uKa_boardHeader{flex:none;align-items:center;gap:10px;display:flex}._7D6uKa_boardTools{align-items:center;gap:var(--dsh-tb-control-gap);flex:auto;justify-content:flex-end;min-width:0;margin-left:auto;display:flex}._7D6uKa_boardTitle{color:var(--dsw-alias-label-primary);white-space:nowrap;margin:0;font-size:15px;font-weight:700}._7D6uKa_backButton{align-items:center;gap:4px;display:inline-flex}._7D6uKa_search{box-sizing:border-box;min-width:120px;height:var(--dsh-tb-control-h);color:var(--dsw-alias-label-primary);background:var(--dsw-specific-input-major);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsh-tb-control-radius);outline:none;flex:0 260px;padding:0 10px;font-size:13px}._7D6uKa_search::placeholder{color:var(--dsw-alias-label-tertiary)}._7D6uKa_columns{overscroll-behavior-inline:contain;scrollbar-color:var(--dsw-alias-border-l3) var(--dsw-alias-interactive-bg-hover);scrollbar-width:thin;flex:1;grid-auto-columns:minmax(220px,1fr);grid-auto-flow:column;gap:12px;min-height:0;padding-bottom:6px;display:grid;overflow:auto hidden}._7D6uKa_columns::-webkit-scrollbar{height:10px}._7D6uKa_columns::-webkit-scrollbar-track{background:var(--dsw-alias-interactive-bg-hover);border-radius:999px}._7D6uKa_columns::-webkit-scrollbar-thumb{background:var(--dsw-alias-border-l3);background-clip:content-box;border:2px solid #0000;border-radius:999px}._7D6uKa_columns::-webkit-scrollbar-thumb:hover{background:var(--dsw-alias-border-l4);background-clip:content-box}._7D6uKa_column{background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l1);border-radius:12px;flex-direction:column;min-height:0;display:flex;overflow:hidden}._7D6uKa_columnHeader{padding:8px var(--dsh-tb-rail);min-height:calc(var(--dsh-tb-card-row) + 18px);flex:none;align-items:center;gap:8px;display:flex}._7D6uKa_columnTitle{color:var(--dsw-alias-label-primary);text-overflow:ellipsis;white-space:nowrap;flex:1;margin:0;font-size:13px;font-weight:700;overflow:hidden}._7D6uKa_columnCount{min-width:0;font-size:12px;line-height:var(--dsh-tb-card-row);color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-interactive-bg-hover);border-radius:999px;flex:none;padding:0 8px}._7D6uKa_statusDot{border-radius:50%;flex:none;width:8px;height:8px}._7D6uKa_statusDot[data-status=backlog]{background:var(--dsw-alias-label-tertiary)}._7D6uKa_statusDot[data-status=todo]{background:var(--dsw-alias-state-business-primary)}._7D6uKa_statusDot[data-status=running]{background:var(--dsw-alias-state-warn-primary)}._7D6uKa_statusDot[data-status=done]{background:var(--dsw-alias-state-success-primary)}._7D6uKa_statusDot[data-status=failed]{background:var(--dsw-alias-state-error-primary)}._7D6uKa_cards{padding:2px var(--dsh-tb-rail) 10px;flex-direction:column;flex:1;gap:8px;min-height:0;display:flex;overflow-y:auto}._7D6uKa_columnEmpty{text-align:center;color:var(--dsw-alias-label-tertiary);padding:24px 0;font-size:12px}._7D6uKa_card{grid-template-columns:var(--dsh-tb-card-stripe) minmax(0, 1fr);column-gap:var(--dsh-tb-card-inset);row-gap:var(--dsh-tb-card-gap);padding:10px calc(var(--dsh-tb-card-stripe) + var(--dsh-tb-card-inset)) 10px 0;text-align:left;background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);cursor:pointer;color:var(--dsw-alias-label-primary);border-radius:10px;flex:none;align-content:start;font-family:inherit;transition:box-shadow .12s,border-color .12s,transform .12s;display:grid;position:relative;overflow:hidden}._7D6uKa_card>:not(._7D6uKa_cardOpen){z-index:1;grid-column:2;min-width:0;position:relative}._7D6uKa_card:before{content:\"\";width:var(--dsh-tb-card-stripe);pointer-events:none;background:0 0;position:absolute;top:0;bottom:0;left:0}._7D6uKa_card[data-tone=running]:before{background:var(--dsw-alias-state-warn-primary)}._7D6uKa_card[data-tone=succeeded]:before{background:var(--dsw-alias-state-success-primary)}._7D6uKa_card[data-tone=failed]:before{background:var(--dsw-alias-state-error-primary)}._7D6uKa_card[data-tone=cancelled]:before{background:var(--dsw-alias-label-tertiary)}._7D6uKa_card:hover{box-shadow:var(--dsw-shadow-lv2);border-color:var(--dsw-alias-border-l3);transform:translateY(-1px)}._7D6uKa_card[data-compact]:hover{box-shadow:none;transform:none}._7D6uKa_card[data-status=running]{border-color:var(--dsw-alias-state-warn-primary)}._7D6uKa_cardOpen{z-index:0;border-radius:inherit;cursor:pointer;background:0 0;border:0;margin:0;padding:0;position:absolute;inset:0}._7D6uKa_cardOpen:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:-2px}._7D6uKa_cardTitleRow{align-items:flex-start;gap:6px;min-width:0;display:flex}._7D6uKa_cardKind{font-size:12px;font-weight:600;line-height:var(--dsh-tb-card-row);white-space:nowrap;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-interactive-bg-hover);border-radius:999px;flex:none;padding:0 8px}._7D6uKa_cardTitle{-webkit-line-clamp:2;-webkit-box-orient:vertical;min-width:0;font-size:13px;font-weight:600;line-height:1.4;display:-webkit-box;overflow:hidden}._7D6uKa_card[data-compact]{row-gap:2px;padding-top:6px;padding-bottom:6px}._7D6uKa_card[data-compact] ._7D6uKa_cardTitle{-webkit-line-clamp:1;font-size:12px;font-weight:500}._7D6uKa_cardDecoration{flex:none;align-items:center;gap:4px;display:inline-flex}._7D6uKa_cardDecoration:empty{display:none}._7D6uKa_cardExcerpt{color:var(--dsw-alias-label-secondary);-webkit-line-clamp:2;-webkit-box-orient:vertical;font-size:12px;line-height:1.4;display:-webkit-box;overflow:hidden}._7D6uKa_cardMeta{min-height:var(--dsh-tb-card-row);font-size:12px;line-height:var(--dsh-tb-card-row);color:var(--dsw-alias-label-tertiary);flex-wrap:wrap;align-items:center;gap:4px 8px;display:flex}._7D6uKa_cardTime{text-overflow:ellipsis;white-space:nowrap;font-variant-numeric:tabular-nums;flex:auto;min-width:max-content;overflow:hidden}._7D6uKa_cardSchedule{min-width:0;height:var(--dsh-tb-card-row);white-space:nowrap;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-interactive-bg-hover);border-radius:999px;flex:none;align-items:center;gap:4px;padding:0 8px;font-size:12px;line-height:1;display:inline-flex}._7D6uKa_cardRun{height:var(--dsh-tb-card-row);font-size:12px;line-height:var(--dsh-tb-card-row);color:var(--dsw-alias-label-tertiary);flex:none;align-items:center;gap:6px;display:inline-flex}._7D6uKa_cardRun[data-declared]{text-underline-offset:2px;text-decoration:underline dotted}._7D6uKa_cardResult{font-size:12px;font-weight:600;line-height:var(--dsh-tb-card-row);color:var(--dsw-alias-state-warn-primary);background:var(--dsw-alias-state-warn-secondary);border-radius:999px;flex:none;padding:0 8px}._7D6uKa_cardResult[data-result=succeeded]{color:var(--dsw-alias-state-success-primary);background:var(--dsw-alias-state-success-secondary)}._7D6uKa_cardResult[data-result=failed]{color:var(--dsw-alias-state-error-primary);background:var(--dsw-alias-state-error-secondary)}._7D6uKa_cardResult[data-result=cancelled]{color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-interactive-bg-hover)}._7D6uKa_cardSession{width:var(--dsh-tb-card-row);height:var(--dsh-tb-card-row);color:var(--dsw-alias-state-business-primary);flex:none;justify-content:center;align-items:center;display:inline-flex}._7D6uKa_cardAction{cursor:pointer;background:0 0;border:0;border-radius:6px;padding:0;font-family:inherit;position:relative}._7D6uKa_cardAction:after{content:\"\";width:var(--dsh-tb-hit-size);height:var(--dsh-tb-hit-size);position:absolute;top:50%;left:50%;transform:translate(-50%,-50%)}._7D6uKa_cardAction:hover{background:var(--dsw-alias-interactive-bg-hover)}._7D6uKa_cardAction:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}._7D6uKa_cardGroup{flex-direction:column;gap:6px;display:flex}._7D6uKa_cardGroupHeader{min-height:var(--dsh-tb-card-row);color:var(--dsw-alias-label-tertiary);align-items:center;gap:6px;padding:4px 0 0;font-size:12px;font-weight:600;display:flex}._7D6uKa_cardGroupCount{font-weight:400}._7D6uKa_cardGroupHeader ._7D6uKa_linkButton{margin-left:auto;font-size:12px}._7D6uKa_sourceGroup{gap:8px}._7D6uKa_sourceGroupHeader{color:var(--dsw-alias-label-secondary)}._7D6uKa_sourceGroupLabel{overflow-wrap:anywhere;flex:auto;min-width:0}._7D6uKa_densityToggle{width:var(--dsh-tb-card-row);height:var(--dsh-tb-card-row);color:var(--dsw-alias-label-tertiary);cursor:pointer;background:0 0;border:0;border-radius:6px;flex:none;justify-content:center;align-items:center;padding:0;display:inline-flex;position:relative}._7D6uKa_densityToggle:after{content:\"\";width:var(--dsh-tb-hit-size);height:var(--dsh-tb-hit-size);position:absolute;top:50%;left:50%;transform:translate(-50%,-50%)}._7D6uKa_densityToggle:hover,._7D6uKa_densityToggle[data-active=true]{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}._7D6uKa_densityToggle:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}._7D6uKa_cardStatus{min-height:var(--dsh-tb-card-row);font-size:12px;line-height:var(--dsh-tb-card-row);color:var(--dsw-alias-label-tertiary);align-items:center;gap:8px;display:flex}._7D6uKa_cardStatusText{flex:0 auto;align-items:center;gap:8px;min-width:0;display:flex}._7D6uKa_cardStatusTrail{flex:none;align-items:center;gap:8px;display:flex}._7D6uKa_cardRuns{font-variant-numeric:tabular-nums;white-space:nowrap}._7D6uKa_cardRunningLabel{text-overflow:ellipsis;white-space:nowrap;min-width:0;color:var(--dsw-alias-state-warn-primary);flex:0 auto;font-size:12px;overflow:hidden}._7D6uKa_cardSpinnerSlot{width:var(--dsh-tb-card-row);height:var(--dsh-tb-card-row);flex:none;justify-content:center;align-items:center;display:inline-flex}._7D6uKa_cardSpinner{border:2px solid var(--dsw-alias-state-warn-primary);border-top-color:#0000;border-radius:50%;flex:none;width:12px;height:12px;animation:.8s linear infinite _7D6uKa_dshTbSpin}@keyframes _7D6uKa_dshTbSpin{to{transform:rotate(360deg)}}._7D6uKa_primaryButton,._7D6uKa_ghostButton,._7D6uKa_dangerButton,._7D6uKa_iconButton{box-sizing:border-box;height:var(--dsh-tb-control-h);border-radius:var(--dsh-tb-control-radius);cursor:pointer;white-space:nowrap;justify-content:center;align-items:center;gap:6px;font-family:inherit;display:inline-flex}._7D6uKa_primaryButton,._7D6uKa_dangerButton{padding:0 14px;font-size:13px;font-weight:600}._7D6uKa_primaryButton{color:var(--dsw-alias-label-primary-foreground);background:var(--dsw-alias-button-primary-fill);border:1px solid #0000}._7D6uKa_dangerButton{color:var(--dsw-alias-label-primary-foreground);background:var(--dsw-alias-state-error-primary);border:1px solid #0000}._7D6uKa_ghostButton{color:var(--dsw-alias-label-primary);border:1px solid var(--dsw-alias-border-l2);background:0 0;padding:0 12px;font-size:13px}._7D6uKa_ghostButton[data-active=true]{color:var(--dsw-alias-label-primary-foreground);background:var(--dsw-alias-button-primary-fill);border-color:#0000}._7D6uKa_primaryButton:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover)}._7D6uKa_ghostButton:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}._7D6uKa_ghostButton[data-active=true]:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover)}._7D6uKa_dangerButton:hover:not(:disabled){filter:brightness(1.08)}._7D6uKa_dangerButton:active:not(:disabled){filter:brightness(.94)}._7D6uKa_primaryButton:disabled,._7D6uKa_dangerButton:disabled{opacity:.5;cursor:default}._7D6uKa_ghostButton:disabled{opacity:.45;cursor:default}._7D6uKa_iconButton{width:var(--dsh-tb-icon-size);color:var(--dsw-alias-label-secondary);background:0 0;border:1px solid #0000;padding:0;position:relative}._7D6uKa_iconButton:after{content:\"\";width:var(--dsh-tb-hit-size);height:var(--dsh-tb-hit-size);position:absolute;top:50%;left:50%;transform:translate(-50%,-50%)}._7D6uKa_iconButton:disabled{opacity:.45;cursor:default}._7D6uKa_linkButton{color:var(--dsw-alias-state-business-primary);cursor:pointer;white-space:nowrap;background:0 0;border:none;padding:0;font-size:12px}._7D6uKa_linkButton:hover{text-decoration:underline}._7D6uKa_modalBackdrop{z-index:1300;background:var(--dsw-alias-bg-mask-1);animation:_7D6uKa_dshTbBackdropIn var(--dsh-tb-motion-enter) var(--dsh-tb-ease) both;justify-content:center;align-items:center;display:flex;position:fixed;inset:0}._7D6uKa_modalBackdrop[data-state=closing]{animation:_7D6uKa_dshTbBackdropOut var(--dsh-tb-motion-close) var(--dsh-tb-ease) both}._7D6uKa_modal,._7D6uKa_detail{animation:_7D6uKa_dshTbSurfaceIn var(--dsh-tb-motion-enter) var(--dsh-tb-ease) both}._7D6uKa_modalBackdrop[data-state=closing] ._7D6uKa_modal,._7D6uKa_modalBackdrop[data-state=closing] ._7D6uKa_detail{animation:_7D6uKa_dshTbSurfaceOut var(--dsh-tb-motion-close) var(--dsh-tb-ease) both}@keyframes _7D6uKa_dshTbBackdropIn{0%{opacity:0}to{opacity:1}}@keyframes _7D6uKa_dshTbBackdropOut{0%{opacity:1}to{opacity:0}}@keyframes _7D6uKa_dshTbSurfaceIn{0%{opacity:0;transform:translateY(8px)scale(.98)}to{opacity:1;transform:none}}@keyframes _7D6uKa_dshTbSurfaceOut{0%{opacity:1;transform:none}to{opacity:0;transform:translateY(8px)scale(.98)}}._7D6uKa_modal{background:var(--dsw-alias-bg-overlay,var(--dsw-alias-bg-layer-1));background:rgb(from var(--dsw-alias-bg-overlay,var(--dsw-alias-bg-layer-1)) r g b / 1);border:1px solid var(--dsw-alias-border-l2);width:min(520px,100vw - 48px);max-height:calc(100vh - 96px);box-shadow:var(--dsw-shadow-lv3);color:var(--dsw-alias-label-primary);border-radius:14px;flex-direction:column;gap:10px;padding:18px;display:flex;overflow:hidden}._7D6uKa_modalTitle{margin:0;font-size:16px;font-weight:700}._7D6uKa_confirmMessage{color:var(--dsw-alias-label-secondary);white-space:pre-wrap;overflow-wrap:anywhere;margin:0;font-size:13px;line-height:1.5}._7D6uKa_modalFooter{justify-content:flex-end;gap:10px;margin-top:4px;display:flex}._7D6uKa_modalHeader{align-items:center;gap:10px;display:flex}._7D6uKa_modalHeader>._7D6uKa_modalTitle{text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;overflow:hidden}._7D6uKa_tagManageList{flex-direction:column;gap:6px;margin:0;padding:0;list-style:none;display:flex}._7D6uKa_tagManageRow{border:1px solid var(--dsw-alias-border-l1);border-radius:var(--dsh-tb-control-radius);flex-wrap:wrap;align-items:center;gap:8px;padding:6px 8px;display:flex}._7D6uKa_tagManageName{text-overflow:ellipsis;white-space:nowrap;min-width:0;color:var(--dsw-alias-label-primary);flex:auto;font-size:13px;overflow:hidden}._7D6uKa_tagManageCount{color:var(--dsw-alias-label-tertiary);flex:none;font-size:12px}._7D6uKa_tagManageInput{flex:auto;min-width:0}._7D6uKa_tagManageMerge{color:var(--dsw-alias-label-tertiary);flex:1 0 100%;font-size:12px}._7D6uKa_tagCleanup{align-items:center;gap:var(--dsh-tb-control-gap);flex:none;display:flex}._7D6uKa_tagCleanup ._7D6uKa_ghostButton{flex:none}._7D6uKa_helpButton{box-sizing:border-box;width:var(--dsh-tb-control-h);height:var(--dsh-tb-control-h);border:1px solid var(--dsw-alias-border-l1);color:var(--dsw-alias-label-secondary);cursor:help;background:0 0;border-radius:50%;flex:none;justify-content:center;align-items:center;padding:0;font-family:inherit;font-size:12px;font-weight:600;line-height:1;display:inline-flex}._7D6uKa_helpButton:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}._7D6uKa_helpTipWrap{flex:none;display:inline-flex;position:relative}._7D6uKa_helpTip{z-index:4;box-sizing:border-box;background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);width:max-content;max-width:240px;box-shadow:var(--dsw-shadow-lv3);color:var(--dsw-alias-label-primary);text-align:left;white-space:pre-line;opacity:0;visibility:hidden;pointer-events:none;border-radius:10px;padding:10px 12px;font-size:12px;font-weight:400;line-height:1.5;transition:opacity .12s;position:absolute;top:calc(100% + 8px);left:0}._7D6uKa_helpTipWrap:hover ._7D6uKa_helpTip,._7D6uKa_helpTipWrap:focus-within ._7D6uKa_helpTip{opacity:1;visibility:visible}._7D6uKa_tagCleanupInput{flex:none;width:64px}._7D6uKa_tagCleanupNotice{color:var(--dsw-alias-label-secondary);margin:0;font-size:12px;line-height:1.4}._7D6uKa_modalBody{flex-direction:column;gap:8px;min-height:0;display:flex;overflow-y:auto}._7D6uKa_modalBody>*{flex:none}._7D6uKa_formSection{border:1px solid var(--dsw-alias-separator-primary);border-radius:10px;flex-direction:column;display:flex;overflow:visible}._7D6uKa_formSectionHeader{box-sizing:border-box;width:100%;min-height:28px;color:var(--dsw-alias-label-primary);text-align:left;cursor:pointer;background:0 0;border:0;border-radius:9px;align-items:center;gap:8px;padding:6px 10px;font-family:inherit;font-size:12px;font-weight:600;line-height:16px;display:flex;position:relative}._7D6uKa_formSectionHeader:hover{background:var(--dsw-alias-bg-mask-1)}._7D6uKa_formSection[data-open=true] ._7D6uKa_formSectionHeader{border-radius:9px 9px 0 0}._7D6uKa_formSectionHeader:after{content:\"\";width:var(--dsh-tb-hit-size);height:var(--dsh-tb-hit-size);position:absolute;top:50%;left:50%;transform:translate(-50%,-50%)}._7D6uKa_formSectionChevron{border-top:4px solid #0000;border-bottom:4px solid #0000;border-left:5px solid var(--dsw-alias-label-tertiary);flex:none;width:0;height:0;margin-left:1px;transition:transform .12s}._7D6uKa_formSection[data-open=true] ._7D6uKa_formSectionChevron{transform:rotate(90deg)}._7D6uKa_formSectionTitle{text-overflow:ellipsis;white-space:nowrap;flex:0 auto;min-width:0;overflow:hidden}._7D6uKa_formSectionSummary{min-width:0;color:var(--dsw-alias-label-tertiary);text-align:right;text-overflow:ellipsis;white-space:nowrap;flex:0 auto;margin-left:auto;font-weight:400;overflow:hidden}._7D6uKa_formSectionBody{border-top:1px solid var(--dsw-alias-separator-primary);flex-direction:column;gap:8px;padding:8px 10px 10px;display:flex}._7D6uKa_field{flex-direction:column;gap:5px;display:flex}._7D6uKa_fieldLabel{color:var(--dsw-alias-label-secondary);font-size:12px;font-weight:600}._7D6uKa_input{box-sizing:border-box;min-height:var(--dsh-tb-control-h);color:var(--dsw-alias-label-primary);background:var(--dsw-specific-input-major);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsh-tb-control-radius);resize:vertical;outline:none;padding:6px 10px;font-family:inherit;font-size:13px}._7D6uKa_input:focus{border-color:var(--dsw-alias-state-business-primary)}._7D6uKa_select{box-sizing:border-box;height:var(--dsh-tb-control-h);color:var(--dsw-alias-label-primary);background:var(--dsw-specific-input-major);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsh-tb-control-radius);outline:none;max-width:100%;padding:0 10px;font-family:inherit;font-size:13px}._7D6uKa_input::placeholder{color:var(--dsw-alias-label-tertiary)}._7D6uKa_formError{color:var(--dsw-alias-state-error-primary);margin:0;font-size:12px}._7D6uKa_detail{background:var(--dsw-alias-bg-overlay,var(--dsw-alias-bg-layer-1));background:rgb(from var(--dsw-alias-bg-overlay,var(--dsw-alias-bg-layer-1)) r g b / 1);border:1px solid var(--dsw-alias-border-l2);width:min(960px,100vw - 48px);max-height:calc(100vh - 80px);box-shadow:var(--dsw-shadow-lv3);color:var(--dsw-alias-label-primary);border-radius:14px;flex-direction:column;display:flex;overflow:hidden}._7D6uKa_detailHeader{z-index:1;border-bottom:1px solid var(--dsw-alias-separator-primary);flex:none;align-items:center;gap:8px;padding:16px 24px;display:flex;position:relative}._7D6uKa_detailTitle{overflow-wrap:anywhere;flex:1;min-width:0;margin:0;font-size:15px;font-weight:700;line-height:1.4}._7D6uKa_statusBadge{border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);border-radius:999px;flex:none;padding:2px 10px;font-size:12px}._7D6uKa_statusBadge[data-status=running]{color:var(--dsw-alias-state-warn-primary);border-color:var(--dsw-alias-state-warn-primary)}._7D6uKa_statusBadge[data-status=done]{color:var(--dsw-alias-state-success-primary);border-color:var(--dsw-alias-state-success-primary)}._7D6uKa_statusBadge[data-status=failed]{color:var(--dsw-alias-state-error-primary);border-color:var(--dsw-alias-state-error-primary)}._7D6uKa_detailBody{flex-direction:column;flex:1;gap:16px;min-height:0;padding:16px 24px 24px;display:flex;overflow-y:auto}._7D6uKa_detailColumns{grid-template-columns:minmax(0,1fr);align-items:start;gap:24px;display:grid}._7D6uKa_detailColumn{flex-direction:column;gap:16px;min-width:0;display:flex}._7D6uKa_detailFolds{flex-direction:column;gap:8px;min-width:0;display:flex}@media (width>=1024px){._7D6uKa_detailColumns{grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr)}}._7D6uKa_detailSection{flex-direction:column;gap:8px;min-width:0;display:flex}._7D6uKa_detailSection h4{color:var(--dsw-alias-label-secondary);margin:0;font-size:12px;font-weight:700}._7D6uKa_detailText{color:var(--dsw-alias-label-primary);white-space:pre-wrap;overflow-wrap:anywhere;margin:0;font-size:13px;line-height:1.55}._7D6uKa_detailBody ._7D6uKa_scheduleInput,._7D6uKa_detailBody ._7D6uKa_schedulePreset,._7D6uKa_detailBody ._7D6uKa_promptBlock{font-size:13px}._7D6uKa_detailBody ._7D6uKa_scheduleZone,._7D6uKa_detailBody ._7D6uKa_scheduleMeta,._7D6uKa_detailBody ._7D6uKa_cardTag{font-size:12px}._7D6uKa_scheduleToggle{color:var(--dsw-alias-label-primary);cursor:pointer;user-select:none;align-items:center;gap:8px;font-size:13px;display:flex}._7D6uKa_scheduleToggle input{accent-color:var(--dsw-alias-state-business-primary)}._7D6uKa_scheduleRow{align-items:center;gap:8px;display:flex}._7D6uKa_scheduleInput{min-width:0;font-family:var(--dsw-font-markdown-code-block-small);flex:1}._7D6uKa_scheduleInputInvalid,._7D6uKa_scheduleInputInvalid:focus{border-color:var(--dsw-alias-state-error-primary)}._7D6uKa_schedulePreset{box-sizing:border-box;height:var(--dsh-tb-control-h);color:var(--dsw-alias-label-primary);background:var(--dsw-specific-input-major);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsh-tb-control-radius);outline:none;flex:none;padding:0 8px}._7D6uKa_scheduleZone{color:var(--dsw-alias-label-secondary);align-items:center;gap:8px;display:flex}._7D6uKa_scheduleZone select{flex:1;min-width:0}._7D6uKa_scheduleMeta{color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere;margin:0}._7D6uKa_promptBlock{line-height:1.5;font-family:var(--dsw-font-markdown-code-block-small);color:var(--dsw-alias-label-primary);background:var(--dsw-alias-markdown-code-block);border:1px solid var(--dsw-alias-border-l1);white-space:pre-wrap;overflow-wrap:anywhere;border-radius:8px;max-height:240px;margin:0;padding:10px 12px;overflow-y:auto}._7D6uKa_clampBody{position:relative}._7D6uKa_clampBody[data-clamped=true]{max-height:160px;overflow:hidden}._7D6uKa_clampBody[data-clamped=true]:after{content:\"\";pointer-events:none;background:linear-gradient(to bottom, transparent, var(--dsw-alias-bg-base));height:44px;position:absolute;bottom:0;left:0;right:0}._7D6uKa_clampToggle{align-self:flex-start}._7D6uKa_executionLog{flex-direction:column;gap:8px;min-width:0;display:flex}._7D6uKa_executionList{flex-direction:column;gap:8px;min-width:0;margin:0;padding:0;list-style:none;display:flex}._7D6uKa_executionExtra{flex-direction:column;gap:8px;min-width:0;display:flex}._7D6uKa_executionRow{border:1px solid var(--dsw-alias-border-l1);border-radius:8px;flex-direction:column;gap:8px;min-width:0;padding:10px 12px;display:flex}._7D6uKa_executionRowHead{flex-wrap:wrap;align-items:center;gap:8px;min-width:0;display:flex}._7D6uKa_executionRowEvidence{flex-direction:column;gap:6px;min-width:0;display:flex}._7D6uKa_executionBadge{color:var(--dsw-alias-state-warn-primary);background:var(--dsw-alias-state-warn-secondary);border-radius:999px;flex:none;padding:1px 8px;font-size:12px;font-weight:600;line-height:18px}._7D6uKa_executionBadge[data-result=succeeded]{color:var(--dsw-alias-state-success-primary);background:var(--dsw-alias-state-success-secondary)}._7D6uKa_executionBadge[data-result=failed]{color:var(--dsw-alias-state-error-primary);background:var(--dsw-alias-state-error-secondary)}._7D6uKa_executionBadge[data-result=cancelled]{color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-interactive-bg-hover)}._7D6uKa_executionTimes{color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere;font-size:12px;line-height:1.5}._7D6uKa_executionError{color:var(--dsw-alias-state-error-primary);overflow-wrap:anywhere;font-size:12px;line-height:1.5}._7D6uKa_executionSession{color:var(--dsw-alias-state-business-primary);cursor:pointer;white-space:nowrap;background:0 0;border:none;align-items:center;gap:4px;margin-left:auto;padding:0 2px;font-family:inherit;font-size:12px;display:inline-flex;position:relative}._7D6uKa_executionSession:after{content:\"\";width:100%;height:var(--dsh-tb-hit-size);position:absolute;top:50%;left:50%;transform:translate(-50%,-50%)}._7D6uKa_executionSession:hover{text-decoration:underline}._7D6uKa_executionDisclosure{align-self:flex-start;align-items:center;gap:6px;display:inline-flex}._7D6uKa_disclosureChevron{width:5px;height:5px;transition:transform .12s var(--dsh-tb-ease);border-bottom:1.5px solid;border-right:1.5px solid;flex:none;transform:rotate(45deg)}._7D6uKa_disclosureChevron[data-open=true]{transform:rotate(225deg)}._7D6uKa_verifyReport{flex-direction:column;gap:8px;min-width:0;display:flex}._7D6uKa_verifyBadge{max-width:100%;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-interactive-bg-hover);border:1px solid var(--dsw-alias-border-l2);cursor:pointer;border-radius:999px;align-self:flex-start;align-items:center;gap:6px;padding:2px 10px;font-family:inherit;font-size:12px;font-weight:600;line-height:18px;display:inline-flex;position:relative}._7D6uKa_verifyBadge:after{content:\"\";height:var(--dsh-tb-hit-size);position:absolute;top:50%;left:0;right:0;transform:translateY(-50%)}._7D6uKa_verifyBadge[data-tone=warn]{color:var(--dsw-alias-state-warn-primary);background:var(--dsw-alias-state-warn-secondary);border-color:#0000}._7D6uKa_verifyBadge[data-tone=success]{color:var(--dsw-alias-state-success-primary);background:var(--dsw-alias-state-success-secondary);border-color:#0000}._7D6uKa_verifyBadge[data-tone=error]{color:var(--dsw-alias-state-error-primary);background:var(--dsw-alias-state-error-secondary);border-color:#0000}._7D6uKa_verifyVerdict{overflow-wrap:anywhere;font-weight:700}._7D6uKa_verifyPanel{background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l1);border-radius:8px;flex-direction:column;gap:8px;min-width:0;padding:10px 12px;display:flex}._7D6uKa_attemptRow{background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l1);border-radius:8px;flex-direction:column;gap:6px;min-width:0;padding:8px 10px;display:flex}._7D6uKa_attemptHead{flex-wrap:wrap;align-items:center;gap:8px;min-width:0;display:flex}._7D6uKa_referenceList{flex-direction:column;gap:6px;min-width:0;margin:0;padding:0;list-style:none;display:flex}._7D6uKa_referenceRow{color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere;font-size:12px}._7D6uKa_menuRoot{flex:none;display:inline-flex;position:relative}._7D6uKa_menuChevron{width:5px;height:5px;transition:transform .12s var(--dsh-tb-ease);border-bottom:1.5px solid;border-right:1.5px solid;flex:none;margin-top:-3px;transform:rotate(45deg)}._7D6uKa_menuChevron[data-open=true]{margin-top:0;transform:rotate(225deg)}._7D6uKa_menuPanel{z-index:20;background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);min-width:180px;box-shadow:var(--dsw-shadow-lv2);border-radius:10px;flex-direction:column;padding:4px;display:flex;position:absolute;top:calc(100% + 4px);left:0}._7D6uKa_detailHeader ._7D6uKa_menuPanel{left:auto;right:0}._7D6uKa_menuItem{min-height:var(--dsh-tb-hit-size);color:var(--dsw-alias-label-primary);cursor:pointer;text-align:left;white-space:nowrap;background:0 0;border:none;border-radius:8px;align-items:center;padding:0 10px;font-family:inherit;font-size:13px;display:flex}._7D6uKa_menuItem:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}._7D6uKa_menuItem:disabled{opacity:.45;cursor:default}._7D6uKa_detailFooter{border-top:1px solid var(--dsw-alias-separator-primary);flex:none;align-items:center;gap:8px;padding:16px 24px;display:flex}._7D6uKa_detailMeta{color:var(--dsw-alias-label-tertiary);overflow-wrap:anywhere;font-size:12px}._7D6uKa_detailFooter>._7D6uKa_detailMeta{margin-left:0}._7D6uKa_detailStamp{text-align:end;margin-left:auto}._7D6uKa_executionExtra,._7D6uKa_verifyPanel,._7D6uKa_detailBody ._7D6uKa_formSectionBody{animation:_7D6uKa_dshTbRowsIn var(--dsh-tb-motion-enter) var(--dsh-tb-ease) both}._7D6uKa_executionExtra[data-execution-fold=closing],._7D6uKa_verifyPanel[data-state=closing],._7D6uKa_detailBody ._7D6uKa_formSectionBody[data-state=closing]{animation:_7D6uKa_dshTbRowsOut var(--dsh-tb-motion-close) var(--dsh-tb-ease) both}._7D6uKa_formSectionBody{animation:_7D6uKa_dshTbRowsIn var(--dsh-tb-motion-enter) var(--dsh-tb-ease) both}._7D6uKa_formSectionBody[data-state=closing]{animation:_7D6uKa_dshTbRowsOut var(--dsh-tb-motion-close) var(--dsh-tb-ease) both}@keyframes _7D6uKa_dshTbRowsIn{0%{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}@keyframes _7D6uKa_dshTbRowsOut{0%{opacity:1;transform:translateY(0)}to{opacity:0;transform:translateY(-6px)}}@keyframes _7D6uKa_dshTbFadeIn{0%{opacity:0}to{opacity:1}}@keyframes _7D6uKa_dshTbFadeOut{0%{opacity:1}to{opacity:0}}@media (prefers-reduced-motion:reduce){._7D6uKa_executionExtra,._7D6uKa_verifyPanel,._7D6uKa_detailBody ._7D6uKa_formSectionBody{animation:_7D6uKa_dshTbFadeIn var(--dsh-tb-motion-close) linear both}._7D6uKa_executionExtra[data-execution-fold=closing],._7D6uKa_verifyPanel[data-state=closing],._7D6uKa_detailBody ._7D6uKa_formSectionBody[data-state=closing]{animation:_7D6uKa_dshTbFadeOut var(--dsh-tb-motion-close) linear both}._7D6uKa_formSectionBody{animation:_7D6uKa_dshTbFadeIn var(--dsh-tb-motion-close) linear both}._7D6uKa_formSectionBody[data-state=closing]{animation:_7D6uKa_dshTbFadeOut var(--dsh-tb-motion-close) linear both}}._7D6uKa_detailBody ._7D6uKa_formSection{min-width:0;overflow:visible}._7D6uKa_detailBody ._7D6uKa_formSectionHeader{box-sizing:border-box;border-radius:9px;min-height:28px;padding:4px 10px;font-size:12px;line-height:16px;position:relative}._7D6uKa_detailBody ._7D6uKa_formSection[data-open=true] ._7D6uKa_formSectionHeader{border-radius:9px 9px 0 0}._7D6uKa_detailBody ._7D6uKa_formSectionHeader:after{content:\"\";width:var(--dsh-tb-hit-size);height:var(--dsh-tb-hit-size);position:absolute;top:50%;left:50%;transform:translate(-50%,-50%)}._7D6uKa_detailBody ._7D6uKa_formSectionTitle{text-overflow:ellipsis;white-space:nowrap;flex:0 auto;min-width:0;overflow:hidden}._7D6uKa_detailBody ._7D6uKa_formSectionSummary{flex:0 auto;min-width:0;margin-left:auto}._7D6uKa_detailBody ._7D6uKa_formSectionBody{gap:8px}@container _7D6uKa_task-board-view (width<=768px){._7D6uKa_board{gap:10px;padding:10px}._7D6uKa_boardHeader{flex-wrap:wrap;align-items:center;gap:8px}._7D6uKa_backButton{flex:none}._7D6uKa_boardTitle{flex:auto}._7D6uKa_boardHeader>._7D6uKa_detailMeta{flex:1 0 100%;margin-left:0}._7D6uKa_boardTools{flex-wrap:wrap;flex:1 0 100%;justify-content:flex-start;margin-left:0}._7D6uKa_boardTools>._7D6uKa_search{flex:1 0 100%;min-width:0}._7D6uKa_boardTools>._7D6uKa_projectFilter{flex:auto;min-width:0}._7D6uKa_boardTools>button{flex:1 1 0;min-width:0}._7D6uKa_columns{scroll-snap-type:inline mandatory;scrollbar-width:none;-webkit-overflow-scrolling:touch;grid-auto-columns:86cqw;gap:10px;padding-inline:2px 14cqw;scroll-padding-inline:2px}._7D6uKa_columns::-webkit-scrollbar{display:none}._7D6uKa_column{scroll-snap-align:start;scroll-snap-stop:always}}@container _7D6uKa_task-board-view (width<=720px){._7D6uKa_boardHeader>._7D6uKa_detailMeta{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}}@container _7D6uKa_task-board-view (width<=600px){._7D6uKa_board{padding-inline:8px}}@media (width<=768px){[data-dsh-taskboard-view]{height:100dvh}._7D6uKa_card,._7D6uKa_primaryButton,._7D6uKa_ghostButton,._7D6uKa_dangerButton,._7D6uKa_iconButton,._7D6uKa_linkButton,._7D6uKa_search,._7D6uKa_input,._7D6uKa_select,._7D6uKa_schedulePreset,._7D6uKa_scheduleToggle{min-height:44px}._7D6uKa_search,._7D6uKa_input,._7D6uKa_select,._7D6uKa_schedulePreset{box-sizing:border-box;font-size:16px}._7D6uKa_modalBackdrop{justify-content:stretch;align-items:stretch;width:100vw;height:100dvh}._7D6uKa_modal,._7D6uKa_detail{box-sizing:border-box;border:0;border-radius:0;width:100vw;height:100dvh;max-height:none}._7D6uKa_modal{padding-top:max(16px, env(safe-area-inset-top));padding-right:max(16px, env(safe-area-inset-right));padding-bottom:max(16px, env(safe-area-inset-bottom));padding-left:max(16px, env(safe-area-inset-left))}._7D6uKa_modalFooter{z-index:1;background:inherit;flex-wrap:wrap;padding-top:8px;position:sticky;bottom:0}._7D6uKa_modalFooter>button{flex:120px}._7D6uKa_detailHeader{padding-top:max(16px, env(safe-area-inset-top));padding-right:max(16px, env(safe-area-inset-right));padding-left:max(16px, env(safe-area-inset-left));flex-wrap:wrap}._7D6uKa_detailTitle{min-width:0}._7D6uKa_detailColumns{grid-template-columns:minmax(0,1fr);gap:16px}._7D6uKa_detailColumn{gap:16px}._7D6uKa_detailBody{overscroll-behavior-y:contain;padding-right:max(16px, env(safe-area-inset-right));padding-left:max(16px, env(safe-area-inset-left))}._7D6uKa_detailFooter{padding-right:max(16px, env(safe-area-inset-right));padding-bottom:max(16px, env(safe-area-inset-bottom));padding-left:max(16px, env(safe-area-inset-left));flex-wrap:wrap}._7D6uKa_menuPanel{min-width:200px}._7D6uKa_detailFooter>button{flex:96px}._7D6uKa_detailFooter>._7D6uKa_detailMeta{text-align:end;flex:1 0 100%;margin-left:0}._7D6uKa_scheduleRow{flex-direction:column;align-items:stretch}._7D6uKa_schedulePreset{width:100%}}._7D6uKa_primaryButton:focus-visible,._7D6uKa_ghostButton:focus-visible,._7D6uKa_dangerButton:focus-visible,._7D6uKa_iconButton:focus-visible,._7D6uKa_linkButton:focus-visible,._7D6uKa_menuItem:focus-visible,._7D6uKa_verifyBadge:focus-visible,._7D6uKa_executionSession:focus-visible,._7D6uKa_search:focus-visible,._7D6uKa_input:focus-visible,._7D6uKa_select:focus-visible,._7D6uKa_schedulePreset:focus-visible,._7D6uKa_scheduleToggle input:focus-visible,._7D6uKa_formSectionHeader:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}._7D6uKa_primaryButton,._7D6uKa_ghostButton,._7D6uKa_dangerButton,._7D6uKa_iconButton,._7D6uKa_linkButton,._7D6uKa_menuItem,._7D6uKa_verifyBadge,._7D6uKa_executionSession,._7D6uKa_search,._7D6uKa_input,._7D6uKa_select,._7D6uKa_schedulePreset,._7D6uKa_scheduleToggle input,._7D6uKa_formSectionHeader,._7D6uKa_formSectionChevron{transition:background-color .12s,color .12s,border-color .12s,outline-color .12s,box-shadow .12s,transform .12s}._7D6uKa_card:active{box-shadow:var(--dsw-shadow-lv1);transform:translateY(0)}._7D6uKa_primaryButton:active:not(:disabled),._7D6uKa_ghostButton:active:not(:disabled),._7D6uKa_dangerButton:active:not(:disabled),._7D6uKa_iconButton:active:not(:disabled),._7D6uKa_linkButton:active:not(:disabled){transform:translateY(1px)}._7D6uKa_iconButton:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}._7D6uKa_linkButton:hover:not(:disabled){text-decoration:underline}._7D6uKa_iconButton:disabled,._7D6uKa_linkButton:disabled{opacity:.45;cursor:default}._7D6uKa_search:focus,._7D6uKa_select:focus,._7D6uKa_schedulePreset:focus{border-color:var(--dsw-alias-state-business-primary)}._7D6uKa_scheduleToggle input{margin:0}@media (prefers-reduced-motion:reduce){._7D6uKa_card,._7D6uKa_primaryButton,._7D6uKa_ghostButton,._7D6uKa_dangerButton,._7D6uKa_iconButton,._7D6uKa_linkButton,._7D6uKa_menuItem,._7D6uKa_verifyBadge,._7D6uKa_executionSession,._7D6uKa_disclosureChevron,._7D6uKa_menuChevron,._7D6uKa_search,._7D6uKa_input,._7D6uKa_select,._7D6uKa_schedulePreset,._7D6uKa_scheduleToggle input,._7D6uKa_formSectionHeader,._7D6uKa_formSectionChevron{transition:none}._7D6uKa_cardSpinner{animation:none}._7D6uKa_modalBackdrop,._7D6uKa_modal,._7D6uKa_detail{animation:_7D6uKa_dshTbBackdropIn var(--dsh-tb-motion-close) linear both}._7D6uKa_modalBackdrop[data-state=closing],._7D6uKa_modalBackdrop[data-state=closing] ._7D6uKa_modal,._7D6uKa_modalBackdrop[data-state=closing] ._7D6uKa_detail{animation:_7D6uKa_dshTbBackdropOut var(--dsh-tb-motion-close) linear both}}._7D6uKa_cardTags{flex-wrap:wrap;gap:4px;display:flex}._7D6uKa_cardTags:empty{display:none}._7D6uKa_cardTag{border:1px solid var(--dsh-task-tag-border);background:var(--dsh-task-tag-fill);max-width:100%;color:var(--dsw-alias-label-primary);text-overflow:ellipsis;white-space:nowrap;border-radius:999px;padding:0 8px;font-size:12px;line-height:1.5;overflow:hidden}._7D6uKa_tagFilter{flex-wrap:wrap;flex:none;align-items:center;gap:8px;margin:0;display:flex}._7D6uKa_tagFilterLabel{color:var(--dsw-alias-label-tertiary);font-size:12px}._7D6uKa_tagChip{border:1px solid var(--dsh-task-tag-border);color:var(--dsw-alias-label-secondary);cursor:pointer;font-family:inherit;font-size:12px;line-height:var(--dsh-tb-card-row);background:0 0;border-radius:999px;padding:1px 9px;position:relative}._7D6uKa_tagChip:after{content:\"\";width:var(--dsh-tb-hit-size);height:var(--dsh-tb-hit-size);position:absolute;top:50%;left:50%;transform:translate(-50%,-50%)}._7D6uKa_tagChip:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}._7D6uKa_tagChip[data-active=true]{background:var(--dsh-task-tag-fill);color:var(--dsw-alias-label-primary)}._7D6uKa_cardTag[data-tag-tone=\"0\"],._7D6uKa_tagChip[data-tag-tone=\"0\"]{--dsh-task-tag-fill:#4e93e82e;--dsh-task-tag-border:#4e93e866}._7D6uKa_cardTag[data-tag-tone=\"1\"],._7D6uKa_tagChip[data-tag-tone=\"1\"]{--dsh-task-tag-fill:#2ea36a2e;--dsh-task-tag-border:#2ea36a66}._7D6uKa_cardTag[data-tag-tone=\"2\"],._7D6uKa_tagChip[data-tag-tone=\"2\"]{--dsh-task-tag-fill:#d08a2a2e;--dsh-task-tag-border:#d08a2a66}._7D6uKa_cardTag[data-tag-tone=\"3\"],._7D6uKa_tagChip[data-tag-tone=\"3\"]{--dsh-task-tag-fill:#b456c82e;--dsh-task-tag-border:#b456c866}._7D6uKa_cardTag[data-tag-tone=\"4\"],._7D6uKa_tagChip[data-tag-tone=\"4\"]{--dsh-task-tag-fill:#cf5f7a2e;--dsh-task-tag-border:#cf5f7a66}._7D6uKa_cardTag[data-tag-tone=\"5\"],._7D6uKa_tagChip[data-tag-tone=\"5\"]{--dsh-task-tag-fill:#4a9fb52e;--dsh-task-tag-border:#4a9fb566}._7D6uKa_fieldHint{color:var(--dsw-alias-label-tertiary);margin:0;font-size:12px;line-height:1.4}._7D6uKa_tagRow{align-items:center;gap:6px;display:flex}._7D6uKa_tagRow ._7D6uKa_input{flex:1 1 0;min-width:0}._7D6uKa_tagRow ._7D6uKa_ghostButton{flex:none}._7D6uKa_tagAddButton{align-self:flex-start}._7D6uKa_attachmentDrop{border:1px dashed var(--dsw-alias-border-secondary);border-radius:8px;flex-wrap:wrap;align-items:center;gap:8px;margin-top:6px;padding:10px 12px;display:flex}._7D6uKa_attachmentDrop[data-state=active]{border-color:var(--dsw-alias-border-focus);background:var(--dsw-alias-surface-raised)}._7D6uKa_attachmentDropHint{min-width:0;color:var(--dsw-alias-label-tertiary);flex:12em;font-size:12px;line-height:1.4}._7D6uKa_attachmentList{flex-direction:column;gap:6px;margin:8px 0 0;padding:0;list-style:none;display:flex}._7D6uKa_attachmentRow{border:1px solid var(--dsw-alias-border-subtle);border-radius:6px;align-items:center;gap:8px;padding:4px 6px;display:flex}._7D6uKa_attachmentThumb{object-fit:cover;background:var(--dsw-alias-surface-raised);border-radius:4px;flex:none;width:40px;height:40px}._7D6uKa_attachmentName{overflow-wrap:anywhere;flex:1 1 0;min-width:0;font-size:13px;line-height:1.4}._7D6uKa_attachmentMeta{color:var(--dsw-alias-label-tertiary);font-size:12px}._7D6uKa_projectFilter{flex:none;align-items:center;gap:6px;display:flex}._7D6uKa_projectFilterLabel{color:var(--dsw-alias-label-secondary);white-space:nowrap;font-size:12px}._7D6uKa_projectDialog{background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:10px;flex-direction:column;flex:none;gap:8px;margin-bottom:8px;padding:10px 12px;display:flex}._7D6uKa_projectDialogActions{justify-content:flex-end;gap:8px;display:flex}._7D6uKa_aiParse{background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:10px;flex-direction:column;gap:6px;padding:10px 12px;display:flex}._7D6uKa_aiParseRow{align-items:center;gap:8px;display:flex}._7D6uKa_aiParseRow ._7D6uKa_select{flex:1 1 0;min-width:0}._7D6uKa_aiParseRow ._7D6uKa_ghostButton,._7D6uKa_aiParseRow ._7D6uKa_primaryButton{flex:none}._7D6uKa_cardSubtask{background:var(--dsw-alias-interactive-bg-hover);max-width:100%;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:var(--dsh-tb-card-row);text-overflow:ellipsis;white-space:nowrap;border-radius:999px;padding:0 8px;overflow:hidden}._7D6uKa_cardSubtask[data-tone=failed]{color:var(--dsw-alias-state-error-primary);background:var(--dsw-alias-state-error-secondary)}._7D6uKa_cardSubtask[data-tone=running]{color:var(--dsw-alias-state-warn-primary);background:var(--dsw-alias-state-warn-secondary)}._7D6uKa_cardSubtask[data-tone=done]{color:var(--dsw-alias-state-success-primary);background:var(--dsw-alias-state-success-secondary)}._7D6uKa_subtaskList{flex-direction:column;gap:6px;margin:0;padding:0;list-style:none;display:flex}._7D6uKa_subtaskRow{border:1px solid var(--dsw-alias-border-l1);border-radius:8px;flex-wrap:wrap;align-items:center;gap:10px;padding:6px 10px;display:flex}._7D6uKa_subtaskRow ._7D6uKa_linkButton:first-child{text-align:left;overflow-wrap:anywhere;flex:auto;min-width:0}._7D6uKa_subtaskAddRow{flex-wrap:wrap;gap:8px;display:flex}._7D6uKa_pickList{flex-direction:column;gap:6px;max-height:320px;margin:0;padding:0;list-style:none;display:flex;overflow-y:auto}._7D6uKa_pickRow{border:1px solid var(--dsw-alias-border-l1);border-radius:8px;align-items:center;gap:10px;padding:6px 10px;display:flex}._7D6uKa_pickTitle{min-width:0;color:var(--dsw-alias-label-primary);overflow-wrap:anywhere;flex:auto;font-size:13px}";
 		const tagId$3 = "@linxin666/dsh-client-ui-task-board/packages/dsh-task-board/src/client/board.module.css";
 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId$3) + "]") === null) {
 			const tag = document.createElement("style");
@@ -4476,6 +4757,13 @@ window.__ModuleLoader__.load({
 		var board_module_css_default = {
 			"aiParse": "_7D6uKa_aiParse",
 			"aiParseRow": "_7D6uKa_aiParseRow",
+			"attachmentDrop": "_7D6uKa_attachmentDrop",
+			"attachmentDropHint": "_7D6uKa_attachmentDropHint",
+			"attachmentList": "_7D6uKa_attachmentList",
+			"attachmentMeta": "_7D6uKa_attachmentMeta",
+			"attachmentName": "_7D6uKa_attachmentName",
+			"attachmentRow": "_7D6uKa_attachmentRow",
+			"attachmentThumb": "_7D6uKa_attachmentThumb",
 			"attemptHead": "_7D6uKa_attemptHead",
 			"attemptRow": "_7D6uKa_attemptRow",
 			"backButton": "_7D6uKa_backButton",
@@ -4602,6 +4890,9 @@ window.__ModuleLoader__.load({
 			"scheduleZone": "_7D6uKa_scheduleZone",
 			"search": "_7D6uKa_search",
 			"select": "_7D6uKa_select",
+			"sourceGroup": "_7D6uKa_sourceGroup",
+			"sourceGroupHeader": "_7D6uKa_sourceGroupHeader",
+			"sourceGroupLabel": "_7D6uKa_sourceGroupLabel",
 			"statusBadge": "_7D6uKa_statusBadge",
 			"statusDot": "_7D6uKa_statusDot",
 			"subtaskAddRow": "_7D6uKa_subtaskAddRow",
@@ -5332,6 +5623,706 @@ window.__ModuleLoader__.load({
 		*/
 		function cleanTags(tags) {
 			return normalizeTags(tags) ?? [];
+		}
+		//#endregion
+		//#region src/core/degraded-reason.ts
+		/**
+		* The one degraded record naming `plugin`, or undefined when that row is not
+		* degraded (or the payload does not come from the shell's own shape). A
+		* plugin may appear once: the shell keys the ledger by package name and
+		* refreshes the record on every new failure.
+		* @param body - parsed JSON body of the health route.
+		* @param plugin - the real plugin package name to look for.
+		* @returns the degraded row, or undefined when the ledger does not name it.
+		*/
+		function degradedRowOf(body, plugin) {
+			if (typeof body !== "object" || body === null) return void 0;
+			const ledger = body;
+			if (ledger.ok !== true || !Array.isArray(ledger.degraded)) return void 0;
+			for (const entry of ledger.degraded) {
+				if (typeof entry !== "object" || entry === null) continue;
+				const record = entry;
+				if (record.plugin !== plugin) continue;
+				const stage = record.stage === "import" || record.stage === "shape" || record.stage === "start" ? record.stage : void 0;
+				if (stage === void 0) continue;
+				return {
+					plugin,
+					stage,
+					reason: typeof record.reason === "string" ? record.reason : ""
+				};
+			}
+		}
+		/** The ledger owner pid a task-board lock reason names, when it names one. */
+		const OWNED_BY_PROCESS_RE = /already owned by process\s+(\d+)/;
+		/**
+		* The marker the ledger appends when it could NOT confirm the recorded PID
+		* belongs to the lock's real owner: the PID was reused by an unrelated process
+		* after a crash, and the reason then carries the manual-removal step instead.
+		* That reason must be rendered verbatim — telling the user to close "the other
+		* DSH instance" would send them after a process that never touched the board.
+		*/
+		const UNCONFIRMED_OWNER_MARKER = "reused after a crash";
+		/**
+		* Extract the pid of the LIVE process a ledger-lock failure blames, when the
+		* reason identifies one. The task board's lock refusal is the one degraded
+		* reason that carries an owner the user can act on, so the panel renders the
+		* pid in its own sentence and adds the guidance that actually applies.
+		* @param reason - the shell's one-line failure reason.
+		* @returns the confirmed owner pid, or undefined when the reason names none or
+		*   warns that the PID may have been reused (its own text owns the recovery).
+		*/
+		function ledgerOwnerPid(reason) {
+			if (reason.includes(UNCONFIRMED_OWNER_MARKER)) return void 0;
+			const match = OWNED_BY_PROCESS_RE.exec(reason);
+			if (match === null) return void 0;
+			const pid = Number(match[1]);
+			return Number.isSafeInteger(pid) && pid > 0 ? pid : void 0;
+		}
+		//#endregion
+		//#region src/core/package-name.ts
+		/**
+		* npm identity of this plugin. The dsh-web-all degraded ledger is keyed by the
+		* real plugin package name of a family row, and this plugin's browser half
+		* must name its OWN row there to learn why its Host API is missing (issue
+		* #1730): the served bundle cannot derive the name, because a family row
+		* mounts the package from a versioned profile path. The host half spells the
+		* same name in its single-mount guard (src/index.ts); the two move together.
+		*/
+		const TASK_BOARD_PACKAGE = "@linxin666/dsh-client-ui-task-board";
+		//#endregion
+		//#region src/protocol.ts
+		const TASK_BOARD_API_PREFIX = "/api/task-board";
+		/** Whether a decoded reply carries the three draft strings the form accepts. */
+		function isTaskParseDraft(value) {
+			if (typeof value !== "object" || value === null) return false;
+			const record = value;
+			return typeof record.title === "string" && typeof record.description === "string" && typeof record.prompt === "string";
+		}
+		//#endregion
+		//#region src/client/host-api.ts
+		/**
+		* Client-side base for the board's routes: DOCUMENT-RELATIVE (issue #1707).
+		*
+		* The host registers `TASK_BOARD_API_PREFIX` root-absolute; the page is served
+		* with `<base href="./">`, so the browser half must drop the leading slash or
+		* a sub-path deployment escapes its entry directory. Derived from the shared
+		* constant so host and client cannot drift.
+		*/
+		const CLIENT_API_PREFIX = TASK_BOARD_API_PREFIX.slice(1);
+		const IMPORT_MARKER = "dsh.taskBoard.v2.hostImported";
+		const SOURCE_KEY = "dsh.taskBoard.v2.sourceId";
+		const IMPORT_REQUEST_KEY = "dsh.taskBoard.v2.importRequestId";
+		const REQUEST_TIMEOUT_MS = 15e3;
+		/** An upload moves real bytes, so it gets a wider budget than a JSON call. */
+		const UPLOAD_TIMEOUT_MS = 12e4;
+		/** Re-notify the panel at most this often while the event stream stays broken. */
+		const STREAM_ERROR_NOTIFY_MS = 15e3;
+		/** Mirrors the Host's own parse budget; only used to phrase the timeout. */
+		const TASK_PARSE_TIMEOUT_SECONDS = 45;
+		/** Transport failure carrying a stable class next to its user-facing message. */
+		var HostApiError = class extends Error {
+			failure;
+			status;
+			constructor(failure, message, status) {
+				super(message);
+				this.failure = failure;
+				this.status = status;
+				this.name = "HostApiError";
+			}
+		};
+		/**
+		* Same-origin family health route served by the dsh-web-all shell: the
+		* degraded ledger, in which a family row that failed during apply appears WITH
+		* its reason. DOCUMENT-RELATIVE for the same reason as the board's own routes
+		* (issue #1707). A 404 here means the family shell is absent or older than the
+		* route, which is not itself a failure of the board.
+		*/
+		const FAMILY_DEGRADED_ROUTE = "api/dsh-web-all/degraded";
+		/** Health-route ceiling: an unresponsive family shell must not hold the board's first paint. */
+		const DEGRADED_LOOKUP_TIMEOUT_MS = 2e3;
+		/**
+		* The failure text for a row this browser knows failed during start.
+		*
+		* A ledger lock is the one class with an owner the user can act on, so its
+		* reason is unpacked into the pid plus what to do about it; every other
+		* degraded row is reported with the shell's own reason verbatim. The raw
+		* reason rides along either way, because it is the only text that names the
+		* lock file or the recovery step when the pid is not the whole story.
+		* @param reason - the shell's one-line failure reason (never empty).
+		*/
+		function degradedFailureMessage(reason) {
+			const pid = ledgerOwnerPid(reason);
+			if (pid === void 0) return {
+				failure: "degraded",
+				message: t("board.hostError.degraded", { detail: reason })
+			};
+			return {
+				failure: "ledger-locked",
+				message: t("board.hostError.ledgerLocked", {
+					pid: String(pid),
+					detail: reason
+				})
+			};
+		}
+		/**
+		* The degraded record the family shell holds for THIS board, or undefined when
+		* the row is healthy, the shell is absent, or the answer is unusable. The
+		* lookup is best-effort by contract: any uncertainty keeps the caller's own
+		* failure text instead of replacing it with a weaker one.
+		* @param fetchImpl - fetch implementation (injected for tests).
+		* @returns the ledger's reason for this row, or undefined when it names none.
+		*/
+		async function fetchDegradedReason(fetchImpl) {
+			const controller = new AbortController();
+			const timer = globalThis.setTimeout(() => {
+				controller.abort();
+			}, DEGRADED_LOOKUP_TIMEOUT_MS);
+			try {
+				const response = await fetchImpl(FAMILY_DEGRADED_ROUTE, {
+					signal: controller.signal,
+					headers: { accept: "application/json" },
+					cache: "no-store"
+				});
+				if (!response.ok) return void 0;
+				return degradedRowOf(await response.json(), TASK_BOARD_PACKAGE)?.reason;
+			} catch {
+				return;
+			} finally {
+				globalThis.clearTimeout(timer);
+			}
+		}
+		/**
+		* Name the real reason this board's routes are missing (issue #1730).
+		*
+		* The core webserver answers an unmounted route with a bare 404, which cannot
+		* distinguish "this deployment never loaded the plugin" from "this row
+		* degraded during start" — a second DSH process holding `ledger-v2.lock` is
+		* the case that matters, because the panel's advice ("restart the service")
+		* is then false: the lock belongs to the other process, and restarting cannot
+		* win it. The family health route knows the difference, so the 404 is
+		* disambiguated there before anything is shown.
+		* @param fallback - copy for the plain "routes are not there" failure, which
+		*   is route-specific (the board's state route and the AI-parse route phrase
+		*   their own absence); it is also what is shown when the ledger names nothing.
+		* @param fetchImpl - fetch implementation (injected for tests).
+		* @returns the HostApiError to throw for a missing board route.
+		*/
+		async function missingRouteFailure(fallback = t("board.hostError.notMounted"), fetchImpl = fetch) {
+			const absent = () => new HostApiError("not-mounted", fallback, 404);
+			const reason = await fetchDegradedReason(fetchImpl);
+			if (reason === void 0 || reason === "") return absent();
+			const described = degradedFailureMessage(reason);
+			return new HostApiError(described.failure, described.message, 404);
+		}
+		function uuid() {
+			return globalThis.crypto?.randomUUID?.() ?? `browser-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+		}
+		/**
+		* Read one Host response without ever handing a non-JSON body to JSON.parse:
+		* the core webserver answers an unmounted `/api/*` path with the plain text
+		* "not found", which used to surface as a JavaScript parse error in the panel.
+		*/
+		async function readJson(response) {
+			const text = await response.text();
+			let parsed;
+			let readable = false;
+			if (text.trim() !== "") try {
+				parsed = JSON.parse(text);
+				readable = true;
+			} catch {
+				readable = false;
+			}
+			const hostError = readable && typeof parsed === "object" && parsed !== null && typeof parsed.error === "string" ? parsed.error : void 0;
+			if (response.ok) {
+				if (!readable) throw new HostApiError("unexpected", t("board.hostError.unexpected", { status: String(response.status) }), response.status);
+				return parsed;
+			}
+			if (hostError !== void 0) {
+				if (hostError === "forbidden") throw new HostApiError("forbidden", t("board.hostError.forbidden"), response.status);
+				if (response.status === 503 || /lock/i.test(hostError)) throw new HostApiError("locked", t("board.hostError.locked", { detail: hostError }), response.status);
+				throw new HostApiError("rejected", hostError, response.status);
+			}
+			if (response.status === 404) throw await missingRouteFailure();
+			if (response.status === 403) throw new HostApiError("forbidden", t("board.hostError.forbidden"), 403);
+			if (response.status === 401) throw new HostApiError("unauthorized", t("board.hostError.unauthorized"), 401);
+			throw new HostApiError("unexpected", t("board.hostError.unexpected", { status: String(response.status) }), response.status);
+		}
+		/**
+		* The URL of one stored image. The board serves it only for an id a card of
+		* this board references, so the URL is useless on its own.
+		* @param attachmentId - the stored object's identifier.
+		* @returns the document-relative URL of the image.
+		*/
+		function attachmentImageUrl(attachmentId) {
+			return `${CLIENT_API_PREFIX}/attachments/image?id=${encodeURIComponent(attachmentId)}`;
+		}
+		var HttpTaskBoardHostTransport = class {
+			storage;
+			constructor(storage = globalThis.localStorage) {
+				this.storage = storage;
+			}
+			async bootstrap(legacy) {
+				const initial = await this.state();
+				const ledgerId = initial.scheduler.ledgerId;
+				if (legacy.length > 0 && ledgerId !== void 0 && this.storage?.getItem(IMPORT_MARKER) !== ledgerId) {
+					let sourceId = this.storage?.getItem(SOURCE_KEY);
+					if (sourceId === null || sourceId === void 0 || sourceId === "") {
+						sourceId = uuid();
+						this.storage?.setItem(SOURCE_KEY, sourceId);
+					}
+					let requestId = this.storage?.getItem(IMPORT_REQUEST_KEY);
+					if (requestId === null || requestId === void 0 || requestId === "") {
+						requestId = uuid();
+						this.storage?.setItem(IMPORT_REQUEST_KEY, requestId);
+					}
+					const snapshot = await this.post(requestId, {
+						kind: "import",
+						sourceId,
+						tasks: [...legacy]
+					});
+					this.storage?.setItem(IMPORT_MARKER, snapshot.scheduler.ledgerId ?? ledgerId);
+					return snapshot;
+				}
+				return initial;
+			}
+			async state() {
+				return await this.request(`${CLIENT_API_PREFIX}/state`, { cache: "no-store" });
+			}
+			async action(action, initiator) {
+				return await this.post(uuid(), action, initiator);
+			}
+			async post(requestId, action, initiator) {
+				const envelope = {
+					requestId,
+					action,
+					...initiator === void 0 || initiator === "" ? {} : { initiator }
+				};
+				return await this.request(`${CLIENT_API_PREFIX}/action`, {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify(envelope)
+				});
+			}
+			async request(url, init) {
+				const controller = new AbortController();
+				const timeout = globalThis.setTimeout(() => {
+					controller.abort();
+				}, REQUEST_TIMEOUT_MS);
+				try {
+					return await readJson(await fetch(url, {
+						...init,
+						signal: controller.signal
+					}));
+				} catch (error) {
+					if (error instanceof HostApiError) throw error;
+					if (controller.signal.aborted) throw new HostApiError("timeout", t("board.hostError.timeout", { seconds: String(REQUEST_TIMEOUT_MS / 1e3) }));
+					throw new HostApiError("unreachable", t("board.hostError.unreachable"));
+				} finally {
+					globalThis.clearTimeout(timeout);
+				}
+			}
+			/**
+			* Ask the Host to turn pasted text into task fields. The route answers a
+			* typed failure (no model, timeout, unparseable reply) already phrased for
+			* the form, so the UI never renders a raw status code (issue #1540).
+			*/
+			async parseDraft(request, signal) {
+				let response;
+				try {
+					response = await fetch(`${CLIENT_API_PREFIX}/parse`, {
+						method: "POST",
+						headers: { "content-type": "application/json" },
+						body: JSON.stringify(request),
+						...signal === void 0 ? {} : { signal }
+					});
+				} catch {
+					throw new HostApiError("unreachable", t("board.hostError.unreachable"));
+				}
+				const text = await response.text();
+				let parsed;
+				let readable = false;
+				if (text.trim() !== "") try {
+					parsed = JSON.parse(text);
+					readable = true;
+				} catch {
+					readable = false;
+				}
+				const record = readable && typeof parsed === "object" && parsed !== null ? parsed : void 0;
+				if (response.ok) {
+					if (record !== void 0 && isTaskParseDraft(record.draft)) return record.draft;
+					throw new HostApiError("unexpected", t("new.aiParseFailed", { error: t("board.hostError.unexpected", { status: String(response.status) }) }), response.status);
+				}
+				if (response.status === 404) throw await missingRouteFailure(t("new.aiParseUnavailable"));
+				if (response.status === 403) throw new HostApiError("forbidden", t("board.hostError.forbidden"), 403);
+				if (response.status === 401) throw new HostApiError("unauthorized", t("board.hostError.unauthorized"), 401);
+				const code = typeof record?.code === "string" ? record.code : void 0;
+				if (code === "no-model") throw new HostApiError("rejected", t("new.aiParseNoModel"), response.status);
+				if (code === "timeout") throw new HostApiError("timeout", t("new.aiParseTimeout", { seconds: String(TASK_PARSE_TIMEOUT_SECONDS) }), response.status);
+				throw new HostApiError("rejected", t("new.aiParseFailed", { error: typeof record?.error === "string" && record.error !== "" ? record.error : String(response.status) }), response.status);
+			}
+			/**
+			* Upload one attachment into the Host's attachment storage.
+			*
+			* The bytes travel as the raw request body: the Host measures the ACTUAL
+			* stream, publishes the object and answers with the host-computed metadata
+			* (size, type and digest) that the card will record.
+			* @param file - the picked file.
+			* @param kind - whether the file is stored as an image or verbatim.
+			* @returns the metadata the Host computed for the stored object.
+			*/
+			async uploadAttachment(file, kind) {
+				const controller = new AbortController();
+				const timer = globalThis.setTimeout(() => {
+					controller.abort();
+				}, UPLOAD_TIMEOUT_MS);
+				try {
+					const query = new URLSearchParams({
+						kind,
+						name: file.name,
+						mediaType: file.type
+					});
+					const response = await fetch(`${CLIENT_API_PREFIX}/attachments/upload?${query.toString()}`, {
+						method: "POST",
+						headers: { "content-type": "application/octet-stream" },
+						body: file,
+						signal: controller.signal
+					});
+					const text = await response.text();
+					let parsed;
+					try {
+						parsed = JSON.parse(text);
+					} catch {
+						parsed = void 0;
+					}
+					const record = parsed;
+					if (response.ok) {
+						if (record !== void 0 && isTaskAttachment(record.attachment)) return record.attachment;
+						throw new HostApiError("unexpected", t("board.hostError.unexpected", { status: String(response.status) }), response.status);
+					}
+					throw new HostApiError("rejected", typeof record?.error === "string" && record.error !== "" ? record.error : String(response.status), response.status);
+				} catch (error) {
+					if (error instanceof HostApiError) throw error;
+					if (controller.signal.aborted) throw new HostApiError("timeout", t("board.hostError.timeout", { seconds: String(UPLOAD_TIMEOUT_MS / 1e3) }));
+					throw new HostApiError("unreachable", t("board.hostError.unreachable"));
+				} finally {
+					globalThis.clearTimeout(timer);
+				}
+			}
+			subscribe(listener) {
+				const events = new EventSource(`${CLIENT_API_PREFIX}/events`);
+				let lastStreamErrorNotify = 0;
+				events.onmessage = (message) => {
+					try {
+						const parsed = JSON.parse(message.data);
+						if (parsed === null || typeof parsed !== "object" || typeof parsed.revision !== "number") throw new Error("invalid event frame");
+						listener(parsed);
+					} catch {
+						listener();
+					}
+				};
+				events.onopen = () => {
+					listener();
+				};
+				events.onerror = () => {
+					const now = Date.now();
+					if (now - lastStreamErrorNotify < STREAM_ERROR_NOTIFY_MS) return;
+					lastStreamErrorNotify = now;
+					listener();
+				};
+				const onVisible = () => {
+					if (document.visibilityState === "visible") listener();
+				};
+				document.addEventListener("visibilitychange", onVisible);
+				return () => {
+					document.removeEventListener("visibilitychange", onVisible);
+					events.close();
+				};
+			}
+		};
+		//#endregion
+		//#region src/client/board/AttachmentField.tsx
+		/**
+		* The attachment field of the create and edit forms.
+		*
+		* A file the user picks is STAGED locally first: the form shows a preview,
+		* the name and the size, and nothing leaves the browser until the card is
+		* saved. The upload therefore happens on save, not on selection — a card the
+		* user abandons never leaves a stored object behind.
+		*
+		* Three input modes are supported: drag and drop, paste, and the file picker.
+		* All three end in the same staged list.
+		*/
+		/** The board's own limits, used when the deployment publishes none. */
+		const DEFAULT_ATTACHMENT_LIMITS = {
+			maxAttachments: 8,
+			maxBytes: TASK_ATTACHMENT_MAX_BYTES,
+			maxTotalBytes: TASK_ATTACHMENT_TOTAL_MAX_BYTES,
+			maxImages: 8,
+			maxImageBytes: TASK_ATTACHMENT_MAX_BYTES,
+			maxMessageImageBytes: TASK_ATTACHMENT_TOTAL_MAX_BYTES
+		};
+		/** A human-readable byte size. */
+		function formatAttachmentBytes(bytes) {
+			if (bytes < 1024) return `${bytes} B`;
+			if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+			return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+		}
+		/**
+		* Whether a picked file is uploaded as an image.
+		*
+		* Only the raster types the official image path accepts are images; every
+		* other file is stored verbatim.
+		*/
+		function attachmentKindOf(file) {
+			const type = file.type.toLowerCase();
+			return TASK_ATTACHMENT_IMAGE_MEDIA_TYPES.includes(type) ? "image" : "file";
+		}
+		/** The byte total of a selection: the stored attachments plus the staged files. */
+		function totalBytesOf(selection) {
+			return selection.persisted.reduce((sum, attachment) => sum + attachment.bytes, 0) + selection.staged.reduce((sum, staged) => sum + staged.bytes, 0);
+		}
+		/** The byte total of the IMAGES of a selection. */
+		function imageBytesOf(selection) {
+			return selection.persisted.filter((attachment) => attachment.kind === "image").reduce((sum, attachment) => sum + attachment.bytes, 0) + selection.staged.filter((staged) => staged.kind === "image").reduce((sum, staged) => sum + staged.bytes, 0);
+		}
+		/** The number of IMAGES of a selection. */
+		function imageCountOf(selection) {
+			return selection.persisted.filter((attachment) => attachment.kind === "image").length + selection.staged.filter((staged) => staged.kind === "image").length;
+		}
+		/**
+		* The staged files the form already holds.
+		*
+		* The identity is the File OBJECT, never its metadata: two different files can
+		* share a name, a size, a type and a modification time, and inferring byte
+		* identity from those four would silently discard one of them. The form
+		* therefore stages every distinct File it is handed.
+		*
+		* The content identity that actually matters — the storage identifier the Host
+		* answers with — is applied AFTER the upload, where it is authoritative
+		* (see the core dedupe). The only case the form skips is the very same File
+		* object handed over twice, which is the same row twice.
+		*/
+		function stagedFileSet(staged) {
+			return new Set(staged.map((entry) => entry.file));
+		}
+		/**
+		* The attachment field of a card form.
+		*
+		* The component owns the local staging only: the selection it reports is what
+		* the card will carry, and the parent uploads the staged files on save.
+		*/
+		function AttachmentField({ selection, onChange, limits, disabled = false, onError }) {
+			const effective = limits ?? DEFAULT_ATTACHMENT_LIMITS;
+			const inputRef = (0, react.useRef)(null);
+			const objectUrls = (0, react.useRef)([]);
+			const counter = (0, react.useRef)(0);
+			const [dragging, setDragging] = (0, react.useState)(false);
+			(0, react.useEffect)(() => () => {
+				for (const url of objectUrls.current) URL.revokeObjectURL(url);
+				objectUrls.current = [];
+			}, []);
+			const addFiles = (files) => {
+				if (disabled || files.length === 0) return;
+				const staged = [...selection.staged];
+				const seen = stagedFileSet(staged);
+				let total = totalBytesOf(selection);
+				let imageBytes = imageBytesOf(selection);
+				let imageCount = imageCountOf(selection);
+				let added = 0;
+				for (const file of files) {
+					if (seen.has(file)) continue;
+					if (selection.persisted.length + staged.length >= effective.maxAttachments) {
+						onError?.(t("new.attachments.limitCount", { count: String(effective.maxAttachments) }));
+						break;
+					}
+					const kind = attachmentKindOf(file);
+					const limit = kind === "image" ? Math.min(effective.maxBytes, effective.maxImageBytes ?? effective.maxBytes) : effective.maxBytes;
+					if (file.size > limit) {
+						onError?.(t("new.attachments.limitSize", {
+							name: file.name,
+							size: formatAttachmentBytes(limit)
+						}));
+						continue;
+					}
+					if (total + file.size > effective.maxTotalBytes) {
+						onError?.(t("new.attachments.limitTotal", { size: formatAttachmentBytes(effective.maxTotalBytes) }));
+						break;
+					}
+					if (kind === "image") {
+						if (imageCount + 1 > effective.maxImages) {
+							onError?.(t("new.attachments.limitImages", { count: String(effective.maxImages) }));
+							break;
+						}
+						if (imageBytes + file.size > effective.maxMessageImageBytes) {
+							onError?.(t("new.attachments.limitImageBytes", { size: formatAttachmentBytes(effective.maxMessageImageBytes) }));
+							break;
+						}
+					}
+					const previewUrl = kind === "image" && typeof URL.createObjectURL === "function" ? URL.createObjectURL(file) : void 0;
+					if (previewUrl !== void 0) objectUrls.current.push(previewUrl);
+					counter.current += 1;
+					seen.add(file);
+					staged.push({
+						id: `staged-${counter.current}`,
+						file,
+						kind,
+						name: file.name,
+						bytes: file.size,
+						mediaType: file.type,
+						...previewUrl === void 0 ? {} : { previewUrl }
+					});
+					total += file.size;
+					if (kind === "image") {
+						imageBytes += file.size;
+						imageCount += 1;
+					}
+					added += 1;
+				}
+				if (added > 0) onChange({
+					...selection,
+					staged
+				});
+			};
+			const removeStaged = (id) => {
+				const target = selection.staged.find((staged) => staged.id === id);
+				if (target?.previewUrl !== void 0) {
+					URL.revokeObjectURL(target.previewUrl);
+					objectUrls.current = objectUrls.current.filter((url) => url !== target.previewUrl);
+				}
+				onChange({
+					...selection,
+					staged: selection.staged.filter((staged) => staged.id !== id)
+				});
+			};
+			const removePersisted = (attachmentId) => {
+				onChange({
+					...selection,
+					persisted: selection.persisted.filter((attachment) => attachment.attachmentId !== attachmentId)
+				});
+			};
+			const rows = [...selection.persisted.map((attachment) => ({
+				key: attachment.attachmentId,
+				attachment
+			})), ...selection.staged.map((staged) => ({
+				key: staged.id,
+				staged
+			}))];
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+				className: board_module_css_default.field,
+				"data-dsh-part": "form-section",
+				children: [
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+						className: board_module_css_default.fieldLabel,
+						children: t("new.attachments")
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+						className: board_module_css_default.fieldHint,
+						children: t("new.attachmentsHint")
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						className: board_module_css_default.attachmentDrop,
+						"data-state": dragging && !disabled ? "active" : void 0,
+						"data-disabled": disabled ? "true" : void 0,
+						tabIndex: disabled ? -1 : 0,
+						"aria-disabled": disabled ? true : void 0,
+						"aria-label": t("new.attachments.drop"),
+						onKeyDown: (event) => {
+							if (disabled) return;
+							if (event.target !== event.currentTarget) return;
+							if (event.key !== "Enter" && event.key !== " ") return;
+							event.preventDefault();
+							inputRef.current?.click();
+						},
+						onDragOver: (event) => {
+							event.preventDefault();
+							if (disabled) return;
+							setDragging(true);
+						},
+						onDragLeave: () => {
+							if (!disabled) setDragging(false);
+						},
+						onDrop: (event) => {
+							event.preventDefault();
+							setDragging(false);
+							addFiles(Array.from(event.dataTransfer?.files ?? []));
+						},
+						onPaste: (event) => {
+							const files = Array.from(event.clipboardData?.files ?? []);
+							if (files.length === 0) return;
+							event.preventDefault();
+							addFiles(files);
+						},
+						children: [
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								className: board_module_css_default.attachmentDropHint,
+								children: t("new.attachments.drop")
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
+								ref: inputRef,
+								type: "file",
+								multiple: true,
+								hidden: true,
+								disabled,
+								onChange: (event) => {
+									addFiles(Array.from(event.target.files ?? []));
+									event.target.value = "";
+								}
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+								type: "button",
+								className: board_module_css_default.ghostButton,
+								disabled,
+								onClick: () => {
+									if (disabled) return;
+									inputRef.current?.click();
+								},
+								children: t("new.attachments.pick")
+							})
+						]
+					}),
+					rows.length > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("ul", {
+						className: board_module_css_default.attachmentList,
+						children: rows.map((row) => /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("li", {
+							className: board_module_css_default.attachmentRow,
+							children: [
+								row.attachment !== void 0 && row.attachment.kind === "image" ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("img", {
+									className: board_module_css_default.attachmentThumb,
+									src: attachmentImageUrl(row.attachment.attachmentId),
+									alt: row.attachment.name
+								}) : null,
+								row.staged !== void 0 && row.staged.kind === "image" && row.staged.previewUrl !== void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("img", {
+									className: board_module_css_default.attachmentThumb,
+									src: row.staged.previewUrl,
+									alt: row.staged.name
+								}) : null,
+								/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+									className: board_module_css_default.attachmentName,
+									children: [row.attachment?.name ?? row.staged?.name, /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+										className: board_module_css_default.attachmentMeta,
+										children: [
+											" ",
+											formatAttachmentBytes(row.attachment?.bytes ?? row.staged?.bytes ?? 0),
+											row.staged?.pending === true ? ` · ${t("new.attachments.uploading")}` : "",
+											row.staged?.error !== void 0 ? ` · ${row.staged.error}` : ""
+										]
+									})]
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+									type: "button",
+									className: board_module_css_default.iconButton,
+									disabled,
+									"aria-label": t("new.attachments.remove", { name: row.attachment?.name ?? row.staged?.name ?? "" }),
+									onClick: () => {
+										if (row.attachment !== void 0) removePersisted(row.attachment.attachmentId);
+										else if (row.staged !== void 0) removeStaged(row.staged.id);
+									},
+									children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(IconClose, { size: 14 })
+								})
+							]
+						}, row.key))
+					})
+				]
+			});
 		}
 		//#endregion
 		//#region src/client/seats.tsx
@@ -8564,6 +9555,18 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 		* New-task modal: title + description + the prompt that execution will send.
 		* Creates through the Host and closes only after the Host confirms it.
 		*/
+		/**
+		* Mark one staged attachment row: the upload state and the failure reason.
+		*/
+		function markStaged$1(selection, id, patch) {
+			return {
+				...selection,
+				staged: selection.staged.map((staged) => staged.id === id ? {
+					...staged,
+					...patch
+				} : staged)
+			};
+		}
 		/** New-task form overlay. */
 		function NewTaskModal({ controller, onClose, initialTask, defaultWorkspaceId, onDuplicateSuccess, parentTask, phase }) {
 			const isDuplicate = initialTask !== void 0;
@@ -8601,6 +9604,11 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 			const [freezeError, setFreezeError] = (0, react.useState)(void 0);
 			const [handoverText, setHandoverText] = (0, react.useState)(initialTask?.handover?.references !== void 0 ? initialTask.handover.references.join("\n") : "");
 			const [tags, setTags] = (0, react.useState)(initialTask?.tags ?? []);
+			const [attachments, setAttachments] = (0, react.useState)({
+				persisted: initialTask?.attachments ?? [],
+				staged: []
+			});
+			const [attachmentError, setAttachmentError] = (0, react.useState)(void 0);
 			const [archiveOriginal, setArchiveOriginal] = (0, react.useState)(true);
 			const [error, setError] = (0, react.useState)(void 0);
 			const [pending, setPending] = (0, react.useState)(false);
@@ -8700,6 +9708,27 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 				};
 				const tagList = cleanTags(tags);
 				setPending(true);
+				const uploaded = [];
+				for (const staged of attachments.staged) {
+					setAttachments((current) => markStaged$1(current, staged.id, {
+						pending: true,
+						error: void 0
+					}));
+					try {
+						const attachment = await controller.uploadAttachment(staged.file, staged.kind);
+						if (attachment === void 0) throw new Error(t("new.attachments.unavailable"));
+						uploaded.push(attachment);
+					} catch (uploadError) {
+						const message = uploadError instanceof Error ? uploadError.message : String(uploadError);
+						setAttachments((current) => markStaged$1(current, staged.id, {
+							pending: false,
+							error: message
+						}));
+						setPending(false);
+						setError(message);
+						return;
+					}
+				}
 				const task = await controller.createTaskConfirmed({
 					title,
 					description,
@@ -8716,6 +9745,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 					...goalRun ? { goalRun: true } : {},
 					...skipVerification ? { skipVerification: true } : {},
 					...tagList.length > 0 ? { tags: tagList } : {},
+					...attachments.persisted.length + uploaded.length > 0 ? { attachments: dedupeAttachments([...attachments.persisted, ...uploaded]) } : {},
 					schedule: scheduleEnabled ? scheduleMode === "once" ? {
 						enabled: true,
 						mode: "once",
@@ -8751,7 +9781,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 			const modeLabel = mode === "" ? inheritLabel : selectedPreset === void 0 ? mode : presetLabel(selectedPreset);
 			const workspaceLabel = workspaceId === "" ? t("exec.workspace.recent") : options.workspaces.find((item) => item.workspaceId === workspaceId)?.title ?? workspaceId;
 			const permissionLabel = permission === "" ? inheritedPermission === void 0 ? t("exec.permission.default") : t("exec.permission.inheritParent", { permission: t(`exec.permission.${inheritedPermission}`) }) : t(`exec.permission.${permission}`);
-			const modelLabel = model === "" ? t("exec.model.default") : (options.models ?? []).find((item) => item.id === model)?.name ?? model;
+			const modelLabel = model === "" ? t("exec.model.default") : modelDisplayLabel(models.find((item) => item.id === model) ?? { id: model });
 			const modelSummary = reasoningEffort === "" ? modelLabel : `${modelLabel} · ${reasoningEffort}`;
 			const executionSummary = [
 				workspaceLabel,
@@ -8759,6 +9789,8 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 				permissionLabel,
 				...model === "" ? [] : [modelSummary]
 			].join(" · ");
+			const attachmentCount = attachments.persisted.length + attachments.staged.length;
+			const attachmentSummary = attachmentCount === 0 ? t("new.summary.none") : t("new.summary.attachmentCount", { count: String(attachmentCount) });
 			const tagCount = cleanTags(tags).length;
 			const labelsSummary = tagCount === 0 ? t("new.summary.none") : t("new.summary.labelCount", { count: String(tagCount) });
 			const runSummary = [goalRun && goalRunEnabled ? t("new.summary.multiRound") : t("new.summary.singleRound"), ...reuseSession ? [t("exec.reuseSession")] : []].join(" · ");
@@ -8825,7 +9857,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 											children: t("exec.model.default")
 										}), models.map((option) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", {
 											value: option.id,
-											children: option.name ?? option.id
+											children: modelDisplayLabel(option)
 										}, option.id))]
 									}), parsePending ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
 										type: "button",
@@ -8894,6 +9926,23 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 							knownTags: collectKnownTags(controller.getSnapshot().tasks),
 							onChange: setTags
 						})
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)(CollapsibleSection, {
+						title: t("new.section.attachments"),
+						summary: attachmentSummary,
+						forceOpen: attachmentError !== void 0,
+						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(AttachmentField, {
+							selection: attachments,
+							onChange: setAttachments,
+							limits: controller.getSnapshot().host?.attachmentLimits,
+							disabled: pending,
+							onError: (message) => {
+								setAttachmentError(message);
+							}
+						}), attachmentError !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+							className: board_module_css_default.formError,
+							children: attachmentError
+						})]
 					}),
 					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)(CollapsibleSection, {
 						title: t("new.section.execution"),
@@ -9009,7 +10058,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 										}),
 										models.map((item) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", {
 											value: item.id,
-											children: item.name ?? item.id
+											children: modelDisplayLabel(item)
 										}, item.id))
 									]
 								})]
@@ -9716,6 +10765,11 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 			const [description, setDescription] = (0, react.useState)(task.description);
 			const [prompt, setPrompt] = (0, react.useState)(task.prompt);
 			const [tags, setTags] = (0, react.useState)(task.tags ?? []);
+			const [attachments, setAttachments] = (0, react.useState)({
+				persisted: task.attachments ?? [],
+				staged: []
+			});
+			const [attachmentError, setAttachmentError] = (0, react.useState)(void 0);
 			const [error, setError] = (0, react.useState)(void 0);
 			const [pending, setPending] = (0, react.useState)(false);
 			const submit = async () => {
@@ -9725,11 +10779,36 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 				}
 				setPending(true);
 				const tagList = cleanTags(tags);
+				const uploaded = [];
+				for (const staged of attachments.staged) {
+					setAttachments((current) => markStaged(current, staged.id, {
+						pending: true,
+						error: void 0
+					}));
+					try {
+						const attachment = await controller.uploadAttachment(staged.file, staged.kind);
+						if (attachment === void 0) throw new Error(t("new.attachments.unavailable"));
+						uploaded.push(attachment);
+					} catch (uploadError) {
+						const message = uploadError instanceof Error ? uploadError.message : String(uploadError);
+						setAttachments((current) => markStaged(current, staged.id, {
+							pending: false,
+							error: message
+						}));
+						setPending(false);
+						setError(message);
+						return;
+					}
+				}
+				const carried = dedupeAttachments([...attachments.persisted, ...uploaded]);
+				const current = task.attachments ?? [];
+				const unchanged = current.length === carried.length && current.every((attachment, index) => attachment.attachmentId === carried[index]?.attachmentId);
 				const patch = {
 					title,
 					description,
 					prompt,
-					...tagList.length > 0 ? { tags: tagList } : task.tags === void 0 ? {} : { tags: null }
+					...tagList.length > 0 ? { tags: tagList } : task.tags === void 0 ? {} : { tags: null },
+					...unchanged ? {} : carried.length > 0 ? { attachments: carried } : { attachments: null }
 				};
 				if (await controller.updateTask(task.id, patch)) {
 					onClose();
@@ -9749,22 +10828,50 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 				},
 				onClose,
 				phase,
-				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(TaskContentFields, {
-					title,
-					description,
-					prompt,
-					onTitleChange: (value) => {
-						setTitle(value);
-						setError(void 0);
-					},
-					onDescriptionChange: setDescription,
-					onPromptChange: setPrompt
-				}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(TaskTagFields, {
-					tags,
-					knownTags: collectKnownTags(controller.getSnapshot().tasks),
-					onChange: setTags
-				})]
+				children: [
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)(TaskContentFields, {
+						title,
+						description,
+						prompt,
+						onTitleChange: (value) => {
+							setTitle(value);
+							setError(void 0);
+						},
+						onDescriptionChange: setDescription,
+						onPromptChange: setPrompt
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)(TaskTagFields, {
+						tags,
+						knownTags: collectKnownTags(controller.getSnapshot().tasks),
+						onChange: setTags
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)(AttachmentField, {
+						selection: attachments,
+						onChange: setAttachments,
+						limits: controller.getSnapshot().host?.attachmentLimits,
+						disabled: pending,
+						onError: (message) => {
+							setAttachmentError(message);
+						}
+					}),
+					attachmentError !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+						className: board_module_css_default.formError,
+						children: attachmentError
+					})
+				]
 			});
+		}
+		/**
+		* Mark one staged attachment row: the upload state and the failure reason.
+		*/
+		function markStaged(selection, id, patch) {
+			return {
+				...selection,
+				staged: selection.staged.map((staged) => staged.id === id ? {
+					...staged,
+					...patch
+				} : staged)
+			};
 		}
 		/** Edit-tags modal: edit labels only, shown for tasks after first execution. */
 		function EditTagsModal({ controller, task, onClose, phase }) {
@@ -10698,7 +11805,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 								}),
 								models.map((item) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", {
 									value: item.id,
-									children: item.name ?? item.id
+									children: modelDisplayLabel(item)
 								}, item.id))
 							]
 						})]
@@ -11449,6 +12556,37 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 													}, tag.name))
 												})]
 											}),
+											current.attachments !== void 0 && current.attachments.length > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("section", {
+												className: board_module_css_default.detailSection,
+												children: [
+													/* @__PURE__ */ (0, react_jsx_runtime.jsx)("h4", { children: t("detail.attachments") }),
+													/* @__PURE__ */ (0, react_jsx_runtime.jsx)("ul", {
+														className: board_module_css_default.attachmentList,
+														children: current.attachments.map((attachment) => /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("li", {
+															className: board_module_css_default.attachmentRow,
+															children: [attachment.kind === "image" ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("img", {
+																className: board_module_css_default.attachmentThumb,
+																src: attachmentImageUrl(attachment.attachmentId),
+																alt: attachment.name
+															}) : null, /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+																className: board_module_css_default.attachmentName,
+																children: [attachment.name, /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+																	className: board_module_css_default.attachmentMeta,
+																	children: [
+																		" ",
+																		formatAttachmentBytes(attachment.bytes),
+																		attachment.kind === "image" && attachment.width !== void 0 && attachment.height !== void 0 ? ` · ${attachment.width}×${attachment.height}` : ""
+																	]
+																})]
+															})]
+														}, attachment.attachmentId))
+													}),
+													/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+														className: board_module_css_default.detailMeta,
+														children: t("detail.attachments.removeHint")
+													})
+												]
+											}),
 											/* @__PURE__ */ (0, react_jsx_runtime.jsx)(SubtaskSection, {
 												controller,
 												task: current,
@@ -11725,6 +12863,78 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 				]
 			});
 		}
+		/** Browser storage key for explicit source-fold overrides. */
+		const SOURCE_GROUP_FOLDS_KEY = "dsh.taskBoard.sourceGroupFolds.v1";
+		function compareText(left, right) {
+			const a = left.toLowerCase();
+			const b = right.toLowerCase();
+			if (a < b) return -1;
+			if (a > b) return 1;
+			return left < right ? -1 : left > right ? 1 : 0;
+		}
+		/** Group cards in their incoming order, then sort provider groups by full label. */
+		function groupTasksBySource(tasks, selectors) {
+			const groups = /* @__PURE__ */ new Map();
+			for (const task of tasks) {
+				let source;
+				for (const selector of selectors) try {
+					const candidate = selector(task);
+					if (candidate === void 0) continue;
+					const id = candidate.id.trim();
+					const label = candidate.label.trim();
+					if (id === "" || label === "") continue;
+					source = {
+						id,
+						label
+					};
+					break;
+				} catch {}
+				const group = source ?? {
+					id: "local",
+					label: ""
+				};
+				const bucket = groups.get(group.id) ?? {
+					...group,
+					items: [],
+					local: source === void 0
+				};
+				bucket.items.push(task);
+				groups.set(group.id, bucket);
+			}
+			return [...groups.values()].sort((left, right) => {
+				if (left.local !== right.local) return left.local ? 1 : -1;
+				return compareText(left.label, right.label) || compareText(left.id, right.id);
+			});
+		}
+		/** Compound key keeps a fold choice scoped to one column/view and one source. */
+		function sourceGroupFoldKey(view, sourceId) {
+			return `${view}:${sourceId}`;
+		}
+		/** Read explicit overrides; malformed or unavailable storage falls back to defaults. */
+		function readSourceGroupFolds(storage) {
+			try {
+				const raw = storage?.getItem(SOURCE_GROUP_FOLDS_KEY);
+				if (raw === null || raw === void 0) return {};
+				const parsed = JSON.parse(raw);
+				if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+				const result = Object.create(null);
+				for (const [key, value] of Object.entries(parsed)) if (key !== "" && typeof value === "boolean") result[key] = value;
+				return result;
+			} catch {
+				return {};
+			}
+		}
+		/** Persist overrides; a storage failure only loses the preference. */
+		function writeSourceGroupFolds(storage, folds) {
+			try {
+				storage?.setItem(SOURCE_GROUP_FOLDS_KEY, JSON.stringify(folds));
+			} catch {}
+		}
+		/** Search always reveals matches; otherwise an override beats the column default. */
+		function isSourceGroupFolded(folds, view, sourceId, searchActive) {
+			if (searchActive) return false;
+			return folds[sourceGroupFoldKey(view, sourceId)] ?? view === "done";
+		}
 		/**
 		* Collect every string leaf of an opaque extension payload. The board does not
 		* interpret provider data, but a provider's identifiers and labels should stay
@@ -11816,6 +13026,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 			const [tagFilter, setTagFilter] = (0, react.useState)([]);
 			const [hideSubtasks, setHideSubtasks] = (0, react.useState)(true);
 			const [compactColumns, setCompactColumns] = (0, react.useState)(() => readCompactColumns(globalThis.localStorage));
+			const [sourceFolds, setSourceFolds] = (0, react.useState)(() => readSourceGroupFolds(globalThis.localStorage));
 			const [unfolded, setUnfolded] = (0, react.useState)([]);
 			const [showNew, setShowNew] = (0, react.useState)(false);
 			const [showTagManager, setShowTagManager] = (0, react.useState)(false);
@@ -11909,15 +13120,13 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 				subtasksFailed: subtaskRollup.get(task.id)?.failed ?? 0
 			}, task.id);
 			/**
-			* Settled cards in recency groups, newest first. A column longer than the
-			* fold threshold folds its oldest group behind a disclosure, so a column of
-			* a hundred finished issues opens on what happened lately; a text or label
-			* search never folds, because a match hidden behind a fold reads as no match.
+			* Recency groups nested inside one source group. The fold key includes the
+			* source, so expanding one repository's earlier cards opens no other group's.
 			*/
-			const renderGrouped = (columnKey, tasks, compact, archived) => {
+			const renderRecencyGroups = (foldScope, tasks, compact, archived) => {
 				const buckets = groupByRecency(tasks, (task) => cardTimeline(task, archived).at, now, timeZone);
 				const foldable = !searchActive && tasks.length > 30 && buckets.length > 1;
-				const open = unfolded.includes(columnKey);
+				const open = unfolded.includes(foldScope);
 				return buckets.map((bucket) => {
 					const folded = foldable && bucket.group === buckets[buckets.length - 1].group && !open;
 					return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
@@ -11938,13 +13147,57 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 									"data-dsh-part": "card-group-toggle",
 									"aria-expanded": !folded,
 									onClick: () => {
-										setUnfolded((current) => current.includes(columnKey) ? current.filter((entry) => entry !== columnKey) : [...current, columnKey]);
+										setUnfolded((current) => current.includes(foldScope) ? current.filter((entry) => entry !== foldScope) : [...current, foldScope]);
 									},
 									children: folded ? t("board.group.expand", { count: String(bucket.items.length) }) : t("board.group.collapse")
 								})
 							]
 						}), !folded && bucket.items.map((task) => renderCard(task, compact))]
 					}, bucket.group);
+				});
+			};
+			/** Every column and the archive first split by provider-owned source. */
+			const renderSourceGroups = (view, tasks, compact, archived) => {
+				const recency = archived || GROUPED_COLUMNS.includes(view);
+				return groupTasksBySource(tasks, snapshot.grouping ?? []).map((bucket) => {
+					const foldKey = sourceGroupFoldKey(view, bucket.id);
+					const folded = isSourceGroupFolded(sourceFolds, view, bucket.id, searchActive);
+					const label = bucket.local ? t("board.source.local") : bucket.label;
+					return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						className: `${board_module_css_default.cardGroup} ${board_module_css_default.sourceGroup}`,
+						"data-dsh-part": "card-group",
+						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+							className: `${board_module_css_default.cardGroupHeader} ${board_module_css_default.sourceGroupHeader}`,
+							children: [
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									className: board_module_css_default.sourceGroupLabel,
+									children: label
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									className: board_module_css_default.cardGroupCount,
+									children: bucket.items.length
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+									type: "button",
+									className: board_module_css_default.linkButton,
+									"data-dsh-part": "card-group-toggle",
+									"aria-expanded": !folded,
+									disabled: searchActive,
+									onClick: () => {
+										setSourceFolds((current) => {
+											const next = {
+												...current,
+												[foldKey]: !isSourceGroupFolded(current, view, bucket.id, false)
+											};
+											writeSourceGroupFolds(globalThis.localStorage, next);
+											return next;
+										});
+									},
+									children: folded ? t("board.group.expand", { count: String(bucket.items.length) }) : t("board.group.collapse")
+								})
+							]
+						}), !folded && (recency ? renderRecencyGroups(foldKey, bucket.items, compact, archived) : bucket.items.map((task) => renderCard(task, compact)))]
+					}, bucket.id);
 				});
 			};
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
@@ -12179,7 +13432,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 								})]
 							}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 								className: board_module_css_default.cards,
-								children: [renderGrouped(ARCHIVE_COLUMN, visible, false, true), visible.length === 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+								children: [renderSourceGroups(ARCHIVE_COLUMN, visible, false, true), visible.length === 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 									className: board_module_css_default.columnEmpty,
 									children: tagFilter.length > 0 ? t("board.tagEmpty") : t("archive.empty")
 								})]
@@ -12188,7 +13441,6 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 							const tasks = visible.filter((task) => task.status === column.status);
 							const isManualDropTarget = MANUAL_STATUSES.includes(column.status);
 							const compact = compactColumns.includes(column.status);
-							const grouped = GROUPED_COLUMNS.includes(column.status);
 							return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("section", {
 								className: board_module_css_default.column,
 								"data-status": column.status,
@@ -12236,7 +13488,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 									]
 								}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 									className: board_module_css_default.cards,
-									children: [grouped ? renderGrouped(column.status, tasks, compact, false) : tasks.map((task) => renderCard(task, compact)), tasks.length === 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+									children: [renderSourceGroups(column.status, tasks, compact, false), tasks.length === 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 										className: board_module_css_default.columnEmpty,
 										children: tagFilter.length > 0 ? t("board.tagEmpty") : t("board.empty")
 									})]
@@ -12380,251 +13632,6 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 			}, TaskBoardPanel)));
 			return () => {
 				for (const dispose of disposers.splice(0)) dispose();
-			};
-		}
-		//#endregion
-		//#region src/client/body-mutations.ts
-		/** Cross-bundle registry key; `Symbol.for` so every module copy agrees. */
-		const HUB_KEY = Symbol.for("dsh-web.body-mutation-hub");
-		const INVALIDATION_ONLY = Symbol.for("dsh-web.body-mutation-invalidation");
-		function needsRecords(subscribers) {
-			for (const listener of subscribers) if (!listener[INVALIDATION_ONLY]) return true;
-			return false;
-		}
-		/**
-		* Subscribe to a coalesced DOM re-check without retaining mutation records.
-		* The marked wrapper also works with an older hub, which delivers records
-		* that it simply ignores until a page reload picks up the updated hub.
-		*/
-		function subscribeBodyInvalidations(subscriber) {
-			const listener = () => {
-				subscriber();
-			};
-			listener[INVALIDATION_ONLY] = true;
-			return subscribeBodyMutations(listener);
-		}
-		/**
-		* Subscribe to body-level childList mutations.
-		* @param subscriber - called at most once per animation frame with the records
-		*   collected since the previous flush; must be safe to run repeatedly.
-		* @returns the disposer removing this subscriber (and the observer when it was
-		*   the last one).
-		*/
-		function subscribeBodyMutations(subscriber) {
-			if (typeof globalThis === "undefined" || typeof document === "undefined") return () => {};
-			if (typeof MutationObserver !== "function") return () => {};
-			const registry = globalThis;
-			let hub = registry[HUB_KEY];
-			if (hub === void 0) {
-				const subscribers = /* @__PURE__ */ new Set();
-				const created = {
-					observer: void 0,
-					subscribers,
-					pending: [],
-					scheduled: false
-				};
-				const flush = () => {
-					created.frame = void 0;
-					created.scheduled = false;
-					const batch = created.pending;
-					created.pending = [];
-					for (const listener of [...subscribers]) {
-						if (!subscribers.has(listener)) continue;
-						try {
-							listener(batch);
-						} catch {}
-					}
-				};
-				const schedule = () => {
-					if (created.scheduled) return;
-					created.scheduled = true;
-					if (typeof requestAnimationFrame === "function") created.frame = requestAnimationFrame(flush);
-					else flush();
-				};
-				created.observer = new MutationObserver((records) => {
-					if (needsRecords(subscribers)) for (const record of records) created.pending.push(record);
-					schedule();
-				});
-				created.observer.observe(document.body ?? document.documentElement, {
-					childList: true,
-					subtree: true
-				});
-				registry[HUB_KEY] = created;
-				hub = created;
-			}
-			const active = hub;
-			active.subscribers.add(subscriber);
-			let subscribed = true;
-			return () => {
-				if (!subscribed) return;
-				subscribed = false;
-				active.subscribers.delete(subscriber);
-				if (!needsRecords(active.subscribers)) active.pending = [];
-				if (active.subscribers.size === 0 && registry[HUB_KEY] === active) {
-					active.observer.disconnect();
-					if (active.frame !== void 0 && typeof cancelAnimationFrame === "function") cancelAnimationFrame(active.frame);
-					active.frame = void 0;
-					active.pending = [];
-					active.scheduled = false;
-					delete registry[HUB_KEY];
-				}
-			};
-		}
-		//#endregion
-		//#region src/client/suppress-schedule-row.ts
-		/**
-		* Hide the official automation-tasks entry while the board is on.
-		*
-		* The shell mounts two scheduling surfaces side by side in the sidebar: the
-		* official `ui-schedule` client half ("Automation tasks" — the Host Schedule
-		* service's own page) and this package's board ("Task board" — a Host ledger
-		* that runs real DSH sessions). The board is the family's complete surface, so
-		* while it is enabled the official row is hidden and the sidebar offers one
-		* scheduling entry instead of two.
-		*
-		* The shell owns that row: it renders the button, the label, the tooltip, the
-		* active highlight and the collapsed rail, and the host's own end-to-end suite
-		* addresses the row by its accessible name. The row is therefore located the
-		* same way — the shell's global panel list seat (`sidebar.panellist`), whose
-		* per-row anchor the slot renderer stamps — and it is identified by the label
-		* the shell itself resolves for that entry (`resolveSlotLabel`, exactly the
-		* call the shell's panel projection makes), so the match follows the active
-		* language instead of a hard-coded translation.
-		*
-		* The write is one inline `display: none` on the shell's own button: the row
-		* stays mounted (React keeps owning it) and the official panel keeps working
-		* everywhere else it is reachable — only the duplicate sidebar entry goes
-		* away. The board's master switch owns the state, exactly as it owns the
-		* board's own row: with the board off, the official row comes back.
-		*/
-		/**
-		* The official automation-tasks panel id.
-		*
-		* The host `ui-schedule` client half registers its sidebar row and its
-		* center-column page under this id; the shell's panel projection addresses
-		* both by it.
-		*/
-		const OFFICIAL_SCHEDULE_PANEL_ID = "schedules";
-		/** The shell's global panel list seat; every rendered panel row carries one anchor. */
-		const PANEL_LIST_SLOT = "sidebar.panellist";
-		/** The anchor the slot renderer stamps for each global panel row. */
-		const PANEL_ROW_ANCHOR = `[data-slot="${PANEL_LIST_SLOT}"]`;
-		/**
-		* The family's own hook on a plugin-owned panel row.
-		*
-		* A row carrying it belongs to a plugin that owns its entry, never to the
-		* official automation-tasks row, so the guard skips those rows: it must not
-		* be able to hide the board's own entry.
-		*/
-		const PLUGIN_ROW_HOOK = "[data-dsh-panel-entry]";
-		/**
-		* The live panel-list ledger, or an empty one.
-		*
-		* A context that serves no slot registry (a capture-only test context, or a
-		* shell that never declared the seat) has no official row to hide, and the
-		* guard must read that as "nothing to do" instead of failing the page.
-		* @param ctx - the client context.
-		* @returns the panel-list entries the shell currently projects.
-		*/
-		function panelEntries(ctx) {
-			const reader = ctx.slots;
-			if (reader === void 0 || typeof reader.entriesOfSlot !== "function") return [];
-			try {
-				return reader.entriesOfSlot(PANEL_LIST_SLOT) ?? [];
-			} catch {
-				return [];
-			}
-		}
-		/**
-		* The accessible name the shell renders on the official automation-tasks row.
-		*
-		* The shell projects its panel list with `resolveSlotLabel(options.label) ??
-		* id`, and that value becomes the row's accessible name. Reading the same
-		* value out of the same ledger is what keeps the DOM match correct in every
-		* language.
-		* @param entries - the live panel-list ledger.
-		* @returns the row's accessible name, or undefined when the official panel is not mounted.
-		*/
-		function officialScheduleRowLabel(entries) {
-			const entry = entries.find((candidate) => candidate.options.id === OFFICIAL_SCHEDULE_PANEL_ID);
-			if (entry === void 0) return void 0;
-			try {
-				return (0, _deepseek_ai_dsh_client_ui_slots.resolveSlotLabel)(entry.options.label) ?? entry.options.id;
-			} catch {
-				return;
-			}
-		}
-		/**
-		* The shell's button for the panel row carrying this accessible name.
-		*
-		* Every global panel row renders one slot anchor inside the shell's own
-		* button, so the anchor is the row's handle and the button is what the user
-		* sees. Rows a plugin owns (they carry the family's own entry hook) are
-		* skipped.
-		* @param root - the document (or a subtree) to search.
-		* @param label - the accessible name to match.
-		* @returns the row button, or undefined when no row carries that name.
-		*/
-		function findPanelRow(root, label) {
-			for (const anchor of root.querySelectorAll(PANEL_ROW_ANCHOR)) {
-				if (anchor.querySelector(PLUGIN_ROW_HOOK) !== null) continue;
-				const button = anchor.closest("button");
-				if (button !== null && button.getAttribute("aria-label") === label) return button;
-			}
-		}
-		/**
-		* Guard the official automation-tasks row against the board's presence.
-		*
-		* The guard hides the row while the board is enabled and restores it when the
-		* board is switched off. It re-applies its write after every DOM change,
-		* because the shell owns the row and may mount or replace it at any time (a
-		* re-render, a panel-list change, the official plugin arriving late).
-		* @param ctx - client context carrying the slot registry.
-		* @param root - the document to search; defaults to the ambient one.
-		* @returns the guard's controls.
-		*/
-		function createScheduleRowGuard(ctx, root) {
-			const scope = root ?? (typeof document === "undefined" ? void 0 : document);
-			let hidden;
-			let previousDisplay = null;
-			let stopWatching;
-			const restoreRow = () => {
-				if (hidden === void 0) return;
-				const button = hidden;
-				hidden = void 0;
-				if (previousDisplay === null) button.style.removeProperty("display");
-				else button.style.setProperty("display", previousDisplay);
-				previousDisplay = null;
-			};
-			const hideRow = () => {
-				if (scope === void 0) return;
-				const label = officialScheduleRowLabel(panelEntries(ctx));
-				if (label === void 0) return;
-				const button = findPanelRow(scope, label);
-				if (button === void 0) return;
-				if (hidden === button) return;
-				restoreRow();
-				hidden = button;
-				previousDisplay = button.style.getPropertyValue("display");
-				button.style.setProperty("display", "none", "important");
-			};
-			const sync = () => {
-				if (hidden !== void 0 && !hidden.isConnected) restoreRow();
-				hideRow();
-			};
-			const hide = () => {
-				hideRow();
-				if (stopWatching === void 0) stopWatching = subscribeBodyInvalidations(sync);
-			};
-			const show = () => {
-				stopWatching?.();
-				stopWatching = void 0;
-				restoreRow();
-			};
-			return {
-				hide,
-				show,
-				dispose: show
 			};
 		}
 		//#endregion
@@ -14261,7 +15268,11 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 				label: inheritRoute === void 0 ? t("settings.goalVerificationModelInheritUnknown") : t("settings.goalVerificationModelInherit", { model: inheritRoute.provider + "/" + inheritRoute.model })
 			}, ...catalog.groups.flatMap((group) => group.models.map((model) => ({
 				value: group.id + "/" + model.id,
-				label: (group.name ?? group.id) + " · " + (model.name ?? model.id)
+				label: modelDisplayLabel({
+					id: group.id + "/" + model.id,
+					name: model.name ?? model.id,
+					provider: group.id
+				})
 			})))];
 			const stagedRoute = parseModelRoute(stagedSettings.model) ?? (inheritRoute === void 0 ? void 0 : {
 				provider: inheritRoute.provider,
@@ -14729,358 +15740,75 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 			});
 		}
 		//#endregion
-		//#region src/core/degraded-reason.ts
+		//#region src/client/pending-verify.ts
 		/**
-		* The one degraded record naming `plugin`, or undefined when that row is not
-		* degraded (or the payload does not come from the shell's own shape). A
-		* plugin may appear once: the shell keys the ledger by package name and
-		* refreshes the record on every new failure.
-		* @param body - parsed JSON body of the health route.
-		* @param plugin - the real plugin package name to look for.
-		* @returns the degraded row, or undefined when the ledger does not name it.
-		*/
-		function degradedRowOf(body, plugin) {
-			if (typeof body !== "object" || body === null) return void 0;
-			const ledger = body;
-			if (ledger.ok !== true || !Array.isArray(ledger.degraded)) return void 0;
-			for (const entry of ledger.degraded) {
-				if (typeof entry !== "object" || entry === null) continue;
-				const record = entry;
-				if (record.plugin !== plugin) continue;
-				const stage = record.stage === "import" || record.stage === "shape" || record.stage === "start" ? record.stage : void 0;
-				if (stage === void 0) continue;
-				return {
-					plugin,
-					stage,
-					reason: typeof record.reason === "string" ? record.reason : ""
-				};
-			}
-		}
-		/** The ledger owner pid a task-board lock reason names, when it names one. */
-		const OWNED_BY_PROCESS_RE = /already owned by process\s+(\d+)/;
-		/**
-		* The marker the ledger appends when it could NOT confirm the recorded PID
-		* belongs to the lock's real owner: the PID was reused by an unrelated process
-		* after a crash, and the reason then carries the manual-removal step instead.
-		* That reason must be rendered verbatim — telling the user to close "the other
-		* DSH instance" would send them after a process that never touched the board.
-		*/
-		const UNCONFIRMED_OWNER_MARKER = "reused after a crash";
-		/**
-		* Extract the pid of the LIVE process a ledger-lock failure blames, when the
-		* reason identifies one. The task board's lock refusal is the one degraded
-		* reason that carries an owner the user can act on, so the panel renders the
-		* pid in its own sentence and adds the guidance that actually applies.
-		* @param reason - the shell's one-line failure reason.
-		* @returns the confirmed owner pid, or undefined when the reason names none or
-		*   warns that the PID may have been reused (its own text owns the recovery).
-		*/
-		function ledgerOwnerPid(reason) {
-			if (reason.includes(UNCONFIRMED_OWNER_MARKER)) return void 0;
-			const match = OWNED_BY_PROCESS_RE.exec(reason);
-			if (match === null) return void 0;
-			const pid = Number(match[1]);
-			return Number.isSafeInteger(pid) && pid > 0 ? pid : void 0;
-		}
-		//#endregion
-		//#region src/core/package-name.ts
-		/**
-		* npm identity of this plugin. The dsh-web-all degraded ledger is keyed by the
-		* real plugin package name of a family row, and this plugin's browser half
-		* must name its OWN row there to learn why its Host API is missing (issue
-		* #1730): the served bundle cannot derive the name, because a family row
-		* mounts the package from a versioned profile path. The host half spells the
-		* same name in its single-mount guard (src/index.ts); the two move together.
-		*/
-		const TASK_BOARD_PACKAGE = "@linxin666/dsh-client-ui-task-board";
-		//#endregion
-		//#region src/protocol.ts
-		const TASK_BOARD_API_PREFIX = "/api/task-board";
-		/** Whether a decoded reply carries the three draft strings the form accepts. */
-		function isTaskParseDraft(value) {
-			if (typeof value !== "object" || value === null) return false;
-			const record = value;
-			return typeof record.title === "string" && typeof record.description === "string" && typeof record.prompt === "string";
-		}
-		//#endregion
-		//#region src/client/host-api.ts
-		/**
-		* Client-side base for the board's routes: DOCUMENT-RELATIVE (issue #1707).
+		* Bounded verification of the one board state the mirror knows is transient.
 		*
-		* The host registers `TASK_BOARD_API_PREFIX` root-absolute; the page is served
-		* with `<base href="./">`, so the browser half must drop the leading slash or
-		* a sub-path deployment escapes its entry directory. Derived from the shared
-		* constant so host and client cannot drift.
-		*/
-		const CLIENT_API_PREFIX = TASK_BOARD_API_PREFIX.slice(1);
-		const IMPORT_MARKER = "dsh.taskBoard.v2.hostImported";
-		const SOURCE_KEY = "dsh.taskBoard.v2.sourceId";
-		const IMPORT_REQUEST_KEY = "dsh.taskBoard.v2.importRequestId";
-		const REQUEST_TIMEOUT_MS = 15e3;
-		/** Re-notify the panel at most this often while the event stream stays broken. */
-		const STREAM_ERROR_NOTIFY_MS = 15e3;
-		/** Mirrors the Host's own parse budget; only used to phrase the timeout. */
-		const TASK_PARSE_TIMEOUT_SECONDS = 45;
-		/** Transport failure carrying a stable class next to its user-facing message. */
-		var HostApiError = class extends Error {
-			failure;
-			status;
-			constructor(failure, message, status) {
-				super(message);
-				this.failure = failure;
-				this.status = status;
-				this.name = "HostApiError";
-			}
-		};
-		/**
-		* Same-origin family health route served by the dsh-web-all shell: the
-		* degraded ledger, in which a family row that failed during apply appears WITH
-		* its reason. DOCUMENT-RELATIVE for the same reason as the board's own routes
-		* (issue #1707). A 404 here means the family shell is absent or older than the
-		* route, which is not itself a failure of the board.
-		*/
-		const FAMILY_DEGRADED_ROUTE = "api/dsh-web-all/degraded";
-		/** Health-route ceiling: an unresponsive family shell must not hold the board's first paint. */
-		const DEGRADED_LOOKUP_TIMEOUT_MS = 2e3;
-		/**
-		* The failure text for a row this browser knows failed during start.
+		* A pushed frame is how the panel normally learns that the Host moved, and the
+		* browser cannot verify that frames still arrive: an SSE connection that stops
+		* delivering without closing leaves `EventSource` open and silent, so no error
+		* fires and no frame comes. While the mirror still shows an execution the Host
+		* has not settled, that silence looks exactly like a run still in progress —
+		* the row a reader is looking at keeps saying "running" long after the Host
+		* wrote the session id and settled it.
 		*
-		* A ledger lock is the one class with an owner the user can act on, so its
-		* reason is unpacked into the pid plus what to do about it; every other
-		* degraded row is reported with the shell's own reason verbatim. The raw
-		* reason rides along either way, because it is the only text that names the
-		* lock file or the recovery step when the pid is not the whole story.
-		* @param reason - the shell's one-line failure reason (never empty).
+		* So the mirror verifies exactly that state and nothing else: one state read per
+		* {@link PENDING_VERIFICATION_MS} while at least one execution is still open,
+		* disarmed by the snapshot itself as soon as the last one settles. A board with
+		* nothing in flight reads nothing (the package rule: an idle board does not
+		* poll), and a hidden page defers its reads until it is looked at again.
+		*
+		* @module dsh-task-board/client/pending-verify
 		*/
-		function degradedFailureMessage(reason) {
-			const pid = ledgerOwnerPid(reason);
-			if (pid === void 0) return {
-				failure: "degraded",
-				message: t("board.hostError.degraded", { detail: reason })
+		/**
+		* Verification cadence while an execution is open. It matches the interval the
+		* transport already uses to recover from a stream error, so a missed frame and
+		* a broken stream converge within the same bound.
+		*/
+		const PENDING_VERIFICATION_MS = 15e3;
+		/**
+		* Watch the mirror and re-read the Host snapshot while it shows work in flight.
+		* @param face - the mirror, the read, and the seams the loop runs on.
+		* @param intervalMs - verification cadence in milliseconds.
+		* @returns the disposer that releases the timer and the subscription.
+		*/
+		function startPendingVerification(face, intervalMs = PENDING_VERIFICATION_MS) {
+			const schedule = face.schedule ?? ((run) => globalThis.setInterval(run, intervalMs));
+			const cancel = face.cancel ?? ((handle) => {
+				globalThis.clearInterval(handle);
+			});
+			const visible = face.visible ?? pageVisible;
+			let handle;
+			const stop = () => {
+				if (handle === void 0) return;
+				const current = handle;
+				handle = void 0;
+				cancel(current);
 			};
-			return {
-				failure: "ledger-locked",
-				message: t("board.hostError.ledgerLocked", {
-					pid: String(pid),
-					detail: reason
-				})
+			const tick = () => {
+				if (!face.pending()) {
+					stop();
+					return;
+				}
+				if (!visible()) return;
+				face.refresh();
+			};
+			const arm = () => {
+				if (handle !== void 0 || !face.pending()) return;
+				handle = schedule(tick);
+			};
+			const unsubscribe = face.subscribe(arm);
+			arm();
+			return () => {
+				unsubscribe();
+				stop();
 			};
 		}
-		/**
-		* The degraded record the family shell holds for THIS board, or undefined when
-		* the row is healthy, the shell is absent, or the answer is unusable. The
-		* lookup is best-effort by contract: any uncertainty keeps the caller's own
-		* failure text instead of replacing it with a weaker one.
-		* @param fetchImpl - fetch implementation (injected for tests).
-		* @returns the ledger's reason for this row, or undefined when it names none.
-		*/
-		async function fetchDegradedReason(fetchImpl) {
-			const controller = new AbortController();
-			const timer = globalThis.setTimeout(() => {
-				controller.abort();
-			}, DEGRADED_LOOKUP_TIMEOUT_MS);
-			try {
-				const response = await fetchImpl(FAMILY_DEGRADED_ROUTE, {
-					signal: controller.signal,
-					headers: { accept: "application/json" },
-					cache: "no-store"
-				});
-				if (!response.ok) return void 0;
-				return degradedRowOf(await response.json(), TASK_BOARD_PACKAGE)?.reason;
-			} catch {
-				return;
-			} finally {
-				globalThis.clearTimeout(timer);
-			}
+		/** Whether the page is being looked at; a composition without a document counts as visible. */
+		function pageVisible() {
+			const state = globalThis.document?.visibilityState;
+			return state === void 0 || state === "visible";
 		}
-		/**
-		* Name the real reason this board's routes are missing (issue #1730).
-		*
-		* The core webserver answers an unmounted route with a bare 404, which cannot
-		* distinguish "this deployment never loaded the plugin" from "this row
-		* degraded during start" — a second DSH process holding `ledger-v2.lock` is
-		* the case that matters, because the panel's advice ("restart the service")
-		* is then false: the lock belongs to the other process, and restarting cannot
-		* win it. The family health route knows the difference, so the 404 is
-		* disambiguated there before anything is shown.
-		* @param fallback - copy for the plain "routes are not there" failure, which
-		*   is route-specific (the board's state route and the AI-parse route phrase
-		*   their own absence); it is also what is shown when the ledger names nothing.
-		* @param fetchImpl - fetch implementation (injected for tests).
-		* @returns the HostApiError to throw for a missing board route.
-		*/
-		async function missingRouteFailure(fallback = t("board.hostError.notMounted"), fetchImpl = fetch) {
-			const absent = () => new HostApiError("not-mounted", fallback, 404);
-			const reason = await fetchDegradedReason(fetchImpl);
-			if (reason === void 0 || reason === "") return absent();
-			const described = degradedFailureMessage(reason);
-			return new HostApiError(described.failure, described.message, 404);
-		}
-		function uuid() {
-			return globalThis.crypto?.randomUUID?.() ?? `browser-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-		}
-		/**
-		* Read one Host response without ever handing a non-JSON body to JSON.parse:
-		* the core webserver answers an unmounted `/api/*` path with the plain text
-		* "not found", which used to surface as a JavaScript parse error in the panel.
-		*/
-		async function readJson(response) {
-			const text = await response.text();
-			let parsed;
-			let readable = false;
-			if (text.trim() !== "") try {
-				parsed = JSON.parse(text);
-				readable = true;
-			} catch {
-				readable = false;
-			}
-			const hostError = readable && typeof parsed === "object" && parsed !== null && typeof parsed.error === "string" ? parsed.error : void 0;
-			if (response.ok) {
-				if (!readable) throw new HostApiError("unexpected", t("board.hostError.unexpected", { status: String(response.status) }), response.status);
-				return parsed;
-			}
-			if (hostError !== void 0) {
-				if (hostError === "forbidden") throw new HostApiError("forbidden", t("board.hostError.forbidden"), response.status);
-				if (response.status === 503 || /lock/i.test(hostError)) throw new HostApiError("locked", t("board.hostError.locked", { detail: hostError }), response.status);
-				throw new HostApiError("rejected", hostError, response.status);
-			}
-			if (response.status === 404) throw await missingRouteFailure();
-			if (response.status === 403) throw new HostApiError("forbidden", t("board.hostError.forbidden"), 403);
-			if (response.status === 401) throw new HostApiError("unauthorized", t("board.hostError.unauthorized"), 401);
-			throw new HostApiError("unexpected", t("board.hostError.unexpected", { status: String(response.status) }), response.status);
-		}
-		var HttpTaskBoardHostTransport = class {
-			storage;
-			constructor(storage = globalThis.localStorage) {
-				this.storage = storage;
-			}
-			async bootstrap(legacy) {
-				const initial = await this.state();
-				const ledgerId = initial.scheduler.ledgerId;
-				if (legacy.length > 0 && ledgerId !== void 0 && this.storage?.getItem(IMPORT_MARKER) !== ledgerId) {
-					let sourceId = this.storage?.getItem(SOURCE_KEY);
-					if (sourceId === null || sourceId === void 0 || sourceId === "") {
-						sourceId = uuid();
-						this.storage?.setItem(SOURCE_KEY, sourceId);
-					}
-					let requestId = this.storage?.getItem(IMPORT_REQUEST_KEY);
-					if (requestId === null || requestId === void 0 || requestId === "") {
-						requestId = uuid();
-						this.storage?.setItem(IMPORT_REQUEST_KEY, requestId);
-					}
-					const snapshot = await this.post(requestId, {
-						kind: "import",
-						sourceId,
-						tasks: [...legacy]
-					});
-					this.storage?.setItem(IMPORT_MARKER, snapshot.scheduler.ledgerId ?? ledgerId);
-					return snapshot;
-				}
-				return initial;
-			}
-			async state() {
-				return await this.request(`${CLIENT_API_PREFIX}/state`, { cache: "no-store" });
-			}
-			async action(action, initiator) {
-				return await this.post(uuid(), action, initiator);
-			}
-			async post(requestId, action, initiator) {
-				const envelope = {
-					requestId,
-					action,
-					...initiator === void 0 || initiator === "" ? {} : { initiator }
-				};
-				return await this.request(`${CLIENT_API_PREFIX}/action`, {
-					method: "POST",
-					headers: { "content-type": "application/json" },
-					body: JSON.stringify(envelope)
-				});
-			}
-			async request(url, init) {
-				const controller = new AbortController();
-				const timeout = globalThis.setTimeout(() => {
-					controller.abort();
-				}, REQUEST_TIMEOUT_MS);
-				try {
-					return await readJson(await fetch(url, {
-						...init,
-						signal: controller.signal
-					}));
-				} catch (error) {
-					if (error instanceof HostApiError) throw error;
-					if (controller.signal.aborted) throw new HostApiError("timeout", t("board.hostError.timeout", { seconds: String(REQUEST_TIMEOUT_MS / 1e3) }));
-					throw new HostApiError("unreachable", t("board.hostError.unreachable"));
-				} finally {
-					globalThis.clearTimeout(timeout);
-				}
-			}
-			/**
-			* Ask the Host to turn pasted text into task fields. The route answers a
-			* typed failure (no model, timeout, unparseable reply) already phrased for
-			* the form, so the UI never renders a raw status code (issue #1540).
-			*/
-			async parseDraft(request, signal) {
-				let response;
-				try {
-					response = await fetch(`${CLIENT_API_PREFIX}/parse`, {
-						method: "POST",
-						headers: { "content-type": "application/json" },
-						body: JSON.stringify(request),
-						...signal === void 0 ? {} : { signal }
-					});
-				} catch {
-					throw new HostApiError("unreachable", t("board.hostError.unreachable"));
-				}
-				const text = await response.text();
-				let parsed;
-				let readable = false;
-				if (text.trim() !== "") try {
-					parsed = JSON.parse(text);
-					readable = true;
-				} catch {
-					readable = false;
-				}
-				const record = readable && typeof parsed === "object" && parsed !== null ? parsed : void 0;
-				if (response.ok) {
-					if (record !== void 0 && isTaskParseDraft(record.draft)) return record.draft;
-					throw new HostApiError("unexpected", t("new.aiParseFailed", { error: t("board.hostError.unexpected", { status: String(response.status) }) }), response.status);
-				}
-				if (response.status === 404) throw await missingRouteFailure(t("new.aiParseUnavailable"));
-				if (response.status === 403) throw new HostApiError("forbidden", t("board.hostError.forbidden"), 403);
-				if (response.status === 401) throw new HostApiError("unauthorized", t("board.hostError.unauthorized"), 401);
-				const code = typeof record?.code === "string" ? record.code : void 0;
-				if (code === "no-model") throw new HostApiError("rejected", t("new.aiParseNoModel"), response.status);
-				if (code === "timeout") throw new HostApiError("timeout", t("new.aiParseTimeout", { seconds: String(TASK_PARSE_TIMEOUT_SECONDS) }), response.status);
-				throw new HostApiError("rejected", t("new.aiParseFailed", { error: typeof record?.error === "string" && record.error !== "" ? record.error : String(response.status) }), response.status);
-			}
-			subscribe(listener) {
-				const events = new EventSource(`${CLIENT_API_PREFIX}/events`);
-				let lastStreamErrorNotify = 0;
-				events.onmessage = (message) => {
-					try {
-						const parsed = JSON.parse(message.data);
-						if (parsed === null || typeof parsed !== "object" || typeof parsed.revision !== "number") throw new Error("invalid event frame");
-						listener(parsed);
-					} catch {
-						listener();
-					}
-				};
-				events.onerror = () => {
-					const now = Date.now();
-					if (now - lastStreamErrorNotify < STREAM_ERROR_NOTIFY_MS) return;
-					lastStreamErrorNotify = now;
-					listener();
-				};
-				const onVisible = () => {
-					if (document.visibilityState === "visible") listener();
-				};
-				document.addEventListener("visibilitychange", onVisible);
-				return () => {
-					document.removeEventListener("visibilitychange", onVisible);
-					events.close();
-				};
-			}
-		};
 		//#endregion
 		//#region src/client/telemetry.ts
 		/** localStorage key carrying the family-wide telemetry opt-out ('1' = off). */
@@ -15091,7 +15819,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 		/** The building package's version, when the bundle carries it. */
 		function bakedVersion() {
 			try {
-				return "0.4.11-dsh.20261028.2";
+				return "0.4.15-dsh.20261104.1";
 			} catch {
 				return;
 			}
@@ -15296,9 +16024,9 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 				}
 			};
 			if (typeof ctx.on === "function") try {
-				ctx.on("slots/changed", () => {
+				ctx.on("slots/changed", (() => {
 					reconcile();
-				});
+				}));
 			} catch {}
 			reconcile();
 		}
@@ -15399,6 +16127,8 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 			unsubscribeController;
 			/** Predicates registered before the controller exists, replayed on attach. */
 			pendingVisibility = [];
+			/** Source selectors registered before the controller exists, replayed on attach. */
+			pendingGrouping = [];
 			listeners = /* @__PURE__ */ new Set();
 			/** Bind the live board controller (called when the UI mounts). */
 			attach(controller) {
@@ -15409,6 +16139,7 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 					this.notify();
 				});
 				for (const predicate of this.pendingVisibility.splice(0)) controller.registerVisibility(predicate);
+				for (const registration of this.pendingGrouping.splice(0)) if (registration.active) registration.dispose = controller.registerGrouping(registration.selector);
 				this.notify();
 			}
 			/** Release the current controller (called when the UI unmounts). */
@@ -15435,6 +16166,20 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 				return () => {
 					const index = this.pendingVisibility.indexOf(predicate);
 					if (index !== -1) this.pendingVisibility.splice(index, 1);
+				};
+			}
+			registerGrouping(selector) {
+				if (this.controller !== void 0) return this.controller.registerGrouping(selector);
+				const registration = {
+					selector,
+					active: true
+				};
+				this.pendingGrouping.push(registration);
+				return () => {
+					registration.active = false;
+					registration.dispose?.();
+					const index = this.pendingGrouping.indexOf(registration);
+					if (index !== -1) this.pendingGrouping.splice(index, 1);
 				};
 			}
 			subscribe(callback) {
@@ -15594,6 +16339,13 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 				const disposers = [];
 				liveController = controller;
 				if (presetRoster !== void 0) controller.setExecutionOptions({ presets: presetRoster });
+				disposers.push(startPendingVerification({
+					pending: () => controller.getSnapshot().tasks.some(hasOpenExecution),
+					refresh: () => {
+						controller.refreshHostState();
+					},
+					subscribe: (listener) => controller.subscribe(listener)
+				}));
 				let followedDefaults = cardDefaultSignature(settingsForm.getSnapshot().value);
 				disposers.push(settingsForm.subscribe(() => {
 					const next = cardDefaultSignature(settingsForm.getSnapshot().value);
@@ -15665,16 +16417,13 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 					uiDisposer = void 0;
 				};
 			};
-			const scheduleRowGuard = createScheduleRowGuard(ctx);
 			const syncEnabled = () => {
 				const snapshot = settingsForm.getSnapshot();
 				if (snapshot.status === "ready" ? snapshot.value?.enabled ?? true : snapshot.status === "unavailable") {
 					mountUi();
 					clientService.setEnabled(true);
-					scheduleRowGuard.hide();
 				} else {
 					clientService.setEnabled(false);
-					scheduleRowGuard.show();
 					uiDisposer?.();
 				}
 			};
@@ -15682,7 +16431,6 @@ Please report this to https://github.com/markedjs/marked.`, e) {
 			ctx.effect(() => () => {
 				unsubscribeSettings();
 				uiDisposer?.();
-				scheduleRowGuard.dispose();
 			}, "task-board: DOM surfaces");
 			syncEnabled();
 		}

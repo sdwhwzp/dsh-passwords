@@ -9,6 +9,7 @@
  * stale UI can never persist a value the execution service rejects.
  */
 import { freezeOf, isTaskPermission, normalizeTags, normalizeTargetId, type TaskRecord, type TaskPermission, type TaskTag } from '../tasks.ts'
+import { normalizeAttachments, type TaskAttachment } from '../attachment.ts'
 import type { FreezeSnapshot } from '../freeze-snapshot.ts'
 import type { TaskHandoverInput } from '../handover.ts'
 
@@ -27,6 +28,15 @@ export type TaskUpdatePatch = Partial<Pick<TaskRecord, 'title' | 'description' |
    * explicit null (or a list that normalizes to nothing) clears them.
    */
   tags?: TaskTag[] | null
+  /**
+   * Replaces the card's attachments (issue #1979).
+   *
+   * The attachments freeze WITH the card content: they are part of what the
+   * card hands to its execution, so an executed or archived card keeps the
+   * ones it ran with, exactly as it keeps the prompt it ran with. An explicit
+   * null clears them; a present array replaces the whole set.
+   */
+  attachments?: TaskAttachment[] | null
 }
 
 /** The fields that edit the task's content (what the user reads and what the
@@ -36,9 +46,21 @@ export type TaskUpdatePatch = Partial<Pick<TaskRecord, 'title' | 'description' |
  */
 export const TASK_CONTENT_FIELDS = ['title', 'description', 'prompt'] as const
 
+/**
+ * The fields that freeze with the card content: the text the card says AND
+ * the attachments it carries.
+ *
+ * The attachments freeze with the content because they ARE part of what the
+ * card hands to its execution: a card whose first run already consumed an
+ * image keeps that image, and the record of what ran stays what it was. An
+ * executed or archived card therefore refuses an attachment change exactly
+ * as it refuses a prompt change.
+ */
+export const TASK_FROZEN_FIELDS = [...TASK_CONTENT_FIELDS, 'attachments'] as const
+
 /** Whether an update patch touches any task-content field. */
 export function hasContentPatch(patch: TaskUpdatePatch): boolean {
-  return (TASK_CONTENT_FIELDS as readonly string[]).some(field => field in patch)
+  return (TASK_FROZEN_FIELDS as readonly string[]).some(field => field in patch)
 }
 
 /**
@@ -77,7 +99,7 @@ export function applyUpdateTask(
 ): readonly TaskRecord[] {
   return tasks.map(task => {
     if (task.id !== id) return task
-    const { freeze: freezePatch, handover: handoverPatch, tags: tagsPatch, ...rest } = patch
+    const { freeze: freezePatch, handover: handoverPatch, tags: tagsPatch, attachments: attachmentsPatch, ...rest } = patch
     const workspaceId = 'workspaceId' in patch ? normalizeTargetId(patch.workspaceId) : undefined
     const mode = 'mode' in patch ? normalizeTargetId(patch.mode) : undefined
     const permission = 'permission' in patch ? normalizePermission(task.permission, patch.permission) : undefined
@@ -99,6 +121,9 @@ export function applyUpdateTask(
     // Tags use the same convention: a present array replaces the set (after
     // repair), an explicit null or a fully-invalid list clears it.
     if ('tags' in patch) next.tags = tagsPatch == null ? undefined : normalizeTags(tagsPatch)
+    // Attachments follow the same convention: a present array replaces the
+    // whole set (after repair), an explicit null clears it.
+    if ('attachments' in patch) next.attachments = attachmentsPatch == null ? undefined : normalizeAttachments(attachmentsPatch)
     // The permission confirmation binds the exact permission value: a change
     // of the pinned permission or of the handover bundle re-arms the gate
     // (blocking confirm-then-swap escalation). handover was destructured out

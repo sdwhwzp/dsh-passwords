@@ -9,6 +9,16 @@ import { MISSING_WORKSPACE_REASON, mostRecentWorkspaceId } from './core/workspac
 import { declaredRoute, normalizeReasoningEffort, resolveReasoningEffort, type ReasoningRoute } from './core/reasoning-effort.ts'
 import type { ModelCatalogView } from './core/verification.ts'
 import type { ExecutionSummary, TaskPermission, TaskRecord } from './core/tasks.ts'
+import type { TaskAttachment } from './core/attachment.ts'
+import {
+  assertRouteAcceptsImages,
+  attachmentPromptPreamble,
+  resolveExecutionAttachments,
+  type ExecutionFilePart,
+  type ModelInfoResolver,
+  type ResolvedAttachments,
+  type TaskBoardAttachmentStore,
+} from './host/attachments.ts'
 import { executionSummaryOf } from './core/execution-summary.ts'
 
 /**
@@ -239,6 +249,20 @@ export interface PromptContext {
    * run's own terms instead of guessing from the Host clock (issue #1722).
    */
   schedule?: { triggeredAt: number; timeZone: string; mode: 'cron' | 'once'; cron?: string }
+  /**
+   * Rework provenance: the instructions a reviewer sent the previous run back
+   * with. Present exactly when this execution continues the card's own session
+   * to redo work, so the agent reads why it is being asked again instead of
+   * seeing the card body a second time with no explanation.
+   */
+  rework?: { instructions: string }
+  /**
+   * The card's attached files, resolved to readable host paths for THIS
+   * execution. Present exactly when the card carries files: the section is a
+   * preamble of its own, separate from the handover references, so the two
+   * kinds of reference stay distinguishable to the reading agent.
+   */
+  files?: readonly ExecutionFilePart[]
 }
 
 /**
@@ -275,6 +299,19 @@ function schedulePromptPreamble(context: PromptContext): string | undefined {
 }
 
 /**
+ * The rework section: this execution continues the card's own conversation
+ * because a reviewer sent the previous attempt back. It states both halves the
+ * agent must not guess — that the earlier work is the starting point, and what
+ * the reviewer actually wants changed — and marks the instruction block with a
+ * delimiter pair, so reviewer text cannot pass for board text.
+ */
+function reworkPromptPreamble(context: PromptContext): string | undefined {
+  const rework = context.rework
+  if (rework === undefined) return undefined
+  return `本次执行是同一会话上的返工：上一轮的结果被人工审阅打回，请在已完成的工作上继续修改，不要从头重做。返工意见 开始\n${escapeProvenanceDelimiter(rework.instructions)}\n返工意见 结束`
+}
+
+/**
  * Build the execution prompt for one task.
  * @param task - the task being launched.
  * @param context - the run's other members, for the execution-shape section.
@@ -290,10 +327,16 @@ export function promptText(task: TaskRecord, context: PromptContext = {}): strin
   // output location), the handover preamble is a per-card note, the scheduled
   // section states why this run exists, and the task body is the instruction.
   const tagPreamble = tagPromptPreamble(task)
+  // The attachment section names the readable paths of the card's files. It
+  // is a section of its own, never folded into the handover preamble.
+  const attachmentSection = context.files === undefined ? undefined : attachmentPromptPreamble(context.files)
   const handoverSection = handoverPreamble
   const schedulePreamble = schedulePromptPreamble(context)
   const runPreamble = dispatchPromptPreamble(context)
-  const preambles = [tagPreamble, handoverSection, schedulePreamble, runPreamble]
+  // The rework section sits last: it is the most specific instruction of this
+  // run and therefore the one read immediately before the card body.
+  const reworkSection = reworkPromptPreamble(context)
+  const preambles = [tagPreamble, attachmentSection, handoverSection, schedulePreamble, runPreamble, reworkSection]
     .filter((part): part is string => part !== undefined)
   const preamble = preambles.length === 0 ? undefined : preambles.join('\n\n')
   const freeze = task.freeze
@@ -385,6 +428,19 @@ function invokeWireArgs(namespace: string, method: string, request: Record<strin
   return { request }
 }
 
+/**
+ * The optional runtime faces an execution needs beyond the session gateway:
+ * the official attachment storage and the model-info reader the image
+ * preflight uses. Both are read live, so a deployment that mounts them after
+ * the board still gains the capability.
+ */
+export interface TaskBoardRuntimeFaces {
+  /** The official attachment storage, or undefined when the deployment has none. */
+  attachments?: () => TaskBoardAttachmentStore | undefined
+  /** The model-info reader, or undefined when the deployment serves no model information. */
+  llm?: () => ModelInfoResolver | undefined
+}
+
 export class HostExecutionRunner {
   /**
    * Newest event sequence per session whose COMPLETE history walk (reaching
@@ -410,6 +466,7 @@ export class HostExecutionRunner {
     unavailableRetry?: { attempts?: number; backoffMs?: number },
     private readonly assertPrincipal?: (principal: TaskBoardPrincipal | undefined) => void,
     ownerPeer?: GatewayPeer,
+    private readonly faces: TaskBoardRuntimeFaces = {},
   ) {
     this.unavailableAttempts = unavailableRetry?.attempts ?? SERVICE_UNAVAILABLE_ATTEMPTS
     this.unavailableBackoffMs = unavailableRetry?.backoffMs ?? SERVICE_UNAVAILABLE_BACKOFF_MS
@@ -563,6 +620,26 @@ export class HostExecutionRunner {
   }
 
   /**
+   * Queue one follow-up user message into an existing execution session.
+   *
+   * This is the same `session/prompt` call a launch makes, with none of the
+   * launch pins: a follow-up continues a conversation the board already
+   * composed, so it must not re-assert the permission, rename the session, or
+   * switch the model. The message is queued behind whatever that session is
+   * doing, which is what lets a caller reach a run that is still working.
+   * @param sessionId - the session the card's execution recorded.
+   * @param text - the message to deliver, already validated by the caller.
+   */
+  async followUp(sessionId: string, text: string): Promise<void> {
+    await this.invoke('session', 'prompt', {
+      sessionId,
+      requestId: 'task-board-follow-up-' + crypto.randomUUID(),
+      mode: 'queue' as const,
+      content: [{ type: 'text' as const, text }],
+    })
+  }
+
+  /**
    * Fail closed when a reused session records a different Agent preset than
    * the one this task pins.
    *
@@ -667,7 +744,17 @@ export class HostExecutionRunner {
     // never chose one must not gain a model-selection call it did not have.
     const requestedEffort = normalizeReasoningEffort(task.reasoningEffort)
     const pinned = HostExecutionRunner.pinnedRoute(task.model)
-    const route = pinned ?? (requestedEffort === undefined ? undefined : await this.sessionRoute(sessionId, catalog, principal))
+    // The card's attachments, resolved afresh for THIS execution: the
+    // recorded metadata is never trusted on its own, and a file whose host
+    // path is missing or unreadable fails the run instead of being silently
+    // dropped.
+    const attachments = task.attachments ?? []
+    const carriesImages = attachments.some(attachment => attachment.kind === 'image')
+    // The route the execution runs at: the card's own pin, or the session's
+    // current selection. It is needed for the effort decision AND for the
+    // image preflight, which must judge the route the run really uses — a
+    // reused session is judged by its CURRENT route, not by the card's pin.
+    const route = pinned ?? (requestedEffort === undefined && !carriesImages ? undefined : await this.sessionRoute(sessionId, catalog, principal))
     if (route !== undefined) {
       const routeLabel = `${route.provider === undefined ? '' : route.provider + '/'}${route.model}`
       const decision = resolveReasoningEffort(requestedEffort, catalog, route)
@@ -680,6 +767,15 @@ export class HostExecutionRunner {
       const declared = declaredRoute(catalog, route)
       const provider = declared?.provider ?? route.provider
       const modelId = declared?.model ?? route.model
+      // The image preflight runs BEFORE the prompt: a route that declares its
+      // input modalities and does not accept an image refuses the run here,
+      // so no session is ever prompted with an image it cannot read. A route
+      // that declares no modalities is unknown, and an unknown route is
+      // allowed — the official model catalog publishes no modality
+      // information and must not be used to answer this question.
+      if (carriesImages && provider !== undefined && modelId !== undefined) {
+        await assertRouteAcceptsImages(this.faces.llm?.(), provider, modelId)
+      }
       try {
         await this.invoke('session', 'selectModel', {
           sessionId,
@@ -700,14 +796,38 @@ export class HostExecutionRunner {
         console.warn(`[dsh-task-board] failed to select model "${provider === undefined ? modelId : provider + '/' + modelId}" for session ${sessionId}, falling back to default:`, modelError)
       }
     }
+    // The attachments are resolved AFTER the preflight and BEFORE the prompt:
+    // an image becomes an image part of the prompt (after the text part), and
+    // a file becomes a readable path in a preamble section of its own.
+    const resolved = await this.resolveAttachments(attachments)
+    const promptContext: PromptContext = resolved.files.length === 0 ? context : { ...context, files: resolved.files }
     await this.invoke('session', 'prompt', {
       sessionId,
       requestId: 'task-board-' + crypto.randomUUID(),
       mode: 'queue' as const,
-      content: [{ type: 'text' as const, text: promptText(task, context) }],
+      content: [
+        { type: 'text' as const, text: promptText(task, promptContext) },
+        ...resolved.images,
+      ],
     }, principal)
-    const armed = await this.armGoal(sessionId, task, context, goalEnabled, principal)
+    const armed = await this.armGoal(sessionId, task, promptContext, goalEnabled, principal)
     onGoalArmed?.(armed)
+  }
+
+  /**
+   * Resolve a card's attachments for one execution.
+   *
+   * A card without attachments resolves to nothing, even in a deployment that
+   * serves no attachment storage at all. A card WITH attachments cannot run
+   * without the storage: the run fails with a readable reason instead of
+   * silently dropping the attachment and running the card as if it carried
+   * none.
+   */
+  private async resolveAttachments(attachments: readonly TaskAttachment[]): Promise<ResolvedAttachments> {
+    if (attachments.length === 0) return { images: [], files: [] }
+    const store = this.faces.attachments?.()
+    if (store === undefined) throw new Error('this deployment serves no attachment storage')
+    return await resolveExecutionAttachments(store, attachments)
   }
 
   /**
