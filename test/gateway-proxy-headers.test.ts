@@ -199,6 +199,7 @@ let directoryListEntriesOverride: Array<{ name?: string; path: string; hidden?: 
 /** 回归用：directoryPicker/list 回一个缺 entries/crumbs 的畸形 value，验证 502 fail-closed。 */
 let directoryListMalformed = false;
 let failNextSessionCreate = false;
+let sessionCreateReplacement: string | null = null;
 let workspaceOrderResponseWorkspaceId = 'ws-visible';
 let delaySessionCreateResponse = false;
 let dropDelayedWorkspaceUpsert = false;
@@ -371,7 +372,7 @@ function startMockUpstream(): Promise<http.Server> {
             error: { code: 'remote/unknown-stream', message: 'Unary endpoint', details: {} } }));
           return;
         }
-        if (frame.endpoint === 'terminal/follow' || frame.endpoint === 'terminal/retain') {
+        if (frame.endpoint === 'terminal/follow' || frame.endpoint === 'terminal/retain' || frame.endpoint === 'terminal/attach') {
           client.send(JSON.stringify({
             type: 'item',
             streamId: frame.streamId,
@@ -868,7 +869,7 @@ function startMockUpstream(): Promise<http.Server> {
             res.end(JSON.stringify({
               type: 'server-response',
               rpcId: 'session-create',
-              result: { ok: true, value: { sessionId } },
+              result: { ok: true, value: { sessionId: sessionCreateReplacement ?? sessionId } },
             }));
           };
           if (delaySessionCreateResponse) { wireCreatedSessionId = sessionId; releaseSessionCreateResponse = reply; }
@@ -1241,6 +1242,7 @@ function createOwnedFixtureUser(username: string, hash: string, role: 'admin' | 
 }
 
 beforeEach(async () => {
+  sessionCreateReplacement = null;
   defaultModelInitializationRequests = [];
   remoteMuxOpenEndpoints = [];
   remoteMuxOpenFrames = [];
@@ -3076,6 +3078,52 @@ test('session.create 显式 ID 只能恢复本人可见会话或成功领取真�
   assert.equal(db.getSessionOwner('s-create-failed'), null, '上游业务失败不得预占 ID');
 });
 
+test('session.create accepts the Host replacement when an owned blank is no longer reusable', async () => {
+  const fixture = await authorizedSubuserFixture('replacement-session-user');
+  sessionCreateReplacement = 'replacement-session';
+  try {
+    const result = await gatewayReq('POST', '/api/session.create',
+      { cookie: fixture.cookie, 'content-type': 'application/json' },
+      JSON.stringify({ type: 'client-request', rpcId: 'reuse', method: 'session/create',
+        payload: { args: { request: { sessionId: 'session-visible', cwd: '/workspaces/visible' } } } }));
+    assert.equal(result.status, 200, result.body);
+    assert.equal(JSON.parse(result.body).result.value.sessionId, 'replacement-session');
+    assert.equal(db.getSessionOwner('replacement-session'), fixture.userId);
+    assert.equal(db.getSessionOwner('session-visible'), fixture.userId);
+    assert.equal(db.hasUserSessionGrant(fixture.userId, 'replacement-session'), true);
+  } finally { fixture.connection.client.close(); }
+});
+
+test('session.create rejects a replacement owned by another account', async () => {
+  const fixture = await authorizedSubuserFixture('replacement-foreign-user');
+  const other = db.createUser('replacement-other', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
+  db.claimSessionOwner('replacement-foreign', other.id);
+  sessionCreateReplacement = 'replacement-foreign';
+  try {
+    const result = await gatewayReq('POST', '/api/session.create',
+      { cookie: fixture.cookie, 'content-type': 'application/json' },
+      JSON.stringify({ type: 'client-request', rpcId: 'reuse', method: 'session/create',
+        payload: { args: { request: { sessionId: 'session-visible', cwd: '/workspaces/visible' } } } }));
+    assert.equal(result.status, 403);
+    assert.equal(db.getSessionOwner('replacement-foreign'), other.id);
+    assert.equal(db.hasUserSessionGrant(fixture.userId, 'replacement-foreign'), false);
+  } finally { fixture.connection.client.close(); }
+});
+
+test('session.create rejects a different identity for a first-time explicit creation', async () => {
+  const fixture = await authorizedSubuserFixture('replacement-new-user');
+  sessionCreateReplacement = 'unexpected-new-session';
+  try {
+    const result = await gatewayReq('POST', '/api/session.create',
+      { cookie: fixture.cookie, 'content-type': 'application/json' },
+      JSON.stringify({ type: 'client-request', rpcId: 'create', method: 'session/create',
+        payload: { args: { request: { sessionId: 'requested-new-session', cwd: '/workspaces/visible' } } } }));
+    assert.equal(result.status, 502);
+    assert.equal(db.getSessionOwner('unexpected-new-session'), null);
+    assert.equal(db.getSessionOwner('requested-new-session'), null);
+  } finally { fixture.connection.client.close(); }
+});
+
 test('session.create 并发抢占只有一个账号获得所有权', async () => {
   const body = JSON.stringify({ cwd: '/workspaces/a', sessionId: 's-concurrent-claim' });
   const before = sessionCreateCallCount;
@@ -4172,6 +4220,14 @@ test('Remote mux：子用户 terminal/follow 与 terminal/retain 只结束该逻
     assert.equal(followError.streamId, 'terminal-follow-denied');
     assert.equal((followError.error as Record<string, unknown>).code, 'terminal/unavailable');
 
+    connection.client.send(JSON.stringify({
+      type: 'open', streamId: 'terminal-attach-denied', endpoint: 'terminal/attach',
+      payload: { args: { agentId: 'session-visible', id: 'term-owner-1' } },
+    }));
+    const attachError = await nextFrameOrFail(connection, 'terminal/attach rejection');
+    assert.equal(attachError.streamId, 'terminal-attach-denied');
+    assert.equal((attachError.error as Record<string, unknown>).code, 'terminal/unavailable');
+
     // terminal 只结束该逻辑流：同一 socket 的 workspace/follow 仍能建立 baseline。
     connection.client.send(JSON.stringify({
       type: 'open', streamId: 'terminal-survivor-workspace', endpoint: 'workspace/follow', payload: { args: {} },
@@ -4193,7 +4249,7 @@ test('Remote mux：子用户 terminal/follow 与 terminal/retain 只结束该逻
   }
 });
 
-test('Remote mux：allowSsh=true 的子用户 terminal/follow 与 terminal/retain 原样转发到上游', async () => {
+test('Remote mux forwards authorized terminal follow, retain and attach streams', async () => {
   remoteMuxOpenEndpoints = [];
   remoteMuxOpenFrames = [];
   const subUser = createOwnedFixtureUser('remote-mux-terminal-allowed-user', '$2a$10$dummyhashdummyhashdummyhashdu', 'user');
@@ -4212,9 +4268,10 @@ test('Remote mux：allowSsh=true 的子用户 terminal/follow 与 terminal/retai
     for (const [streamId, endpoint] of [
       ['terminal-follow-allowed', 'terminal/follow'],
       ['terminal-retain-allowed', 'terminal/retain'],
+      ['terminal-attach-allowed', 'terminal/attach'],
     ] as const) {
       connection.client.send(JSON.stringify({
-        type: 'open', streamId, endpoint, payload: { args: endpoint === 'terminal/follow' ? { agentId: 'session-visible', id: 'term-owner-1', attachmentId: 'att-1' } : { sessionId: 'session-visible', id: 'term-owner-1' } },
+        type: 'open', streamId, endpoint, payload: { args: endpoint === 'terminal/follow' ? { agentId: 'session-visible', id: 'term-owner-1', attachmentId: 'att-1' } : endpoint === 'terminal/attach' ? { agentId: 'session-visible', id: 'term-owner-1' } : { sessionId: 'session-visible', id: 'term-owner-1' } },
       }));
       const frame = await nextFrameOrFail(connection, `${endpoint} allowed roundtrip`);
       assert.deepEqual(frame, {
@@ -4223,7 +4280,7 @@ test('Remote mux：allowSsh=true 的子用户 terminal/follow 与 terminal/retai
         value: { type: 'terminal/output', terminalId: 'term-owner-1', data: 'owner-shell-bytes' },
       });
     }
-    assert.deepEqual(remoteMuxOpenEndpoints, ['terminal/follow', 'terminal/retain']);
+    assert.deepEqual(remoteMuxOpenEndpoints, ['terminal/follow', 'terminal/retain', 'terminal/attach']);
     assert.equal(connection.client.readyState, NodeWebSocket.OPEN, '官方 terminal 流不应关闭 carrier');
   } finally {
     connection.client.close();
@@ -5208,12 +5265,15 @@ test('SSH permission does not authorize unknown terminal endpoints or another ac
       assert.equal((result.error as { code: string }).code, 'gateway/forbidden');
       assert.equal(remoteMuxOpenEndpoints.includes(endpoint), false);
     }
-    fixture.connection.client.send(JSON.stringify({ type: 'open', streamId: 'foreign-terminal',
-      endpoint: 'terminal/follow', payload: { args: { agentId: 's-other-user', id: 'foreign-terminal', attachmentId: 'foreign-attachment' } } }));
-    const denied = await nextFrameOrFail(fixture.connection, 'foreign terminal Session denied');
-    assert.equal(denied.streamId, 'foreign-terminal');
-    assert.equal((denied.error as { code: string }).code, 'terminal/unavailable');
-    assert.equal(remoteMuxOpenEndpoints.includes('terminal/follow'), false);
+    for (const endpoint of ['terminal/follow', 'terminal/attach']) {
+      fixture.connection.client.send(JSON.stringify({ type: 'open', streamId: endpoint,
+        endpoint, payload: { args: { agentId: 's-other-user', id: 'foreign-terminal',
+          ...(endpoint === 'terminal/follow' ? { attachmentId: 'foreign-attachment' } : {}) } } }));
+      const denied = await nextFrameOrFail(fixture.connection, 'foreign terminal Session denied');
+      assert.equal(denied.streamId, endpoint);
+      assert.equal((denied.error as { code: string }).code, 'terminal/unavailable');
+      assert.equal(remoteMuxOpenEndpoints.includes(endpoint), false);
+    }
     fixture.connection.client.send(JSON.stringify({ type: 'open', streamId: 'after-terminal-denial',
       endpoint: 'workspace/follow', payload: { args: {} } }));
     const resumed = await nextFrameOrFail(fixture.connection, 'workspace follows after terminal denial');

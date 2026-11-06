@@ -252,6 +252,7 @@ import {
   parseTenantRemoteServerFrame,
   tenantTerminalRetentionSessionId,
   tenantTerminalFollowSessionId,
+  tenantTerminalAttachSessionId,
 } from './tenant-remote-mux.js';
 export const DEFAULT_USER_REQUEST_BODY_BYTES = 64 * 1024 * 1024;
 export const ADMIN_REQUEST_BODY_BYTES = 300 * 1024 * 1024;
@@ -338,7 +339,7 @@ const WORKSPACE_TITLE_RE = /^\/api\/workspace\/rename$/;
 /** DSH 官方 terminal HTTP unary RPC：主用户直通，子用户由 allowSsh 控制。 */
 const OFFICIAL_TERMINAL_HTTP_RE = /^\/api\/terminal[.\/](?:environment|shells|list|create|write|resize|rename|close)$/;
 /** DSH 官方 terminal Remote 流：主用户直通，子用户由 allowSsh 控制。 */
-const OFFICIAL_TERMINAL_REMOTE_ENDPOINTS = new Set(['terminal/follow', 'terminal/retain']);
+const OFFICIAL_TERMINAL_REMOTE_ENDPOINTS = new Set(['terminal/follow', 'terminal/retain', 'terminal/attach']);
 /** 子用户 terminal UX 桩路径（点号/斜杠两种官方写法）：list / environment /
  *  shells / close。allowSsh 关闭时只回不放开能力的 server-response，见下方中间件；
  *  allowSsh 开启后这些请求也原样透传。 */
@@ -9946,14 +9947,18 @@ export function createGatewayServer(
                 const resolvedPreset = reqAs.dshpwAgentPreset ??
                   collectSessionAgentPresets(parsed, sessionAgentPresetMapFor(reqAs.dshpwUser)).get(sessionId);
                 const requestedSessionId = reqAs.dshpwRequestedSessionId;
-                if (requestedSessionId !== undefined && requestedSessionId !== sessionId) {
+                const replacesOwnedSession = requestedSessionId !== undefined &&
+                  requestedSessionId !== sessionId &&
+                  reqAs.dshpwSessionClaimCandidate === undefined &&
+                  sessionOwner(requestedSessionId) === reqAs.dshpwUser;
+                if (requestedSessionId !== undefined && requestedSessionId !== sessionId && !replacesOwnedSession) {
                   if (!res.headersSent) {
                     sendApiError(res, 502, 'UPSTREAM_UNAVAILABLE', 'session.create returned an unexpected identity');
                   }
                   return;
                 }
                 const shouldClaim = requestedSessionId === undefined ||
-                  reqAs.dshpwSessionClaimCandidate === sessionId;
+                  reqAs.dshpwSessionClaimCandidate === sessionId || replacesOwnedSession;
                 const owner = shouldClaim
                   ? claimSessionOwner(sessionId, reqAs.dshpwUser, reqAs.dshpwIsAdmin === true)
                   : sessionOwner(sessionId);
@@ -11905,6 +11910,7 @@ export function createGatewayServer(
               : frame.endpoint === 'terminal/retain'
                 ? tenantTerminalRetentionSessionId(frame.payload)
                 : frame.endpoint === 'terminal/follow' ? tenantTerminalFollowSessionId(frame.payload)
+                : frame.endpoint === 'terminal/attach' ? tenantTerminalAttachSessionId(frame.payload)
                 : followAddress !== null ? sessionAuthorizationId(followAddress) : resultSessionId ?? jobSessionId;
             if (authorizedSessionId !== null &&
                 !subuserCanAccessSession(userId, perms, authorizedSessionId)) {

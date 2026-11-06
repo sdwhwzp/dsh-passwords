@@ -48,7 +48,9 @@ Harness 0.2.1-rc.2 的账号网关支持工作区置顶会话列表，并严格�
 
 上游 HTTP 连接池通过 `MCP_GATEWAY_UPSTREAM_IDLE_TIMEOUT_MS` 设置闲置连接保留时间（默认 5000 毫秒），并遵循 Host 的更短 Keep-Alive 提示。新建或复用的活动请求、SSE 不继承闲置截止；请求自身的超时仍有效。连接失败不会自动重放请求。
 
-官方终端 Remote 流 `terminal/follow`、`terminal/retain` 仍由账号 SSH 权限及会话归属控制；共享默认模型初始化和未知终端端点不因此放行。
+官方终端 Remote 流 `terminal/attach`、`terminal/follow`、`terminal/retain` 由账号 SSH 权限及会话归属控制。Harness 0.2.2 的 `terminal/attach` 在同一条流上传输终端输入输出，取消会话授权后停止转发；共享默认模型初始化和未知终端端点不因此放行。
+
+创建会话时，如果本人原有空会话已开始使用或已归档，网关接受 Host 新建的替代会话，保留原会话与账号归属。首次指定的新 ID 仍须与响应一致；返回其他账号已拥有的 ID 仍被拒绝。
 
 ## 开发模式与纯会话
 

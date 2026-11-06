@@ -10,6 +10,7 @@ export const TENANT_REMOTE_STREAM_ENDPOINTS: ReadonlySet<string> = new Set([
   'toolResults/watch',
   'terminal/retain',
   'terminal/follow',
+  'terminal/attach',
   'job/list',
   'job/follow',
 ] as const);
@@ -22,6 +23,22 @@ export function tenantTerminalFollowSessionId(value: unknown): string {
       !exactKeys(args, ['agentId', 'id', 'attachmentId']) ||
       !nonEmptyString(args.agentId) || !nonEmptyString(args.id) || !nonEmptyString(args.attachmentId)) {
     throw new Error('invalid terminal follow scope');
+  }
+  return args.agentId;
+}
+
+/**
+ * Read the owning Session from a terminal input/output attachment.
+ * @param value - untrusted logical stream payload.
+ * @returns the Session id requiring tenant ownership and folder authorization.
+ */
+export function tenantTerminalAttachSessionId(value: unknown): string {
+  const payload = record(value);
+  const args = record(payload?.args);
+  if (payload === undefined || !exactKeys(payload, ['args']) || args === undefined ||
+      !exactKeys(args, ['agentId', 'id']) ||
+      !nonEmptyString(args.agentId) || !nonEmptyString(args.id)) {
+    throw new Error('invalid terminal attachment scope');
   }
   return args.agentId;
 }

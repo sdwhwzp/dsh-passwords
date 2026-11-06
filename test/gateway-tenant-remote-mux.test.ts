@@ -516,6 +516,52 @@ tenantTest('restricted Remote mux relays ordinary items and logical cancellation
 });
 
 
+tenantTest('terminal attach forwards input and output only while the account owns the session', async mobile => {
+  const env = await setup(mobile);
+  const { downstream, upstream } = await env.connect();
+  try {
+    const opened = nextMessage(upstream);
+    const frame = { type: 'open', streamId: 'terminal', endpoint: 'terminal/attach', payload: { args: { agentId: 'own-session', id: 'saved-terminal' } } };
+    downstream.send(JSON.stringify(frame));
+    assert.deepEqual(await opened, frame);
+    const received = nextMessage(downstream);
+    upstream.send(muxItem('terminal', { type: 'output', data: 'terminal-output' }));
+    assert.deepEqual(await received, { type: 'item', streamId: 'terminal', value: { type: 'output', data: 'terminal-output' } });
+    const input = { type: 'item', streamId: 'terminal', value: { type: 'input', data: 'echo fixture\r' } };
+    const accepted = nextMessage(upstream);
+    downstream.send(JSON.stringify(input));
+    assert.deepEqual(await accepted, input);
+    env.disableSession();
+    const closed = nextClose(downstream);
+    downstream.send(JSON.stringify(input));
+    assert.equal(await closed, 1008);
+  } finally {
+    downstream.terminate();
+    await env.cleanup();
+  }
+});
+
+tenantTest('malformed terminal attachment closes the carrier without forwarding', async mobile => {
+  const env = await setup(mobile);
+  try {
+    for (const args of [
+      { agentId: 'own-session', id: 'term', workspaceRoot: otherRoot },
+      { agentId: 'own-session' },
+      { agentId: '', id: 'term' },
+    ]) {
+      const { downstream, upstream } = await env.connect();
+      const forwarded: unknown[] = [];
+      upstream.on('message', data => forwarded.push(JSON.parse(data.toString())));
+      const closed = nextClose(downstream);
+      const upstreamClosed = nextClose(upstream);
+      downstream.send(JSON.stringify({ type: 'open', streamId: 'term', endpoint: 'terminal/attach', payload: { args } }));
+      assert.equal(await closed, 1008);
+      await upstreamClosed;
+      assert.deepEqual(forwarded, []);
+    }
+  } finally { await env.cleanup(); }
+});
+
 tenantTest('restoring saved terminals preserves the workspace stream when a terminal is unavailable', async mobile => {
   const env = await setup(mobile);
   const { downstream, upstream } = await env.connect();

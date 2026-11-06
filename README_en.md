@@ -49,7 +49,9 @@ The Harness 0.2.1-rc.2 gateway accepts workspace pin lists and validates each pi
 
 The upstream HTTP pool uses `MCP_GATEWAY_UPSTREAM_IDLE_TIMEOUT_MS` for idle connections (default: 5000 ms), capped by shorter Host Keep-Alive hints. New and reused active requests, including SSE, do not inherit the idle deadline; caller request deadlines remain effective. Connection failures never replay requests automatically.
 
-Official `terminal/follow` and `terminal/retain` Remote streams require the account SSH grant and Session ownership. This does not authorize shared default-model initialization or unknown terminal endpoints.
+Official `terminal/attach`, `terminal/follow`, and `terminal/retain` Remote streams require the account SSH grant and Session ownership. Harness 0.2.2 uses `terminal/attach` for terminal input and output on the same stream; revoking Session access stops forwarding. This does not authorize shared default-model initialization or unknown terminal endpoints.
+
+When an owned blank Session has started work or has been archived, session creation accepts the replacement minted by the Host and preserves the original Session and its owner. A first-time explicit ID must still match the response; a returned ID already owned by another account remains denied.
 
 ## Development and chat modes
 
