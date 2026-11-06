@@ -424,8 +424,8 @@ test('cancel 与在途 FIN 顺序：cancel 不得截断已开始发送的消息'
       client.on('message', (buffer: Buffer) => {
         let frame: Record<string, unknown>;
         try { frame = JSON.parse(buffer.toString('utf8')) as Record<string, unknown>; } catch { return; }
-        if (frame.type === 'open' && frame.streamId === 'A') {
-          client.send(JSON.stringify({ type: 'item', streamId: 'A', value: { type: 'event', seq: 1, data } }));
+        if (frame.type === 'open' && String(frame.streamId).endsWith(':A')) {
+          client.send(JSON.stringify({ type: 'item', streamId: frame.streamId, value: { type: 'event', seq: 1, data } }));
         }
       });
     },
@@ -463,10 +463,10 @@ test('error 与 FIN 顺序：上游 error 帧排在在途 item 的 FIN 之后（
       client.on('message', (buffer: Buffer) => {
         let frame: Record<string, unknown>;
         try { frame = JSON.parse(buffer.toString('utf8')) as Record<string, unknown>; } catch { return; }
-        if (frame.type !== 'open' || frame.streamId !== 'A') return;
+        if (frame.type !== 'open' || !String(frame.streamId).endsWith(':A')) return;
         // 背靠背：先大 item（会在 Sender 内分片），紧接着同流 error。
-        client.send(JSON.stringify({ type: 'item', streamId: 'A', value: { type: 'event', seq: 1, data } }));
-        client.send(JSON.stringify({ type: 'error', streamId: 'A', error: { code: 'host/failed', message: 'boom', details: {} } }));
+        client.send(JSON.stringify({ type: 'item', streamId: frame.streamId, value: { type: 'event', seq: 1, data } }));
+        client.send(JSON.stringify({ type: 'error', streamId: frame.streamId, error: { code: 'host/failed', message: 'boom', details: {} } }));
       });
     },
   });
@@ -499,8 +499,8 @@ test('服务器先回收后 finally 销毁：网关先收敛 carrier 并下发 C
       client.on('message', (buffer: Buffer) => {
         let frame: Record<string, unknown>;
         try { frame = JSON.parse(buffer.toString('utf8')) as Record<string, unknown>; } catch { return; }
-        if (frame.type === 'open' && frame.streamId === 'A') {
-          client.send(JSON.stringify({ type: 'item', streamId: 'A', value: { type: 'event', seq: 1, data: 'ok' } }));
+        if (frame.type === 'open' && String(frame.streamId).endsWith(':A')) {
+          client.send(JSON.stringify({ type: 'item', streamId: frame.streamId, value: { type: 'event', seq: 1, data: 'ok' } }));
         }
       });
     },
@@ -576,10 +576,12 @@ test('R1 回归：A 在途且已 cancel 时，兄弟流 B 的合法大 item 不�
     mux.send(openFrame('B', { args: {} }));
     await waitFor(() => upstreamClient !== null, 3000, '网关应先连上上游');
     await waitFor(() => forwarded.filter((frame) => frame.type === 'open').length === 2, 3000, 'A、B 的 open 应先转发到上游');
+    const wireA = forwarded.find(frame => frame.type === 'open' && String(frame.streamId).endsWith(':A'))!.streamId;
+    const wireB = forwarded.find(frame => frame.type === 'open' && String(frame.streamId).endsWith(':B'))!.streamId;
 
     // 冻结下行：A 的 3 MiB item 进入「已开始发送」，停留在 MuxSender.current。
     pauseClientRead(mux.client);
-    upstreamClient.send(JSON.stringify({ type: 'item', streamId: 'A', value: { type: 'event', seq: 1, data: aData } }));
+    upstreamClient.send(JSON.stringify({ type: 'item', streamId: wireA, value: { type: 'event', seq: 1, data: aData } }));
     await sleep(500);
     // 取消 A：在途消息仍须发到 FIN，只是删除其后续/未开始的排队项。
     mux.send(JSON.stringify({ type: 'cancel', streamId: 'A' }));
@@ -587,7 +589,7 @@ test('R1 回归：A 在途且已 cancel 时，兄弟流 B 的合法大 item 不�
 
     // 兄弟流 B 的合法大 item：修复前 queueBytes(0) + 3 MiB > 2 MiB 队列字节上限
     // → queue-full → 误将整条 carrier 按 1013 关闭。总接受量仅 6 MiB，远低于 102 MiB。
-    upstreamClient.send(JSON.stringify({ type: 'item', streamId: 'B', value: { type: 'event', seq: 1, data: bData } }));
+    upstreamClient.send(JSON.stringify({ type: 'item', streamId: wireB, value: { type: 'event', seq: 1, data: bData } }));
     await sleep(500);
     assert.equal(mux.isClosed(), false, '兄弟流合法大 item 不得因队列字节预算误关 carrier');
 
@@ -626,19 +628,21 @@ test('下行 item queue-full 只拒绝该逻辑流：兄弟流 carrier 保持打
     mux.send(openFrame('B', { args: {} }));
     await waitFor(() => upstreamClient !== null, 3000, '网关应先连上上游');
     await waitFor(() => forwarded.filter((frame) => frame.type === 'open').length === 2, 3000, 'A、B 的 open 应先转发到上游');
+    const wireA = forwarded.find(frame => frame.type === 'open' && String(frame.streamId).endsWith(':A'))!.streamId;
+    const wireB = forwarded.find(frame => frame.type === 'open' && String(frame.streamId).endsWith(':B'))!.streamId;
     // 冻结下行：A 的首条大 item 占住下行 Sender 的 current，后续 item 只能排队。
     pauseClientRead(mux.client);
-    upstreamClient.send(JSON.stringify({ type: 'item', streamId: 'A', value: { type: 'event', seq: 0, data: aData } }));
+    upstreamClient.send(JSON.stringify({ type: 'item', streamId: wireA, value: { type: 'event', seq: 0, data: aData } }));
     await sleep(300);
     // 灌满 8192 条等待槽（REMOTE_MUX_MAX_STREAMS 64 × 128），再发一条触发 queue-full。
     // 修复前：整条 carrier 被 1013 关闭；修复后：只拒绝流 A（向浏览器发受限 error、向上游补 cancel）。
     for (let i = 1; i <= 8200; i += 1) {
-      upstreamClient.send(JSON.stringify({ type: 'item', streamId: 'A', value: { type: 'event', seq: i, data: 'x' } }));
+      upstreamClient.send(JSON.stringify({ type: 'item', streamId: wireA, value: { type: 'event', seq: i, data: 'x' } }));
     }
-    await waitFor(() => forwarded.some((frame) => frame.type === 'cancel' && frame.streamId === 'A'), 8000, '流 A 溢出后应向上游补 cancel');
+    await waitFor(() => forwarded.some((frame) => frame.type === 'cancel' && frame.streamId === wireA), 8000, '流 A 溢出后应向上游补 cancel');
     assert.equal(mux.isClosed(), false, '流 A 队列溢出不得按 1013 关闭整条 carrier');
     // 兄弟流 B 仍在同一 carrier 上：排队槽已被流 A 的取消释放，B 的 item 应被接受。
-    upstreamClient.send(JSON.stringify({ type: 'item', streamId: 'B', value: { type: 'event', seq: 1, data: 'sibling' } }));
+    upstreamClient.send(JSON.stringify({ type: 'item', streamId: wireB, value: { type: 'event', seq: 1, data: 'sibling' } }));
     await sleep(200);
     assert.equal(mux.isClosed(), false, '兄弟流 B 的 item 不得触发误关');
     // 恢复读取：A 的在途大 item（FIN）、A 的 error、B 的 item 依次完整送达。
@@ -674,6 +678,8 @@ test('上行 item queue-full 只拒绝该逻辑流：兄弟流 carrier 保持打
     mux.send(openFrame('B', { args: {} }));
     await waitFor(() => upstreamClient !== null, 3000, '网关应先连上上游');
     await waitFor(() => received.filter((frame) => frame.type === 'open').length === 2, 3000, 'A、B 的 open 应转发到上游');
+    const wireA = received.find(frame => frame.type === 'open' && String(frame.streamId).endsWith(':A'))!.streamId;
+    const wireB = received.find(frame => frame.type === 'open' && String(frame.streamId).endsWith(':B'))!.streamId;
     // 上游停读：A 的首条大 item 占住上行 Sender 的 current，后续 item 只能排队。
     upstreamClient._socket?.pause();
     mux.send(JSON.stringify({ type: 'item', streamId: 'A', value: { type: 'event', seq: 0, data: 'a'.repeat(3 * MIB) } }));
@@ -687,9 +693,9 @@ test('上行 item queue-full 只拒绝该逻辑流：兄弟流 carrier 保持打
     // 恢复上游读取并发送兄弟流 B：A 的在途 item、A 的 cancel、B 的 item 依次送达（FIFO 不交错）。
     upstreamClient._socket?.resume();
     mux.send(JSON.stringify({ type: 'item', streamId: 'B', value: { type: 'event', seq: 1, data: 'sibling' } }));
-    await waitFor(() => received.some((frame) => frame.type === 'item' && frame.streamId === 'B'), 8000, '兄弟流 B 的 item 应送达上游');
+    await waitFor(() => received.some((frame) => frame.type === 'item' && frame.streamId === wireB), 8000, '兄弟流 B 的 item 应送达上游');
     assert.equal(mux.isClosed(), false, 'carrier 必须保持打开');
-    assert.ok(received.some((frame) => frame.type === 'cancel' && frame.streamId === 'A'), '流 A 应向上游补 cancel');
+    assert.ok(received.some((frame) => frame.type === 'cancel' && frame.streamId === wireA), '流 A 应向上游补 cancel');
   } finally {
     mux?.terminate();
     await gateway.close();

@@ -53,6 +53,8 @@ Official `terminal/attach`, `terminal/follow`, and `terminal/retain` Remote stre
 
 When an owned blank Session has started work or has been archived, session creation accepts the replacement minted by the Host and preserves the original Session and its owner. A first-time explicit ID must still match the response; a returned ID already owned by another account remains denied.
 
+Real-time connection capacity counts active subscriptions; cancelled, completed, and rejected subscriptions do not accumulate against it. Independent upstream IDs isolate late messages from new subscriptions. Each connection defaults to 1024 active subscriptions and an upstream handshake queue bounded by 8192 messages and 2 MiB; see [advanced tuning](docs/advanced-tuning.md). Active capacity overflow rejects only the new subscription; handshake queue overflow closes the connection. Account authorization remains enforced throughout.
+
 ## Development and chat modes
 
 Choose **Development** in the sidebar to use workspaces, terminals and the editor. Choose **Chat** to ask questions without selecting a workspace. **New chat** reuses an unasked chat on the server per account, including concurrent requests from multiple windows. Chats with subagents and subagent sessions are excluded from reuse. History shows only the selected blank chat. Messages, running work, queued input, archived chats and named chats are preserved. Subagent records remain accessible through their parent conversation and are not listed as new chats. History belongs to the signed-in account and can be resumed later.

@@ -13,6 +13,16 @@ These settings are optional operational overrides. Normal installations should l
 
 Values are strict decimal integers. Blank or unset values use defaults. Invalid or out-of-range values fall back to defaults with a warning. If the Ping interval exceeds the Pong timeout, both validated values are retained and a warning is emitted.
 
+### Tenant subscription capacity
+
+| Variable | Default | Range | Purpose |
+|---|---:|---:|---|
+| `MCP_GATEWAY_MUX_MAX_STREAMS` | `1024` | `1..65536` | Active subscriptions per authenticated connection |
+| `MCP_GATEWAY_MUX_PENDING_MESSAGES` | `8192` | `1..65536` | Frames awaiting the upstream handshake |
+| `MCP_GATEWAY_MUX_PENDING_BYTES` | `2097152` | `1..104857600` | UTF-8 bytes awaiting the upstream handshake |
+
+These capacities accept positive decimal integers. Blank or unset values use defaults; invalid explicit values prevent startup. Cancelled and completed subscriptions release their active slots, and rejected subscriptions reserve none. Independent upstream IDs prevent late messages from an ended subscription reaching a replacement. An excess active subscription receives `gateway/overflow` without disconnecting sibling streams. A handshake queue overflow closes the carrier with code `1009`; its bytes also count against the gateway's shared sender budget. Cancelling a subscription before the handshake removes its queued frames.
+
 ## Gateway and inventory timeouts
 
 | Variable | Default | Range | Purpose |

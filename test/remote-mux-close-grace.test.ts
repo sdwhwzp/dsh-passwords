@@ -239,7 +239,13 @@ async function startRelay(targetPort: number): Promise<RelayHandle> {
 
 test('R2 关闭握手：上游腿先完成关闭后浏览器腿继续握手，观察到 1003 而非 1006', async () => {
   const item = 'z'.repeat(4 * MIB);
-  const upstream = await startUpstream();
+  let upstreamId: string | undefined;
+  const upstream = await startUpstream({ onConnection: client => {
+    client.on('message', (data: Buffer) => {
+      const frame = JSON.parse(data.toString()) as { type: string; streamId: string };
+      if (frame.type === 'open') upstreamId = frame.streamId;
+    });
+  } });
   const gateway = await startGateway(upstream.port);
   const relay = await startRelay(gateway.port);
   let mux: MuxHandle | null = null;
@@ -247,11 +253,11 @@ test('R2 关闭握手：上游腿先完成关闭后浏览器腿继续握手，�
     mux = await openMux(relay.port);
     await waitFor(() => upstream.connections.length === 1, 3000, '网关应先连上上游');
     mux.send(openFrame('A', { args: {} }));
-    await sleep(200);
+    await waitFor(() => upstreamId !== undefined, 3000, '上游应收到订阅编号');
     // 浏览器停读后再让上游回传大 item：整条 item 落在网关→浏览器腿上形成下行积压，
     // 使随后 closeCarrier 下发的 Close 排在积压之后（复现「Close 已入队但被同一次 teardown 丢弃」）。
     pauseClientRead(mux.client);
-    upstream.connections[0].send(JSON.stringify({ type: 'item', streamId: 'A', value: { type: 'event', seq: 1, data: item } }));
+    upstream.connections[0].send(JSON.stringify({ type: 'item', streamId: upstreamId, value: { type: 'event', seq: 1, data: item } }));
     await sleep(150);
     // 触发 closeCarrier：二进制帧 → 1003 text messages required，两条腿一起优雅关闭。
     mux.sendBinary(Buffer.from([0x00, 0x01, 0x02]));

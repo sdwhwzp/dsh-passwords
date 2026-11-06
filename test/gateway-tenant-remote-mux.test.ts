@@ -14,10 +14,22 @@ import type { PlatformConfig } from '../src/config.js';
 import { Database } from '../src/db.js';
 import { createFieldCrypto } from '../src/encrypt.js';
 import { createGatewayServer } from '../src/gateway.js';
+import type { TenantMuxLimits } from '../src/tenant-mux-limits.js';
 
 const ownRoot = '/managed/u2';
 const otherRoot = '/managed/u3';
 const hostCookie = 'dsh-auth-test=host';
+const upstreamAliases = new WeakMap<WebSocket, Map<string, string>>();
+const upstreamWriters = new WeakMap<WebSocket, (data: string) => void>();
+
+function decodedFrame(socket: WebSocket, data: WebSocket.RawData): Record<string, unknown> {
+  const frame = JSON.parse(data.toString()) as Record<string, unknown>;
+  const aliases = upstreamAliases.get(socket);
+  if (aliases !== undefined && typeof frame.streamId === 'string') {
+    frame.streamId = aliases.get(frame.streamId) ?? frame.streamId;
+  }
+  return frame;
+}
 
 function closeServer(server: http.Server): Promise<void> {
   return new Promise((resolve) => server.close(() => resolve()));
@@ -28,7 +40,7 @@ function nextMessage(socket: WebSocket): Promise<Record<string, unknown>> {
     const timer = setTimeout(() => reject(new Error('WebSocket message timed out')), 1_000);
     socket.once('message', (data) => {
       clearTimeout(timer);
-      resolve(JSON.parse(data.toString()) as Record<string, unknown>);
+      resolve(decodedFrame(socket, data));
     });
   });
 }
@@ -47,7 +59,7 @@ function muxItem(streamId: string, value: unknown): string {
   return JSON.stringify({ type: 'item', streamId, value });
 }
 
-async function setup(mobile = false, heartbeatTimeout = false) {
+async function setup(mobile = false, heartbeatTimeout = false, options: { holdUpstream?: boolean; limits?: TenantMuxLimits } = {}) {
   const temporary = await mkdtemp(path.join(os.tmpdir(), 'dshpw-tenant-remote-'));
   const dbPath = path.join(temporary, 'platform.db');
   const db = new Database(dbPath, createFieldCrypto('enc', 'setup'));
@@ -67,6 +79,9 @@ async function setup(mobile = false, heartbeatTimeout = false) {
   const upstreamWebSockets = new WebSocketServer({ noServer: true, perMessageDeflate: false });
   const accepted: WebSocket[] = [];
   const waiters: Array<(socket: WebSocket) => void> = [];
+  let releaseUpstream = () => {};
+  const upstreamGate = new Promise<void>(resolve => { releaseUpstream = resolve; });
+  if (!options.holdUpstream) releaseUpstream();
   const upstream = http.createServer((req, res) => {
     if (req.url === '/api/workspace.list' && req.method === 'POST') {
       res.writeHead(200, { 'content-type': 'application/json' });
@@ -87,12 +102,27 @@ async function setup(mobile = false, heartbeatTimeout = false) {
     }
     res.writeHead(404).end();
   });
-  upstream.on('upgrade', (req, socket, head) => {
+  upstream.on('upgrade', async (req, socket, head) => {
+    await upstreamGate;
+    if (socket.destroyed) return;
     if (req.url !== '/api/remote.mux') {
       socket.destroy();
       return;
     }
     upstreamWebSockets.handleUpgrade(req, socket, head, (websocket) => {
+      const aliases = new Map<string, string>();
+      upstreamAliases.set(websocket, aliases);
+      websocket.on('message', data => {
+        const frame = JSON.parse(data.toString()) as { type: string; streamId: string };
+        if (frame.type === 'open') aliases.set(frame.streamId, frame.streamId.replace(/^[0-9]+:/, ''));
+      });
+      const send = websocket.send.bind(websocket);
+      upstreamWriters.set(websocket, data => send(data));
+      websocket.send = (data, ...args) => {
+        const frame = JSON.parse(String(data)) as { streamId: string };
+        const wireId = [...aliases].reverse().find(([, clientId]) => clientId === frame.streamId)?.[0];
+        send(JSON.stringify({ ...frame, streamId: wireId ?? frame.streamId }), ...args);
+      };
       accepted.push(websocket);
       waiters.shift()?.(websocket);
     });
@@ -100,6 +130,7 @@ async function setup(mobile = false, heartbeatTimeout = false) {
   await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
   const upstreamPort = (upstream.address() as { port: number }).port;
   const config: PlatformConfig = {
+    ...(options.limits === undefined ? {} : { tenantMux: options.limits }),
     ...(heartbeatTimeout ? { mux: { fragmentBytes: 16384, pingIntervalMs: 250, pongTimeoutMs: 2000, writeStallMs: 5000 } } : {}),
     setupKey: 'setup', dbPath, dbEncKey: 'enc', database: { driver: 'sqlite', path: dbPath },
     gateway: {
@@ -124,7 +155,7 @@ async function setup(mobile = false, heartbeatTimeout = false) {
   }, config.jwtSecret, { expiresIn: '1h' });
   const cookie = `dsh_gateway_token=${token}`;
   const mobileToken = mobile ? (await new MobileAuth(config, new AuthService(config, db), db, () => {}).login('customer', 'MobileTestPassword1!', {})).accessToken : null;
-  const connect = async () => {
+  const connectDownstream = async () => {
     const upstreamAccepted = new Promise<WebSocket>((resolve) => waiters.push(resolve));
     const downstream = new WebSocket(`${mobile ? 'wss' : 'ws'}://127.0.0.1:${String(gatewayPort)}/api/remote.mux`, {
       rejectUnauthorized: !mobile,
@@ -135,9 +166,14 @@ async function setup(mobile = false, heartbeatTimeout = false) {
       downstream.once('open', resolve);
       downstream.once('error', reject);
     });
-    return { downstream, upstream: await upstreamAccepted };
+    return { downstream, upstreamReady: upstreamAccepted };
+  };
+  const connect = async () => {
+    const { downstream, upstreamReady } = await connectDownstream();
+    return { downstream, upstream: await upstreamReady };
   };
   const cleanup = async () => {
+    releaseUpstream();
     for (const client of upstreamWebSockets.clients) client.terminate();
     upstreamWebSockets.close();
     await closeServer(gateway);
@@ -146,11 +182,157 @@ async function setup(mobile = false, heartbeatTimeout = false) {
     await rm(temporary, { recursive: true, force: true });
   };
   const disableSession = () => db.setPermissions(customer.id, { ...permissions, disabledSessions: ['own-session'] });
-  return { connect, cleanup, disableSession, db, customer, permissions, temporary };
+  return { connect, connectDownstream, releaseUpstream, cleanup, disableSession, db, customer, permissions, temporary };
 }
 
 function tenantTest(name: string, run: (mobile: boolean) => Promise<void>) {
   for (const mobile of [false, true]) test(`${mobile ? 'mobile bearer' : 'web cookie'}: ${name}`, { timeout: 15000 }, () => run(mobile));
+}
+
+function collectFrames(socket: WebSocket, count: number): Promise<Record<string, unknown>[]> {
+  return new Promise((resolve, reject) => {
+    const frames: Record<string, unknown>[] = [];
+    const finish = (error?: Error) => {
+      clearTimeout(timer);
+      socket.off('message', receive);
+      socket.off('close', closed);
+      if (error) reject(error);
+      else resolve(frames);
+    };
+    const receive = (data: WebSocket.RawData) => {
+      frames.push(decodedFrame(socket, data));
+      if (frames.length === count) finish();
+    };
+    const closed = () => finish(new Error('Carrier closed before delivering the expected frames'));
+    const timer = setTimeout(() => finish(new Error('Expected frames were not delivered')), 5000);
+    socket.on('message', receive);
+    socket.once('close', closed);
+  });
+}
+
+tenantTest('185 subscriptions wait for the upstream handshake without reconnecting', async mobile => {
+  const env = await setup(mobile, false, { holdUpstream: true });
+  const { downstream, upstreamReady } = await env.connectDownstream();
+  try {
+    const barrier = nextMessage(downstream);
+    for (let index = 0; index < 185; index += 1) {
+      downstream.send(JSON.stringify({ type: 'open', streamId: `tree-${index}`, endpoint: '$events', payload: { args: {} } }));
+    }
+    downstream.send(JSON.stringify({ type: 'open', streamId: 'barrier', endpoint: 'not-allowed', payload: {} }));
+    assert.equal((await barrier).streamId, 'barrier');
+    const forwarded = upstreamReady.then(socket => collectFrames(socket, 185));
+    env.releaseUpstream();
+    assert.equal((await forwarded).length, 185);
+    const upstream = await upstreamReady;
+    const ready = collectFrames(downstream, 185);
+    for (let index = 0; index < 185; index += 1) {
+      upstream.send(muxItem(`tree-${index}`, { type: 'ready', clientId: 'fixture', host: { home: '/host' } }));
+    }
+    assert.equal((await ready).length, 185);
+    assert.equal(downstream.readyState, WebSocket.OPEN);
+  } finally { downstream.terminate(); await env.cleanup(); }
+});
+
+tenantTest('cancelled and completed subscriptions release capacity beyond 256 lifetime opens', async mobile => {
+  const env = await setup(mobile, false, { limits: { maxStreams: 2, pendingMessages: 8, pendingBytes: 4096 } });
+  const { downstream, upstream } = await env.connect();
+  try {
+    for (let index = 0; index < 600; index += 1) {
+      const streamId = `cycle-${index}`;
+      const opened = nextMessage(upstream);
+      downstream.send(JSON.stringify({ type: 'open', streamId, endpoint: '$events', payload: { args: {} } }));
+      assert.equal((await opened).streamId, streamId);
+      if (index % 2 === 0) {
+        const cancelled = nextMessage(upstream);
+        downstream.send(JSON.stringify({ type: 'cancel', streamId }));
+        assert.equal((await cancelled).type, 'cancel');
+      } else {
+        const ended = nextMessage(downstream);
+        upstream.send(JSON.stringify({ type: 'end', streamId }));
+        assert.equal((await ended).type, 'end');
+      }
+    }
+    assert.equal(downstream.readyState, WebSocket.OPEN);
+  } finally { downstream.terminate(); await env.cleanup(); }
+});
+
+tenantTest('active capacity rejects only the excess stream and recovers after cancellation', async mobile => {
+  const env = await setup(mobile, false, { limits: { maxStreams: 1, pendingMessages: 8, pendingBytes: 4096 } });
+  const { downstream, upstream } = await env.connect();
+  try {
+    const first = nextMessage(upstream);
+    downstream.send(JSON.stringify({ type: 'open', streamId: 'first', endpoint: '$events', payload: { args: {} } }));
+    await first;
+    const overflow = nextMessage(downstream);
+    downstream.send(JSON.stringify({ type: 'open', streamId: 'second', endpoint: '$events', payload: { args: {} } }));
+    assert.equal(((await overflow).error as { code: string }).code, 'gateway/overflow');
+    const cancelled = nextMessage(upstream);
+    downstream.send(JSON.stringify({ type: 'cancel', streamId: 'second' }));
+    downstream.send(JSON.stringify({ type: 'cancel', streamId: 'first' }));
+    assert.equal((await cancelled).streamId, 'first');
+    const reopened = nextMessage(upstream);
+    downstream.send(JSON.stringify({ type: 'open', streamId: 'second', endpoint: '$events', payload: { args: {} } }));
+    assert.equal((await reopened).streamId, 'second');
+    const ready = nextMessage(downstream);
+    upstream.send(muxItem('second', { type: 'ready', clientId: 'fixture', host: { home: '/host' } }));
+    assert.equal((await ready).streamId, 'second');
+  } finally { downstream.terminate(); await env.cleanup(); }
+});
+
+tenantTest('reused client ids never receive a cancelled upstream generation', async mobile => {
+  const env = await setup(mobile);
+  const { downstream, upstream } = await env.connect();
+  try {
+    const frame = { type: 'open', streamId: 'same', endpoint: 'terminal/attach', payload: { args: { agentId: 'own-session', id: 'term' } } };
+    const opened = nextMessage(upstream);
+    downstream.send(JSON.stringify(frame));
+    await opened;
+    const oldWire = [...upstreamAliases.get(upstream)!.keys()].at(-1)!;
+    const cancelled = nextMessage(upstream);
+    downstream.send(JSON.stringify({ type: 'cancel', streamId: 'same' }));
+    await cancelled;
+    const reopened = nextMessage(upstream);
+    downstream.send(JSON.stringify(frame));
+    await reopened;
+    const nextWire = [...upstreamAliases.get(upstream)!.keys()].at(-1)!;
+    assert.notEqual(oldWire, nextWire);
+    const output = nextMessage(downstream);
+    upstreamWriters.get(upstream)!(muxItem(oldWire, { type: 'output', data: 'stale' }));
+    upstreamWriters.get(upstream)!(JSON.stringify({ type: 'end', streamId: oldWire }));
+    upstream.send(muxItem('same', { type: 'output', data: 'current' }));
+    assert.deepEqual(await output, { type: 'item', streamId: 'same', value: { type: 'output', data: 'current' } });
+    assert.equal(downstream.readyState, WebSocket.OPEN);
+  } finally { downstream.terminate(); await env.cleanup(); }
+});
+
+tenantTest('handshake cancellation releases pending capacity before the upstream is ready', async mobile => {
+  const env = await setup(mobile, false, { holdUpstream: true, limits: { maxStreams: 2, pendingMessages: 1, pendingBytes: 4096 } });
+  const { downstream, upstreamReady } = await env.connectDownstream();
+  try {
+    const barrier = nextMessage(downstream);
+    downstream.send(JSON.stringify({ type: 'open', streamId: 'cancelled', endpoint: '$events', payload: { args: {} } }));
+    downstream.send(JSON.stringify({ type: 'cancel', streamId: 'cancelled' }));
+    downstream.send(JSON.stringify({ type: 'open', streamId: 'current', endpoint: '$events', payload: { args: {} } }));
+    downstream.send(JSON.stringify({ type: 'open', streamId: 'barrier', endpoint: 'not-allowed', payload: {} }));
+    await barrier;
+    const forwarded = upstreamReady.then(socket => nextMessage(socket));
+    env.releaseUpstream();
+    assert.equal((await forwarded).streamId, 'current');
+  } finally { downstream.terminate(); await env.cleanup(); }
+});
+
+for (const limit of ['pendingMessages', 'pendingBytes'] as const) {
+  tenantTest(`the configured handshake ${limit} bound remains enforced`, async mobile => {
+    const limits = { maxStreams: 10, pendingMessages: 10, pendingBytes: 4096, [limit]: 1 };
+    const env = await setup(mobile, false, { holdUpstream: true, limits });
+    const { downstream } = await env.connectDownstream();
+    try {
+      const closed = nextClose(downstream);
+      downstream.send(JSON.stringify({ type: 'open', streamId: 'first', endpoint: '$events', payload: { args: {} } }));
+      downstream.send(JSON.stringify({ type: 'open', streamId: 'second', endpoint: '$events', payload: { args: {} } }));
+      assert.equal(await closed, 1009);
+    } finally { downstream.terminate(); await env.cleanup(); }
+  });
 }
 
 tenantTest('paired folders survive workspace baseline and new-folder increments without host folder grants', async mobile => {
@@ -597,7 +779,7 @@ tenantTest('saved terminals without current session access leave workspace group
         downstream.send(JSON.stringify({ type: 'open', streamId: 'workspaces', endpoint: 'workspace/follow', payload: { args: {} } }));
         await opened;
         const forwarded: unknown[] = [];
-        upstream.on('message', data => forwarded.push(JSON.parse(data.toString())));
+        upstream.on('message', data => forwarded.push(decodedFrame(upstream, data)));
         const rejected = nextMessage(downstream);
         downstream.send(JSON.stringify({ type: 'open', streamId: 'term', endpoint: 'terminal/retain', payload: { args: { sessionId, id: 'saved-terminal' } } }));
         assert.deepEqual(await rejected, {

@@ -4103,10 +4103,12 @@ test('Remote mux 竞态：session/follow 首帧快照不匹配只结束该逻辑
       },
     });
     assert.equal(connection.client.readyState, NodeWebSocket.OPEN, '快照不匹配不得关闭物理 mux');
-    for (let attempt = 0; attempt < 20 && !remoteMuxCancelStreamIds.includes('mismatch-follow'); attempt += 1) {
+    const upstreamId = remoteMuxOpenFrames.find(frame => frame.endpoint === 'session/follow')!.streamId as string;
+    assert.notEqual(upstreamId, 'mismatch-follow');
+    for (let attempt = 0; attempt < 20 && !remoteMuxCancelStreamIds.includes(upstreamId); attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 2));
     }
-    assert.ok(remoteMuxCancelStreamIds.includes('mismatch-follow'), '快照拒绝后必须向上游补发 cancel');
+    assert.ok(remoteMuxCancelStreamIds.includes(upstreamId), '快照拒绝后必须向上游补发 cancel');
     assert.deepEqual([...remoteMuxOpenEndpoints].sort(), ['session/follow', 'workspace/follow']);
 
     // 被拒绝后，同一 carrier 上的新逻辑流仍可正常建立。
@@ -4452,6 +4454,8 @@ test('Remote mux alpha.1 上行：仅透明放行的已开流转发 item/end，�
     }));
     const output = await nextFrameOrFail(fixture.connection, 'terminal output');
     assert.equal(output.streamId, 'uplink-terminal');
+    const upstreamId = remoteMuxOpenFrames.find(frame => frame.endpoint === 'terminal/follow')!.streamId as string;
+    assert.notEqual(upstreamId, 'uplink-terminal');
 
     fixture.connection.client.send(JSON.stringify({
       type: 'item', streamId: 'uplink-terminal', value: { type: 'terminal/input', data: 'ls\n' },
@@ -4472,8 +4476,8 @@ test('Remote mux alpha.1 上行：仅透明放行的已开流转发 item/end，�
     assert.deepEqual(
       remoteMuxUplinkFrames,
       [
-        { type: 'item', streamId: 'uplink-terminal', value: { type: 'terminal/input', data: 'ls\n' } },
-        { type: 'end', streamId: 'uplink-terminal' },
+        { type: 'item', streamId: upstreamId, value: { type: 'terminal/input', data: 'ls\n' } },
+        { type: 'end', streamId: upstreamId },
       ],
       '只有透明放行的已开流可以上行转发',
     );

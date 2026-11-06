@@ -11,6 +11,7 @@ import os, { homedir } from 'node:os';
 import path from 'node:path';
 import type { MysqlConnectionOptions } from './mysql-sync.js';
 import { parseUpstreamIdleTimeoutMs } from './upstream-agent.js';
+import { resolveTenantMuxLimits, type TenantMuxLimits } from './tenant-mux-limits.js';
 import { isFilesystemRootPath, isFullyQualifiedPath, normalizePath, parseEndpointAllowlist } from './permissions.js';
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -106,6 +107,9 @@ const MANAGED_ENV_KEYS = [
   'MCP_GATEWAY_MUX_PING_INTERVAL_MS',
   'MCP_GATEWAY_MUX_PONG_TIMEOUT_MS',
   'MCP_GATEWAY_MUX_WRITE_STALL_MS',
+  'MCP_GATEWAY_MUX_MAX_STREAMS',
+  'MCP_GATEWAY_MUX_PENDING_MESSAGES',
+  'MCP_GATEWAY_MUX_PENDING_BYTES',
   // 管理员目录选择器安全起点（browse roots）。未纳入托管时，插件拉起的网关子进程拿不到
   // 部署 .env 里的新值，运维改文件后选择器仍按家目录兜底，无法收窄到目标子树。
   'MCP_GATEWAY_DIRECTORY_PICKER_ROOTS',
@@ -327,6 +331,8 @@ export interface PlatformConfig {
    * 声明为可选以兼容既有测试中的 PlatformConfig 字面量。
    */
   mux?: RemoteMuxConfig;
+  /** Active subscription and pre-handshake queue capacities, resolved at startup. */
+  tenantMux?: TenantMuxLimits;
 }
 
 /** 第三方端点登记表变量名。 */
@@ -614,6 +620,7 @@ export function loadConfig(options: { requireSetupKey?: boolean; env?: NodeJS.Pr
     // 目录选择器安全起点：未配置时为 [os.homedir()]（见 resolveDirectoryPickerRoots）。
     directoryPickerRoots: resolveDirectoryPickerRoots(env),
     mux: resolveRemoteMuxConfig(env),
+    tenantMux: resolveTenantMuxLimits(env),
   };
 }
 

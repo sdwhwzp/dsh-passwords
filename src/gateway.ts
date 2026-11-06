@@ -168,6 +168,7 @@ export function readBoundedResponseBody(
 
 import type { PlatformConfig } from './config.js';
 import { hardenSecretsAfterSetup, readEndpointRuntimeConfig, resolveRemoteMuxConfig } from './config.js';
+import { resolveTenantMuxLimits } from './tenant-mux-limits.js';
 import { AuthService, AuthError, type RequestMeta } from './auth.js';
 import { Database, PermissionStateConflictError, SessionGrantsConflictError, canonicalForMatch, pathWithinDeletedTree, samePathForMatch, type UserPermissionsRow, type WorkspaceCleanupIntent } from './db.js';
 import {
@@ -11419,6 +11420,7 @@ export function createGatewayServer(
   server.maxConnections = 512;
 
   const tenantMuxConfig = config.mux ?? resolveRemoteMuxConfig();
+  const tenantMuxLimits = config.tenantMux ?? resolveTenantMuxLimits();
   const tenantMuxBudget = new MuxSenderBudget(512 * 1024 * 1024);
   const tenantWebSockets = new WebSocketServer({
     noServer: true,
@@ -11690,6 +11692,7 @@ export function createGatewayServer(
   ): void {
     tenantWebSockets.handleUpgrade(req, socket, head, (downstream) => {
       type LogicalStream = {
+        readonly upstreamId: string;
         readonly endpoint: string;
         readonly events: TenantRemoteEventFilter | null;
         readonly authorizedSessionId: string | null;
@@ -11699,7 +11702,8 @@ export function createGatewayServer(
       const diagnostics = createRemoteMuxDiagnosticsSession(randomUUID());
       const streams = new Map<string, LogicalStream>();
       const upstreamForwardedAt = new Map<string, number>();
-      const cancelledStreamIds = new Set<string>();
+      const upstreamStreamIds = new Map<string, string>();
+      let streamSerial = 0;
       const pendingFrames: string[] = [];
       let pendingBytes = 0;
       let closed = false;
@@ -11731,14 +11735,15 @@ export function createGatewayServer(
         const record = diagnostics.close({ source, code, direction: 'both', pendingBytes, streams: streams.size,
           bufferedBytes: downstream.bufferedAmount + (upstreamWebSocket?.bufferedAmount ?? 0),
           clientSender: downstreamLeg?.snapshot(), upstreamSender: upstreamLeg?.snapshot() });
-        if (record !== null) console.error(`[dsh-passwords] remote.mux close source=${record.source} direction=${record.direction} code=${record.code} buffered=${record.bufferedBytes} pending=${record.pendingBytes} streams=${record.streams} clientQueued=${record.clientSender.queuedMessages}/${record.clientSender.queuedBytes} upstreamQueued=${record.upstreamSender.queuedMessages}/${record.upstreamSender.queuedBytes}`);
+        if (record !== null) console.error(`[dsh-passwords] remote.mux close userId=${userId} source=${record.source} direction=${record.direction} code=${record.code} buffered=${record.bufferedBytes} pending=${record.pendingBytes} streams=${record.streams} clientQueued=${record.clientSender.queuedMessages}/${record.clientSender.queuedBytes} upstreamQueued=${record.upstreamSender.queuedMessages}/${record.upstreamSender.queuedBytes}`);
         unregisterTenantConnection();
         unregisterWorkspacePublisher();
         downstreamLeg?.dispose();
         upstreamLeg?.dispose();
         streams.clear();
         upstreamForwardedAt.clear();
-        cancelledStreamIds.clear();
+        upstreamStreamIds.clear();
+        tenantMuxBudget.release(pendingBytes);
         pendingFrames.length = 0;
         pendingBytes = 0;
         closeTenantMuxLeg(downstream, code, reason);
@@ -11756,13 +11761,18 @@ export function createGatewayServer(
 
       downstreamLeg = createTenantMuxLeg(downstream, false, tenantMuxConfig, tenantMuxBudget, closeBoth);
       downstreamLeg.start();
-      function rejectLogicalStream(streamId: string): void {
+      const removeStream = (streamId: string) => {
+        const stream = streams.get(streamId);
+        if (stream === undefined) return;
         streams.delete(streamId);
-        upstreamForwardedAt.delete(streamId);
-        cancelledStreamIds.add(streamId);
+        upstreamStreamIds.delete(stream.upstreamId);
+        upstreamForwardedAt.delete(stream.upstreamId);
+        upstreamLeg?.cancel(stream.upstreamId);
+      };
+      function rejectLogicalStream(streamId: string): void {
         downstreamLeg?.cancel(streamId);
-        upstreamLeg?.cancel(streamId);
         sendUpstream(JSON.stringify({ type: 'cancel', streamId }));
+        removeStream(streamId);
         sendDownstream(JSON.stringify({ type: 'error', streamId, error: {
           code: 'gateway/overflow', message: 'Remote stream send queue full', details: {},
         } }));
@@ -11779,22 +11789,40 @@ export function createGatewayServer(
       const sendUpstream = (value: string, streamId?: string) => {
         const active = upstreamWebSocket;
         if (closed || active === null) return;
+        const outgoing = JSON.parse(value) as { type: string; streamId: string };
+        const stream = streams.get(outgoing.streamId);
+        if (stream === undefined) return;
+        value = JSON.stringify({ ...outgoing, streamId: stream.upstreamId });
         if (active.readyState === WebSocket.OPEN) {
-          const outgoing = JSON.parse(value) as { type: string; streamId: string };
-          if (outgoing.type === 'open') upstreamForwardedAt.set(outgoing.streamId, loadingTimeline.begin());
-          if (outgoing.type === 'cancel') upstreamForwardedAt.delete(outgoing.streamId);
-          const outcome = upstreamLeg?.send(value, streamId);
+          if (outgoing.type === 'open') upstreamForwardedAt.set(stream.upstreamId, loadingTimeline.begin());
+          if (outgoing.type === 'cancel') {
+            upstreamForwardedAt.delete(stream.upstreamId);
+            upstreamLeg?.cancel(stream.upstreamId);
+          }
+          const outcome = upstreamLeg?.send(value, streamId === undefined ? undefined : stream.upstreamId);
           if (outcome !== undefined && outcome !== 'accepted' && outcome !== 'closed') {
             if (streamId !== undefined) rejectLogicalStream(streamId);
             else closeBoth(1013, 'Remote stream backpressure limit exceeded', 'queue-overflow');
           }
           return;
         }
-        pendingBytes += Buffer.byteLength(value);
-        if (pendingFrames.length >= 64 || pendingBytes > 2 * 1024 * 1024) {
-          closeBoth(1009, 'Remote stream queue too large');
+        if (outgoing.type === 'cancel') {
+          for (let index = pendingFrames.length - 1; index >= 0; index -= 1) {
+            if (JSON.parse(pendingFrames[index]!).streamId !== stream.upstreamId) continue;
+            const bytes = Buffer.byteLength(pendingFrames[index]!);
+            pendingFrames.splice(index, 1);
+            pendingBytes -= bytes;
+            tenantMuxBudget.release(bytes);
+          }
           return;
         }
+        const bytes = Buffer.byteLength(value);
+        if (pendingFrames.length >= tenantMuxLimits.pendingMessages ||
+            pendingBytes + bytes > tenantMuxLimits.pendingBytes || !tenantMuxBudget.tryReserve(bytes)) {
+          closeBoth(1009, 'Remote stream queue too large', 'queue-overflow');
+          return;
+        }
+        pendingBytes += bytes;
         pendingFrames.push(value);
       };
 
@@ -11855,19 +11883,22 @@ export function createGatewayServer(
           if (frame.type === 'open') {
             if (
               streams.has(frame.streamId) ||
-              cancelledStreamIds.has(frame.streamId) ||
-              streams.size + cancelledStreamIds.size >= 256 ||
               (!ownerCarrier && frame.endpoint === '$events' && !isEmptyRemoteEventPayload(frame.payload))
             ) {
               throw new Error('Remote stream open is not allowed');
             }
             const rejectStream = (code: string, message = 'Stream is unavailable for this account') => {
-              cancelledStreamIds.add(frame.streamId);
               sendDownstream(JSON.stringify({ type: 'error', streamId: frame.streamId,
                 error: { code, message, details: {} } }));
             };
+            if (streams.size >= tenantMuxLimits.maxStreams) {
+              rejectStream('gateway/overflow', 'Too many active Remote streams');
+              return;
+            }
+            const upstreamId = `${++streamSerial}:${frame.streamId}`;
             if (ownerCarrier) {
-              streams.set(frame.streamId, { endpoint: frame.endpoint, events: null, authorizedSessionId: null, filtered: null });
+              streams.set(frame.streamId, { upstreamId, endpoint: frame.endpoint, events: null, authorizedSessionId: null, filtered: null });
+              upstreamStreamIds.set(upstreamId, frame.streamId);
               sendUpstream(text);
               return;
             }
@@ -11921,6 +11952,7 @@ export function createGatewayServer(
               throw new Error('Remote stream session is not allowed');
             }
             streams.set(frame.streamId, {
+              upstreamId,
               endpoint: frame.endpoint,
               events: frame.endpoint === '$events' ? new TenantRemoteEventFilter() : null,
               authorizedSessionId,
@@ -11933,12 +11965,13 @@ export function createGatewayServer(
                     visibleWorkspaces: new Map(), visibleWorkspaceRows: new Map() }
                 : null,
             });
+            upstreamStreamIds.set(upstreamId, frame.streamId);
           } else if (frame.type === 'cancel') {
-            if (cancelledStreamIds.has(frame.streamId)) return;
-            if (!streams.delete(frame.streamId)) throw new Error('unknown Remote stream cancellation');
-            cancelledStreamIds.add(frame.streamId);
+            if (!streams.has(frame.streamId)) return;
             downstreamLeg?.cancel(frame.streamId);
-            upstreamLeg?.cancel(frame.streamId);
+            sendUpstream(text);
+            removeStream(frame.streamId);
+            return;
           } else {
             const stream = streams.get(frame.streamId);
             if (stream === undefined || stream.filtered !== null || stream.events !== null) return;
@@ -11986,10 +12019,14 @@ export function createGatewayServer(
         }
         upstreamLeg?.start();
         const queued = pendingFrames.splice(0);
+        tenantMuxBudget.release(pendingBytes);
         pendingBytes = 0;
         for (const queuedFrame of queued) {
           if (active.readyState !== WebSocket.OPEN || closed) break;
-          sendUpstream(queuedFrame);
+          const frame = JSON.parse(queuedFrame) as { type: string; streamId: string };
+          const clientId = upstreamStreamIds.get(frame.streamId);
+          if (clientId === undefined) continue;
+          sendUpstream(JSON.stringify({ ...frame, streamId: clientId }), frame.type === 'item' ? clientId : undefined);
         }
       });
       active.on('message', (data, isBinary) => {
@@ -12004,19 +12041,18 @@ export function createGatewayServer(
         }
         try {
           const text = remoteFrameText(data);
-          const frame = parseTenantRemoteServerFrame(text);
+          const upstreamFrame = parseTenantRemoteServerFrame(text);
+          const clientId = upstreamStreamIds.get(upstreamFrame.streamId);
+          if (clientId === undefined) return;
+          const frame = { ...upstreamFrame, streamId: clientId };
           const stream = streams.get(frame.streamId);
-          const forwardedAt = upstreamForwardedAt.get(frame.streamId);
+          const forwardedAt = upstreamForwardedAt.get(upstreamFrame.streamId);
           if (forwardedAt !== undefined && frame.type === 'item') {
             loadingTimeline.elapsed('mux.upstream.snapshot.prepare', forwardedAt, { bytesIn: Buffer.byteLength(text) });
           }
-          if (frame.type !== 'item' || forwardedAt !== undefined) upstreamForwardedAt.delete(frame.streamId);
+          if (frame.type !== 'item' || forwardedAt !== undefined) upstreamForwardedAt.delete(upstreamFrame.streamId);
           if (stream === undefined) {
-            if (cancelledStreamIds.has(frame.streamId)) {
-              // Keep bounded tombstones so late end/item frames cannot close other streams.
-              return;
-            }
-            throw new Error('unknown upstream Remote stream id');
+            return;
           }
           if (frame.type === 'item' && stream.authorizedSessionId !== null) {
             const perms = effectivePermissions(userId);
@@ -12050,14 +12086,14 @@ export function createGatewayServer(
             else if (stream.endpoint !== 'workspace/follow' && stream.endpoint !== 'workspaceFiles/changes' &&
               !(stream.endpoint === 'session/control' && isPlainJsonRecord(frame.value) &&
                 ['projection', 'queue', 'jobs'].includes(String(frame.value.type)))) {
-              streams.delete(frame.streamId); cancelledStreamIds.add(frame.streamId);
               sendUpstream(JSON.stringify({ type: 'cancel', streamId: frame.streamId }));
+              removeStream(frame.streamId);
               sendDownstream(JSON.stringify(stream.endpoint === 'session/follow' ? { type: 'error', streamId: frame.streamId, error: { code: 'gateway/invalid-snapshot', message: 'Remote session follow snapshot rejected', details: {} } } : { type: 'end', streamId: frame.streamId }));
             }
             return;
           }
-          if (frame.type !== 'item') { streams.delete(frame.streamId); cancelledStreamIds.add(frame.streamId); }
-          sendDownstream(text, frame.type === 'item' ? frame.streamId : undefined);
+          if (frame.type !== 'item') removeStream(frame.streamId);
+          sendDownstream(JSON.stringify(frame), frame.type === 'item' ? frame.streamId : undefined);
         } catch {
           closeBoth(1011, 'invalid upstream Remote stream frame');
         }
