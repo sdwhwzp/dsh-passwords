@@ -83,7 +83,9 @@ test('anonymous, other-account, revoked, read-only and foreign-directory calls n
   for (const principal of [undefined, { ...a.exec.principal!, id: String(h.other.id), username: h.other.username }, { ...a.exec.principal!, source: 'forged' }, { ...a.exec.principal!, username: 'forged' }]) {
     await assert.rejects(a.run(undefined, { ...a.exec, principal }), /access denied|active account/);
   }
-  await assert.rejects(a.run(undefined, { ...a.exec, agent: h.createAgent().agent }), /unavailable/);
+  h.db.claimSessionOwner('cross-agent', h.other.id);
+  const crossAgent = h.createAgent(h.otherCwd, 'cross-agent');
+  await assert.rejects(a.run(undefined, { ...a.exec, agent: crossAgent.agent }), /session access denied/);
   for (const workdir of [h.otherCwd, 'escape', '../..', '/workspace/../outside', '/etc']) {
     await assert.rejects(a.tools[0]!.execute({ command: 'pwd', description: 'Inspect directory', workdir }, a.exec));
   }
@@ -145,6 +147,7 @@ test('persistent service commands retain account authorization and do not stop s
   await tool.execute(start, a.exec);
   assert.deepEqual(h.calls[0]!.args, ['-n', '--', h.config.tenantAgentShell!.serviceLauncher, String(h.owner.id), h.cwd, h.owner.username]);
   assert.deepEqual(JSON.parse(h.calls[0]!.command), start);
+  assert.equal(h.calls.length, 1);
   for (const action of ['status', 'logs', 'stop', 'list']) {
     await assert.rejects(tool.execute({ action, name: 'vite-front' }, { ...a.exec, principal: { ...a.exec.principal!, id: String(h.other.id), username: h.other.username } }), /access denied/);
   }

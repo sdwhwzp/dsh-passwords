@@ -18,7 +18,7 @@ interface SandboxPolicy {
 
 /** Owns account concurrency and aborts all command processes when disposed. */
 export class TenantAgentShell {
-  private readonly active = new Set<{ owner: number; agent: Agent; controller: AbortController; done: Promise<TenantCommandResult> }>();
+  private readonly active = new Set<{ owner: number; controller: AbortController; done: Promise<TenantCommandResult> }>();
   private disposed = false;
   private readonly access: DshPasswordsPrincipalAccessProvider;
 
@@ -39,7 +39,7 @@ export class TenantAgentShell {
     const lifetime = new AbortController();
     agent.ctx.tools.register(this.tool(agent, owner, lifetime.signal));
     if (this.config.tenantAgentShell?.serviceLauncher) {
-      agent.ctx.tools.register(tenantServiceTool((request, exec) => this.execute(agent, owner, { command: '' }, exec, lifetime.signal, request)));
+      agent.ctx.tools.register(tenantServiceTool((request, exec) => this.execute(agent, exec.agent ?? agent, owner, { command: '' }, exec, lifetime.signal, request)));
       agent.ctx.systemPrompt.section({ name: 'tenant-persistent-services', order: 96,
         text: 'For a user-requested running test environment, use dev_server start with a foreground command, then inspect status and logs and verify the requested URL. Keep the service enabled after your reply; stop it only when the user explicitly asks. Bash background jobs are temporary and cannot substitute for dev_server. Use dev_server list in later conversations to find existing services. Do not claim network reachability from a listening port alone; test the requested URL. An enabled service survives Agent and Harness restarts and host reboot.',
       });
@@ -48,14 +48,14 @@ export class TenantAgentShell {
       name: 'tenant-workspace-shell', order: 95,
       text: 'The bash tool executes commands in this account’s server workspace sandbox. The account root is /workspace; its persistent personal HOME is /home/dsh, shared with the web terminal and editor. Use relative workdir paths or /workspace paths. Install development tools in HOME (for example ~/.local/bin); sudo and host-wide installation are unavailable. Each call starts a fresh shell; files persist, shell variables and background processes do not. Explicitly load a version manager when needed. Cancellation and timeout stop the command. Inspect the command result before reporting an installation as completed.',
     });
-    agent.ctx.effect(() => async () => { lifetime.abort(); await this.stop(agent); }, 'dsh-passwords: agent shell cleanup');
+    agent.ctx.effect(() => async () => { lifetime.abort(); await this.stop(); }, 'dsh-passwords: agent shell cleanup');
   }
 
   /** Stop accepting commands and await all owned processes. */
   async dispose(): Promise<void> { this.disposed = true; await this.stop(); }
 
-  private async stop(agent?: Agent): Promise<void> {
-    const selected = [...this.active].filter(item => agent === undefined || item.agent === agent);
+  private async stop(): Promise<void> {
+    const selected = [...this.active];
     for (const item of selected) item.controller.abort();
     await Promise.allSettled(selected.map(item => item.done));
   }
@@ -88,7 +88,11 @@ export class TenantAgentShell {
       execute: async (args, exec) => {
         if (args.command.trim() === '' || args.description.trim() === '') throw new Error('command and description must not be empty');
         if (args.timeoutMs !== undefined && (!Number.isSafeInteger(args.timeoutMs) || args.timeoutMs < 1 || args.timeoutMs > settings.maxTimeoutMs)) throw new Error('invalid command timeout');
-        return this.execute(agent, owner, args, exec, lifetime);
+        // The tool belongs to the current executing agent: the gateway replays
+        // tools for resumed sessions, so identity comes from the run context,
+        // while the session workspace directory stays anchored at install time.
+        const current = exec.agent ?? agent;
+        return this.execute(agent, current, owner, args, exec, lifetime);
       },
       presentCall: args => ({ card: 'terminal', title: args.command, description: args.description, ...(args.workdir === undefined ? {} : { cwd: args.workdir }) }),
       presentResult: (_args, result) => {
@@ -99,14 +103,14 @@ export class TenantAgentShell {
   }
 
   private async execute(
-    agent: Agent, owner: number,
+    sessionCwdSource: Agent, agent: Agent, owner: number,
     args: { command: string; workdir?: string; timeoutMs?: number }, exec: ToolRunContext, lifetime: AbortSignal, service?: TenantServiceRequest,
   ): Promise<TenantCommandResult> {
-    exec.signal.throwIfAborted();
-    if (this.disposed || exec.agent !== agent) throw new Error('agent shell is unavailable');
+    if (this.disposed) throw new Error('agent shell is unavailable');
     const principal = exec.principal;
     if (principal === undefined || principal.role !== 'user' || principal.id !== String(owner)) throw new Error('workspace account access denied');
     this.access.assertAuthenticated(principal);
+    exec.signal.throwIfAborted();
     const permissions = this.db.getPermissions(owner);
     const sessionOwner = this.db.getSessionOwner(agent.session.id);
     if ((sessionOwner !== null && sessionOwner !== owner) || permissions?.disabled_sessions.includes(agent.session.id)) throw new Error('session access denied');
@@ -114,7 +118,7 @@ export class TenantAgentShell {
     if (policy === undefined) throw new Error('workspace sandbox policy is unavailable');
     if (permissions?.sandbox_mode === 'read-only' || policy.resolve({ session: agent.session }).mode === 'read-only') throw new Error('workspace shell requires write permission');
     const root = path.join(this.config.managedWorkspaceRoot, `u${owner}`);
-    const sessionCwd = await tenantDirectory(this.config.managedWorkspaceRoot, principal.id, agent.session.header.cwd!);
+    const sessionCwd = await tenantDirectory(this.config.managedWorkspaceRoot, principal.id, sessionCwdSource.session.header.cwd!);
     if (this.db.managedWorkspaceOwnerForPath(sessionCwd) !== owner) throw new Error('workspace ownership changed');
     const requested = args.workdir === undefined ? sessionCwd
       : args.workdir === '/workspace' || args.workdir.startsWith('/workspace/')
@@ -141,7 +145,7 @@ export class TenantAgentShell {
       timeoutMs: service === undefined ? args.timeoutMs ?? settings.timeoutMs : 30000,
       maxOutputBytes: settings.maxOutputBytes, signal,
     });
-    const active = { owner, agent, controller, done };
+    const active = { owner, controller, done };
     this.active.add(active);
     try { return await done; } finally { this.active.delete(active); }
   }
