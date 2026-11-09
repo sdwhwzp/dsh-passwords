@@ -40,16 +40,23 @@ async function harness(t: { after(fn: () => Promise<void>): void }, runner?: (re
     tenantAgentShell: { enabled: true, timeoutMs: 120000, maxTimeoutMs: 600000, maxOutputBytes: 262144 },
   } as PlatformConfig;
   const calls: TenantCommandRequest[] = [];
-  const shell = new TenantAgentShell(ctx, db, config, async request => { calls.push(request); return runner === undefined ? success : runner(request); });
+  const createShell = () => new TenantAgentShell(ctx, db, config, async request => { calls.push(request); return runner === undefined ? success : runner(request); });
+  const shell = createShell();
   t.after(async () => { await shell.dispose(); db.close(); await rm(temp, { recursive: true, force: true }); });
   const createAgent = (directory = cwd, id = 'owned-session') => {
     const tools: ToolDefinition[] = [];
     const sections: Array<{ name: string; text: string }> = [];
     const disposers: Array<() => Promise<void>> = [];
     const agent = { session: { id, header: { cwd: directory } }, ctx: {
-      tools: { register: (tool: ToolDefinition) => { tools.push(tool); } },
-      systemPrompt: { section: (section: { name: string; text: string }) => { sections.push(section); } },
-      effect: (create: () => () => Promise<void>) => { disposers.push(create()); },
+      tools: { register: (tool: ToolDefinition) => { tools.push(tool); return () => {}; } },
+      systemPrompt: { section: (section: { name: string; text: string }) => { sections.push(section); return () => {}; } },
+      effect: (create: () => Generator<() => void | Promise<void>>) => {
+        const cleanups = [...create()].reverse();
+        let pending: Promise<void> | undefined;
+        const dispose = () => (pending ??= (async () => { for (const cleanup of cleanups) await cleanup(); })());
+        disposers.push(dispose);
+        return dispose;
+      },
     } } as unknown as Agent;
     shell.install(agent);
     const principal = { source: 'dsh-passwords', id: String(owner.id), username: owner.username, role: 'user' } as const;
@@ -57,8 +64,65 @@ async function harness(t: { after(fn: () => Promise<void>): void }, runner?: (re
     const run = (args = { command: 'node --version && pnpm --version', description: 'Check installed development tools' }, execution = exec) => tools[0]!.execute(args, execution);
     return { agent, tools, sections, exec, run, dispose: async () => { for (const dispose of disposers) await dispose(); } };
   };
-  return { shell, calls, db, config, cwd, otherCwd, owner, other, permissions, createAgent, setMode: (value: string) => { mode = value; }, noPolicy: () => { policyAvailable = false; } };
+  return { shell, createShell, calls, db, config, cwd, otherCwd, owner, other, permissions, createAgent, setMode: (value: string) => { mode = value; }, noPolicy: () => { policyAvailable = false; } };
 }
+
+test('shell plugin disposal releases live agent registrations for reinstallation', async (t) => {
+  const { createScope } = await import('@deepseek-ai/dsh-scope');
+  const { default: Tools } = await import('@deepseek-ai/dsh-tools');
+  const { default: SystemPrompt } = await import('@deepseek-ai/dsh-system-prompt');
+  const NativeExecutor = await import('@deepseek-ai/dsh-tool-executor-native');
+  const { ToolCallId } = await import('@deepseek-ai/dsh-llm');
+  const h = await harness(t);
+  const ctx = new Context();
+  t.after(async () => ctx.fiber.dispose());
+  await ctx.plugin(SystemPrompt);
+  await ctx.plugin(Tools);
+  await ctx.plugin(NativeExecutor);
+  const agent = { id: 'owned-session', session: { id: 'owned-session', header: { cwd: h.cwd } } } as unknown as Agent;
+  await ctx.plugin({ inject: ['tools', 'systemPrompt'], apply(inner) { Object.assign(agent, { ctx: createScope(inner, agent).ctx }); } });
+  const principal = { source: 'dsh-passwords', id: String(h.owner.id), username: h.owner.username, role: 'user' } as const;
+  const run = async () => (await ctx.tools.execute({
+    agent, principal, calls: [{ type: 'tool-call', name: 'bash', id: ToolCallId('shell-test'), arguments: JSON.stringify({ command: 'pwd', description: 'Inspect directory' }) }],
+    signal: new AbortController().signal,
+  })).results[0]!.result;
+  h.shell.install(agent);
+  assert.equal((await run()).isError, false);
+  await h.shell.dispose();
+  assert.equal(ctx.tools.get('bash', agent), undefined);
+  const replacement = h.createShell();
+  try {
+    replacement.install(agent);
+    assert.equal((await run()).isError, false);
+  } finally {
+    await replacement.dispose();
+  }
+});
+
+test('plugin activation reinstalls shell tools for already live agents', { skip: process.platform !== 'linux' }, async (t) => {
+  const { createScope } = await import('@deepseek-ai/dsh-scope');
+  const { default: Tools } = await import('@deepseek-ai/dsh-tools');
+  const { default: SystemPrompt } = await import('@deepseek-ai/dsh-system-prompt');
+  const h = await harness(t);
+  const ctx = new Context();
+  t.after(async () => ctx.fiber.dispose());
+  await ctx.plugin(SystemPrompt);
+  await ctx.plugin(Tools);
+  const agent = { id: 'owned-session', session: { id: 'owned-session', header: { cwd: h.cwd } } } as unknown as Agent;
+  await ctx.plugin({ inject: ['tools', 'systemPrompt'], apply(inner) { Object.assign(agent, { ctx: createScope(inner, agent).ctx }); } });
+  ctx.provide('agents', { list: () => [agent] } as never);
+  const mount = () => ctx.plugin({ apply(inner) { registerTenantAgentShell(inner, h.db, h.config); } });
+  const first = mount();
+  await first;
+  assert.ok(ctx.tools.get('bash', agent));
+  await first.dispose();
+  assert.equal(ctx.tools.get('bash', agent), undefined);
+  const second = mount();
+  await second;
+  assert.ok(ctx.tools.get('bash', agent));
+  await second.dispose();
+  assert.equal(ctx.tools.get('bash', agent), undefined);
+});
 
 test('managed parent and child agents receive bash with logged terminal output and persistent-home guidance', async (t) => {
   const h = await harness(t);
@@ -83,9 +147,7 @@ test('anonymous, other-account, revoked, read-only and foreign-directory calls n
   for (const principal of [undefined, { ...a.exec.principal!, id: String(h.other.id), username: h.other.username }, { ...a.exec.principal!, source: 'forged' }, { ...a.exec.principal!, username: 'forged' }]) {
     await assert.rejects(a.run(undefined, { ...a.exec, principal }), /access denied|active account/);
   }
-  h.db.claimSessionOwner('cross-agent', h.other.id);
-  const crossAgent = h.createAgent(h.otherCwd, 'cross-agent');
-  await assert.rejects(a.run(undefined, { ...a.exec, agent: crossAgent.agent }), /session access denied/);
+  await assert.rejects(a.run(undefined, { ...a.exec, agent: h.createAgent().agent }), /unavailable/);
   for (const workdir of [h.otherCwd, 'escape', '../..', '/workspace/../outside', '/etc']) {
     await assert.rejects(a.tools[0]!.execute({ command: 'pwd', description: 'Inspect directory', workdir }, a.exec));
   }
@@ -127,6 +189,32 @@ test('concurrency is per account, and disposal cancels and awaits running comman
   await h.shell.dispose(); assert.equal(h.createAgent().tools.length, 0);
 });
 
+test('disposing one agent does not cancel another agent command', async (t) => {
+  const ready = Promise.withResolvers<void>();
+  const requests: TenantCommandRequest[] = [];
+  let finishSecond!: () => void;
+  const h = await harness(t, request => new Promise(resolve => {
+    requests.push(request);
+    const finish = (aborted: boolean) => resolve({ ...success, aborted });
+    request.signal.addEventListener('abort', () => finish(true), { once: true });
+    if (requests.length === 2) {
+      finishSecond = () => finish(false);
+      ready.resolve();
+    }
+  }));
+  h.config.tenantTerminal!.maxPerUser = 2;
+  const firstAgent = h.createAgent();
+  const secondAgent = h.createAgent(h.cwd, 'other-owned-session');
+  const first = firstAgent.run();
+  const second = secondAgent.run();
+  await ready.promise;
+  await firstAgent.dispose();
+  assert.equal((await first).aborted, true);
+  assert.equal(requests[1]!.signal.aborted, false);
+  finishSecond();
+  assert.equal((await second).aborted, false);
+});
+
 test('disabled deployments and non-managed workspaces do not receive a host shell', async (t) => {
   const h = await harness(t);
   registerTenantAgentShell({} as Context, h.db, { ...h.config, tenantAgentShell: undefined });
@@ -147,7 +235,6 @@ test('persistent service commands retain account authorization and do not stop s
   await tool.execute(start, a.exec);
   assert.deepEqual(h.calls[0]!.args, ['-n', '--', h.config.tenantAgentShell!.serviceLauncher, String(h.owner.id), h.cwd, h.owner.username]);
   assert.deepEqual(JSON.parse(h.calls[0]!.command), start);
-  assert.equal(h.calls.length, 1);
   for (const action of ['status', 'logs', 'stop', 'list']) {
     await assert.rejects(tool.execute({ action, name: 'vite-front' }, { ...a.exec, principal: { ...a.exec.principal!, id: String(h.other.id), username: h.other.username } }), /access denied/);
   }

@@ -650,7 +650,7 @@ keyed slot "settings.plugin.item" requires options.key
 
 Linux 部署由管理员将 `scripts/tenant-terminal-launcher.py` 安装为 root 所有且不可被普通用户修改的 `/usr/local/libexec/dsh-tenant-terminal`，并配置只允许执行这个启动器的 sudoers 规则。启动器中的服务账号和托管根目录必须匹配部署；不得授权任意 `sudo bwrap`。设置 `MCP_TENANT_TERMINAL_LAUNCHER` 后启用，默认每账号最多 8 个终端、断线宽限期 30 秒，可用 `MCP_TENANT_TERMINAL_LIMIT` 和 `MCP_TENANT_TERMINAL_GRACE_MS` 调整。
 
-启用 `MCP_TENANT_AGENT_SHELL=true` 后，Agent 和子代理可在当前服务器个人项目中使用 `bash` 执行命令，结果以终端卡片返回。每次调用重新核对账号和写入权限，当前项目及个人 HOME 可写，其他账号不可访问。HOME 与网页终端和编辑器共用，可安装用户级 Node、pnpm；命令取消或超时会结束进程。发布时必须同时更新启动器及 sudoers 摘要，配置和验证约束见[个人工作区命令执行](https://github.com/sdwhwzp/dsh-passwords/blob/dev/docs/plans/2026-09-11-tenant-agent-shell.md)。
+启用 `MCP_TENANT_AGENT_SHELL=true` 后，Agent 和子代理可在当前服务器个人项目中使用 `bash` 执行命令，结果以终端卡片返回。每次调用重新核对账号和写入权限，当前项目及个人 HOME 可写，其他账号不可访问。HOME 与网页终端和编辑器共用，可安装用户级 Node、pnpm；命令取消或超时会结束进程。插件重载时会停止正在执行的命令，并为仍存活的 Agent 重新注册工具。发布时必须同时更新启动器及 sudoers 摘要，配置和验证约束见[个人工作区命令执行](https://github.com/sdwhwzp/dsh-passwords/blob/dev/docs/plans/2026-09-11-tenant-agent-shell.md)。
 
 设置 `MCP_TENANT_TASK_BOARD=true` 启用按账号分开的任务看板，同时把 `web-ui-task-board` 行指向本包 `integrations/task-board/client-shell/index.js` 的绝对或配置相对路径，保留源配置表单与客户端，避免启动第二个全局账本。账本保存在 `MCP_TENANT_TASK_BOARD_DIR`，重载后恢复定时任务；执行与历史读取经过 `MCP_TENANT_TASK_BOARD_GATEWAY` 指定的本机网关，沿用当前账号的工作区、模型、沙盒和额度检查。账号删除、禁用或身份不匹配会拒绝执行。旧全局账本不会自动合并进个人账本。 每个账号只为最近的 cron 时点设置一个定时器，新建或导入已启用的计划立即排程；修改、停用、删除或归档会撤销旧时点。重启或恢复运行只排程未来时点，不补跑停机期间错过的任务。
 
