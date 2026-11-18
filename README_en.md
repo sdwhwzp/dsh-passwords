@@ -1,5 +1,7 @@
 # dsh-passwords
 
+On Harness 0.2.2-rc.4, account services register on the symbol-keyed Cordis root context. Upgrades retain the existing account settings and session ownership.
+
 Sidebar file and Git requests require session ownership and authorized paths; ordinary accounts also need file-write permission for mutations. Git commits, pushes and pulls use the same file-write permission; commit model catalogs and routes expose only models granted to the account. Generated commit messages require account model invocation and quota support, which ordinary accounts cannot bypass through the sidebar. Paired local folders support batched directory reads.
 
 [简体中文](README.md) | English
@@ -57,9 +59,11 @@ Real-time connection capacity counts active subscriptions; cancelled, completed,
 
 ## Development and chat modes
 
-Choose **Development** in the sidebar to use workspaces, terminals and the editor. Choose **Chat** to ask questions without selecting a workspace. **New chat** reuses an unasked chat on the server per account, including concurrent requests from multiple windows. Chats with subagents and subagent sessions are excluded from reuse. History shows only the selected blank chat. Messages, running work, queued input, archived chats and named chats are preserved. Subagent records remain accessible through their parent conversation and are not listed as new chats. History belongs to the signed-in account and can be resumed later.
+With `dsh-chat-demo` loaded in the Web profile, open **Chat** and pick an authorized Harness model in the upper right. Existing Harness sessions are available under **Development** according to the account's session grants. Direct messages between accounts have a separate entry.
 
-Chat keeps model selection, streamed replies and history. All tools authorized for the account are available, including knowledge retrieval, GenUI, files, shell commands and subagents. The account workspace is attached automatically; account permissions, sandbox rules and account isolation match development mode. See the [implementation and maintenance notes (Chinese)](docs/2026-09-14-conversation-mode.md).
+The Host uses the Harness provider credentials and enforces model grants, account bans, and usage limits. The optional personal DeepSeek API integration supports search, uploads, and speech. Speech requires both upload and chat media grants. Attachment references are bound to the uploading account and API key. Chat history, settings, and original attachments are encrypted in the current browser and scoped to the account.
+
+For a local source install, run `pnpm install --frozen-lockfile` and `pnpm build` in `../../chat-demo`, then register the Web profile with `node scripts/register-plugin.mjs`. On separate installs, set `DSH_PLUGIN_CHAT_DEMO_SPEC` to a built plugin package or local link.
 
 ## When to use it
 
@@ -420,12 +424,13 @@ After logging in to dsh, open **Settings → Plugins** to find the "dsh-password
 | **Change password** | Yourself; the owner can change anyone's | Old sessions are invalidated immediately |
 | **Change username** | Yourself; the owner can change anyone's | Sign in with the new username afterwards |
 | **Subuser management** | Owner only | Create/delete subusers (subusers can sign in but have no admin rights) |
-| **Subuser permissions** | Owner only | Workspace switches, per-session checkboxes, hourly token limit, daily time limit, sandbox level, upload/git-download toggles, ban |
+| **Subuser permissions** | Owner only | Workspace switches, workspace creation permission, per-session checkboxes, hourly token limit, daily time limit, sandbox level, upload/git-download toggles, ban |
 | **Local workspaces** | All signed-in users | Download the Windows companion, inspect online state, and revoke their own local workspaces |
 | **Chat / messages** | All signed-in users | Chat button in the bottom-left corner, with tags (issue/pull request/discussion/announcement/question); subusers DM the owner by default, broadcasting is owner-only; every account can hide its own chat entry in Settings |
 
 - **Owner** = the account created at first-time setup; everything added later is a **subuser**.
 - Passwords follow the same rule as the login page: at least 12 characters with uppercase, lowercase, digits and symbols.
+- Open **Account management → Permissions & budget** for the account, check or uncheck **Workspace creation permission**, then click **Save permissions**. This permission is off by default for new accounts.
 
 ## Configuration reference (.env)
 

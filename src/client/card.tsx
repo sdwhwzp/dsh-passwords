@@ -2035,6 +2035,14 @@ export function DshPasswordsCard(props: DshPasswordsCardProps) {
                     'aria-label': t('permsSsh'),
                     onChange: (e: { target: { checked: boolean } }) => setDraft(u.id, { ssh: e.target.checked }),
                   }), t('permsSsh')),
+                h('label', { className: 'dshpw-check' },
+                  h('input', {
+                    type: 'checkbox',
+                    checked: d.workspaceCreate,
+                    disabled: busy,
+                    'aria-label': t('permsWorkspaceCreate'),
+                    onChange: (event: { target: { checked: boolean } }) => setDraft(u.id, { workspaceCreate: event.target.checked }),
+                  }), t('permsWorkspaceCreate')),
                 h('label', { className: 'dshpw-check', title: t('permsChatMediaDesc') },
                   h('input', {
                     type: 'checkbox', checked: d.chatMedia,

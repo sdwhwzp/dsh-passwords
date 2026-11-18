@@ -7,6 +7,7 @@
 //        （仅主用户可触发，10 分钟冷却；补丁强制启用，无开关）
 //      dsh 升级覆盖补丁后，主用户在设置页点"重载补丁"即可，无需登录服务器。
 import type { Context } from '@deepseek-ai/cordis';
+import { cordisRoot } from './cordis-root.js';
 import type {} from '@deepseek-ai/dsh-agent';
 import type {} from '@deepseek-ai/dsh-client-connection';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -26,7 +27,7 @@ import { Database, type UserListRow } from './db.js';
 import { createFieldCrypto } from './encrypt.js';
 import { registerTenantTaskBoard } from './tenant-task-board.js';
 import { registerTenantTerminal } from './tenant-terminal.js';
-import { registerConversationMode } from './conversation-mode.js';
+import { chatDemoAccess } from './chat-demo-access.js';
 import { registerTenantAgentShell } from './tenant-agent-shell.js';
 import { AuthService, AuthError, assertNoSqlInjection, type AuthedUser, type RequestMeta } from './auth.js';
 import { findDshRoot, patchStatus } from './patch.js';
@@ -1050,6 +1051,8 @@ export function apply(ctx: Context): void {
     }
   }
 
+  const demoAccess = chatDemoAccess(db, cfg.internalSecret, () => ctx.get('spendAccounting'));
+  ctx.effect(() => cordisRoot(ctx).provide('dshChatDemoAccess', demoAccess), 'dsh-passwords: chat demo access');
   const localWorkspaceHub = db === null ? null : new LocalWorkspaceHub(ctx, db, cfg);
   const managedWorkspaces = db === null ? null : new ManagedWorkspaceProvisioner(db, cfg);
   if (db !== null) {
@@ -1057,12 +1060,11 @@ export function apply(ctx: Context): void {
     const principalAccess = registerPrincipalAccess(ctx, db);
     registerAttachmentReplayGuard(ctx, principalAccess);
     registerTenantTerminal(ctx, db, cfg);
-    registerConversationMode(ctx, db);
     registerTenantAgentShell(ctx, db, cfg);
     registerTenantTaskBoard(ctx, db, cfg);
     if (auth !== null) registerBotBridge(ctx, db, auth);
     const remoteDb = db;
-    ctx.inject(['typertGateway', 'managedUserWorkspace', 'sessionController', 'workspaceRegistry'], (scope) => {
+    ctx.inject(['typertGateway'], (scope) => {
       new DshPasswordsRemote(scope, remoteDb);
     });
   }
@@ -1086,7 +1088,7 @@ export function apply(ctx: Context): void {
     // actually holds the checkout; `null` keeps them on their own execution
     // path for every ordinary workspace, so nothing changes for Host folders.
     ctx.effect(
-      () => ctx.root.provide('localWorkspaceCommands', {
+      () => cordisRoot(ctx).provide('localWorkspaceCommands', {
         runInPairedWorkspace: (cwd: string, argv: readonly string[], options?: { signal?: AbortSignal; timeoutMs?: number }) =>
           localWorkspaceHub.runPairedArgv(cwd, argv, options ?? {}),
       }),

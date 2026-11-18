@@ -6,15 +6,6 @@
 // 优先按 code 本地化，未知 code 回退到服务端返回的 error 文案。
 
 export const zh = {
-  conversationModes: '会话模式',
-  conversationPlaceholder: '向 AI 提问…',
-  developmentMode: '开发模式',
-  conversationMode: '纯会话',
-  conversationNew: '新建纯会话',
-  conversationCreating: '正在创建…',
-  conversationModeHint: '直接聊天，可使用账号已授权的全部工具。',
-  conversationHistory: '聊天记录',
-  conversationUntitled: '新会话',
   managedFilesDragHint: '拖动文件或文件夹到目标文件夹或“返回上级”即可移动；也可以使用“移动”和“粘贴”。',
   desktopTitle: '下载桌面端',
   desktopBack: '返回会话',
@@ -427,15 +418,6 @@ export const zh = {
 };
 
 export const en: Record<keyof typeof zh, string> = {
-  conversationModes: 'Conversation mode',
-  conversationPlaceholder: 'Ask AI…',
-  developmentMode: 'Development',
-  conversationMode: 'Chat',
-  conversationNew: 'New chat',
-  conversationCreating: 'Creating…',
-  conversationModeHint: 'Chat with all tools authorized for your account.',
-  conversationHistory: 'Chat history',
-  conversationUntitled: 'New conversation',
   managedFilesDragHint: 'Drag a file or folder onto a destination folder or Up to move it. Move and Paste are also available.',
   desktopTitle: 'Download desktop',
   desktopBack: 'Back to conversation',

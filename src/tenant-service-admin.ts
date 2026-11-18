@@ -1,5 +1,6 @@
 /** Administrator control of child-account development service lifetimes. */
 import type { Context } from '@deepseek-ai/cordis';
+import { cordisRoot } from './cordis-root.js';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
 import type { PlatformConfig } from './config.js';
@@ -49,7 +50,7 @@ export function registerTenantServiceAdministration(ctx: Context, db: Database, 
   ctx.on('session/event', (session, event) => {
     if (event.type !== 'turn/start') return;
     const principal = event.data.principal;
-    const registry = ctx.root.get('agents') as { get(id: typeof session.id): Agent | undefined } | undefined;
+    const registry = cordisRoot(ctx).get('agents') as { get(id: typeof session.id): Agent | undefined } | undefined;
     const agent = registry?.get(session.id);
     if (principal?.role === 'admin' && agent !== undefined && !installed.has(agent)) {
       access.assertAuthenticated(principal);

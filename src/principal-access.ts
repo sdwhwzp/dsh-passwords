@@ -1,6 +1,7 @@
 /** Host authorization for principal-scoped Session and Workspace reads. */
 
 import type { Context } from '@deepseek-ai/cordis';
+import { cordisRoot } from './cordis-root.js';
 import type {
   PrincipalAccessResult,
   PrincipalAccessSubjects,
@@ -98,7 +99,7 @@ export class DshPasswordsPrincipalAccessProvider {
       };
     }
 
-    const services = this.ctx.root as unknown as HostServices;
+    const services = cordisRoot(this.ctx) as unknown as HostServices;
     const registry = services.get('workspaceRegistry') as { list(): readonly WorkspaceRecord[] } | undefined;
     const sessions = services.get('sessions') as { get(id: string): SessionRecord | undefined } | undefined;
     const persistence = services.get('sessionPersistence') as {
@@ -272,7 +273,7 @@ export function registerPrincipalAccess(
 ): DshPasswordsPrincipalAccessProvider {
   const provider = new DshPasswordsPrincipalAccessProvider(ctx, db);
   ctx.effect(
-    () => (ctx.root as unknown as HostServices).provide('principalAccess', provider),
+    () => (cordisRoot(ctx) as unknown as HostServices).provide('principalAccess', provider),
     'dsh-passwords: principal access provider',
   );
   return provider;

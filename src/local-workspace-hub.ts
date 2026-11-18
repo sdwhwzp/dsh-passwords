@@ -1,6 +1,7 @@
 /** Host-side pairing server and agent-scoped remote workspace tool provider. */
 
 import type { Context } from '@deepseek-ai/cordis';
+import { cordisRoot } from './cordis-root.js';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { AttachmentId, AttachmentStore, ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment';
 import type { PrincipalAccessResult, PrincipalAccessSubjects } from '@deepseek-ai/dsh-principal-access';
@@ -1412,7 +1413,7 @@ function desktopToolDefinitions(ctx: Context, executeRemote: ExecuteRemote): Too
       }
       const principal = (exec as typeof exec & { readonly principal?: AuthenticatedPrincipal }).principal;
       const sessionId = exec.agent?.id;
-      const provider = ctx.root.get('principalAccess') as Pick<DshPasswordsPrincipalAccessProvider, 'recordAttachments'> | undefined;
+      const provider = cordisRoot(ctx).get('principalAccess') as Pick<DshPasswordsPrincipalAccessProvider, 'recordAttachments'> | undefined;
       if (principal === undefined || sessionId === undefined || provider?.recordAttachments === undefined) throw attachmentGrantDenied();
       const display = (args as Record<string, unknown>).display;
       const value = await executeRemote(
@@ -1585,7 +1586,7 @@ function remoteToolDefinitions(
             throw new RemoteOperationError('当前账号无权访问此本机工作区', 'FORBIDDEN');
           }
           const hostRead = await readHostAttachmentWindow(filePath, value, root, async (id) => {
-            const provider = ctx.root.get('principalAccess') as {
+            const provider = cordisRoot(ctx).get('principalAccess') as {
               resolve(principal: AuthenticatedPrincipal, subjects: PrincipalAccessSubjects, signal?: AbortSignal): Promise<PrincipalAccessResult>;
             } | undefined;
             if (principal === undefined || provider === undefined) {

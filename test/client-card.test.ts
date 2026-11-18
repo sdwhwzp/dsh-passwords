@@ -603,6 +603,45 @@ async function savePermissions(card: MountedCard) {
   await act(async () => { save!.props.onClick(); });
 }
 
+test('workspace creation permission saves independently and survives refresh and reopening', async (context) => {
+  const overview = subuserOverview(['sess-1'], ['/work/alpha']);
+  const permissions = overview.users[0]!.permissions;
+  const card = await mountPermissionsCard(context, {
+    '/gateway/api/permissions': () => {
+      const body = permissionBodies(card).at(-1)!;
+      if (typeof body.allowWorkspaceCreate === 'boolean') {
+        permissions.allowWorkspaceCreate = body.allowWorkspaceCreate;
+      }
+      return Response.json({ ok: true });
+    },
+  }, {
+    '/gateway/api/overview': () => overview,
+    '/api/dsh-passwords/workspaces': permissionWorkspaces,
+  });
+  const checkbox = () => card.renderer.root.findByProps({ 'aria-label': 'permsWorkspaceCreate' });
+  assert.equal(checkbox().props.checked, false);
+
+  for (const enabled of [true, false]) {
+    assert.equal(await toggleWorkspaceCreate(card), enabled);
+    await card.refresh();
+    assert.equal(checkbox().props.checked, enabled);
+    await savePermissions(card);
+    assert.deepEqual(permissionBodies(card).at(-1), { userId: 2, allowWorkspaceCreate: enabled });
+    assert.equal(permissions.allowWorkspaceCreate, enabled);
+    await card.refresh();
+    assert.equal(checkbox().props.checked, enabled);
+    await act(async () => { card.renderer.root.findByProps({ 'aria-label': 'accountsClose' }).props.onClick(); });
+    await act(async () => { card.renderer.root.findByProps({ 'aria-label': 'accountsEdit · subuser' }).props.onClick(); });
+    assert.equal(checkbox().props.checked, enabled);
+  }
+
+  await savePermissions(card);
+  assert.deepEqual(permissionBodies(card).at(-1), { userId: 2 });
+  permissions.allowWorkspaceCreate = true;
+  await card.refresh();
+  assert.equal(checkbox().props.checked, true);
+});
+
 test('saving a workspace-only change omits allowedSessionIds so server grants survive', async (t) => {
   const card = await mountPermissionsCard(t, {
     '/gateway/api/permissions': () => Response.json({ ok: true }),

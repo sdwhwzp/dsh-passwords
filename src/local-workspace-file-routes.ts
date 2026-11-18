@@ -1,5 +1,6 @@
 /** Preserve the standard file-picker and preview RPCs while routing paired folders to their owner. */
 import type { Context } from '@deepseek-ai/cordis';
+import { cordisRoot } from './cordis-root.js';
 import type { InvokeRemoteRequest } from '@deepseek-ai/dsh-api-gateway';
 import type {} from '@deepseek-ai/dsh-client-connection';
 import type {} from '@deepseek-ai/dsh-session-query';
@@ -215,7 +216,7 @@ function ignored(name: string, value: unknown): boolean {
 export function registerLocalWorkspaceFileRoutes(ctx: Context, db: Database, hub: LocalWorkspaceHub, config: PlatformConfig): void {
   ctx.inject(['connection', 'typertGateway', 'sessionQuery'], scope => {
     const routes = new LocalWorkspaceFileRoutes(scope, db, hub, config.localWorkspace);
-    scope.effect(() => scope.root.provide('localWorkspaceFiles', routes), 'dsh-passwords: paired sidebar files');
+    scope.effect(() => cordisRoot(scope).provide('localWorkspaceFiles', routes), 'dsh-passwords: paired sidebar files');
     for (const endpoint of ['atFile/search', ...['list', 'stat', 'read', 'readBytes', 'readAll', 'readRelated'].map(method => `workspaceFiles/${method}`)]) {
       scope.connection.fetch.register({ path: `/api/${endpoint}`, methods: ['POST'], requestBody: 'buffered', fetch: (request, principal) => routes.fetch(endpoint, request, principal) });
     }

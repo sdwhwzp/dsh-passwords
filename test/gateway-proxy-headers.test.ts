@@ -28,7 +28,7 @@ const { WebSocketServer, WebSocket: NodeWebSocket } = require('ws') as {
   WebSocket: new (url: string, options?: { headers?: Record<string, string> }) => any;
 };
 
-import { createGatewayServer, requestBodyLimitFor, DEFAULT_USER_REQUEST_BODY_BYTES, ADMIN_REQUEST_BODY_BYTES } from '../src/gateway.js';
+import { createGatewayServer, proxyRequestBodyLimitFor, requestBodyLimitFor, DEFAULT_USER_REQUEST_BODY_BYTES, ADMIN_REQUEST_BODY_BYTES } from '../src/gateway.js';
 import { upstreamResponseHeaderTimeoutMs } from '../src/proxy.js';
 import { AuthService } from '../src/auth.js';
 import { Database } from '../src/db.js';
@@ -36,6 +36,7 @@ import { createFieldCrypto } from '../src/encrypt.js';
 import type { PlatformConfig } from '../src/config.js';
 
 const HTML_BODY = '<html><head><title>home</title></head><body>hello</body></html>';
+const CHAT_DEMO_CSP = "default-src 'none'; script-src 'self'; frame-ancestors 'self'";
 const USAGE_HTML_BODY = `<html><head><script>globalThis["__DSH_BOOT__"] = ${JSON.stringify({
   rev: 'host-rev',
   entries: [
@@ -598,7 +599,14 @@ function startMockUpstream(): Promise<http.Server> {
       if (/^\/api\/session[./]prompt(?:[?]|$)/.test(req.url ?? '')) promptUpstreamCount += 1;
       const testMode = req.headers['x-test-mode'];
       const badJson = testMode === 'bad-json';
-      if (req.url === '/sidebar/api/git.models' || req.url === '/sidebar/api/git.commit-model') {
+      if (req.url === '/dsh-chat-demo/') {
+        res.writeHead(200, {
+          'content-type': 'text/html',
+          'content-security-policy': CHAT_DEMO_CSP,
+          'cache-control': 'no-store',
+        });
+        res.end(HTML_BODY);
+      } else if (req.url === '/sidebar/api/git.models' || req.url === '/sidebar/api/git.commit-model') {
         res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'public, max-age=600' });
         const route = { provider: 'codex', model: 'gpt-5.5' };
         res.end(JSON.stringify(testMode === 'bad-git-metadata' ? { ok: true, value: {} } : {
@@ -1102,6 +1110,33 @@ function gatewayReq(
     req.end(body);
   });
 }
+
+test('chat demo HTML passes through with its CSP and private caching intact', async () => {
+  const response = await gatewayReq('GET', '/dsh-chat-demo/', { cookie: customerCookie });
+  assert.equal(response.status, 200);
+  assert.equal(response.body, HTML_BODY);
+  assert.equal(rawHeader(response.rawHeaders, 'content-security-policy'), CHAT_DEMO_CSP);
+  assert.equal(rawHeader(response.rawHeaders, 'cache-control'), 'private, no-store');
+  assert.match(rawHeader(response.rawHeaders, 'vary'), /\bCookie\b/);
+});
+
+test('a chat demo request without a session receives a JSON authentication error', async () => {
+  const response = await gatewayReq('GET', '/dsh-chat-demo/api/access', { cookie: '' });
+  assert.equal(response.status, 401);
+  assert.equal(JSON.parse(response.body).code, 'UNAUTHENTICATED');
+});
+
+test('chat demo body ceilings apply only to the corresponding POST endpoints', () => {
+  const limit = (method: string, route: string) =>
+    proxyRequestBodyLimitFor('user', false, method, `/dsh-chat-demo/api/${route}`);
+  const mib = 1024 * 1024;
+  assert.equal(limit('POST', 'anthropic/v1/files'), 65 * mib);
+  assert.equal(limit('POST', 'anthropic/v1/messages'), 8 * mib);
+  assert.equal(limit('POST', 'v1/tools/asr'), 9 * mib);
+  assert.equal(limit('POST', 'v1/tools/tts'), 8 * mib);
+  assert.equal(limit('GET', 'anthropic/v1/files'), mib);
+  assert.equal(limit('POST', 'anthropic/v1/files/unknown'), mib);
+});
 
 /** Build one encoded sidebar media URL from the filesystem-backed test workspace. */
 function sidebarFileUrl(

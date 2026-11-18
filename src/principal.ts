@@ -1,4 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis';
+import { cordisRoot } from './cordis-root.js';
 import type {
   ConnectionPrincipalRequest,
   RequestPrincipalProvider as RequestPrincipalProviderContract,
@@ -177,7 +178,7 @@ export class RequestPrincipalProvider implements RequestPrincipalProviderContrac
 export function registerRequestPrincipal(ctx: Context, config: PlatformConfig): void {
   const provider = new RequestPrincipalProvider(config);
   ctx.effect(
-    () => ctx.root.provide('requestPrincipal', provider),
+    () => cordisRoot(ctx).provide('requestPrincipal', provider),
     'dsh-passwords: root request principal provider',
   );
 }

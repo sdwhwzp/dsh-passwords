@@ -260,6 +260,21 @@ export const ADMIN_REQUEST_BODY_BYTES = 300 * 1024 * 1024;
 export const DEFAULT_RPC_REQUEST_BODY_BYTES = 64 * 1024;
 export const SESSION_SCOPED_REQUEST_BODY_BYTES = 1024 * 1024;
 export const AIONUI_REQUEST_BODY_BYTES = 4 * 1024 * 1024;
+const CHAT_DEMO_PAGE = '/dsh-chat-demo/';
+const CHAT_DEMO_API = '/dsh-chat-demo/api';
+const CHAT_DEMO_FILE_UPLOAD = `${CHAT_DEMO_API}/anthropic/v1/files`;
+const CHAT_DEMO_ASR = `${CHAT_DEMO_API}/v1/tools/asr`;
+const CHAT_DEMO_TTS = `${CHAT_DEMO_API}/v1/tools/tts`;
+const CHAT_DEMO_POST_BODY_LIMITS = new Map([
+  [CHAT_DEMO_FILE_UPLOAD, 65 * 1024 * 1024],
+  [`${CHAT_DEMO_API}/anthropic/v1/messages`, 8 * 1024 * 1024],
+  [CHAT_DEMO_ASR, 9 * 1024 * 1024],
+  [CHAT_DEMO_TTS, 8 * 1024 * 1024],
+]);
+
+function isChatDemoApi(pathname: string): boolean {
+  return pathname === CHAT_DEMO_API || pathname.startsWith(`${CHAT_DEMO_API}/`);
+}
 
 export function requestBodyLimitFor(role: 'admin' | 'user', allowLargeBody: boolean): number {
   return role === 'admin' || allowLargeBody ? ADMIN_REQUEST_BODY_BYTES : DEFAULT_USER_REQUEST_BODY_BYTES;
@@ -275,6 +290,8 @@ export function proxyRequestBodyLimitFor(
   method: string,
   pathname: string,
 ): number {
+  const chatDemoLimit = method === 'POST' ? CHAT_DEMO_POST_BODY_LIMITS.get(pathname) : undefined;
+  if (chatDemoLimit !== undefined) return chatDemoLimit;
   if (isUploadRequest(method, pathname)) return requestBodyLimitFor(role, allowLargeBody);
   if (isAionuiPanel(pathname)) return AIONUI_REQUEST_BODY_BYTES;
   return SESSION_SCOPED_REQUEST_BODY_BYTES;
@@ -3493,6 +3510,7 @@ export function createGatewayServer(
 
   function isMachineRequestPath(requestPath: string): boolean {
     return requestPath.startsWith('/api/') ||
+      isChatDemoApi(requestPath) ||
       requestPath.startsWith('/aionui-panel/') ||
       requestPath.startsWith('/sidebar/api/') ||
       SIDEBAR_FILE_RE.test(requestPath) ||
@@ -7793,6 +7811,17 @@ export function createGatewayServer(
           denyRequest(req, res, lang, t(lang, 'gw.noUpload'));
           return;
         }
+        if (req.method === 'POST') {
+          const chatVoiceRequest = requestPath === CHAT_DEMO_ASR || requestPath === CHAT_DEMO_TTS;
+          if (!perms.allow_upload && (requestPath === CHAT_DEMO_FILE_UPLOAD || chatVoiceRequest)) {
+            denyRequest(req, res, lang, t(lang, 'gw.noUpload'));
+            return;
+          }
+          if (chatVoiceRequest && !perms.allow_chat_media) {
+            denyRequest(req, res, lang, t(lang, 'err.FORBIDDEN_MEDIA'));
+            return;
+          }
+        }
         if (!perms.allow_git_download && isGitRequest(requestPath) &&
             !(config.tenantSsh?.enabled === true && requestPath === '/api/dsh-ssh/ls')) {
           denyRequest(req, res, lang, t(lang, 'gw.noGit'));
@@ -9271,6 +9300,8 @@ export function createGatewayServer(
           reqAs.dshpwUser !== undefined &&
           (
             contentType.includes('text/html') ||
+            proxyPath === CHAT_DEMO_PAGE ||
+            isChatDemoApi(proxyPath) ||
             PRINCIPAL_SCOPED_RESPONSE_RE.test(proxyPath) ||
             SIDEBAR_FILE_RE.test(proxyPath) || SIDEBAR_HTML_RE.test(proxyPath) || SIDEBAR_GIT_MODEL_RE.test(proxyPath)
           )
@@ -9379,7 +9410,7 @@ export function createGatewayServer(
         }
 
         // ── HTML 响应：缓冲 + 注入兼容脚本（crypto.randomUUID polyfill 等） ──
-        if (contentType.includes('text/html') && !isSidebarHtmlAttachment && !SIDEBAR_HTML_RE.test(proxyPath)) {
+        if (contentType.includes('text/html') && proxyPath !== CHAT_DEMO_PAGE && !isSidebarHtmlAttachment && !SIDEBAR_HTML_RE.test(proxyPath)) {
           bufferUpstream(upstreamRes, res, (raw) => {
             try {
               let body = raw;
@@ -10560,7 +10591,11 @@ export function createGatewayServer(
     // launches a server-side application. For a child account, bind that path
     // to a workspace already present in the child's filtered Remote baseline;
     // allowed_folders alone must not turn this into an arbitrary directory launcher.
-    const needsImageAttachmentCheck = reqAs.dshpwPerms !== undefined && !reqAs.dshpwPerms.allow_upload && req.method === 'POST';
+    const needsImageAttachmentCheck =
+      reqAs.dshpwPerms !== undefined &&
+      !reqAs.dshpwPerms.allow_upload &&
+      req.method === 'POST' &&
+      !CHAT_DEMO_POST_BODY_LIMITS.has(proxyPath);
     const needsOpenInAppCheck =
       reqAs.dshpwPerms !== undefined &&
       reqAs.dshpwIsAdmin !== true &&

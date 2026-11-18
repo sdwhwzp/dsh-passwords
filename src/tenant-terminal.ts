@@ -1,5 +1,6 @@
 /** Authenticated sidebar terminals confined by the deployment's root-owned launcher. */
 import type { Context } from '@deepseek-ai/cordis';
+import { cordisRoot } from './cordis-root.js';
 import type {} from '@deepseek-ai/dsh-host-webserver';
 import type { SessionId } from '@deepseek-ai/dsh-session/types';
 import type { IncomingMessage } from 'node:http';
@@ -62,7 +63,7 @@ export function registerTenantTerminal(ctx: Context, db: Database, config: Platf
         if (!sessionId || !tab || tab.length > 160 || url.searchParams.has('uuid')) throw new Error('invalid terminal target');
         const allowed = await access.resolve(principal, { sessionIds: [sessionId] });
         if (!allowed.readableSessionIds.has(sessionId)) throw new Error('session access denied');
-        const query = ctx.root.get('sessionQuery') as unknown as {
+        const query = cordisRoot(ctx).get('sessionQuery') as unknown as {
           listSessions(): Promise<Array<{ header: { id: string; cwd?: string } }>>;
         };
         const record = (await query.listSessions()).find(item => item.header.id === sessionId);

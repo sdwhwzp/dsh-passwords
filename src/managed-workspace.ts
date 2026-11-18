@@ -1,6 +1,7 @@
 /** Host-side workspace provisioning for dsh-passwords subusers. */
 
 import type { Context } from '@deepseek-ai/cordis';
+import { cordisRoot } from './cordis-root.js';
 import type { Workspace, WorkspaceRegistry } from '@deepseek-ai/dsh-workspace';
 import { randomBytes } from 'node:crypto';
 import { chmod, lstat, mkdir, realpath } from 'node:fs/promises';
@@ -68,7 +69,7 @@ export function registerManagedUserWorkspace(
 ): ManagedUserWorkspaceProvider {
   const provider = new ManagedUserWorkspaceProvider(db, config);
   ctx.effect(
-    () => ctx.root.provide('managedUserWorkspace', provider),
+    () => cordisRoot(ctx).provide('managedUserWorkspace', provider),
     'dsh-passwords: managed user workspace provider',
   );
   return provider;

@@ -7,6 +7,7 @@ import express from 'express';
 import type { Database } from './db.js';
 import type { AuthService } from './auth.js';
 import type { Context } from '@deepseek-ai/cordis';
+import { cordisRoot } from './cordis-root.js';
 import type { AuthenticatedPrincipal } from './principal.js';
 import type { ManagedUserWorkspaceProvider } from './managed-workspace.js';
 
@@ -28,7 +29,7 @@ function isWithin(root:string,candidate:string){const relative=path.relative(roo
 export function createBotBridge(ctx:Context,db:Database,auth:AuthService){
  const app=express();app.disable('x-powered-by');app.use(express.json({limit:'256kb'}));
  const logins=new Map<string,Login>(),active=new Map<string,AbortController>();
- const services=ctx.root as unknown as {get(name:string):unknown};
+ const services=cordisRoot(ctx) as unknown as {get(name:string):unknown};
  const requireService=<T>(name:string):T=>{const service=services.get(name);if(!service)throw new BridgeError(503,`DSH 服务 ${name} 尚未就绪`);return service as T;};
  function user(ownerId:number){const u=db.getUserById(ownerId);if(!u)throw new BridgeError(403,'账号已删除');if(u.role!=='admin'&&(db.getPermissions(u.id)?.banned??true))throw new BridgeError(403,'账号已封禁或未配置权限');return u;}
  function principal(ownerId:number):AuthenticatedPrincipal{const u=user(ownerId);return {source:'dsh-passwords',id:String(u.id),username:u.username,role:u.role};}

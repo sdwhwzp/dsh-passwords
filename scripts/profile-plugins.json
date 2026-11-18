@@ -111,6 +111,15 @@
       "activation": "bundle"
     },
     {
+      "name": "dsh-chat-demo",
+      "specifierEnvironment": "DSH_PLUGIN_CHAT_DEMO_SPEC",
+      "localCandidates": [
+        "../../chat-demo"
+      ],
+      "activation": "bundle",
+      "optional": true
+    },
+    {
       "name": "dsh-shandong-tizhi-brand",
       "specifierEnvironment": "DSH_PLUGIN_BRAND_SPEC",
       "localCandidates": [

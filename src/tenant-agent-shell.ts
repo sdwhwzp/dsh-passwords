@@ -1,5 +1,6 @@
 /** Agent bash commands confined to the authenticated account's managed workspace. */
 import type { Context } from '@deepseek-ai/cordis';
+import { cordisRoot } from './cordis-root.js';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools';
 import path from 'node:path';
@@ -129,7 +130,7 @@ export class TenantAgentShell {
     const permissions = this.db.getPermissions(owner);
     const sessionOwner = this.db.getSessionOwner(agent.session.id);
     if ((sessionOwner !== null && sessionOwner !== owner) || permissions?.disabled_sessions.includes(agent.session.id)) throw new Error('session access denied');
-    const policy = this.ctx.root.get('sandboxPolicy') as SandboxPolicy | undefined;
+    const policy = cordisRoot(this.ctx).get('sandboxPolicy') as SandboxPolicy | undefined;
     if (policy === undefined) throw new Error('workspace sandbox policy is unavailable');
     if (permissions?.sandbox_mode === 'read-only' || policy.resolve({ session: agent.session }).mode === 'read-only') throw new Error('workspace shell requires write permission');
     const root = path.join(this.config.managedWorkspaceRoot, `u${owner}`);
@@ -179,5 +180,5 @@ export function registerTenantAgentShell(ctx: Context, db: Database, config: Pla
     return undefined;
   });
   ctx.effect(() => () => shell.dispose(), 'dsh-passwords: tenant agent shell');
-  for (const agent of ctx.root.get('agents')?.list() ?? []) shell.install(agent);
+  for (const agent of cordisRoot(ctx).get('agents')?.list() ?? []) shell.install(agent);
 }
