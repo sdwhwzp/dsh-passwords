@@ -37,6 +37,32 @@ export function supportsUpstreamBrowserAuthentication(
     && typeof (connection as { authenticatedUrl?: unknown }).authenticatedUrl === 'function';
 }
 
+export function browserAuthenticationForGateway(
+  connection: unknown,
+  entryUrls: (origin: string) => readonly string[],
+): unknown {
+  if (
+    supportsUpstreamBrowserAuthentication(connection) ||
+    connection === null ||
+    typeof connection !== 'object' ||
+    !('authentication' in connection)
+  ) return connection;
+
+  return {
+    authenticatedUrl(origin: string): string {
+      const authority = new URL(origin);
+      const matches = entryUrls(origin).filter((entry) => {
+        const url = URL.parse(entry);
+        return url !== null && url.origin === authority.origin && isLoopbackHostname(url.hostname)
+          && url.username === '' && url.password === '' && url.hash === '' && url.pathname === '/'
+          && url.searchParams.size === 1 && Boolean(url.searchParams.get('token'));
+      });
+      if (matches.length !== 1) throw new Error('Host did not publish a unique loopback browser authentication entry');
+      return matches[0];
+    },
+  } satisfies UpstreamBrowserAuthenticationConnection;
+}
+
 const DEFAULT_ATTEMPTS = 20;
 const DEFAULT_REQUEST_TIMEOUT_MS = 500;
 const DEFAULT_RETRY_DELAY_MS = 100;

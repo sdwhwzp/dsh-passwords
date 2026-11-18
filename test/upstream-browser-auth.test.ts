@@ -3,6 +3,7 @@ import http from 'node:http';
 import test from 'node:test';
 import {
   assertStandaloneUpstreamSupported,
+  browserAuthenticationForGateway,
   exchangeUpstreamBrowserCookie,
   supportsUpstreamBrowserAuthentication,
 } from '../src/upstream-browser-auth.js';
@@ -25,6 +26,23 @@ test('Host browser authentication feature detection preserves older connection s
   assert.equal(supportsUpstreamBrowserAuthentication(null), false);
   assert.equal(supportsUpstreamBrowserAuthentication({ authenticatedUrl: 'not-a-function' }), false);
   assert.equal(supportsUpstreamBrowserAuthentication({ authenticatedUrl: () => 'http://127.0.0.1/' }), true);
+});
+
+test('modern Hosts exchange only the current loopback entry and require a unique token', () => {
+  const origin = 'http://127.0.0.1:3080';
+  const foreign = 'http://localhost:3080/?token=foreign';
+  const local = `${origin}/?token=fixture`;
+  const legacy = { authenticatedUrl: () => local };
+  assert.equal(browserAuthenticationForGateway(legacy, () => assert.fail('legacy bridge was replaced')), legacy);
+  assert.equal(supportsUpstreamBrowserAuthentication(browserAuthenticationForGateway({}, () => [])), false);
+  let entries = [foreign, `${origin}/`, `${origin}/nested?token=fixture`, `${local}&token=duplicate`, local];
+  const bridge = browserAuthenticationForGateway({ authentication: {} }, () => entries);
+  assert.ok(supportsUpstreamBrowserAuthentication(bridge));
+  assert.equal(bridge.authenticatedUrl(origin), local);
+  entries = [foreign];
+  assert.throws(() => bridge.authenticatedUrl(origin), /unique loopback browser authentication entry/);
+  entries = [local, `${origin}/?token=other`];
+  assert.throws(() => bridge.authenticatedUrl(origin), /unique loopback browser authentication entry/);
 });
 
 test('Host launch URL exchange retries a transient response and retains only one Cookie pair', async () => {

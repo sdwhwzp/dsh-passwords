@@ -56,6 +56,7 @@ import {
 } from './quota-notice.js';
 import { customerModelAllowed } from './model-policy.js';
 import {
+  browserAuthenticationForGateway,
   supportsUpstreamBrowserAuthentication,
   UPSTREAM_BROWSER_AUTH_REQUEST,
   UPSTREAM_BROWSER_AUTH_RESPONSE,
@@ -784,8 +785,13 @@ export function startGateway(
         // 拿不到就用默认值
       }
       const upstreamUrl = explicitUpstream !== '' ? explicitUpstream : `http://127.0.0.1:${String(upstreamPort)}`;
-      const connection: unknown = ctx.connection;
-      const upstreamBrowserAuthenticationRequired = supportsUpstreamBrowserAuthentication(connection);
+      const connection = browserAuthenticationForGateway(ctx.connection, (origin) => {
+        const entries: Array<{ url: string }> = [];
+        Reflect.apply(ctx.emit, ctx, [ctx.webServer, 'webserver/entry-url', origin, entries]);
+        return entries.map((entry) => entry.url);
+      });
+      const upstreamBrowserAuthenticationRequired =
+        isLoopbackUpstream(upstreamUrl) && supportsUpstreamBrowserAuthentication(connection);
 
       const refreshCookie = async (): Promise<boolean> => {
         const derived = deriveDshBrowserCookie(connection, upstreamUrl);
