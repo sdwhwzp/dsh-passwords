@@ -281,273 +281,335 @@ export function ManagedFilesPanel(props: Props) {
   };
 
   const currentPath = listing?.path === '' || listing === null ? '/' : `/${listing.path}`;
+  const pathSegments = (listing?.path ?? '').split('/').filter(Boolean);
   const repository = listing?.git?.repository === true;
   const incompleteCredentials = (gitCredentials.username === '') !== (gitCredentials.password === '');
   const branch = listing?.git?.branch ?? null;
+  const toggleCloneForm = () => {
+    setCloneForm(cloneForm === null ? { url: '', directory: '' } : null);
+    if (cloneForm !== null) setGitCredentials({ username: '', password: '' });
+  };
+  const entryIcon = (kind: 'directory' | 'file') => h(
+    'span',
+    { className: `dshpw-mf-icon ${kind}`, 'aria-hidden': 'true' },
+    kind === 'directory'
+      ? h('svg', { viewBox: '0 0 20 20', width: 16, height: 16, fill: 'currentColor' },
+          h('path', { d: 'M2 5.5A2.5 2.5 0 0 1 4.5 3h3.38a2 2 0 0 1 1.41.59l.83.82a1 1 0 0 0 .7.29H15.5A2.5 2.5 0 0 1 18 7.2v7.3a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 2 14.5v-9Z' }))
+      : h('svg', { viewBox: '0 0 20 20', width: 16, height: 16, fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round' },
+          h('path', { d: 'M5.5 2.5h6l4 4v11a1.5 1.5 0 0 1-1.5 1.5h-8.5A1.5 1.5 0 0 1 4 17.5V4a1.5 1.5 0 0 1 1.5-1.5Z' }),
+          h('path', { d: 'M11.5 2.5v4h4' })),
+  );
+
   return h(
     'div',
     { className: 'dshpw-section dshpw-managed-files' },
     h(
       'div',
-      { className: 'dshpw-section-head' },
-      h('span', { className: 'dshpw-label' }, t('managedFilesTitle')),
-      h('code', { className: 'dshpw-managed-files-path', title: currentPath }, currentPath),
-    ),
-    h('div', { className: 'dshpw-hint' }, t('managedFilesHint')),
-    h('div', { className: 'dshpw-hint' }, t('managedFilesDragHint')),
-    h(
-      'div',
-      { className: 'dshpw-managed-files-toolbar' },
-      h('button', {
-        type: 'button',
-        className: `dshpw-btn${dropTarget !== null && dropTarget === listing?.parent ? ' dshpw-drop-target' : ''}`,
-        ...(listing?.parent !== null && listing?.parent !== undefined ? dropProps(listing.parent) : {}),
-        disabled: busy || loading || listing?.parent === null || listing === null,
-        onClick: () => load(listing?.parent ?? ''),
-      }, t('managedFilesBack')),
-      h('button', {
-        type: 'button',
-        className: 'dshpw-btn',
-        disabled: busy || loading,
-        onClick: () => load(currentDirectory),
-      }, t('managedFilesRefresh')),
-      h('button', {
-        type: 'button',
-        className: 'dshpw-btn ghost',
-        disabled: busy || loading,
-        onClick: () => setFolderName(folderName === null ? '' : null),
-      }, t('managedFilesNewFolder')),
-      h(
-        'label',
-        { className: `dshpw-btn dshpw-managed-files-upload${busy ? ' disabled' : ''}` },
-        t('managedFilesUpload'),
-        h('input', {
-          ref: inputRef,
-          type: 'file',
-          multiple: true,
-          disabled: busy || loading,
-          onChange: (event: { target: { files: FileList | null } }) => {
-            upload(Array.from(event.target.files ?? []), false);
-          },
-        }),
-      ),
-      h(
-        'label',
-        { className: `dshpw-btn dshpw-managed-files-upload${busy ? ' disabled' : ''}` },
-        t('managedFilesUploadFolder'),
-        h('input', {
-          ref: folderInputRef,
-          type: 'file',
-          multiple: true,
-          webkitdirectory: '',
-          disabled: busy || loading,
-          onChange: (event: { target: { files: FileList | null } }) => {
-            upload(Array.from(event.target.files ?? []), true);
-          },
-        }),
-      ),
-    ),
-    uploadProgress === null ? null : h(
-      'div',
-      { className: 'dshpw-hint', role: 'status', 'aria-live': 'polite' },
-      t('managedFilesUploadProgress', uploadProgress),
-    ),
-    folderName === null
-      ? null
-      : h(
-          'div',
-          { className: 'dshpw-managed-files-form' },
-          h('input', {
-            className: 'dshpw-input',
-            autoFocus: true,
-            'aria-label': t('managedFilesNewFolder'),
-            placeholder: t('managedFilesNewFolderName'),
-            value: folderName,
-            disabled: busy,
-            onChange: (event: { target: { value: string } }) => setFolderName(event.target.value),
-          }),
-          h('button', {
-            type: 'button',
-            className: 'dshpw-btn',
-            disabled: busy || folderName.trim() === '',
-            onClick: createDirectory,
-          }, t('managedFilesCreate')),
-          h('button', {
-            type: 'button',
-            className: 'dshpw-btn ghost',
-            disabled: busy,
-            onClick: () => setFolderName(null),
-          }, t('managedFilesCancel')),
-        ),
-    h(
-      'div',
-      { className: 'dshpw-managed-files-git' },
+      { className: 'dshpw-mf-explorer' },
       h(
         'div',
-        { className: 'dshpw-managed-files-git-head' },
-        h('span', { className: 'dshpw-label' }, t('managedFilesGit')),
-        repository
-          ? h('span', { className: 'dshpw-chip' }, branch === null ? t('managedFilesGitRepo') : t('managedFilesGitBranch', { branch }))
-          : null,
+        { className: 'dshpw-mf-bar' },
         h(
-          'span',
-          { className: 'dshpw-managed-files-git-actions' },
-          repository
-            ? h('button', {
-                type: 'button',
-                className: 'dshpw-btn',
-                disabled: busy || loading || incompleteCredentials,
-                onClick: pullRepository,
-              }, t('managedFilesGitPull'))
-            : null,
+          'div',
+          { className: 'dshpw-mf-nav' },
+          h(
+            'div',
+            { className: 'dshpw-mf-breadcrumbs', 'aria-label': t('managedFilesTitle'), title: currentPath },
+            h('button', {
+              type: 'button',
+              className: `dshpw-mf-crumb${pathSegments.length === 0 ? ' active' : ''}`,
+              disabled: busy || loading || pathSegments.length === 0,
+              onClick: () => load(''),
+            }, '/'),
+            ...pathSegments.map((segment, index) => {
+              const targetPath = pathSegments.slice(0, index + 1).join('/');
+              const isLast = index === pathSegments.length - 1;
+              return h(
+                'span',
+                { className: 'dshpw-mf-crumb-wrap', key: targetPath },
+                h('span', { className: 'dshpw-mf-crumb-sep', 'aria-hidden': 'true' }, '/'),
+                h('button', {
+                  type: 'button',
+                  className: `dshpw-mf-crumb${isLast ? ' active' : ''}`,
+                  disabled: busy || loading || isLast,
+                  onClick: () => load(targetPath),
+                }, segment),
+              );
+            }),
+          ),
+          h(
+            'div',
+            { className: 'dshpw-mf-nav-actions' },
+            h('button', {
+              type: 'button',
+              className: `dshpw-btn ghost sm${dropTarget !== null && dropTarget === listing?.parent ? ' dshpw-drop-target' : ''}`,
+              ...(listing?.parent !== null && listing?.parent !== undefined ? dropProps(listing.parent) : {}),
+              disabled: busy || loading || listing?.parent === null || listing === null,
+              onClick: () => load(listing?.parent ?? ''),
+            }, t('managedFilesBack')),
+            h('button', {
+              type: 'button',
+              className: 'dshpw-btn ghost sm',
+              disabled: busy || loading,
+              onClick: () => load(currentDirectory),
+            }, t('managedFilesRefresh')),
+          ),
+        ),
+        h(
+          'div',
+          { className: 'dshpw-managed-files-toolbar' },
           h('button', {
             type: 'button',
-            className: 'dshpw-btn ghost',
+            className: 'dshpw-btn ghost sm',
             disabled: busy || loading,
-            onClick: () => {
-              setCloneForm(cloneForm === null ? { url: '', directory: '' } : null);
-              if (cloneForm !== null) setGitCredentials({ username: '', password: '' });
-            },
-          }, t('managedFilesGitClone')),
+            onClick: () => setFolderName(folderName === null ? '' : null),
+          }, t('managedFilesNewFolder')),
+          !repository ? h('button', {
+            type: 'button',
+            className: 'dshpw-btn ghost sm',
+            disabled: busy || loading,
+            onClick: toggleCloneForm,
+          }, t('managedFilesGitClone')) : null,
+          h(
+            'span',
+            { className: 'dshpw-managed-files-upload-group' },
+            h(
+              'label',
+              { className: `dshpw-btn sm dshpw-managed-files-upload${busy ? ' disabled' : ''}` },
+              t('managedFilesUpload'),
+              h('input', {
+                ref: inputRef,
+                type: 'file',
+                multiple: true,
+                disabled: busy || loading,
+                onChange: (event: { target: { files: FileList | null } }) => {
+                  upload(Array.from(event.target.files ?? []), false);
+                },
+              }),
+            ),
+            h(
+              'label',
+              { className: `dshpw-btn ghost sm dshpw-managed-files-upload${busy ? ' disabled' : ''}` },
+              t('managedFilesUploadFolder'),
+              h('input', {
+                ref: folderInputRef,
+                type: 'file',
+                multiple: true,
+                webkitdirectory: '',
+                disabled: busy || loading,
+                onChange: (event: { target: { files: FileList | null } }) => {
+                  upload(Array.from(event.target.files ?? []), true);
+                },
+              }),
+            ),
+          ),
         ),
       ),
-      h('span', { className: 'dshpw-hint' }, t('managedFilesGitHint')),
-      h('div', { className: 'dshpw-managed-files-form' },
-        h('label', { className: 'dshpw-managed-files-credential' }, t('managedFilesGitUsername'),
-          h('input', {
-            className: 'dshpw-input', type: 'text', autoComplete: 'off', autoCapitalize: 'none', spellCheck: false,
-            maxLength: 256, value: gitCredentials.username, disabled: busy || loading,
-            onChange: (event: { target: { value: string } }) => setGitCredentials({ ...gitCredentials, username: event.target.value }),
-          })),
-        h('label', { className: 'dshpw-managed-files-credential' }, t('managedFilesGitPassword'),
-          h('input', {
-            className: 'dshpw-input', type: 'password', autoComplete: 'new-password',
-            maxLength: 4096, value: gitCredentials.password, disabled: busy || loading,
-            onChange: (event: { target: { value: string } }) => setGitCredentials({ ...gitCredentials, password: event.target.value }),
-          })),
+      uploadProgress === null ? null : h(
+        'div',
+        { className: 'dshpw-mf-drawer dshpw-hint', role: 'status', 'aria-live': 'polite' },
+        t('managedFilesUploadProgress', uploadProgress),
       ),
-      h('span', { className: 'dshpw-hint' }, t('managedFilesGitCredentialsHint')),
-      cloneForm === null ? null : h(
+      folderName === null
+        ? null
+        : h(
             'div',
-            { className: 'dshpw-managed-files-form' },
+            { className: 'dshpw-mf-drawer dshpw-managed-files-form' },
             h('input', {
               className: 'dshpw-input',
               autoFocus: true,
-              'aria-label': t('managedFilesGitUrl'),
-              placeholder: t('managedFilesGitUrl'),
-              value: cloneForm.url,
+              'aria-label': t('managedFilesNewFolder'),
+              placeholder: t('managedFilesNewFolderName'),
+              value: folderName,
               disabled: busy,
-              onChange: (event: { target: { value: string } }) =>
-                setCloneForm({ ...cloneForm, url: event.target.value }),
-            }),
-            h('input', {
-              className: 'dshpw-input dshpw-managed-files-git-folder',
-              'aria-label': t('managedFilesGitFolder'),
-              placeholder: t('managedFilesGitFolder'),
-              value: cloneForm.directory,
-              disabled: busy,
-              onChange: (event: { target: { value: string } }) =>
-                setCloneForm({ ...cloneForm, directory: event.target.value }),
+              onChange: (event: { target: { value: string } }) => setFolderName(event.target.value),
             }),
             h('button', {
               type: 'button',
-              className: 'dshpw-btn',
-              disabled: busy || cloneForm.url.trim() === '' || incompleteCredentials,
-              onClick: cloneRepository,
-            }, busy ? t('managedFilesGitCloning') : t('managedFilesGitStart')),
+              className: 'dshpw-btn sm',
+              disabled: busy || folderName.trim() === '',
+              onClick: createDirectory,
+            }, t('managedFilesCreate')),
             h('button', {
               type: 'button',
-              className: 'dshpw-btn ghost',
+              className: 'dshpw-btn ghost sm',
               disabled: busy,
-              onClick: () => { setCloneForm(null); setGitCredentials({ username: '', password: '' }); },
+              onClick: () => setFolderName(null),
             }, t('managedFilesCancel')),
           ),
-    ),
-    clipboard === null
-      ? null
-      : h(
+      !(repository || cloneForm !== null) ? null : h(
+        'div',
+        { className: 'dshpw-managed-files-git' },
+        h(
           'div',
-          { className: 'dshpw-managed-files-clipboard' },
+          { className: 'dshpw-managed-files-git-head' },
+          h('span', { className: 'dshpw-label' }, t('managedFilesGit')),
+          repository
+            ? h('span', { className: 'dshpw-chip' }, branch === null ? t('managedFilesGitRepo') : t('managedFilesGitBranch', { branch }))
+            : null,
           h(
             'span',
-            { className: 'dshpw-hint dshpw-action-copy' },
-            clipboard.mode === 'move'
-              ? t('managedFilesClipboardMove', { name: clipboard.name })
-              : t('managedFilesClipboardCopy', { name: clipboard.name }),
+            { className: 'dshpw-managed-files-git-actions' },
+            repository
+              ? h('button', {
+                  type: 'button',
+                  className: 'dshpw-btn sm',
+                  disabled: busy || loading || incompleteCredentials,
+                  onClick: pullRepository,
+                }, t('managedFilesGitPull'))
+              : null,
+            repository ? h('button', {
+              type: 'button',
+              className: 'dshpw-btn ghost sm',
+              disabled: busy || loading,
+              onClick: toggleCloneForm,
+            }, t('managedFilesGitClone')) : null,
           ),
-          h('button', {
-            type: 'button',
-            className: 'dshpw-btn',
-            disabled: busy || loading,
-            onClick: paste,
-          }, t('managedFilesPaste')),
-          h('button', {
-            type: 'button',
-            className: 'dshpw-btn ghost',
-            disabled: busy,
-            onClick: () => setClipboard(null),
-          }, t('managedFilesCancel')),
         ),
-    loading && listing === null
-      ? h('div', { className: 'dshpw-hint' }, t('managedFilesLoading'))
-      : listing !== null && listing.entries.length > 0
-        ? h(
-            'div',
-            { className: 'dshpw-managed-files-list' },
-            ...listing.entries.map((entry) => h(
+        h('span', { className: 'dshpw-hint' }, t('managedFilesGitHint')),
+        h('div', { className: 'dshpw-managed-files-form' },
+          h('label', { className: 'dshpw-managed-files-credential' }, t('managedFilesGitUsername'),
+            h('input', {
+              className: 'dshpw-input', type: 'text', autoComplete: 'off', autoCapitalize: 'none', spellCheck: false,
+              maxLength: 256, value: gitCredentials.username, disabled: busy || loading,
+              onChange: (event: { target: { value: string } }) => setGitCredentials({ ...gitCredentials, username: event.target.value }),
+            })),
+          h('label', { className: 'dshpw-managed-files-credential' }, t('managedFilesGitPassword'),
+            h('input', {
+              className: 'dshpw-input', type: 'password', autoComplete: 'new-password',
+              maxLength: 4096, value: gitCredentials.password, disabled: busy || loading,
+              onChange: (event: { target: { value: string } }) => setGitCredentials({ ...gitCredentials, password: event.target.value }),
+            })),
+        ),
+        h('span', { className: 'dshpw-hint' }, t('managedFilesGitCredentialsHint')),
+        cloneForm === null ? null : h(
               'div',
-              { className: `dshpw-managed-files-row${dropTarget === entry.path ? ' dshpw-drop-target' : ''}`, key: entry.path,
-                'data-managed-path': entry.path,
-                draggable: !busy && !loading,
-                onDragStart: (event: DragEvent<HTMLDivElement>) => {
-                  if (busy || loading) { event.preventDefault(); return; }
-                  dragged.current = entry; setDropTarget(null);
-                  event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('application/x-dsh-managed-file', entry.path);
-                },
-                onDragEnd: () => { dragged.current = null; setDropTarget(null); },
-                ...(entry.kind === 'directory' ? dropProps(entry.path) : {}),
-              },
-              entry.kind === 'directory'
-                ? h('button', {
-                    type: 'button',
-                    className: 'dshpw-managed-files-name',
-                    disabled: busy,
-                    onClick: () => load(entry.path),
-                    title: entry.name,
-                  }, `📁 ${entry.name}`)
-                : h('span', { className: 'dshpw-managed-files-name', title: entry.name }, `📄 ${entry.name}`),
-              h('span', { className: 'dshpw-hint' }, entry.bytes === null ? '' : formatManagedFileBytes(entry.bytes)),
-              h(
+              { className: 'dshpw-managed-files-form' },
+              h('input', {
+                className: 'dshpw-input',
+                autoFocus: true,
+                'aria-label': t('managedFilesGitUrl'),
+                placeholder: t('managedFilesGitUrl'),
+                value: cloneForm.url,
+                disabled: busy,
+                onChange: (event: { target: { value: string } }) =>
+                  setCloneForm({ ...cloneForm, url: event.target.value }),
+              }),
+              h('input', {
+                className: 'dshpw-input dshpw-managed-files-git-folder',
+                'aria-label': t('managedFilesGitFolder'),
+                placeholder: t('managedFilesGitFolder'),
+                value: cloneForm.directory,
+                disabled: busy,
+                onChange: (event: { target: { value: string } }) =>
+                  setCloneForm({ ...cloneForm, directory: event.target.value }),
+              }),
+              h('button', {
+                type: 'button',
+                className: 'dshpw-btn sm',
+                disabled: busy || cloneForm.url.trim() === '' || incompleteCredentials,
+                onClick: cloneRepository,
+              }, busy ? t('managedFilesGitCloning') : t('managedFilesGitStart')),
+              h('button', {
+                type: 'button',
+                className: 'dshpw-btn ghost sm',
+                disabled: busy,
+                onClick: () => { setCloneForm(null); setGitCredentials({ username: '', password: '' }); },
+              }, t('managedFilesCancel')),
+            ),
+      ),
+      clipboard === null
+        ? null
+        : h(
+            'div',
+            { className: 'dshpw-managed-files-clipboard' },
+            h(
+              'span',
+              { className: 'dshpw-hint dshpw-action-copy' },
+              clipboard.mode === 'move'
+                ? t('managedFilesClipboardMove', { name: clipboard.name })
+                : t('managedFilesClipboardCopy', { name: clipboard.name }),
+            ),
+            h('button', {
+              type: 'button',
+              className: 'dshpw-btn sm',
+              disabled: busy || loading,
+              onClick: paste,
+            }, t('managedFilesPaste')),
+            h('button', {
+              type: 'button',
+              className: 'dshpw-btn ghost sm',
+              disabled: busy,
+              onClick: () => setClipboard(null),
+            }, t('managedFilesCancel')),
+          ),
+      loading && listing === null
+        ? h('div', { className: 'dshpw-mf-empty' }, t('managedFilesLoading'))
+        : listing !== null && listing.entries.length > 0
+          ? h(
+              'div',
+              { className: 'dshpw-managed-files-list' },
+              ...listing.entries.map((entry) => h(
                 'div',
-                { className: 'dshpw-managed-files-actions' },
-                entry.kind === 'file' && h('a', {
-                  className: 'dshpw-btn sm dshpw-download-btn',
-                  href: managedFileDownloadUrl(entry.path),
-                  download: entry.name,
-                }, t('managedFilesDownload')),
-                h('button', {
-                  type: 'button',
-                  className: 'dshpw-btn ghost sm',
-                  disabled: busy,
-                  onClick: () => setClipboard({ path: entry.path, name: entry.name, kind: entry.kind, mode: 'move' }),
-                }, t('managedFilesMove')),
-                h('button', {
-                  type: 'button',
-                  className: 'dshpw-btn ghost sm',
-                  disabled: busy,
-                  onClick: () => setClipboard({ path: entry.path, name: entry.name, kind: entry.kind, mode: 'copy' }),
-                }, t('managedFilesCopy')),
-                h('button', {
-                  type: 'button',
-                  className: 'dshpw-btn danger sm',
-                  disabled: busy,
-                  onClick: () => remove(entry),
-                }, t('managedFilesDelete')),
-              ),
-            )),
-          )
-        : h('div', { className: 'dshpw-hint' }, t('managedFilesEmpty')),
-    gitOutput === '' ? null : h('pre', { className: 'dshpw-managed-files-output' }, gitOutput),
-    listing?.truncated && h('div', { className: 'dshpw-hint' }, t('managedFilesTruncated')),
+                { className: `dshpw-managed-files-row${dropTarget === entry.path ? ' dshpw-drop-target' : ''}`, key: entry.path,
+                  'data-managed-path': entry.path,
+                  draggable: !busy && !loading,
+                  onDragStart: (event: DragEvent<HTMLDivElement>) => {
+                    if (busy || loading) { event.preventDefault(); return; }
+                    dragged.current = entry; setDropTarget(null);
+                    event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('application/x-dsh-managed-file', entry.path);
+                  },
+                  onDragEnd: () => { dragged.current = null; setDropTarget(null); },
+                  ...(entry.kind === 'directory' ? dropProps(entry.path) : {}),
+                },
+                entry.kind === 'directory'
+                  ? h('button', {
+                      type: 'button',
+                      className: 'dshpw-managed-files-name',
+                      disabled: busy,
+                      onClick: () => load(entry.path),
+                      title: entry.name,
+                    }, entryIcon('directory'), h('span', { className: 'dshpw-mf-name-text' }, entry.name))
+                  : h('span', { className: 'dshpw-managed-files-name', title: entry.name }, entryIcon('file'), h('span', { className: 'dshpw-mf-name-text' }, entry.name)),
+                h('span', { className: 'dshpw-hint' }, entry.bytes === null ? '—' : formatManagedFileBytes(entry.bytes)),
+                h(
+                  'div',
+                  { className: 'dshpw-managed-files-actions' },
+                  entry.kind === 'file' && h('a', {
+                    className: 'dshpw-btn sm dshpw-download-btn',
+                    href: managedFileDownloadUrl(entry.path),
+                    download: entry.name,
+                  }, t('managedFilesDownload')),
+                  h('button', {
+                    type: 'button',
+                    className: 'dshpw-btn ghost sm',
+                    disabled: busy,
+                    onClick: () => setClipboard({ path: entry.path, name: entry.name, kind: entry.kind, mode: 'move' }),
+                  }, t('managedFilesMove')),
+                  h('button', {
+                    type: 'button',
+                    className: 'dshpw-btn ghost sm',
+                    disabled: busy,
+                    onClick: () => setClipboard({ path: entry.path, name: entry.name, kind: entry.kind, mode: 'copy' }),
+                  }, t('managedFilesCopy')),
+                  h('button', {
+                    type: 'button',
+                    className: 'dshpw-btn danger sm',
+                    disabled: busy,
+                    onClick: () => remove(entry),
+                  }, t('managedFilesDelete')),
+                ),
+              )),
+            )
+          : h('div', { className: 'dshpw-mf-empty' }, t('managedFilesEmpty')),
+      gitOutput === '' ? null : h('pre', { className: 'dshpw-managed-files-output' }, gitOutput),
+      listing?.truncated && h('div', { className: 'dshpw-mf-drawer dshpw-hint' }, t('managedFilesTruncated')),
+      h(
+        'div',
+        { className: 'dshpw-mf-footer' },
+        h('div', { className: 'dshpw-hint' }, t('managedFilesHint')),
+        h('div', { className: 'dshpw-hint' }, t('managedFilesDragHint')),
+      ),
+    ),
   );
 }
